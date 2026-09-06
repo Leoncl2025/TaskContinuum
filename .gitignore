@@ -1,0 +1,15 @@
+node_modules/
+out/
+dist/
+coverage/
+test-results/
+playwright-report/
+.runtime/
+artifacts/
+*.log
+*.local
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db

@@ -1,0 +1,164 @@
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { describe, expect, it, vi } from 'vitest'
+import App from '../src/renderer/App'
+import type { ChatAdapter } from '../src/shared/chat'
+
+function explorer() { return within(screen.getByRole('complementary', { name: 'Task explorer' })) }
+
+describe('workbench', () => {
+  it('renders the required panes and honest demo status', () => {
+    render(<App />)
+    expect(screen.getByRole('navigation', { name: 'Workbench navigation' })).toBeInTheDocument()
+    expect(screen.getByRole('complementary', { name: 'Task chat' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('UI based on Electron')
+    expect(screen.getByText('No services connected')).toBeInTheDocument()
+    expect(screen.getByText('LOCAL DEMO')).toBeInTheDocument()
+  })
+  it('filters and selects tasks', async () => {
+    const user = userEvent.setup(); render(<App />)
+    await user.type(screen.getByRole('textbox', { name: 'Filter tasks' }), 'backend')
+    expect(explorer().queryByRole('button', { name: 'T-0002 UI based on Electron' })).not.toBeInTheDocument()
+    await user.click(explorer().getByRole('button', { name: 'T-0003 Backend service' }))
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Backend service')
+    expect(screen.getByRole('log')).toHaveAccessibleName('Conversation for T-0003')
+  })
+  it('shows a recoverable empty search state', async () => {
+    const user = userEvent.setup(); render(<App />)
+    await user.type(screen.getByRole('textbox', { name: 'Filter tasks' }), 'missing-task')
+    expect(screen.getByText('No matching tasks')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Clear filters' }))
+    expect(explorer().getByRole('button', { name: 'T-0003 Backend service' })).toBeInTheDocument()
+  })
+  it('filters by status and collapses the task group', async () => {
+    const user = userEvent.setup(); render(<App />)
+    await user.click(screen.getByRole('button', { name: 'Collapse task group' }))
+    expect(explorer().queryByRole('button', { name: 'T-0003 Backend service' })).not.toBeInTheDocument()
+    await user.click(within(screen.getByRole('group', { name: 'Task status filter' })).getByRole('button', { name: /^Done/ }))
+    expect(explorer().getByRole('button', { name: 'DEMO-01 Map the first user journey' })).toBeInTheDocument()
+  })
+  it('derives progress from local checklist edits', async () => {
+    const user = userEvent.setup(); render(<App />)
+    expect(screen.getByRole('progressbar')).toHaveAttribute('value', '40')
+    await user.click(screen.getByRole('checkbox', { name: /Build the task explorer/ }))
+    expect(screen.getByRole('progressbar')).toHaveAttribute('value', '60')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Task status' }), 'done')
+    expect(screen.getByRole('combobox', { name: 'Task status' })).toHaveValue('done')
+  })
+  it('supports document tab keyboard navigation', async () => {
+    const user = userEvent.setup(); render(<App />)
+    screen.getByRole('tab', { name: 'Overview' }).focus()
+    await user.keyboard('{ArrowRight}')
+    expect(screen.getByRole('tab', { name: 'Requirements' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('heading', { name: 'What success looks like' })).toBeInTheDocument()
+  })
+  it('toggles panels independently with shortcuts', () => {
+    render(<App />)
+    fireEvent.keyDown(window, { key: 'b', ctrlKey: true })
+    expect(screen.queryByRole('complementary', { name: 'Task explorer' })).not.toBeInTheDocument()
+    expect(screen.getByRole('complementary', { name: 'Task chat' })).toBeInTheDocument()
+    fireEvent.keyDown(window, { key: 'b', ctrlKey: true, altKey: true })
+    expect(screen.queryByRole('complementary', { name: 'Task chat' })).not.toBeInTheDocument()
+    fireEvent.keyDown(window, { key: 'b', ctrlKey: true })
+    expect(screen.getByRole('complementary', { name: 'Task explorer' })).toBeInTheDocument()
+  })
+  it('opens and searches the quick switcher', async () => {
+    const user = userEvent.setup(); render(<App />)
+    fireEvent.keyDown(window, { key: 'p', ctrlKey: true })
+    const dialog = screen.getByRole('dialog', { name: 'Quick open' })
+    await user.type(within(dialog).getByRole('textbox', { name: 'Find a task' }), 'T-0004')
+    await user.click(within(dialog).getByRole('button', { name: /Technical design/ }))
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Technical design')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+  it('persists display preferences and labels integrations as disconnected', async () => {
+    const user = userEvent.setup(); const { container } = render(<App />)
+    await user.click(screen.getByRole('button', { name: 'Preferences' }))
+    await user.click(screen.getByRole('radio', { name: 'Light' }))
+    expect(container.querySelector('.workbench')).toHaveAttribute('data-theme', 'light')
+    expect(screen.getAllByText('Not connected')).toHaveLength(4)
+    expect(localStorage.getItem('taskcontinuum:layout:v1')).toContain('light')
+  })
+  it('creates a local-only task and handles an empty workspace', async () => {
+    const user = userEvent.setup(); render(<App />)
+    await user.click(screen.getByRole('button', { name: 'Create demo task' }))
+    await user.type(screen.getByRole('textbox', { name: 'Title' }), 'Explore a new idea')
+    await user.click(screen.getByRole('button', { name: 'Create task' }))
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Explore a new idea')
+    expect(screen.getByRole('progressbar')).toHaveAttribute('value', '0')
+    for (const title of ['Explore a new idea', 'UI based on Electron', 'Task Continuum MVP']) await user.click(screen.getByRole('button', { name: `Close ${title}` }))
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Make room for meaningful work.')
+  })
+})
+
+describe('task-scoped chat', () => {
+  it('keeps drafts and conversations separate when switching tasks', async () => {
+    const user = userEvent.setup(); render(<App />)
+    await user.type(screen.getByRole('textbox', { name: 'Message to demo agent' }), 'Plan for the UI')
+    await user.click(explorer().getByRole('button', { name: 'T-0003 Backend service' }))
+    expect(screen.getByRole('textbox', { name: 'Message to demo agent' })).toHaveValue('')
+    await user.type(screen.getByRole('textbox', { name: 'Message to demo agent' }), 'Host draft')
+    await user.click(explorer().getByRole('button', { name: 'T-0002 UI based on Electron' }))
+    expect(screen.getByRole('textbox', { name: 'Message to demo agent' })).toHaveValue('Plan for the UI')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+    await user.click(explorer().getByRole('button', { name: 'T-0003 Backend service' }))
+    expect(screen.getByRole('textbox', { name: 'Message to demo agent' })).toHaveValue('Host draft')
+    expect(within(screen.getByRole('log')).queryByText('Plan for the UI')).not.toBeInTheDocument()
+    await user.click(explorer().getByRole('button', { name: 'T-0002 UI based on Electron' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Stop response' })).not.toBeInTheDocument())
+    expect(within(screen.getByRole('log')).getByText(/A next step for T-0002/)).toBeInTheDocument()
+  })
+  it('does not send whitespace, Shift+Enter, or an IME composition Enter', async () => {
+    const user = userEvent.setup(); render(<App />)
+    const input = screen.getByRole('textbox', { name: 'Message to demo agent' })
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled()
+    await user.type(input, '  ')
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled()
+    await user.type(input, 'Draft')
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
+    expect(screen.queryByRole('article', { name: 'Your message' })).not.toBeInTheDocument()
+  })
+  it('stops streaming and can clear only the selected conversation', async () => {
+    const user = userEvent.setup(); render(<App />)
+    await user.click(screen.getByRole('button', { name: 'Review risks' }))
+    await user.click(screen.getByRole('button', { name: 'Stop response' }))
+    await screen.findByText('Response stopped')
+    await user.click(screen.getByRole('button', { name: 'Clear conversation' }))
+    await user.click(screen.getByRole('button', { name: 'Clear messages' }))
+    expect(screen.queryByRole('article', { name: 'Your message' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Summarize this task' })).toBeInTheDocument()
+  })
+  it('reports incomplete streams instead of claiming success', async () => {
+    const incomplete: ChatAdapter = { label: 'Test', kind: 'demo', async *stream() { yield { type: 'delta', text: 'Partial output' } } }
+    const user = userEvent.setup(); render(<App adapter={incomplete} />)
+    await user.click(screen.getByRole('button', { name: 'Summarize this task' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Response failed')
+    expect(screen.getByText(/The response stream ended before completion/)).toBeInTheDocument()
+  })
+  it('aborts active work on unmount', async () => {
+    let signal: AbortSignal | undefined
+    const adapter: ChatAdapter = { label: 'Test', kind: 'demo', async *stream(request) {
+      signal = request.signal
+      yield { type: 'delta', text: 'Started' }
+      await new Promise<void>((resolve) => request.signal.addEventListener('abort', () => resolve(), { once: true }))
+      yield { type: 'complete' }
+    } }
+    const user = userEvent.setup(); const view = render(<App adapter={adapter} />)
+    await user.click(screen.getByRole('button', { name: 'Summarize this task' }))
+    view.unmount()
+    expect(signal?.aborted).toBe(true)
+    await act(async () => {})
+  })
+  it('uses a single pane on a compact viewport and returns to the task after selection', async () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({ matches: true, media: query, onchange: null, addEventListener: vi.fn(), removeEventListener: vi.fn(), addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: () => true }))
+    const user = userEvent.setup(); render(<App />)
+    expect(screen.queryByRole('complementary')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Tasks' }))
+    await user.click(explorer().getByRole('button', { name: 'T-0003 Backend service' }))
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Backend service')
+    expect(screen.queryByRole('complementary')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Toggle chat panel' }))
+    expect(screen.getByRole('complementary', { name: 'Task chat' })).toBeInTheDocument()
+  })
+})

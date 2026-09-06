@@ -1,0 +1,25 @@
+import type { TaskRecord } from './tasks'
+
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+  status: 'complete' | 'streaming' | 'cancelled' | 'error'
+}
+
+export interface ChatRequest {
+  sessionId: string
+  task: TaskRecord
+  message: string
+  history: ReadonlyArray<ChatMessage>
+  signal: AbortSignal
+}
+
+export type ChatEvent = { type: 'delta'; text: string } | { type: 'activity'; text: string } | { type: 'complete' }
+
+// UI/session boundary, not a raw LLM API. Live adapters belong in the backend slice.
+export interface ChatAdapter {
+  readonly label: string
+  readonly kind: 'demo' | 'live'
+  stream(request: ChatRequest): AsyncIterable<ChatEvent>
+}
