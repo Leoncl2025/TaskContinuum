@@ -1,11 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
-import type { SessionLinksSnapshot } from '../../shared/sessionBindings'
+import type { SessionLink, SessionLinksSnapshot } from '../../shared/sessionBindings'
 import type { WorkspaceSnapshot } from '../../shared/workspace'
-import { clearSessionBindings, readSessionBindings, saveSessionBindings } from './sessionBindings'
+import { clearSessionBindings, readSessionBindings, saveSessionBindings, sessionBindingKey } from './sessionBindings'
 import type { SessionBinding, SessionBindings } from './sessionBindings'
 
 function uiBindings(snapshot: SessionLinksSnapshot): SessionBindings {
-  return Object.fromEntries(Object.entries(snapshot.document.bindings).map(([taskId, link]) => [taskId, { id: link.sessionId, title: 'GitHub Copilot' }]))
+  return Object.fromEntries(Object.entries(snapshot.document.bindings).map(([taskId, link]) => [taskId, { id: link.sessionId, title: 'GitHub Copilot', ...(link.provider === 'vscode-copilot' ? { vscodeWorkspaceStorageId: link.workspaceStorageId } : {}) }]))
+}
+
+function repositoryLink(binding: SessionBinding): SessionLink {
+  return binding.vscodeWorkspaceStorageId
+    ? { provider: 'vscode-copilot', sessionId: binding.id, workspaceStorageId: binding.vscodeWorkspaceStorageId }
+    : { provider: 'github-copilot', sessionId: binding.id }
 }
 
 export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
@@ -64,10 +70,10 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
   async function attach(taskId: string, binding: SessionBinding): Promise<void> {
     ready()
     if (!workspace) {
-      setBindings((current) => ({ ...Object.fromEntries(Object.entries(current).filter(([id, link]) => id === taskId || link.id !== binding.id)), [taskId]: binding }))
+      setBindings((current) => ({ ...Object.fromEntries(Object.entries(current).filter(([id, link]) => id === taskId || sessionBindingKey(link) !== sessionBindingKey(binding))), [taskId]: binding }))
       return
     }
-    await run(() => bridge!.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: binding.id, expectedRevision: snapshot!.revision }))
+    await run(() => bridge!.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: binding.id, expectedRevision: snapshot!.revision, ...(binding.vscodeWorkspaceStorageId ? { vscodeWorkspaceStorageId: binding.vscodeWorkspaceStorageId } : {}) }))
   }
 
   async function detach(taskId: string): Promise<void> {
@@ -81,7 +87,7 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
 
   async function migrate(): Promise<void> {
     if (!workspace || !bridge || !snapshot || snapshot.revision !== null) throw new Error('Local bindings can only be migrated before a repository link file exists.')
-    await run(() => bridge.migrateSessionLinks({ workspaceId: workspace.id, bindings: Object.fromEntries(Object.entries(legacy).map(([taskId, binding]) => [taskId, { provider: 'github-copilot' as const, sessionId: binding.id }])) }))
+    await run(() => bridge.migrateSessionLinks({ workspaceId: workspace.id, bindings: Object.fromEntries(Object.entries(legacy).map(([taskId, binding]) => [taskId, repositoryLink(binding)])) }))
     clearSessionBindings(workspace.id)
   }
 

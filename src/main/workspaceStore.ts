@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import type { WorkspaceDescriptor, WorkspaceSnapshot, WorkspaceState } from '../shared/workspace'
 import { readTaskWorkspace } from './workspaceReader'
-import { migrateRepositorySessionLinks, readRepositorySessionLinks, updateRepositorySessionLink } from './repositorySessionLinks'
+import { migrateRepositorySessionLinks, readRepositorySessionLinks, sessionLinkSchema, updateRepositorySessionLink } from './repositorySessionLinks'
 import type { SessionLinksSnapshot } from '../shared/sessionBindings'
 
 const descriptorSchema = z.object({ id: z.string().regex(/^[a-f\d]{64}$/), name: z.string().max(300), title: z.string().max(200), root: z.string().min(1).max(4096) })
@@ -12,11 +12,12 @@ const stateSchema = z.object({ currentId: z.string().nullable(), recent: z.array
 const linkChangeSchema = z.object({
   workspaceId: z.string().regex(/^[a-f\d]{64}$/), taskId: z.string().regex(/^T-\d{4,}$/),
   sessionId: z.string().min(1).max(240).regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/).nullable(),
+  vscodeWorkspaceStorageId: z.string().regex(/^[a-f0-9]{32}$/).optional(),
   expectedRevision: z.string().regex(/^[a-f\d]{64}$/).nullable(),
 }).strict()
 const migrationSchema = z.object({
   workspaceId: z.string().regex(/^[a-f\d]{64}$/),
-  bindings: z.record(z.string().regex(/^T-\d{4,}$/), z.object({ provider: z.literal('github-copilot'), sessionId: z.string().min(1).max(240).regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/) }).strict()),
+  bindings: z.record(z.string().regex(/^T-\d{4,}$/), sessionLinkSchema),
 }).strict()
 
 function descriptor(snapshot: WorkspaceSnapshot): WorkspaceDescriptor {
@@ -129,7 +130,7 @@ export class WorkspaceStore {
       if (request.sessionId !== null && !(await readTaskWorkspace(workspace.root)).tasks.some((task) => task.id === request.taskId)) {
         throw new Error('This task no longer exists in the selected workspace.')
       }
-      return updateRepositorySessionLink(workspace.root, request.taskId, request.sessionId, request.expectedRevision)
+      return updateRepositorySessionLink(workspace.root, request.taskId, request.sessionId, request.expectedRevision, request.vscodeWorkspaceStorageId)
     })
   }
 

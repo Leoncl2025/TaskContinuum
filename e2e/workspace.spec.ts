@@ -1,9 +1,13 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
+import { hostname, userInfo } from 'node:os'
 import { _electron as electron, expect, test } from '@playwright/test'
 import type { ElectronApplication, Page } from '@playwright/test'
+import { startVSCodeChatCompanion } from '../src/main/vscodeChatCompanion'
+import { vsCodeBridgeConnectUri, vsCodeChatResource } from '../src/shared/vscodeChat'
+import { deliveryPrompt } from '../src/main/vscodeChatDelivery'
 
 let app: ElectronApplication
 let page: Page
@@ -228,6 +232,169 @@ test('renders a navigable multilevel task tree with independent folding and visi
   }))
   expect(fits).toBe(true)
   await page.screenshot({ path: resolve('artifacts/task-tree-narrow.png') })
+})
+
+test('links an original VS Code conversation with long history without import and keeps its repository identity after restart', async () => {
+  const nativeSessionId = randomUUID()
+  const workspaceStorageId = 'a'.repeat(32)
+  const storageRoot = join(environment.TASKCONTINUUM_VSCODE_USER_DATA_DIR, 'User', 'workspaceStorage')
+  const directory = join(storageRoot, workspaceStorageId, 'chatSessions')
+  await mkdir(directory, { recursive: true })
+  const sourceFile = join(directory, `${nativeSessionId}.jsonl`)
+  const progress = JSON.stringify({ kind: 1, k: ['requests', 0, 'response'], v: [{ kind: 'toolInvocation', value: 'x'.repeat(256 * 1024) }] }) + '\n'
+  const source = JSON.stringify({ kind: 0, v: { customTitle: 'Original VS Code link fixture', requests: [{ message: { text: 'Existing original question' }, response: [] }] } }) + '\n'
+    + progress.repeat(132) + JSON.stringify({ kind: 1, k: ['requests', 0, 'response'], v: [{ value: 'Existing original answer' }] }) + '\n'
+  expect(Buffer.byteLength(source)).toBeGreaterThan(32 * 1024 * 1024)
+  await writeFile(sourceFile, source)
+  let opened: string | undefined
+  const companion = await startVSCodeChatCompanion({
+    storageRoot, workspaceStorageId, discoveryDirectory: join(storageRoot, workspaceStorageId, 'taskcontinuum.vscode-bridge', 'bridges'),
+    vscodeVersion: '1.136.1', open: async (resource) => { opened = resource },
+  })
+  const taskFile = join(firstRoot, 'tasks', 'T-0002-shared-id', 'task.json')
+  const originalTask = await readFile(taskFile, 'utf8')
+  const linkFile = join(firstRoot, '.taskcontinuum', 'session-bindings.json')
+  try {
+    await selectFolder(firstRoot)
+    const surface = await page.evaluate(() => Object.keys(window.vscodeChat!).sort())
+    expect(surface).toEqual(['connect', 'onChange', 'open', 'read', 'send', 'watch'])
+    await page.getByRole('button', { name: 'Sessions', exact: true }).click()
+    await page.getByRole('button', { name: 'Preview Original VS Code link fixture' }).click()
+    await expect(page.getByRole('button', { name: 'Continue in new session' })).toBeHidden()
+    await page.getByRole('button', { name: 'Link to current task' }).click()
+    const panel = page.getByRole('complementary', { name: 'VS Code task chat' })
+    await expect(panel.getByRole('log')).toContainText('Existing original answer')
+    await expect(panel.getByRole('button', { name: 'Send to original VS Code session' })).toBeDisabled()
+    const expected = { provider: 'vscode-copilot', sessionId: nativeSessionId, workspaceStorageId }
+    expect(JSON.parse(await readFile(linkFile, 'utf8')).bindings['T-0002']).toEqual(expected)
+    expect((await page.evaluate(() => window.copilot!.getStatus())).state).toBe('disconnected')
+    await panel.getByRole('button', { name: 'Open in VS Code' }).click()
+    await expect.poll(() => opened).toBe(vsCodeChatResource(nativeSessionId))
+    await expect(page.getByRole('button', { name: 'Original session linked' })).toBeVisible()
+    await page.screenshot({ path: resolve('artifacts/vscode-linked-desktop.png') })
+    const appended = JSON.stringify({ kind: 2, k: ['requests', 0, 'response', 0, 'value'], v: ' updated in VS Code' }) + '\n'
+    await writeFile(sourceFile, source + appended)
+    await expect(panel.getByRole('log')).toContainText('Existing original answer updated in VS Code')
+    await app.close()
+    await launch()
+    await expect(page.getByRole('complementary', { name: 'VS Code task chat' }).getByRole('log')).toContainText('Existing original answer updated in VS Code')
+    expect(JSON.parse(await readFile(linkFile, 'utf8')).bindings['T-0002']).toEqual(expected)
+    expect((await page.evaluate(() => window.copilot!.getStatus())).state).toBe('disconnected')
+    await app.evaluate(({ BrowserWindow }) => { const window = BrowserWindow.getAllWindows()[0]; window.setMinimumSize(380, 600); window.setSize(420, 760) })
+    await page.getByRole('button', { name: 'Toggle chat panel' }).click()
+    const narrowPanel = page.getByRole('complementary', { name: 'VS Code task chat' })
+    await expect(narrowPanel.getByRole('button', { name: 'Open in VS Code' })).toBeInViewport()
+    expect(await narrowPanel.evaluate((element) => element.scrollWidth <= element.clientWidth && element.getBoundingClientRect().right <= innerWidth)).toBe(true)
+    await page.screenshot({ path: resolve('artifacts/vscode-linked-narrow.png') })
+    await narrowPanel.getByRole('button', { name: 'Detach conversation' }).click()
+    await page.getByRole('button', { name: 'Detach session', exact: true }).click()
+    await expect(narrowPanel).toBeHidden()
+    expect(JSON.parse(await readFile(linkFile, 'utf8')).bindings).toEqual({})
+    expect(await readFile(taskFile, 'utf8')).toBe(originalTask)
+    expect(await readFile(sourceFile, 'utf8')).toBe(source + appended)
+    expect((await readdir(directory)).filter((file) => /\.jsonl?$/.test(file))).toEqual([`${nativeSessionId}.jsonl`])
+  } finally { await companion.close(); await rm(sourceFile, { force: true }) }
+})
+
+test('sends from the desktop with original-session identity and preserves user and Agent machine attribution', async () => {
+  const nativeSessionId = randomUUID()
+  const workspaceStorageId = 'b'.repeat(32)
+  const storageRoot = join(environment.TASKCONTINUUM_VSCODE_USER_DATA_DIR, 'User', 'workspaceStorage')
+  const directory = join(storageRoot, workspaceStorageId, 'chatSessions')
+  await mkdir(directory, { recursive: true })
+  const sourceFile = join(directory, `${nativeSessionId}.jsonl`)
+  const previousRequestId = randomUUID()
+  await writeFile(sourceFile, JSON.stringify({ kind: 0, v: {
+    customTitle: 'Attributed original conversation', requesterUsername: 'Previous user', responderUsername: 'GitHub Copilot',
+    inputState: { mode: { id: 'agent', kind: 'agent' }, inputText: '' },
+    requests: [{ requestId: previousRequestId, message: { text: 'Earlier question' }, response: [{ value: 'Earlier answer' }], result: {} }],
+  } }) + '\n')
+  let requests = 0
+  let acceptedRequestId = ''
+  const startCompanion = () => startVSCodeChatCompanion({
+    storageRoot, workspaceStorageId, discoveryDirectory: join(storageRoot, workspaceStorageId, 'taskcontinuum.vscode-bridge', 'bridges'),
+    vscodeVersion: '1.136.1', open: async () => {},
+    dispatch: async (identity, delivery) => {
+      expect(identity).toEqual({ nativeSessionId, workspaceStorageId })
+      expect(delivery.participant.username).toBe(userInfo().username)
+      requests++
+      acceptedRequestId = randomUUID()
+      await appendFile(sourceFile, JSON.stringify({ kind: 2, k: ['requests'], v: [{
+        requestId: acceptedRequestId, message: { text: deliveryPrompt(delivery) },
+        agent: { name: 'copilot', fullName: 'GitHub Copilot' },
+        response: [{ value: 'Desktop delivery confirmed in the original conversation.' }], result: {},
+      }] }) + '\n')
+      return { state: 'submitted', nativeRequestId: acceptedRequestId }
+    },
+  })
+  let companion: Awaited<ReturnType<typeof startVSCodeChatCompanion>> | undefined
+  const linkFile = join(firstRoot, '.taskcontinuum', 'session-bindings.json')
+  try {
+    await selectFolder(firstRoot)
+    await page.getByRole('button', { name: 'Sessions', exact: true }).click()
+    await page.getByRole('button', { name: 'Preview Attributed original conversation' }).click()
+    await page.getByRole('button', { name: 'Link to current task' }).click()
+    const panel = page.getByRole('complementary', { name: 'VS Code task chat' })
+    await expect(panel.getByText('Not connected', { exact: true })).toBeVisible()
+    await expect(panel.getByRole('log')).toContainText('Previous user')
+    await panel.getByRole('textbox', { name: 'Message original VS Code Agent' }).fill('Continue the original session from the desktop')
+    await expect(panel.getByRole('button', { name: 'Send to original VS Code session' })).toBeDisabled()
+    await expect(panel.getByRole('button', { name: 'Send to original VS Code session' })).toHaveAccessibleDescription('The original VS Code workspace is not connected.')
+    const connection = await app.evaluateHandle(({ shell }) => {
+      const original = shell.openExternal
+      const addresses: string[] = []
+      shell.openExternal = async (uri) => { addresses.push(uri) }
+      return { addresses, restore: () => { shell.openExternal = original } }
+    })
+    try {
+      await expect(page.evaluate(async (workspaceStorageId) => window.vscodeChat!.connect!({ nativeSessionId: '../other', workspaceStorageId }), workspaceStorageId)).rejects.toThrow()
+      await panel.getByRole('button', { name: 'Connect VS Code' }).click()
+      await expect.poll(() => connection.evaluate((probe) => probe.addresses)).toEqual([vsCodeBridgeConnectUri({ nativeSessionId, workspaceStorageId })])
+    } finally { await connection.evaluate((probe) => probe.restore()); await connection.dispose() }
+    expect(requests).toBe(0)
+    await expect(panel.getByRole('textbox', { name: 'Message original VS Code Agent' })).toHaveValue('Continue the original session from the desktop')
+    await page.screenshot({ path: resolve('artifacts/vscode-connect-desktop.png') })
+    companion = await startCompanion()
+    await expect(panel.getByText(`GitHub Copilot @ ${hostname()}`, { exact: true })).toBeVisible()
+    await expect(panel.getByRole('button', { name: 'Send to original VS Code session' })).toBeEnabled()
+    await expect(panel.getByRole('textbox', { name: 'Message original VS Code Agent' })).toHaveValue('Continue the original session from the desktop')
+    await panel.getByRole('button', { name: 'Send to original VS Code session' }).click()
+    await expect(panel.getByRole('log')).toContainText('Desktop delivery confirmed in the original conversation.')
+    const userMessage = panel.locator(`.message-user[data-request-id="${acceptedRequestId}"]`)
+    const answer = panel.locator(`.message-assistant[data-request-id="${acceptedRequestId}"]`)
+    await expect(userMessage.locator('header')).toContainText(userInfo().username)
+    await expect(userMessage).toContainText('Continue the original session from the desktop')
+    await expect(userMessage).not.toContainText('Task Continuum message ID:')
+    await expect(answer.locator('header')).toContainText(`GitHub Copilot @ ${hostname()}`)
+    expect(requests).toBe(1)
+    expect((await page.evaluate(() => window.copilot!.getStatus())).state).toBe('disconnected')
+    expect(JSON.parse(await readFile(linkFile, 'utf8')).bindings['T-0002']).toEqual({ provider: 'vscode-copilot', sessionId: nativeSessionId, workspaceStorageId })
+    await page.screenshot({ path: resolve('artifacts/vscode-sending-desktop.png') })
+    await app.close()
+    await launch()
+    const restoredPanel = page.getByRole('complementary', { name: 'VS Code task chat' })
+    await expect(restoredPanel.locator(`.message-assistant[data-request-id="${acceptedRequestId}"] header`)).toContainText(`GitHub Copilot @ ${hostname()}`)
+    await companion.close()
+    companion = undefined
+    await restoredPanel.getByRole('button', { name: 'Refresh original conversation' }).click()
+    await expect(restoredPanel.getByRole('button', { name: 'Send to original VS Code session' })).toBeDisabled()
+    await expect(restoredPanel.getByRole('log')).toContainText(userInfo().username)
+    await expect(restoredPanel.getByRole('log')).toContainText(`GitHub Copilot @ ${hostname()}`)
+    await app.evaluate(({ BrowserWindow }) => { const window = BrowserWindow.getAllWindows()[0]; window.setMinimumSize(380, 600); window.setSize(420, 760) })
+    await page.getByRole('button', { name: 'Toggle chat panel' }).click()
+    const compactPanel = page.getByRole('complementary', { name: 'VS Code task chat' })
+    await expect(compactPanel.getByRole('button', { name: 'Connect VS Code' })).toBeInViewport()
+    await expect(compactPanel.getByRole('button', { name: 'Open in VS Code' })).toBeInViewport()
+    await expect(compactPanel.getByRole('textbox', { name: 'Message original VS Code Agent' })).toBeInViewport()
+    await expect(compactPanel.getByRole('button', { name: 'Send to original VS Code session' })).toBeInViewport()
+    expect(await compactPanel.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+    await page.screenshot({ path: resolve('artifacts/vscode-sending-narrow.png') })
+    await compactPanel.getByRole('button', { name: 'Detach conversation' }).click()
+    await page.getByRole('button', { name: 'Detach session', exact: true }).click()
+    await expect(compactPanel).toBeHidden()
+    expect(requests).toBe(1)
+    expect((await readFile(sourceFile, 'utf8')).includes('Desktop delivery confirmed in the original conversation.')).toBe(true)
+  } finally { await companion?.close() }
 })
 
 test('opens the explicitly requested local planning repository without changing any source file', async () => {

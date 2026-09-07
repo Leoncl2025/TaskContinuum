@@ -4,8 +4,8 @@ A focused Electron workbench for tasks and the conversations that move them forw
 Familiar VS Code-style navigation, without an editor, extension host, terminal, or debugger.
 
 **Local and shared-session MVP.** The desktop can connect to GitHub Copilot,
-resume native CLI sessions, and continue reviewed VS Code text history in a new
-Copilot session. It can also open real AgentDesk workspace folders as read-only
+resume native CLI sessions, link an original VS Code conversation without forking,
+or explicitly import reviewed text into a new Copilot session. It can also open real AgentDesk workspace folders as read-only
 task views; the original sample workspace remains available as a separate demo.
 A separate shared Host lets authorized participants converse with one owner Agent
 over SSH, retain offline history, and continue reviewed checkpoints in an explicit
@@ -28,6 +28,10 @@ semantic fork. Git and OneDrive synchronization remain user-managed.
     streamed responses, tool activity, and cancellation.
 - Searchable CLI/VS Code session lists, read-only transcript previews, and explicit
     import confirmation before continuing a VS Code conversation.
+- Original VS Code task/session links, saved-history updates, and an authenticated
+    companion extension that opens and sends to the original chat without forking.
+- Original-session messages display the sender's username; replies include the
+    actual execution machine. Delivery confirmation and tool approvals stay in VS Code.
 - Deny/allow-once tool decisions and agent questions, with pending requests cleaned
     up on stop, reload, or disconnect.
 - Persisted native history, reviewed imports, and repository-backed task/session links.
@@ -68,6 +72,7 @@ Run commands from this repository's root. Dependencies are pinned in
 | `npm run lint` | Run ESLint with no warnings permitted. |
 | `npm test` | Run unit and React component tests. |
 | `npm run build` | Type-check and build production main/preload/renderer output. |
+| `npm run build:vscode-bridge` | Type-check and package the local original-chat companion VSIX. |
 | `npm start` | Open the already-built Electron application. |
 | `npm run check` | Run lint, unit tests, and production build. |
 | `npm run test:e2e` | Build and run real Electron tests; live model calls are skipped unless explicitly enabled. |
@@ -125,13 +130,16 @@ Remove-Item Env:TASKCONTINUUM_WORKSPACE
 3. For a CLI conversation, stop activity in its original client and choose its **Resume** entry.
     The original session ID and native history are retained.
 4. For VS Code history, open **Preview**, review the exact text and working directory,
-    then choose **Continue in new session**. The first message carries the reviewed context.
+    choose **Import into new session**, then **Continue in new session**. The first
+    message carries the reviewed context. To keep the original session, use the next section instead.
 5. Send a message. Review tool requests with **Deny** or **Allow once**, or use **Stop response**.
 
 VS Code import is a text-history handoff, not control of an active VS Code Chat process.
 It does not transfer attachments, tool results/state, pending edits, or hidden reasoning.
-Import itself makes no model request and never changes the source file. Files above
-32 MB are skipped; the most recent 60,000 text characters/500 messages are previewed,
+Import itself makes no model request and never changes the source file. Legacy JSON
+files are limited to 32 MiB. JSONL histories are replayed one record at a time, with
+a 32 MiB per-record limit and a 256 MiB total journal limit. The most recent
+60,000 text characters/500 messages are previewed,
 with truncation and unreadable-source warnings shown explicitly.
 
 To opt into three small authenticated model requests that verify creation, restart
@@ -146,6 +154,168 @@ Remove-Item Env:TASKCONTINUUM_LIVE_COPILOT
 The live test sends only synthetic prompts and a synthetic transcript, not your
 existing conversations. Requests can consume Copilot usage. Normal tests remain offline.
 
+## Link an original VS Code conversation
+
+This path keeps the original GitHub Copilot Chat session ID. It is not a fork or
+text-history import. Task Continuum sends explicitly submitted messages to that
+session and displays its saved responses. **Delivery confirmation is enabled by
+default and can be disabled; stopping responses, answering agent questions, and
+approving tools still happen in VS Code.**
+
+1. Open the task workspace in Task Continuum and select the target task. Open
+    **Sessions**, choose a **VS Code history** entry, then **Link to current task**.
+    No CLI sign-in is needed to link or view saved history. If the task already has a
+    different link, detach it first; this does not delete the underlying conversation.
+2. Build the companion with `npm run build:vscode-bridge`. Install the resulting
+    `artifacts/taskcontinuum-vscode-bridge-0.2.6.vsix` through VS Code's
+    **Extensions: Install from VSIX** command. Component details are in
+    [vscode-bridge/README.md](vscode-bridge/README.md).
+3. In VS Code, open the conversation's original workspace, which may differ from
+    the task repository. For example, a conversation created in `Q:\src\Projects`
+    needs that VS Code window, not a new window opened only on TaskContinuum-ad.
+4. In Task Continuum's linked panel, choose **Connect VS Code**, then confirm
+    **Connect** in the original VS Code workspace. The bridge starts without sending
+    a message or creating a conversation. **Open in VS Code** remains available as
+    the external-link icon. The Command Palette's **Task Continuum: Start VS Code
+    Bridge** command is still available for manual startup.
+5. Sign in to Copilot in VS Code and keep the original conversation open in its
+    current sidebar or editor with its existing Agent mode and an available model.
+    Finish any active response and clear its
+    unsent draft. Enter a message in the desktop and choose **Send to original VS
+    Code session**. If delivery confirmation is enabled, review the exact target,
+    username, machine, and message in VS Code, then confirm **Send to original
+    session**. Otherwise the desktop submission sends directly. No CLI session is created.
+6. **Detach conversation** removes only the task link. **Task Continuum: Stop VS Code
+    Bridge**, reloading, or closing the VS Code window ends its delivery service;
+    closing the desktop does not cancel the VS Code Agent.
+
+After upgrading the companion, finish active work and reload its VS Code window
+if the old extension is still loaded, then start the bridge again. The desktop
+never reloads VS Code or silently starts a new Agent for you.
+
+The 0.2.6 reader fixes long JSONL conversations disappearing from the session list.
+Previously the 32 MiB whole-file import limit also applied to journal discovery and
+original-session reads. It now streams bounded records rather than loading the whole
+journal into a string. List, preview, original history, and the companion use the same
+reader. The most recently parsed file revision is reused until its identity, size, or
+timestamps change; caller mutations do not alter the cache. Skipped files include the
+specific limit or format reason. Existing session IDs, bindings, and source files are
+unchanged. Reopen an older desktop to load the reader; load the updated companion
+after active work ends for the same long-history support in the sending path.
+
+Bridge 0.2.5 supports disabling only the extra send popup. In this machine's VS Code
+User settings, set `taskcontinuum.confirmOriginalSessionSend` to `false` (default
+`true`). Once the updated companion is loaded, the setting takes effect on the next
+message without a bridge restart. It is machine-scoped, so task repositories cannot
+opt users out of confirmation. Connection consent and Copilot tool approvals are
+unchanged, as are original-session identity, trust, busy/draft checks, and no-replay
+protections. The real installed-VS-Code test verifies default-confirmed delivery
+followed by a distinct no-popup delivery, both targeting the same original session
+without moving the sidebar or changing the other editor conversation.
+
+Bridge 0.2.4 adds explicit cache invalidation through the contribution's own
+`taskcontinuum.deliveryRevision` context condition after every template update and
+restoration. It also checks a unique, non-sending handoff before starting the bridge.
+The check only prepares and restores the private template; it does not send a prompt,
+invoke an Agent, alter history, or create a delivery record. On failure, VS Code shows
+the mismatch and the bridge does not start. Connect first; a user message is no longer
+needed to discover a template-readiness failure. This does not validate model access.
+
+The continued real-workspace failure on 0.2.3 was not resolved by its earlier isolated
+tests. The latest verification covers no-message connection and two distinct deliveries
+with file watching excluded, but does not certify the current user's unreloaded window.
+Failed/pending user submissions remain untouched and are not automatically replayed.
+
+Bridge 0.2.3 changes template identity matching after the custom-Agent cache has been
+loaded. The template keeps a stable registered name and is updated through VS Code's
+file service. A cached display name is not used as proof that a message is current:
+the exact template file, unique command handoff, complete message, original Agent,
+and auto-send flag must match. Timeout errors now name the failed condition without
+printing message contents. No existing failed submission is retried automatically.
+Verification includes two different consecutive messages in the same installed
+VS Code window, with distinct native request IDs and unchanged conversation layout.
+
+Bridge 0.2.2 removes automatic editor opening from the send path. Earlier builds
+opened the original conversation as an editor immediately after confirmation,
+which moved a sidebar conversation and left that sidebar empty, even if the later
+delivery failed. Sending now targets the already-open original widget directly.
+If that widget is unavailable, it fails without moving, creating, or substituting
+a conversation. The separate **Open in VS Code** icon still explicitly opens as an
+editor; it is not needed to send to a conversation already open in the sidebar.
+
+To return a conversation moved by an earlier build, focus its editor tab and run
+**Chat: Move Chat into Side Bar** from VS Code's Command Palette. This moves that
+existing conversation; it does not delete history. No automatic layout reset,
+window reload, or message replay is performed by the repair.
+
+Bridge 0.2.1 adds the desktop connection entry. Reopen an older running Task
+Continuum build to load the new button; finish or preserve any unsent draft before
+restarting the desktop. Connection attempts within the same open panel keep its
+draft. The input area states why sending is disabled: disconnected, unsupported
+bridge, active response, pending/uncertain delivery, wrong mode, or an original draft.
+Connecting does not override those guards. Readiness refreshes automatically.
+
+Keep the source VS Code workspace window foremost when connecting. VS Code routes
+extension URIs to its topmost window; a different workspace is rejected, not opened
+or switched automatically. The restricted `vscode://taskcontinuum.vscode-bridge/connect`
+URI (or `vscode-insiders://`) contains only the original session/workspace IDs. Its
+handler checks the existing session and asks for connection consent; it accepts no
+message, command, token, or caller-provided filesystem path.
+
+User messages display the OS username recorded by the authenticated local bridge,
+and replies display `Agent name @ execution machine`. These are different from
+the `GitHub Copilot CLI` connection shown in the session explorer. The bridge's
+`hostname()` supplies the actual execution machine for this local-only adapter;
+names are not renderer guesses or caller-supplied identity claims. Historical
+authors/machines without evidence remain unknown, not assigned to the current user.
+Recorded attribution survives restart and offline viewing; last-recorded identity
+is explicitly distinguished from an online execution owner.
+
+Delivery is persisted before dispatch and matched to the original native request
+ID. Retrying a lost acknowledgment uses the same command ID. Unconfirmed deliveries
+are never automatically resent, including after restart. The delivery journal is
+limited to 500 messages/4 MB per source workspace. VS Code normally saves session
+state about once a minute, so desktop confirmation/history can lag its UI; **Refresh
+original conversation** rereads saved state and does not force a VS Code save.
+Replies are a saved-history view, not a guaranteed token stream. `Submitted` means
+the native request was found, not that its Agent finished. Check VS Code if a delivery
+remains uncertain; do not submit a duplicate while its outcome is unknown.
+
+The companion currently permits VS Code 1.136.x local trusted workspaces only;
+the actual original-chat commands were verified with VS Code 1.136.1. Sending uses
+`workbench.action.chat.executeHandoff` with an explicit original `sessionResource`,
+a unique delivery item, and the original Agent mode. A temporary extension-owned
+template provides the message, guarded by a cross-window lock and cleaned after
+delivery; it is not the Agent executing your task. No focused-widget Send command
+is used. Other versions, Remote SSH/WSL/container windows,
+and virtual workspaces are unsupported until verified. There is no use of proposed
+API enablement, focus-based Send automation, Copilot credential access, or automatic
+approval. Missing sessions and missing/ambiguous bridges are reported rather than
+falling back to a new CLI session.
+
+This is a version-specific compatibility integration, not a supported public control
+API. Do not change the original draft, mode, model, or conversation while delivery
+is being confirmed; saved-state checks cannot fence concurrent live edits. Ambiguous
+Agent names are rejected. If VS Code crashes, inspect the original request and confirm
+the old process has stopped before removing a reported stale delivery-template lock.
+
+The companion starts only on explicit command or confirmed connection. It exposes authenticated loopback
+`GET /identity` and `POST /open`, `/send`, `/deliveries`, rejects browser origins, and confines delivery to
+existing saved sessions in its own workspace. A per-run credential is stored under
+VS Code's `User/workspaceStorage/<workspace-id>/taskcontinuum.vscode-bridge/bridges/`.
+Private delivery records are in the parent extension-storage directory. Message
+payloads briefly reside in the installed companion's ignored output template while
+it is being delivered; normal completion/stop clears them, but a crash may leave a
+private payload for manual recovery. These records stay outside Git and credentials
+stay outside the renderer. Protect the local profile and trust
+installed extensions; this credential does not defend against a compromised OS user.
+
+Bindings include `provider: "vscode-copilot"`, the original `sessionId`, and
+`workspaceStorageId`. The storage ID identifies the local VS Code workspace and is
+not a portable shared-session route. A clone without that original history cannot
+resume it from Git alone. If Stable and Insiders both contain the same source identity,
+select the intended data root with `TASKCONTINUUM_VSCODE_USER_DATA_DIR`.
+
 ## Versioned task/session links
 
 Real workspaces use `.taskcontinuum/session-bindings.json` in the task repository,
@@ -159,16 +329,25 @@ The relation is a single source of truth keyed by task ID:
         "T-0002": {
             "provider": "github-copilot",
             "sessionId": "example-native-session-id"
+        },
+        "T-0003": {
+            "provider": "vscode-copilot",
+            "sessionId": "example-original-vscode-id",
+            "workspaceStorageId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         }
     }
 }
 ```
 
-The example ID is illustrative. Opening or creating a real conversation records
+The example IDs are illustrative. Opening or creating a CLI conversation records
 the native SDK session ID only after the repository write succeeds. Selecting a
-task then resumes that ID; selecting an already-linked session returns to its task.
+CLI-linked task resumes that ID; a VS Code-linked task loads its saved original
+history without calling the CLI. Selecting an already-linked session returns to its task.
 The current MVP permits one session per task and one task per session in a workspace.
 Detach an existing link explicitly before moving the session to a different task.
+Session uniqueness includes its provider and, for VS Code, its source workspace.
+Existing CLI-only files remain valid. Older Task Continuum builds that understand
+only CLI links cannot read the new provider variant; use this build on those clients.
 
 Check in the relationship file and its generated `.taskcontinuum/.gitignore` with
 the task repository. The ignore file excludes write locks and temporary files,
@@ -310,6 +489,12 @@ native ID when the Host journal proves no command was accepted.
 | [src/main/copilotBridge.ts](src/main/copilotBridge.ts) | Trusted IPC registration and native folder-selection boundaries. |
 | [src/main/copilotService.ts](src/main/copilotService.ts) | Official runtime, native sessions, streaming, cancellation, and permissions. |
 | [src/main/vscodeSessions.ts](src/main/vscodeSessions.ts) | Bounded read-only discovery and reconstruction of VS Code transcripts. |
+| [src/main/vscodeChatBridge.ts](src/main/vscodeChatBridge.ts) | Trusted original-history read/watch/open/send IPC. |
+| [src/main/vscodeChatClient.ts](src/main/vscodeChatClient.ts) | Private companion discovery, authenticated identity checks, and exact-session open requests. |
+| [src/main/vscodeChatExtension.ts](src/main/vscodeChatExtension.ts) | Explicit VS Code bridge lifecycle, version/trust checks, and original-chat opening. |
+| [src/main/vscodeChatCompanion.ts](src/main/vscodeChatCompanion.ts) | Loopback authentication and existing-workspace/session restrictions. |
+| [src/main/vscodeChatDelivery.ts](src/main/vscodeChatDelivery.ts) | Durable attributed submissions, retry deduplication, and native request reconciliation. |
+| [src/main/vscodeChatDispatch.ts](src/main/vscodeChatDispatch.ts) | Confirmed exact-session delivery, original Agent checks, temporary template lock, and bounded acknowledgment. |
 | [src/main/localSessionHost.ts](src/main/localSessionHost.ts) | Reviewed import snapshots and persistent history handoff. |
 | [src/main/workspaceReader.ts](src/main/workspaceReader.ts) | Bounded, read-only AgentDesk task/document loading. |
 | [src/main/workspaceStore.ts](src/main/workspaceStore.ts) | Current/recent workspace persistence and failure-safe switching. |
@@ -330,6 +515,7 @@ native ID when the Host journal proves no command was accepted.
 | [src/renderer/chat/useTaskChats.ts](src/renderer/chat/useTaskChats.ts) | Per-task draft/message state and request cancellation. |
 | [src/renderer/chat/useSessionLinks.ts](src/renderer/chat/useSessionLinks.ts) | Repository-authoritative bindings, explicit legacy migration, and conflict recovery. |
 | [src/renderer/components/SharedSessionPanel.tsx](src/renderer/components/SharedSessionPanel.tsx) | Shared conversation, participant controls, offline state, and reviewed continuation. |
+| [src/renderer/components/VSCodeChatPanel.tsx](src/renderer/components/VSCodeChatPanel.tsx) | Original-session composer, attributed history, delivery state, and refresh/open/detach controls. |
 | [src/renderer/chat/demoAdapter.ts](src/renderer/chat/demoAdapter.ts) | Deterministic, network-free demo responses, not an LLM. |
 | [src/renderer/chat/copilotAdapter.ts](src/renderer/chat/copilotAdapter.ts) | Request-scoped desktop event streams; never a silent demo fallback. |
 | [src/renderer/data/tasks.ts](src/renderer/data/tasks.ts) | Sample data, not a read of the planning workspace. |
@@ -337,6 +523,7 @@ native ID when the Host journal proves no command was accepted.
 | [e2e/copilot.spec.ts](e2e/copilot.spec.ts) | Read-only imports, restricted IPC, narrow layouts, and opt-in real Copilot continuity. |
 | [e2e/workspace.spec.ts](e2e/workspace.spec.ts) | Real folder selection, recent-workspace switching, source preservation, and restart recovery. |
 | [e2e/shared.spec.ts](e2e/shared.spec.ts) | Shared desktop, cache/checkpoints, independent Host lifecycle, and opt-in real semantic fork. |
+| [e2e/vscode-bridge.spec.ts](e2e/vscode-bridge.spec.ts) | Isolated real VS Code original-ID opening without sending or forking. |
 
 The renderer has no Node types or Node integration. Test code has a separate mixed
 Node/DOM type environment. Production serves allowlisted assets under a custom
@@ -445,6 +632,76 @@ SSH server on loopback. It does not change system services or user SSH configura
 All machine identities in this verification are separate profiles on one Windows host.
 Physical A/B/C networking and approved OneDrive cross-machine synchronization have
 not been tested. No installer, managed service, automatic failover, or native fork is claimed.
+
+The original VS Code link/open increment passed 162 tests, lint, strict types, and
+production build. The desktop scenario verifies repository-backed original identity,
+source updates, restart, detach, and 420px layout without starting the CLI. The real
+VS Code 1.136.1 scenario opens a synthetic original conversation and checks its bound
+resource, original question/answer, unchanged source bytes, and no additional saved
+session. It makes no model request and uses an isolated profile. Screenshots were
+reviewed. This is evidence for linking/opening, not desktop-side message execution.
+
+The later sending increment adds a real-VS-Code targeted-delivery test with two
+existing sessions and an explicitly named deterministic test participant. It verifies
+that only the intended original receives a new request and reply, the native ID is
+retained, authors and execution machines match, and retrying the same command does
+not duplicate it. Separate Electron coverage exercises the desktop composer,
+attribution, restart, offline history, and 420px layout. This verifies the transport
+and session lifecycle, not an authenticated hosted Copilot response; that latter
+check remains dependent on a signed-in VS Code environment. No credentials were
+copied and no user conversation was used as a fixture.
+
+To run the real companion check after building its VSIX:
+
+```powershell
+$env:TASKCONTINUUM_VERIFY_VSCODE = 'C:\Program Files\Microsoft VS Code\Code.exe'
+$env:TASKCONTINUUM_VERIFY_VSCODE_SEND = '1'
+npm run test:e2e -- e2e/vscode-bridge.spec.ts
+Remove-Item Env:TASKCONTINUUM_VERIFY_VSCODE_SEND
+Remove-Item Env:TASKCONTINUUM_VERIFY_VSCODE
+```
+
+The desktop connection repair passed 181 tests, lint, strict types, and production
+build. Two focused Electron scenarios cover the Connect button through IPC, rejection
+of invalid identities, unchanged drafts, automatic send readiness, original opening,
+and 420px controls. Real VS Code 1.136.1 tests enter through the connection URI,
+confirm the bridge, and verify original-session opening and deterministic participant
+delivery. The complete hosted Copilot check remains separate. Desktop and narrow
+connection screenshots were reviewed; no user messages were sent for verification.
+
+The 0.2.2 layout repair passed 183 tests, lint, strict types, and production build.
+A real, normally installed VS Code 1.136.1 test keeps the original in the sidebar
+and a different conversation in the editor. A confirmed deterministic reply and
+same-command retry preserve the original IDs, other conversation, editor tabs,
+group count, and panel bounds. Before/after screenshots were reviewed. Missing-widget
+and template-load failures also leave the source unchanged without an open fallback.
+This verifies the reported layout regression, not an authenticated hosted Copilot
+response or a separately established native-crash cause. VS Code tests now keep
+their isolated installed extensions/profiles under the OS temporary directory and
+clean them after closing, rather than adding those directories to the workspace.
+
+The 0.2.3 template repair passed 189 tests across 34 files, lint, strict types, and
+production build. The installed-VS-Code regression preloads the mode cache and
+verifies two consecutive distinct submissions, both persisted replies, exact new
+request IDs and text, retry deduplication, template restoration, and unchanged
+sidebar/editor layout. The test uses an isolated deterministic participant with no
+hosted model or user messages. A document-edit experiment was not retained; template
+updates do not use `WorkspaceEdit`, show an editor, or change the user's settings.
+
+The 0.2.4 readiness update passed 191 tests, lint, strict types, and production build.
+Installed VS Code 1.136.1 verified non-sending startup and consecutive distinct
+deliveries with file watching excluded; another no-model run verified connection/open
+compatibility. The readiness tests reject stale state and release the private lock.
+An attempted negative control did not isolate incidental refreshes and was removed;
+it is not evidence that the user's exact environment has been reproduced or repaired.
+
+The 0.2.6 long-history regression passed 195 tests, lint, strict types, and production
+build. Two focused Electron scenarios include a JSONL conversation above 32 MiB:
+discovery, preview/link, source updates, restart, detach, and source preservation.
+Unit checks cover split UTF-8, incomplete final records, invalid complete records,
+cache invalidation/isolation, and each size limit. A read-only check of the actual
+32.78 MiB original session verified that it is readable and listed again, without
+messages or credentials in diagnostic output. No user message or binding was changed.
 
 Third-party attribution is recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 The application does not claim VS Code or GitHub Copilot affiliation.

@@ -78,6 +78,11 @@ SSH test server; `@types/ssh2` retains its upstream DefinitelyTyped MIT notice.
 Production forwarding uses the operating system's OpenSSH executable, which is
 not bundled by this application and retains its own license notices.
 
+The local companion is packaged with `@vscode/vsce` 3.7.1
+(https://github.com/microsoft/vscode-vsce, MIT) and typed with `@types/vscode` 1.134.0
+(https://github.com/DefinitelyTyped/DefinitelyTyped, MIT). These are development-only
+dependencies. Its VSIX bundles Zod 4.3.6 (MIT); it does not bundle VS Code or Copilot.
+
 Vite, electron-vite, TypeScript, ESLint, Vitest, Playwright, Testing Library,
 and other development dependencies retain their upstream licenses in the
 dependency installation. The locked dependency manifest records exact versions.

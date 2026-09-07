@@ -13,19 +13,25 @@ interface SessionDialogProps {
   onBrowse(): Promise<string | null | undefined>
   onConnect(): void
   onSubmit(options: SessionOptions): void
+  onLink?(): void
   onClose(): void
 }
 
-export function CopilotSessionDialog({ preview, directory, models, ready, busy, error, onBrowse, onConnect, onSubmit, onClose }: SessionDialogProps) {
+export function CopilotSessionDialog({ preview, directory, models, ready, busy, error, onBrowse, onConnect, onSubmit, onLink, onClose }: SessionDialogProps) {
   const [workingDirectory, setWorkingDirectory] = useState(preview?.session.workingDirectory ?? directory)
   const [model, setModel] = useState('')
+  const [importing, setImporting] = useState(!preview || !onLink)
   return <Dialog title={preview ? 'Continue VS Code conversation' : 'New Copilot session'} className={preview ? 'import-dialog' : ''} onClose={() => { if (!busy) onClose() }}>
-    <form onSubmit={(event) => { event.preventDefault(); if (ready && workingDirectory && !busy) onSubmit({ workingDirectory, model: model || undefined }) }}>
-      {preview && <><h3 className="import-title">{preview.session.title}</h3><p className="import-notice">A new Copilot session will receive the text below. The VS Code source stays unchanged. Tools, attachments, and pending edits are excluded.</p><div className="import-transcript" aria-label="Import preview">{preview.messages.map((message) => <article key={message.id}><strong>{message.role === 'user' ? 'You' : 'Copilot'}</strong><p>{message.text}</p></article>)}</div>{preview.truncated && <p className="import-warning">Earlier context was omitted to fit the import limit.</p>}</>}
-      <label className="form-field">Working directory<div className="directory-picker"><input aria-label="Working directory" readOnly value={workingDirectory} title={workingDirectory} /><IconButton icon="folder-opened" label="Choose working directory" disabled={busy} onClick={() => { void onBrowse().then((value) => { if (value) setWorkingDirectory(value) }) }} /></div></label>
-      <label className="form-field">Model<select aria-label="Copilot model" value={model} onChange={(event) => setModel(event.target.value)} disabled={busy}><option value="">Default model</option>{models.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+    <form onSubmit={(event) => { event.preventDefault(); if (importing && ready && workingDirectory && !busy) onSubmit({ workingDirectory, model: model || undefined }) }}>
+      {preview && <><h3 className="import-title">{preview.session.title}</h3><div className="import-transcript" aria-label="Import preview">{preview.messages.map((message) => <article key={message.id}><strong>{message.role === 'user' ? 'You' : 'Copilot'}</strong><p>{message.text}</p></article>)}</div>{preview.truncated && <p className="import-warning">Earlier context was omitted to fit the preview limit.</p>}</>}
+      {preview && onLink && <div className="dialog-actions"><button type="button" className="primary-button" disabled={busy} onClick={onLink}><Icon name="link" />Link to current task</button><button type="button" className="secondary-button" disabled={busy} aria-expanded={importing} onClick={() => setImporting((value) => !value)}><Icon name="git-branch" />Import into new session</button></div>}
+      {importing && <>
+        {preview && <p className="import-notice">Import creates a new Copilot CLI session from this text. The VS Code source stays unchanged. Tools, attachments, and pending edits are excluded.</p>}
+        <label className="form-field">Working directory<div className="directory-picker"><input aria-label="Working directory" readOnly value={workingDirectory} title={workingDirectory} /><IconButton icon="folder-opened" label="Choose working directory" disabled={busy} onClick={() => { void onBrowse().then((value) => { if (value) setWorkingDirectory(value) }) }} /></div></label>
+        <label className="form-field">Model<select aria-label="Copilot model" value={model} onChange={(event) => setModel(event.target.value)} disabled={busy}><option value="">Default model</option>{models.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+      </>}
       {error && <p className="copilot-error" role="alert">{error}</p>}
-      <div className="dialog-actions"><button type="button" className="secondary-button" disabled={busy} onClick={onClose}>Cancel</button>{!ready ? <button type="button" className="primary-button" disabled={busy} onClick={onConnect}><Icon name="plug" />Connect Copilot</button> : <button type="submit" className="primary-button" disabled={busy || !workingDirectory}><Icon name={preview ? 'git-branch' : 'add'} />{preview ? 'Continue in new session' : 'Create session'}</button>}</div>
+      <div className="dialog-actions"><button type="button" className="secondary-button" disabled={busy} onClick={onClose}>Cancel</button>{importing && (!ready ? <button type="button" className="primary-button" disabled={busy} onClick={onConnect}><Icon name="plug" />Connect Copilot</button> : <button type="submit" className="primary-button" disabled={busy || !workingDirectory}><Icon name={preview ? 'git-branch' : 'add'} />{preview ? 'Continue in new session' : 'Create session'}</button>)}</div>
     </form>
   </Dialog>
 }

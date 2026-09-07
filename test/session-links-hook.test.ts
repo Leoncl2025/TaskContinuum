@@ -19,7 +19,7 @@ function fixture() {
     updateSessionLink: vi.fn(async (request) => {
       const bindings = { ...snapshot.document.bindings }
       if (request.sessionId === null) delete bindings[request.taskId]
-      else bindings[request.taskId] = { provider: 'github-copilot', sessionId: request.sessionId }
+      else bindings[request.taskId] = request.vscodeWorkspaceStorageId ? { provider: 'vscode-copilot', sessionId: request.sessionId, workspaceStorageId: request.vscodeWorkspaceStorageId } : { provider: 'github-copilot', sessionId: request.sessionId }
       snapshot = { document: { schemaVersion: 1, bindings }, revision: 'a'.repeat(64) }
       return snapshot
     }),
@@ -61,6 +61,16 @@ describe('repository-backed session binding state', () => {
     expect(bridge.migrateSessionLinks).toHaveBeenCalledWith({ workspaceId: workspace.id, bindings: { 'T-0002': { provider: 'github-copilot', sessionId: 'legacy-session' } } })
     expect(readSessionBindings(workspace.id)).toEqual({})
     expect(result.current.needsMigration).toBe(false)
+  })
+
+  it('keeps a VS Code link separate from native CLI execution and local-only caches', async () => {
+    const { workspace, bridge } = fixture()
+    const { result } = renderHook(() => useSessionLinks(workspace))
+    await waitFor(() => expect(result.current.ready).toBe(true))
+    await act(() => result.current.attach('T-0002', { id: 'original-chat', title: 'Private title', vscodeWorkspaceStorageId: 'a'.repeat(32) }))
+    expect(result.current.bindings['T-0002']).toMatchObject({ id: 'original-chat', vscodeWorkspaceStorageId: 'a'.repeat(32) })
+    expect(bridge.updateSessionLink).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'original-chat', vscodeWorkspaceStorageId: 'a'.repeat(32) }))
+    expect(readSessionBindings(workspace.id)).toEqual({})
   })
 
   it('treats an existing repository file as authoritative even when a legacy cache disagrees', async () => {

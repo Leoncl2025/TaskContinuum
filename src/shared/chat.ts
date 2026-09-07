@@ -5,6 +5,8 @@ export interface ChatMessage {
   role: 'user' | 'assistant'
   text: string
   status: 'complete' | 'streaming' | 'cancelled' | 'error'
+  nativeRequestId?: string
+  author?: { name: string; machineName?: string }
 }
 
 export interface ChatRequest {

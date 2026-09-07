@@ -44,6 +44,16 @@ describe('workspace-scoped repository link writes', () => {
     await expect(store.updateSessionLink(request)).rejects.toThrow('active workspace changed')
   })
 
+  it('persists the original VS Code source and identity across desktop profiles', async () => {
+    const { root, taskFile, original, store, workspace } = await fixture()
+    const saved = await store.updateSessionLink({ workspaceId: workspace.id, taskId: 'T-0002', sessionId: 'original-chat', vscodeWorkspaceStorageId: 'a'.repeat(32), expectedRevision: null })
+    expect(saved.document.bindings['T-0002']).toEqual({ provider: 'vscode-copilot', sessionId: 'original-chat', workspaceStorageId: 'a'.repeat(32) })
+    const next = new WorkspaceStore(join(root, 'another-profile'))
+    await next.openFolder(root)
+    expect(await next.getSessionLinks(workspace.id)).toEqual(saved)
+    expect(await readFile(taskFile, 'utf8')).toBe(original)
+  })
+
   it('validates every migrated task and removes metadata without deleting native sessions', async () => {
     const { store, workspace } = await fixture()
     await expect(store.migrateSessionLinks({ workspaceId: workspace.id, bindings: { 'T-0999': { provider: 'github-copilot', sessionId: 'missing-task' } } })).rejects.toThrow('no longer exists')

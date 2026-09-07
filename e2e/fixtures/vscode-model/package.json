@@ -1,0 +1,16 @@
+{
+  "name": "original-chat-test-model",
+  "publisher": "taskcontinuum",
+  "version": "0.0.1",
+  "engines": { "vscode": "^1.136.0" },
+  "main": "./index.cjs",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "chatParticipants": [
+      { "id": "taskcontinuum.delivery-test", "name": "continuum_test", "fullName": "Delivery Test Agent", "description": "Deterministic original-session delivery test", "isSticky": false }
+    ],
+    "languageModelChatProviders": [
+      { "vendor": "taskcontinuum-test", "displayName": "Task Continuum Test" }
+    ]
+  }
+}

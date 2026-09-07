@@ -7,6 +7,7 @@ import { APP_URL, PRODUCTION_CSP, isTrustedRendererUrl, rendererSecurityPreferen
 import { registerCopilotBridge } from './copilotBridge'
 import { registerWorkspaceBridge } from './workspaceBridge'
 import { registerSharedBridge } from './sharedBridge'
+import { registerVSCodeChatBridge } from './vscodeChatBridge'
 
 app.setName('Task Continuum')
 const dataDirectory = process.env.TASKCONTINUUM_DATA_DIR
@@ -23,6 +24,7 @@ const devUrl = app.isPackaged ? undefined : validateDevUrl(process.env.ELECTRON_
 let mainWindow: BrowserWindow | undefined
 let copilotHost: ReturnType<typeof registerCopilotBridge> | undefined
 let sharedDesktop: ReturnType<typeof registerSharedBridge> | undefined
+let vscodeChat: ReturnType<typeof registerVSCodeChatBridge> | undefined
 let quitting = false
 let cleanupComplete = false
 
@@ -71,9 +73,9 @@ async function createWindow(): Promise<void> {
   window.webContents.on('will-navigate', (event) => event.preventDefault())
   window.webContents.on('will-frame-navigate', (event) => event.preventDefault())
   window.webContents.on('will-redirect', (event) => event.preventDefault())
-  window.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) copilotHost?.cancelAll() })
+  window.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { copilotHost?.cancelAll(); vscodeChat?.close() } })
   window.webContents.on('render-process-gone', () => copilotHost?.cancelAll())
-  window.webContents.on('destroyed', () => copilotHost?.cancelAll())
+  window.webContents.on('destroyed', () => { copilotHost?.cancelAll(); vscodeChat?.close() })
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
   window.webContents.session.setPermissionCheckHandler(() => false)
   if (devUrl) {
@@ -109,6 +111,7 @@ void app.whenReady().then(async () => {
   })
   registerDesktopBridge()
   copilotHost = registerCopilotBridge(requireTrustedWindow, () => mainWindow)
+  vscodeChat = registerVSCodeChatBridge(requireTrustedWindow, () => mainWindow)
   const workspaces = registerWorkspaceBridge(requireTrustedWindow, copilotHost.allowDirectory)
   sharedDesktop = registerSharedBridge(requireTrustedWindow, () => mainWindow, workspaces.currentRoot, copilotHost.requireDirectory)
   await createWindow()

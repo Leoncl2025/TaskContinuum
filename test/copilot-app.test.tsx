@@ -5,7 +5,7 @@ import App from '../src/renderer/App'
 import type { SendMessageRequest } from '../src/shared/sessions'
 import { mockCopilotBridge } from './copilot-fixtures'
 
-afterEach(() => { delete window.copilot })
+afterEach(() => { delete window.copilot; delete window.vscodeChat })
 function localSessions() { return within(screen.getByRole('complementary', { name: 'Local sessions' })) }
 
 async function connectedApp() {
@@ -45,6 +45,33 @@ describe('Copilot workbench integration', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     expect(host.bridge.importSession).toHaveBeenCalledWith('preview-token', expect.objectContaining({ workingDirectory: host.source.workingDirectory }))
     expect(localStorage.getItem('taskcontinuum:session-bindings:v1')).toContain('imported-session')
+  })
+
+  it('links and restores an original VS Code conversation without CLI resume, import, or fork', async () => {
+    const { host, user, view } = await connectedApp()
+    host.source.id = `vscode:0:${'a'.repeat(32)}:original-chat.jsonl`
+    const read = vi.fn(async () => ({ session: host.source, messages: host.messages }))
+    window.vscodeChat = { read, open: vi.fn(async () => {}), watch: vi.fn(async () => {}), onChange: () => () => {} }
+    await user.click(localSessions().getByRole('button', { name: 'Preview Existing VS Code work' }))
+    expect(screen.queryByRole('button', { name: 'Continue in new session' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Import into new session' })).toHaveAttribute('aria-expanded', 'false')
+    await user.click(await screen.findByRole('button', { name: 'Link to current task' }))
+    expect(await screen.findByRole('complementary', { name: 'VS Code task chat' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Original session linked' })).toBeInTheDocument()
+    expect(screen.queryByText('Copilot disconnected')).not.toBeInTheDocument()
+    expect(read).toHaveBeenCalledWith({ nativeSessionId: 'original-chat', workspaceStorageId: 'a'.repeat(32) })
+    expect(host.bridge.createSession).not.toHaveBeenCalled()
+    expect(host.bridge.importSession).not.toHaveBeenCalled()
+    expect(host.bridge.resumeSession).not.toHaveBeenCalled()
+    expect(host.bridge.send).not.toHaveBeenCalled()
+    expect(JSON.parse(localStorage.getItem('taskcontinuum:session-bindings:v1')!)['T-0002']).toMatchObject({ id: 'original-chat', vscodeWorkspaceStorageId: 'a'.repeat(32) })
+    view.unmount()
+    render(<App />)
+    await screen.findByText('Previous local answer')
+    expect(host.bridge.resumeSession).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: 'Detach conversation' }))
+    await user.click(screen.getByRole('button', { name: 'Detach session' }))
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: 'VS Code task chat' })).not.toBeInTheDocument())
   })
 
   it('reopens a streaming session without resuming, rebinding, or cancelling it', async () => {

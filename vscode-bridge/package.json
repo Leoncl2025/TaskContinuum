@@ -1,0 +1,39 @@
+{
+  "name": "vscode-bridge",
+  "displayName": "Task Continuum Bridge",
+  "description": "Send attributed messages to an existing VS Code Copilot conversation from Task Continuum.",
+  "version": "0.2.6",
+  "publisher": "taskcontinuum",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.136.0"
+  },
+  "categories": ["Other"],
+  "extensionKind": ["ui"],
+  "activationEvents": ["onUri"],
+  "main": "./out/extension.cjs",
+  "capabilities": {
+    "untrustedWorkspaces": { "supported": false },
+    "virtualWorkspaces": { "supported": false }
+  },
+  "contributes": {
+    "configuration": {
+      "title": "Task Continuum",
+      "properties": {
+        "taskcontinuum.confirmOriginalSessionSend": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "Show an extra VS Code confirmation for messages submitted from Task Continuum to the original session. Disable to send directly from the desktop. Copilot tool approvals, connection consent, and session safety checks are unchanged."
+        }
+      }
+    },
+    "chatAgents": [
+      { "path": "./out/delivery.agent.md", "sessionTypes": ["local"], "when": "taskcontinuum.deliveryRevision >= 0" }
+    ],
+    "commands": [
+      { "command": "taskcontinuum.startBridge", "title": "Start VS Code Bridge", "category": "Task Continuum" },
+      { "command": "taskcontinuum.stopBridge", "title": "Stop VS Code Bridge", "category": "Task Continuum" }
+    ]
+  }
+}

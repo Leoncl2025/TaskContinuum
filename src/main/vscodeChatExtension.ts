@@ -1,0 +1,111 @@
+import * as vscode from 'vscode'
+import { basename, dirname, join } from 'node:path'
+import { startVSCodeChatCompanion } from './vscodeChatCompanion'
+import { dispatchVSCodeMessage, verifyVSCodeDeliveryTemplate } from './vscodeChatDispatch'
+import type { VSCodeDeliveryMode } from './vscodeChatDispatch'
+import { VSCodeSessionStore } from './vscodeSessions'
+import { identityFromVSCodeBridgeUri } from '../shared/vscodeChat'
+
+let companion: Awaited<ReturnType<typeof startVSCodeChatCompanion>> | undefined
+let changing = false
+let readiness: AbortController | undefined
+
+export function activate(context: vscode.ExtensionContext): void {
+  let templateRevision = 0
+  const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 20)
+  status.text = '$(link) Task Continuum'
+  status.tooltip = 'Original-chat bridge is running. Tool approvals stay in VS Code.'
+  status.command = 'taskcontinuum.stopBridge'
+  context.subscriptions.push(status)
+  function sourceStorage(): string {
+    if (!/^1\.136\./.test(vscode.version)) throw new Error(`VS Code ${vscode.version} is not verified for original-chat delivery. This adapter supports 1.136.x only.`)
+    if (!vscode.workspace.isTrusted || vscode.env.remoteName || !vscode.workspace.workspaceFolders?.length || vscode.workspace.workspaceFolders.some((folder) => folder.uri.scheme !== 'file')) {
+      throw new Error('Open the original local, trusted workspace before starting the bridge. Remote and virtual workspaces are not supported.')
+    }
+    if (context.storageUri?.scheme !== 'file') throw new Error('This window has no local workspace storage.')
+    return dirname(context.storageUri.fsPath)
+  }
+  async function startBridge(): Promise<void> {
+    if (companion || changing) return
+    changing = true
+    try {
+      const workspaceStorage = sourceStorage()
+      const openCommand = 'workbench.action.chat.openSessionInEditorGroup'
+      const commands = await vscode.commands.getCommands(true)
+      if (!commands.includes(openCommand)) throw new Error('The original-session open command is unavailable in this VS Code build.')
+      await vscode.commands.executeCommand('setContext', 'taskcontinuum.deliveryRevision', templateRevision)
+      const templatePath = join(context.extensionUri.fsPath, 'out', 'delivery.agent.md')
+      const templateCommands = {
+        modes: async () => await vscode.commands.executeCommand<VSCodeDeliveryMode[]>('workbench.action.chat.getHandoffs') ?? [],
+        writeTemplate: async (content: string) => {
+          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(context.extensionUri, 'out', 'delivery.agent.md'), Buffer.from(content, 'utf8'))
+          await vscode.commands.executeCommand('setContext', 'taskcontinuum.deliveryRevision', ++templateRevision)
+        },
+      }
+      const canDispatch = commands.includes('workbench.action.chat.executeHandoff') && commands.includes('workbench.action.chat.getHandoffs')
+      if (canDispatch) {
+        readiness = new AbortController()
+        await verifyVSCodeDeliveryTemplate(templatePath, templateCommands, readiness.signal)
+      }
+      const store = new VSCodeSessionStore([dirname(workspaceStorage)])
+      const openOriginal = async (resource: string) => {
+        if (!vscode.workspace.isTrusted) throw new Error('The workspace is no longer trusted.')
+        await vscode.commands.executeCommand(openCommand, { resource: vscode.Uri.parse(resource) })
+      }
+      companion = await startVSCodeChatCompanion({
+        storageRoot: dirname(workspaceStorage), workspaceStorageId: basename(workspaceStorage),
+        discoveryDirectory: join(workspaceStorage, context.extension.id, 'bridges'), vscodeVersion: vscode.version,
+        open: openOriginal,
+        dispatch: canDispatch
+          ? (identity, delivery, signal) => dispatchVSCodeMessage({ identity, delivery, signal, store, templatePath, commands: {
+            ...templateCommands,
+            confirm: async (target, message, title) => {
+              if (!vscode.workspace.isTrusted) return false
+              if (vscode.workspace.getConfiguration('taskcontinuum').get<boolean>('confirmOriginalSessionSend', true) === false) return true
+              const chosen = await vscode.window.showWarningMessage(`Send to original Copilot conversation "${title}"?`, {
+                modal: true,
+                detail: `From: ${message.participant.username} @ ${message.participant.machineName}\nAgent machine: ${message.execution.machineName}\nSession: ${target.nativeSessionId}\n\n${message.text}\n\nThe original Agent mode is retained. Existing tool approvals still apply. An unsaved draft in this chat must be sent or cleared first.`,
+              }, 'Send to original session')
+              return chosen === 'Send to original session'
+            },
+            handoff: async (resource, sourceAgent, label) => {
+              if (!vscode.workspace.isTrusted) throw new Error('The workspace is no longer trusted. No message was sent.')
+              return vscode.commands.executeCommand('workbench.action.chat.executeHandoff', { sessionResource: resource, sourceCustomAgent: sourceAgent, label })
+            },
+          } }) : undefined,
+      })
+      status.show()
+    } catch (error) {
+      await vscode.window.showErrorMessage(error instanceof Error ? error.message : 'Task Continuum bridge could not start.')
+    } finally { readiness = undefined; changing = false }
+  }
+  context.subscriptions.push(vscode.commands.registerCommand('taskcontinuum.startBridge', startBridge))
+  context.subscriptions.push(vscode.window.registerUriHandler({
+    handleUri: async (uri) => {
+      try {
+        const workspaceStorage = sourceStorage()
+        const identity = identityFromVSCodeBridgeUri(uri.toString(true), vscode.env.uriScheme, basename(workspaceStorage))
+        const original = await new VSCodeSessionStore([dirname(workspaceStorage)]).locateOriginal(identity)
+        if (companion) return
+        const accepted = await vscode.window.showInformationMessage('Connect Task Continuum to this VS Code workspace?', {
+          modal: true,
+          detail: `Original conversation: ${original.snapshot.session.title}\nSession: ${identity.nativeSessionId}\n\nThis enables the authenticated local bridge. No message is sent and no new conversation is created. Delivery confirmation follows your Task Continuum setting; Copilot tool approvals are unchanged.`,
+        }, 'Connect')
+        if (accepted === 'Connect') await startBridge()
+      } catch (error) {
+        await vscode.window.showErrorMessage(error instanceof Error ? error.message : 'The desktop connection request was rejected.')
+      }
+    },
+  }))
+  context.subscriptions.push(vscode.commands.registerCommand('taskcontinuum.stopBridge', async () => {
+    if (changing) return
+    changing = true
+    try { await companion?.close(); companion = undefined; status.hide() } finally { changing = false }
+  }))
+}
+
+export async function deactivate(): Promise<void> {
+  readiness?.abort(new Error('The bridge stopped during its readiness check.'))
+  await companion?.close()
+  companion = undefined
+}

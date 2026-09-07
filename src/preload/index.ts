@@ -3,6 +3,7 @@ import type { DesktopBridge, DesktopInfo } from '../shared/desktop'
 import type { CopilotBridge, CopilotEvent } from '../shared/sessions'
 import type { WorkspaceBridge } from '../shared/workspace'
 import type { SharedDesktopBridge, SharedDesktopUpdate } from '../shared/sharedSessions'
+import type { VSCodeChatBridge, VSCodeChatIdentity } from '../shared/vscodeChat'
 
 const bridge: DesktopBridge = {
   getInfo: async () => {
@@ -38,6 +39,20 @@ const copilot: CopilotBridge = {
 }
 
 contextBridge.exposeInMainWorld('copilot', copilot)
+
+const vscodeChat: VSCodeChatBridge = {
+  read: (identity) => ipcRenderer.invoke('vscode-chat:read', identity),
+  connect: (identity) => ipcRenderer.invoke('vscode-chat:connect', identity),
+  open: (identity) => ipcRenderer.invoke('vscode-chat:open', identity),
+  send: (identity, commandId, text) => ipcRenderer.invoke('vscode-chat:send', identity, commandId, text),
+  watch: (identity) => ipcRenderer.invoke('vscode-chat:watch', identity),
+  onChange: (listener) => {
+    const receive = (_event: Electron.IpcRendererEvent, identity: VSCodeChatIdentity) => listener(identity)
+    ipcRenderer.on('vscode-chat:changed', receive)
+    return () => ipcRenderer.removeListener('vscode-chat:changed', receive)
+  },
+}
+contextBridge.exposeInMainWorld('vscodeChat', vscodeChat)
 
 const workspace: WorkspaceBridge = {
   getState: () => ipcRenderer.invoke('workspace:state'),

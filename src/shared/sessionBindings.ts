@@ -1,6 +1,10 @@
-export interface SessionLink {
+export type SessionLink = {
   provider: 'github-copilot'
   sessionId: string
+} | {
+  provider: 'vscode-copilot'
+  sessionId: string
+  workspaceStorageId: string
 }
 
 export interface SessionLinksDocument {
@@ -17,6 +21,7 @@ export interface UpdateSessionLink {
   workspaceId: string
   taskId: string
   sessionId: string | null
+  vscodeWorkspaceStorageId?: string
   expectedRevision: string | null
 }
 

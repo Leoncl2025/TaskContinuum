@@ -34,6 +34,17 @@ describe('versioned task/session links', () => {
     expect(await readRepositorySessionLinks(clone)).toEqual(saved)
   })
 
+  it('links the original VS Code identity without changing native CLI bindings or creating a session', async () => {
+    const root = await folder()
+    const first = await updateRepositorySessionLink(root, 'T-0002', 'original-session', null)
+    const second = await updateRepositorySessionLink(root, 'T-0003', 'original-session', first.revision, 'a'.repeat(32))
+    expect(second.document.bindings['T-0003']).toEqual({ provider: 'vscode-copilot', sessionId: 'original-session', workspaceStorageId: 'a'.repeat(32) })
+    expect(second.document.bindings['T-0002']).toEqual(first.document.bindings['T-0002'])
+    await expect(updateRepositorySessionLink(root, 'T-0004', 'original-session', second.revision, 'a'.repeat(32))).rejects.toThrow('already linked to T-0003')
+    expect(await readRepositorySessionLinks(root)).toEqual(second)
+    expect(await readFile(join(root, sessionLinksPath), 'utf8')).not.toContain(root)
+  })
+
   it('preserves other task links and never implicitly moves a session to another task', async () => {
     const root = await folder()
     const first = await updateRepositorySessionLink(root, 'T-0002', 'first-session', null)
