@@ -32,7 +32,7 @@ describe('workbench', () => {
   })
   it('filters by status and collapses the task group', async () => {
     const user = userEvent.setup(); render(<App />)
-    await user.click(screen.getByRole('button', { name: 'Collapse task group' }))
+    await user.click(screen.getByRole('button', { name: 'Collapse T-0001' }))
     expect(explorer().queryByRole('button', { name: 'T-0003 Backend service' })).not.toBeInTheDocument()
     await user.click(within(screen.getByRole('group', { name: 'Task status filter' })).getByRole('button', { name: /^Done/ }))
     expect(explorer().getByRole('button', { name: 'DEMO-01 Map the first user journey' })).toBeInTheDocument()

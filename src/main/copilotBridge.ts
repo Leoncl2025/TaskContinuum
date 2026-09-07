@@ -50,6 +50,8 @@ export function registerCopilotBridge(requireWindow: (event: IpcMainInvokeEvent)
   handle('respond', (_window, id, response) => service.respond(id, response))
 
   return {
+    requireDirectory: (value: unknown) => options({ workingDirectory: value }).workingDirectory,
+    allowDirectory: (root: string) => { directories.add(resolve(root)) },
     cancelAll: () => host.cancelAll(),
     disconnect: async () => { host.cancelAll(); await service.disconnect() },
   }

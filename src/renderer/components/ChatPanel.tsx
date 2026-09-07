@@ -9,6 +9,8 @@ interface Props {
   thread: TaskChat
   adapter: ChatAdapter
   connected?: boolean
+  boundSessionId?: string
+  disabled?: boolean
   sessionName?: string
   onSessions?(): void
   onConnect?(): void
@@ -19,12 +21,12 @@ interface Props {
   onClose(): void
 }
 
-export function ChatPanel({ task, thread, adapter, connected = false, sessionName, onSessions, onConnect, onDraft, onSend, onStop, onClear, onClose }: Props) {
+export function ChatPanel({ task, thread, adapter, connected = false, boundSessionId, disabled = false, sessionName, onSessions, onConnect, onDraft, onSend, onStop, onClear, onClose }: Props) {
   const logRef = useRef<HTMLDivElement>(null)
   const followBottom = useRef(true)
   const busy = thread.messages.some((message) => message.status === 'streaming')
   const live = adapter.kind === 'live'
-  const canSend = !live || connected && Boolean(thread.sessionId)
+  const canSend = !disabled && (!live || connected && Boolean(thread.sessionId) && thread.sessionId === boundSessionId)
   useEffect(() => {
     if (followBottom.current && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
   }, [thread.messages])
@@ -33,8 +35,8 @@ export function ChatPanel({ task, thread, adapter, connected = false, sessionNam
   function send(value: string) { if (!canSend || busy) return; followBottom.current = true; onSend(value) }
 
   return <aside className="chat-panel" aria-label="Task chat">
-    <header className="panel-header"><span>CHAT</span><div className="header-actions"><IconButton icon={live ? 'debug-disconnect' : 'clear-all'} label={live ? 'Detach conversation' : 'Clear conversation'} disabled={!thread.messages.length && !thread.sessionId} onClick={onClear} /><IconButton icon="layout-sidebar-right-off" label="Hide chat panel" onClick={onClose} /></div></header>
-    <div className="chat-context"><Icon name="attach" /><div><strong>{live ? sessionName ?? 'GitHub Copilot' : task.id}</strong><span title={thread.sessionId}>{live ? thread.sessionId ?? 'No session selected' : task.title}</span></div><span className="context-badge">{live ? 'Local session' : 'Task context'}</span></div>
+    <header className="panel-header"><span>CHAT</span><div className="header-actions"><IconButton icon={live ? 'debug-disconnect' : 'clear-all'} label={live ? 'Detach conversation' : 'Clear conversation'} disabled={disabled || busy || !thread.messages.length && !thread.sessionId && !boundSessionId} onClick={onClear} /><IconButton icon="layout-sidebar-right-off" label="Hide chat panel" onClick={onClose} /></div></header>
+    <div className="chat-context"><Icon name="attach" /><div><strong>{live ? sessionName ?? 'GitHub Copilot' : task.id}</strong><span title={boundSessionId ?? thread.sessionId}>{live ? boundSessionId ?? thread.sessionId ?? 'No session selected' : task.title}</span></div><span className="context-badge">{live ? task.id : 'Task context'}</span></div>
     {onSessions && <div className="session-toolbar"><button type="button" className="text-button" onClick={onSessions}><Icon name="history" />Local sessions</button>{connected ? <span className="session-connection-state"><Icon name="pass" />Connected</span> : <button type="button" className="text-button" onClick={onConnect}><Icon name="plug" />Connect Copilot</button>}</div>}
     <div className="chat-log" ref={logRef} role="log" aria-label={`Conversation for ${task.id}`} aria-live="polite" aria-relevant="additions text" onScroll={() => { const node = logRef.current; if (node) followBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 60 }}>
       {!thread.messages.length && (live ? <div className="chat-welcome live-welcome"><span className="chat-welcome-icon"><Icon name="copilot" /></span><h2>{thread.sessionId ? 'GitHub Copilot' : 'No session selected'}</h2>{thread.sessionId ? <div className="suggestions">{['Continue this session', 'Summarize progress', 'Review next steps'].map((prompt) => <button type="button" key={prompt} disabled={!canSend} onClick={() => send(prompt)}><Icon name="arrow-right" />{prompt}</button>)}</div> : <button type="button" className="text-button" onClick={onSessions}><Icon name="history" />Open local sessions</button>}</div> : <div className="chat-welcome"><span className="chat-welcome-icon"><Icon name="comment-discussion" /></span><h2>Keep the conversation<br />with the task.</h2><p>Explore the goal, find a next step, or review what is missing.</p><div className="suggestions">{['Summarize this task', 'Suggest next steps', 'Review risks'].map((prompt) => <button type="button" key={prompt} onClick={() => send(prompt)}><Icon name={prompt.startsWith('Summarize') ? 'note' : prompt.startsWith('Suggest') ? 'arrow-right' : 'shield'} />{prompt}<Icon name="chevron-right" /></button>)}</div><p className="demo-explainer"><Icon name="beaker" />Local demo. No AI provider is connected.</p></div>)}

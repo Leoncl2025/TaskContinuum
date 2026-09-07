@@ -21,3 +21,7 @@ export function readSessionBindings(workspaceId?: string): SessionBindings {
 export function saveSessionBindings(bindings: SessionBindings, workspaceId?: string): void {
   try { localStorage.setItem(storageKey(workspaceId), JSON.stringify(bindings)) } catch { return }
 }
+
+export function clearSessionBindings(workspaceId: string): void {
+  try { localStorage.removeItem(storageKey(workspaceId)) } catch { return }
+}

@@ -12,6 +12,7 @@ test.beforeAll(async () => {
   const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined))
   delete env.ELECTRON_RUN_AS_NODE
   delete env.ELECTRON_RENDERER_URL
+  delete env.TASKCONTINUUM_WORKSPACE
   env.TASKCONTINUUM_DATA_DIR = resolve('.runtime', `e2e-${Date.now()}`)
   mkdirSync(resolve('artifacts'), { recursive: true })
   app = await electron.launch({ args: [resolve('.')], cwd: resolve('.'), env })
@@ -19,6 +20,8 @@ test.beforeAll(async () => {
   page.on('pageerror', (error) => errors.push(error.message))
   page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()) })
   page.on('request', (request) => { if (/^(https?|wss?):/.test(request.url())) externalRequests.push(request.url()) })
+  await expect(page.getByRole('heading', { level: 1, name: 'UI based on Electron' })).toBeVisible()
+  await expect(page.locator('.workbench')).toHaveAttribute('aria-busy', 'false')
 })
 
 test.beforeEach(async () => {
@@ -27,6 +30,7 @@ test.beforeEach(async () => {
   await page.reload()
   await expect(page.getByRole('heading', { level: 1, name: 'UI based on Electron' })).toBeVisible()
   await expect(page.getByText('Desktop · 0.1.0', { exact: true })).toBeVisible()
+  await expect(page.locator('.workbench')).toHaveAttribute('aria-busy', 'false')
 })
 
 test.afterEach(() => {

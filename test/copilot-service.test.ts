@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { tmpdir } from 'node:os'
 import type { SessionConfig, SessionEvent } from '@github/copilot-sdk'
 import { CopilotService } from '../src/main/copilotService'
 import type { CopilotRuntime, RuntimeSession } from '../src/main/copilotService'
@@ -60,6 +61,27 @@ describe('local Copilot session host', () => {
     expect(snapshot.messages.map((message) => message.text)).toEqual(['Original question', 'Original answer'])
     expect(host.client.resumeSession).toHaveBeenCalledWith('existing-session', expect.objectContaining({ continuePendingWork: false, streaming: true }))
     await expect(host.service.resumeSession('../unknown')).rejects.toThrow('not found')
+    await host.service.disconnect()
+  })
+
+  it('recreates only an explicitly empty Host-owned session missing from native persistence', async () => {
+    const host = fixture()
+    await host.service.connect()
+    vi.mocked(host.client.resumeSession).mockRejectedValue(new Error('Failed to load session events: Session not found: existing-session'))
+    vi.mocked(host.handle.getEvents).mockResolvedValue([])
+    const restored = await host.service.restoreOwnedSession('existing-session', { workingDirectory: tmpdir() }, true)
+    expect(restored.session.id).toBe('existing-session')
+    expect(host.client.createSession).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'existing-session', streaming: true }))
+    await host.service.disconnect()
+  })
+
+  it('never recreates missing sessions with known work or on unrelated restore failures', async () => {
+    const host = fixture()
+    await host.service.connect()
+    vi.mocked(host.client.resumeSession).mockRejectedValueOnce(new Error('Session not found: existing-session')).mockRejectedValueOnce(new Error('Permission denied'))
+    await expect(host.service.restoreOwnedSession('existing-session', { workingDirectory: tmpdir() }, false)).rejects.toThrow('Session not found')
+    await expect(host.service.restoreOwnedSession('existing-session', { workingDirectory: tmpdir() }, true)).rejects.toThrow('Permission denied')
+    expect(host.client.createSession).not.toHaveBeenCalled()
     await host.service.disconnect()
   })
 

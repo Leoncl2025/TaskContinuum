@@ -1,0 +1,108 @@
+import { useEffect, useRef, useState } from 'react'
+import type { SessionLinksSnapshot } from '../../shared/sessionBindings'
+import type { WorkspaceSnapshot } from '../../shared/workspace'
+import { clearSessionBindings, readSessionBindings, saveSessionBindings } from './sessionBindings'
+import type { SessionBinding, SessionBindings } from './sessionBindings'
+
+function uiBindings(snapshot: SessionLinksSnapshot): SessionBindings {
+  return Object.fromEntries(Object.entries(snapshot.document.bindings).map(([taskId, link]) => [taskId, { id: link.sessionId, title: 'GitHub Copilot' }]))
+}
+
+export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
+  const bridge = window.workspace
+  const [bindings, setBindings] = useState<SessionBindings>(() => workspace ? {} : readSessionBindings())
+  const [legacy] = useState<SessionBindings>(() => workspace ? Object.fromEntries(Object.entries(readSessionBindings(workspace.id)).filter(([taskId]) => workspace.tasks.some((task) => task.id === taskId))) : {})
+  const [snapshot, setSnapshot] = useState<SessionLinksSnapshot | null>(null)
+  const [busy, setBusy] = useState(Boolean(workspace))
+  const [error, setError] = useState<string | null>(null)
+  const mounted = useRef(false)
+  const pending = useRef(Boolean(workspace))
+
+  useEffect(() => {
+    mounted.current = true
+    if (!workspace) return () => { mounted.current = false }
+    pending.current = true
+    let cancelled = false
+    const load = bridge ? bridge.getSessionLinks(workspace.id) : Promise.reject(new Error('The workspace session link bridge is unavailable.'))
+    void load.then((value) => {
+      if (cancelled) return
+      setSnapshot(value)
+      setBindings(uiBindings(value))
+      setError(null)
+    }).catch((failure: unknown) => {
+      if (!cancelled) setError(failure instanceof Error ? failure.message : 'Repository session links could not be read.')
+    }).finally(() => {
+      if (!cancelled) { pending.current = false; setBusy(false) }
+    })
+    return () => { cancelled = true; mounted.current = false }
+  }, [bridge, workspace])
+
+  useEffect(() => { if (!workspace) saveSessionBindings(bindings) }, [bindings, workspace])
+
+  function ready(): void {
+    if (pending.current) throw new Error('Session links are still loading or saving.')
+    if (workspace && (!bridge || !snapshot || error)) throw new Error('Reload repository session links before changing the connection.')
+  }
+
+  async function run(action: () => Promise<SessionLinksSnapshot>): Promise<void> {
+    ready()
+    pending.current = true
+    setBusy(true)
+    setError(null)
+    try {
+      const value = await action()
+      if (mounted.current) { setSnapshot(value); setBindings(uiBindings(value)) }
+    } catch (failure) {
+      if (mounted.current) setError(failure instanceof Error ? failure.message : 'The session link could not be saved.')
+      throw failure
+    } finally {
+      pending.current = false
+      if (mounted.current) setBusy(false)
+    }
+  }
+
+  async function attach(taskId: string, binding: SessionBinding): Promise<void> {
+    ready()
+    if (!workspace) {
+      setBindings((current) => ({ ...Object.fromEntries(Object.entries(current).filter(([id, link]) => id === taskId || link.id !== binding.id)), [taskId]: binding }))
+      return
+    }
+    await run(() => bridge!.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: binding.id, expectedRevision: snapshot!.revision }))
+  }
+
+  async function detach(taskId: string): Promise<void> {
+    ready()
+    if (!workspace) {
+      setBindings((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== taskId)))
+      return
+    }
+    await run(() => bridge!.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: null, expectedRevision: snapshot!.revision }))
+  }
+
+  async function migrate(): Promise<void> {
+    if (!workspace || !bridge || !snapshot || snapshot.revision !== null) throw new Error('Local bindings can only be migrated before a repository link file exists.')
+    await run(() => bridge.migrateSessionLinks({ workspaceId: workspace.id, bindings: Object.fromEntries(Object.entries(legacy).map(([taskId, binding]) => [taskId, { provider: 'github-copilot' as const, sessionId: binding.id }])) }))
+    clearSessionBindings(workspace.id)
+  }
+
+  async function reload(): Promise<void> {
+    if (!workspace || !bridge || pending.current) return
+    pending.current = true
+    setBusy(true)
+    try {
+      const value = await bridge.getSessionLinks(workspace.id)
+      if (mounted.current) { setSnapshot(value); setBindings(uiBindings(value)); setError(null) }
+    } catch (failure) {
+      if (mounted.current) setError(failure instanceof Error ? failure.message : 'Repository session links could not be read.')
+    } finally {
+      pending.current = false
+      if (mounted.current) setBusy(false)
+    }
+  }
+
+  return {
+    bindings, busy, error, legacy, attach, detach, migrate, reload,
+    ready: !busy && !error && (!workspace || snapshot !== null),
+    needsMigration: Boolean(workspace && snapshot?.revision === null && Object.keys(legacy).length),
+  }
+}

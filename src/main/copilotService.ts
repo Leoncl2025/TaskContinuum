@@ -220,6 +220,27 @@ export class CopilotService {
     return { session: metadata, messages: messagesFromEvents(await session.getEvents()) }
   }
 
+  async restoreOwnedSession(value: string, options: SessionOptions, allowEmptyRecreate: boolean): Promise<SessionSnapshot> {
+    const id = checkedString(value, 'owned session ID')
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(id)) throw new Error('Invalid owned session ID.')
+    const runtime = this.runtime()
+    const workingDirectory = await realpath(checkedString(options.workingDirectory, 'working directory', 4096))
+    if (!(await stat(workingDirectory)).isDirectory()) throw new Error('The working directory must be a folder.')
+    let session: RuntimeSession
+    try {
+      session = await runtime.resumeSession(id, { ...this.configuration(), workingDirectory, continuePendingWork: false })
+    } catch (error) {
+      if (!allowEmptyRecreate || !(error instanceof Error) || !error.message.includes(`Session not found: ${id}`)) throw error
+      session = await runtime.createSession({ ...this.configuration(), sessionId: id, workingDirectory, model: options.model })
+    }
+    if (session.sessionId !== id) throw new Error('The provider returned a different owned session ID.')
+    const messages = messagesFromEvents(await session.getEvents())
+    const metadata: LocalSessionSummary = { id, source: 'copilot', title: 'Shared Copilot conversation', workingDirectory, updatedAt: new Date().toISOString() }
+    this.sessions.set(id, session)
+    this.summaries.set(id, metadata)
+    return { session: metadata, messages }
+  }
+
   send(request: SendMessageRequest, prompt = request?.message): Promise<void> {
     this.runtime()
     const sessionId = checkedString(request?.sessionId, 'session ID')

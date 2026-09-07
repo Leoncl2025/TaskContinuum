@@ -37,6 +37,17 @@ product affiliation or grant permission to use hosted Copilot services.
   notices in the dependency installation. Include the complete license inventory
   before distributing any installer.
 
+## Markdown and workspace parsing
+
+- `react-markdown` 10.1.0: https://github.com/remarkjs/react-markdown (MIT).
+- `unified` 11.0.5: https://github.com/unifiedjs/unified (MIT).
+- `remark-parse` 11.0.0, `remark-gfm` 4.0.1, and `remark-frontmatter` 5.0.0:
+  https://github.com/remarkjs (MIT).
+- `mdast-util-to-string` 4.0.0: https://github.com/syntax-tree/mdast-util-to-string (MIT).
+- `zod` 4.3.6: https://github.com/colinhacks/zod (MIT).
+- Transitive dependencies retain their upstream notices in the dependency installation.
+  Markdown parser modules are included in the main-process bundle for ESM compatibility.
+
 ## MIT permission notice
 
 The following permission text accompanies the MIT-licensed components above;
@@ -61,6 +72,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ## Development dependencies
+
+`ssh2` 1.17.0 (https://github.com/mscdex/ssh2, MIT) supplies only the isolated
+SSH test server; `@types/ssh2` retains its upstream DefinitelyTyped MIT notice.
+Production forwarding uses the operating system's OpenSSH executable, which is
+not bundled by this application and retains its own license notices.
 
 Vite, electron-vite, TypeScript, ESLint, Vitest, Playwright, Testing Library,
 and other development dependencies retain their upstream licenses in the

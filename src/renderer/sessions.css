@@ -17,6 +17,13 @@
 .session-source { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--muted); font-size: 10px; }
 .session-source time { margin-left: auto; color: var(--subtle); }
 .session-directory { font-size: 10px; color: var(--subtle); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.session-task-link { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); font-size: 10px; }
+.link-migration-status { color: var(--muted); font-size: 11px; flex-wrap: wrap; }
+.link-migration-status > .text-button { flex-shrink: 0; }
+.session-link-list { max-height: 40dvh; overflow: auto; font-size: 12px; }
+.session-link-list > div { display: grid; grid-template-columns: 65px minmax(0, 1fr); gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.session-link-list dt { color: var(--accent); }
+.session-link-list dd { margin: 0; overflow-wrap: anywhere; }
 .session-footer { display: flex; align-items: center; gap: 7px; margin: 12px 13px; color: var(--muted); font-size: 10px; }
 .session-warnings { padding: 10px 13px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; max-height: 140px; overflow: auto; overflow-wrap: anywhere; }
 .session-warnings p { line-height: 1.5; }

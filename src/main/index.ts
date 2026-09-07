@@ -5,6 +5,8 @@ import { app, BrowserWindow, ipcMain, Menu, net, protocol } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
 import { APP_URL, PRODUCTION_CSP, isTrustedRendererUrl, rendererSecurityPreferences, resolveRendererAsset, validateDevUrl } from './security'
 import { registerCopilotBridge } from './copilotBridge'
+import { registerWorkspaceBridge } from './workspaceBridge'
+import { registerSharedBridge } from './sharedBridge'
 
 app.setName('Task Continuum')
 const dataDirectory = process.env.TASKCONTINUUM_DATA_DIR
@@ -20,6 +22,7 @@ protocol.registerSchemesAsPrivileged([
 const devUrl = app.isPackaged ? undefined : validateDevUrl(process.env.ELECTRON_RENDERER_URL)
 let mainWindow: BrowserWindow | undefined
 let copilotHost: ReturnType<typeof registerCopilotBridge> | undefined
+let sharedDesktop: ReturnType<typeof registerSharedBridge> | undefined
 let quitting = false
 let cleanupComplete = false
 
@@ -106,6 +109,8 @@ void app.whenReady().then(async () => {
   })
   registerDesktopBridge()
   copilotHost = registerCopilotBridge(requireTrustedWindow, () => mainWindow)
+  const workspaces = registerWorkspaceBridge(requireTrustedWindow, copilotHost.allowDirectory)
+  sharedDesktop = registerSharedBridge(requireTrustedWindow, () => mainWindow, workspaces.currentRoot, copilotHost.requireDirectory)
   await createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -120,7 +125,7 @@ app.on('before-quit', (event) => {
   event.preventDefault()
   if (quitting) return
   quitting = true
-  void copilotHost?.disconnect().catch((error: unknown) => console.error(error)).finally(() => {
+  void Promise.all([copilotHost?.disconnect(), sharedDesktop?.close()]).catch((error: unknown) => console.error(error)).finally(() => {
     cleanupComplete = true
     app.quit()
   })

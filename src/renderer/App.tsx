@@ -7,7 +7,8 @@ import type { TaskRecord, TaskStatus } from '../shared/tasks'
 import { demoChatAdapter } from './chat/demoAdapter'
 import { useTaskChats } from './chat/useTaskChats'
 import { useCopilotConnection } from './chat/useCopilotConnection'
-import { readSessionBindings, saveSessionBindings } from './chat/sessionBindings'
+import { useSessionLinks } from './chat/useSessionLinks'
+import { sessionLinksPath } from '../shared/sessionBindings'
 import { ChatPanel } from './components/ChatPanel'
 import { CopilotInteractionDialog, CopilotSessionDialog } from './components/CopilotDialogs'
 import { LocalSessions } from './components/LocalSessions'
@@ -16,18 +17,35 @@ import { TaskSidebar } from './components/TaskSidebar'
 import { TaskViewer } from './components/TaskViewer'
 import { demoTasks } from './data/tasks'
 import { defaultLayout, isCompact, readLayout, saveLayout, subscribeCompact } from './layout'
+import { useWorkspaces } from './useWorkspaces'
+import { WorkspacePicker } from './components/WorkspacePicker'
+import { SharedSessionPanel } from './components/SharedSessionPanel'
+import type { SharedPanelStatus } from './components/SharedSessionPanel'
 
-type DialogName = 'quick-open' | 'settings' | 'new-task' | 'clear-chat' | null
+type DialogName = 'quick-open' | 'settings' | 'new-task' | 'clear-chat' | 'migrate-links' | null
 
 export default function App({ adapter: suppliedAdapter }: { adapter?: ChatAdapter }) {
+  const workspaces = useWorkspaces()
+  return <Workbench key={workspaces.state.current?.id ?? 'demo'} suppliedAdapter={suppliedAdapter} workspaces={workspaces} />
+}
+
+function Workbench({ suppliedAdapter, workspaces }: { suppliedAdapter?: ChatAdapter; workspaces: ReturnType<typeof useWorkspaces> }) {
+  const workspace = workspaces.state.current
   const copilot = useCopilotConnection()
-  const adapter = suppliedAdapter ?? (copilot.enabled && copilot.adapter ? copilot.adapter : demoChatAdapter)
-  const [bindings, setBindings] = useState(readSessionBindings)
+  const links = useSessionLinks(workspace)
+  const bindings = links.bindings
+  const adapter = suppliedAdapter ?? ((copilot.enabled || Object.keys(bindings).length > 0) && copilot.adapter ? copilot.adapter : demoChatAdapter)
+  const live = adapter.kind === 'live'
   const [sessionDialog, setSessionDialog] = useState<{ kind: 'new' } | { kind: 'import'; preview: ImportPreview } | null>(null)
-  const [tasks, setTasks] = useState<TaskRecord[]>(() => structuredClone(demoTasks))
-  const [selectedId, setSelectedId] = useState<string | null>('T-0002')
-  const [openTasks, setOpenTasks] = useState(['T-0001', 'T-0002'])
+  const [demoRecords, setTasks] = useState<TaskRecord[]>(() => structuredClone(demoTasks))
+  const tasks = workspace?.tasks ?? demoRecords
+  const [requestedId, setSelectedId] = useState<string | null>(() => workspace ? workspace.tasks[0]?.id ?? null : 'T-0002')
+  const selectedId = requestedId !== null && !tasks.some((item) => item.id === requestedId) ? tasks[0]?.id ?? null : requestedId
+  const [tabIds, setOpenTasks] = useState(() => workspace ? workspace.tasks.slice(0, 1).map((item) => item.id) : ['T-0001', 'T-0002'])
+  const openTasks = [...new Set([...tabIds.filter((id) => tasks.some((item) => item.id === id)), ...(selectedId ? [selectedId] : [])])]
   const [view, setView] = useState<'tasks' | 'sessions'>('tasks')
+  const [sharedChat, setSharedChat] = useState(false)
+  const [sharedStatus, setSharedStatus] = useState<SharedPanelStatus>({ online: false, busy: false, pending: false, message: 'Shared sessions' })
   const [query, setQuery] = useState('')
   const [quickQuery, setQuickQuery] = useState('')
   const [layout, setLayout] = useState(readLayout)
@@ -42,22 +60,27 @@ export default function App({ adapter: suppliedAdapter }: { adapter?: ChatAdapte
   const chatVisible = compact ? compactPanel === 'chat' : layout.chat
   const activeResponses = Object.values(chats.threads).filter((thread) => thread.messages.some((message) => message.status === 'streaming')).length
   const interaction = copilot.interactions[0]
+  const workspaceLocked = activeResponses > 0 || Boolean(copilot.busy) || links.busy || Boolean(sessionDialog) || Boolean(interaction) || dialog === 'migrate-links' || sharedChat && (sharedStatus.busy || sharedStatus.pending)
 
   useEffect(() => { saveLayout(layout) }, [layout])
-  useEffect(() => { saveSessionBindings(bindings) }, [bindings])
   const currentSession = useEffectEvent((taskId: string) => chats.getThread(taskId).sessionId)
+  const clearSession = useEffectEvent((taskId: string) => chats.clear(taskId))
   const restoreSession = useEffectEvent((taskId: string, snapshot: SessionSnapshot) => chats.restore(taskId, snapshot.session.id, snapshot.messages))
   const restoreError = useEffectEvent((error: unknown) => copilot.setError(error instanceof Error ? error.message : 'The attached session could not be restored.'))
   useEffect(() => {
-    if (!copilot.bridge || !copilot.enabled || copilot.status.state !== 'ready' || !selectedId) return
+    if (!links.ready || !selectedId) return
     const binding = bindings[selectedId]
-    if (!binding || currentSession(selectedId) === binding.id) return
+    const current = currentSession(selectedId)
+    if (current && current !== binding?.id) clearSession(selectedId)
+    if (!binding || current === binding.id || !copilot.bridge || !live || copilot.status.state !== 'ready') return
     let cancelled = false
     void copilot.bridge.resumeSession(binding.id).then((snapshot) => {
       if (!cancelled) restoreSession(selectedId, snapshot)
-    }).catch((error: unknown) => { if (!cancelled) restoreError(error) })
+    }).catch((error: unknown) => {
+      if (!cancelled) restoreError(new Error(`Could not resume linked session ${binding.id}. ${error instanceof Error ? error.message : 'The session may be unavailable on this machine.'}`))
+    })
     return () => { cancelled = true }
-  }, [copilot.bridge, copilot.enabled, copilot.status.state, selectedId, bindings])
+  }, [copilot.bridge, copilot.status.state, live, selectedId, bindings, links.ready])
   useEffect(() => {
     let mounted = true
     void window.desktop?.getInfo().then((info) => { if (mounted) setDesktop(info) }).catch(() => { if (mounted) setDesktopError(true) })
@@ -67,15 +90,15 @@ export default function App({ adapter: suppliedAdapter }: { adapter?: ChatAdapte
   const toggleSidebar = useCallback(() => {
     if (compact) setCompactPanel((value) => value === 'tasks' ? null : 'tasks')
     else setLayout((value) => ({ ...value, sidebar: !value.sidebar }))
-  }, [compact])
+  }, [compact, setCompactPanel, setLayout])
   const toggleChat = useCallback(() => {
     if (compact) setCompactPanel((value) => value === 'chat' ? null : 'chat')
     else setLayout((value) => ({ ...value, chat: !value.chat }))
-  }, [compact])
+  }, [compact, setCompactPanel, setLayout])
 
   useEffect(() => {
     const handle = (event: KeyboardEvent) => {
-      if (dialog || sessionDialog || interaction || event.isComposing) return
+      if (dialog || sessionDialog || interaction || sharedChat && sharedStatus.pending || event.isComposing) return
       const key = event.key.toLowerCase()
       if ((event.ctrlKey || event.metaKey) && key === 'b' && !event.shiftKey) {
         event.preventDefault()
@@ -87,7 +110,7 @@ export default function App({ adapter: suppliedAdapter }: { adapter?: ChatAdapte
     }
     window.addEventListener('keydown', handle)
     return () => window.removeEventListener('keydown', handle)
-  }, [compact, dialog, sessionDialog, interaction, toggleChat, toggleSidebar])
+  }, [compact, dialog, sessionDialog, interaction, sharedChat, sharedStatus.pending, toggleChat, toggleSidebar])
 
   function selectTask(id: string): void {
     setSelectedId(id)
@@ -108,11 +131,13 @@ export default function App({ adapter: suppliedAdapter }: { adapter?: ChatAdapte
   }
 
   function changeTask(update: (current: TaskRecord) => TaskRecord): void {
+    if (workspace) return
     setTasks((current) => current.map((item) => item.id === selectedId ? update(item) : item))
   }
 
   function openSidebar(nextView: 'tasks' | 'sessions'): void {
     setView(nextView)
+    if (nextView === 'sessions') setSharedChat(false)
     if (nextView === 'sessions' && copilot.bridge) void copilot.refresh()
     if (compact) setCompactPanel('tasks')
     else setLayout((value) => ({ ...value, sidebar: true }))
@@ -127,9 +152,9 @@ export default function App({ adapter: suppliedAdapter }: { adapter?: ChatAdapte
     void copilot.connect()
   }
 
-  function attachSession(taskId: string, snapshot: SessionSnapshot): void {
+  async function attachSession(taskId: string, snapshot: SessionSnapshot): Promise<void> {
+    await links.attach(taskId, { id: snapshot.session.id, title: snapshot.session.title })
     for (const [id, binding] of Object.entries(bindings)) if (id !== taskId && binding.id === snapshot.session.id) chats.clear(id)
-    setBindings((current) => ({ ...Object.fromEntries(Object.entries(current).filter(([id, binding]) => id === taskId || binding.id !== snapshot.session.id)), [taskId]: { id: snapshot.session.id, title: snapshot.session.title } }))
     chats.restore(taskId, snapshot.session.id, snapshot.messages)
     selectTask(taskId)
     setSessionDialog(null)
@@ -146,45 +171,100 @@ export default function App({ adapter: suppliedAdapter }: { adapter?: ChatAdapte
       showChat()
       return
     }
-    const target = selectedId ?? tasks[0].id
+    if (!links.ready) { copilot.setError('Reload the workspace session links before opening a conversation.'); return }
+    const linkedTask = session.source === 'copilot' ? Object.entries(bindings).find(([, binding]) => binding.id === session.id)?.[0] : undefined
+    if (linkedTask) {
+      if (!tasks.some((item) => item.id === linkedTask)) { copilot.setError(`This session is linked to ${linkedTask}, which is not present in this workspace.`); return }
+      if (selectedId === linkedTask && chats.getThread(linkedTask).sessionId !== session.id) {
+        await copilot.run('Resuming linked conversation', async () => {
+          const snapshot = await bridge.resumeSession(session.id)
+          chats.restore(linkedTask, snapshot.session.id, snapshot.messages)
+        })
+      }
+      selectTask(linkedTask)
+      showChat()
+      return
+    }
+    const target = selectedId ?? tasks[0]?.id
+    if (!target) { copilot.setError('This workspace has no tasks to attach a conversation to.'); return }
     if (session.source === 'vscode') {
       const preview = await copilot.run('Loading conversation preview', () => bridge.previewImport(session.id))
       if (preview) setSessionDialog({ kind: 'import', preview })
     } else {
-      const snapshot = await copilot.run('Resuming conversation', () => bridge.resumeSession(session.id))
-      if (snapshot) attachSession(target, snapshot)
+      await copilot.run('Linking conversation', async () => {
+        const snapshot = await bridge.resumeSession(session.id)
+        await attachSession(target, snapshot)
+      })
     }
   }
 
   async function createSession(options: SessionOptions): Promise<void> {
     const bridge = copilot.bridge
     if (!bridge || !sessionDialog) return
-    const target = selectedId ?? tasks[0].id
-    const snapshot = await copilot.run('Opening Copilot conversation', () => sessionDialog.kind === 'import'
-      ? bridge.importSession(sessionDialog.preview.token, options) : bridge.createSession(options))
-    if (snapshot) { attachSession(target, snapshot); void copilot.refresh() }
+    if (!links.ready) { copilot.setError('Reload the workspace session links before creating a conversation.'); return }
+    const target = selectedId ?? tasks[0]?.id
+    if (!target) { copilot.setError('This workspace has no tasks to attach a conversation to.'); return }
+    const linked = await copilot.run('Opening Copilot conversation', async () => {
+      const snapshot = sessionDialog.kind === 'import' ? await bridge.importSession(sessionDialog.preview.token, options) : await bridge.createSession(options)
+      try { await attachSession(target, snapshot) } catch (error) {
+        throw new Error(`Session ${snapshot.session.id} was created, but its task link was not saved. It remains in Local sessions. ${error instanceof Error ? error.message : 'Retry after reloading the links.'}`)
+      }
+      return true
+    })
+    if (linked) void copilot.refresh()
   }
 
-  return <div className="workbench" data-theme={layout.theme} data-compact={compact}>
+  async function detachSession(taskId: string): Promise<void> {
+    await copilot.run('Removing session link', async () => {
+      await links.detach(taskId)
+      chats.clear(taskId)
+      setDialog(null)
+    })
+  }
+
+  async function migrateLinks(): Promise<void> {
+    await copilot.run('Saving local session links', async () => {
+      await links.migrate()
+      setDialog(null)
+    })
+  }
+
+  function openWorkspace(): void {
+    if (!workspaceLocked) void workspaces.openFolder()
+  }
+
+  function selectWorkspace(id: string): void {
+    if (workspaceLocked) return
+    if (id === 'demo') void workspaces.useDemo()
+    else void workspaces.openRecent(id)
+  }
+
+  const workspaceControls = workspaces.available ? <WorkspacePicker state={workspaces.state} busy={workspaces.busy} locked={workspaceLocked} onOpen={openWorkspace} onSelect={selectWorkspace} onRefresh={() => { if (!workspaceLocked) void workspaces.refresh() }} /> : undefined
+
+  return <div className="workbench" data-theme={layout.theme} data-compact={compact} aria-busy={workspaces.busy} inert={workspaces.busy}>
     <header className="titlebar">
       <div className="app-brand"><span className="brand-mark"><Icon name="layers" /></span><span>Task Continuum</span></div>
       <button type="button" className="command-center" onClick={() => { setQuickQuery(''); setDialog('quick-open') }}><Icon name="search" /><span>Search tasks and jump back in</span><kbd>Ctrl P</kbd></button>
-      <div className="titlebar-actions"><IconButton icon="layout-sidebar-left" label="Toggle task sidebar" title="Toggle task sidebar (Ctrl+B)" aria-pressed={sidebarVisible} onClick={toggleSidebar} /><IconButton icon="layout-sidebar-right" label="Toggle chat panel" title="Toggle chat panel (Ctrl+Alt+B)" aria-pressed={chatVisible} onClick={toggleChat} /></div>
+      <div className="titlebar-actions">{workspaces.available && <IconButton icon="folder-opened" label="Switch workspace folder" disabled={workspaceLocked || workspaces.busy} onClick={openWorkspace} />}<IconButton icon="layout-sidebar-left" label="Toggle task sidebar" title="Toggle task sidebar (Ctrl+B)" aria-pressed={sidebarVisible} onClick={toggleSidebar} /><IconButton icon="layout-sidebar-right" label="Toggle chat panel" title="Toggle chat panel (Ctrl+Alt+B)" aria-pressed={chatVisible} onClick={toggleChat} /></div>
       {window.desktop && <div className="window-controls"><IconButton icon="chrome-minimize" label="Minimize window" onClick={() => windowAction('minimize')} /><IconButton icon="chrome-maximize" label="Maximize or restore window" onClick={() => windowAction('toggleMaximize')} /><IconButton icon="chrome-close" label="Close window" onClick={() => windowAction('close')} /></div>}
     </header>
 
-    {copilot.error && !sessionDialog && !interaction && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{copilot.error}</span><IconButton icon="close" label="Dismiss Copilot error" onClick={() => copilot.setError(null)} /></div>}
+    {workspaces.error && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{workspaces.error}</span><IconButton icon="close" label="Dismiss workspace error" onClick={() => workspaces.setError(null)} /></div>}
+    {links.error && dialog !== 'migrate-links' && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{links.error}</span><IconButton icon="refresh" label="Reload session links" disabled={links.busy || activeResponses > 0} onClick={() => { copilot.setError(null); void links.reload() }} /></div>}
+    {links.needsMigration && !links.error && <div className="copilot-banner link-migration-status"><Icon name="link" /><span>{Object.keys(links.legacy).length} local task/session links are not saved in this workspace.</span><button type="button" className="text-button" disabled={workspaceLocked} onClick={() => setDialog('migrate-links')}>Review links</button></div>}
+    {copilot.error && !links.error && !sessionDialog && !interaction && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{copilot.error}</span><IconButton icon="close" label="Dismiss Copilot error" onClick={() => copilot.setError(null)} /></div>}
     <div className="workbench-body">
       <nav className="activity-bar" aria-label="Workbench navigation">
         <button type="button" className={sidebarVisible && view === 'tasks' ? 'activity active' : 'activity'} aria-label="Tasks" title="Tasks" aria-pressed={sidebarVisible && view === 'tasks'} onClick={() => openSidebar('tasks')}><Icon name="checklist" /></button>
         <button type="button" className={sidebarVisible && view === 'sessions' ? 'activity active' : 'activity'} aria-label="Sessions" title="Local Copilot and VS Code sessions" aria-pressed={sidebarVisible && view === 'sessions'} onClick={() => openSidebar('sessions')}><Icon name="comment-discussion" />{activeResponses > 0 && <span className="activity-badge">{activeResponses}</span>}</button>
+        {workspace && window.sharedSessions && <button type="button" className={sharedChat && chatVisible ? 'activity active' : 'activity'} aria-label="Shared sessions" title="Shared sessions" aria-pressed={sharedChat && chatVisible} onClick={() => { setSharedChat((value) => !value); showChat() }}><Icon name="organization" /></button>}
         <button type="button" className="activity" aria-label="Search tasks" title="Search tasks" onClick={() => { openSidebar('tasks'); requestAnimationFrame(() => document.getElementById('task-filter')?.focus()) }}><Icon name="search" /></button>
         <div className="activity-spacer" />
-        <span className="avatar profile-avatar" title="Local demo profile">Y</span>
+        <span className="avatar profile-avatar" title={workspace ? 'Local profile' : 'Local demo profile'}>Y</span>
         <button type="button" className="activity" aria-label="Preferences" title="Preferences and integration status" onClick={() => setDialog('settings')}><Icon name="settings-gear" /></button>
       </nav>
 
-      {sidebarVisible && (view === 'sessions' && copilot.bridge ? <LocalSessions status={copilot.status} listing={copilot.listing} busy={copilot.busy} selectedId={task ? chats.getThread(task.id).sessionId : undefined} onConnect={connectCopilot} onDisconnect={() => { for (const id of Object.keys(chats.threads)) chats.stop(id); void copilot.disconnect() }} onRefresh={() => { void copilot.refresh() }} onNew={() => { copilot.setError(null); setSessionDialog({ kind: 'new' }) }} onOpen={(session) => { void openSession(session) }} onClose={toggleSidebar} /> : <TaskSidebar tasks={tasks} selectedId={selectedId} view={view} query={query} onQuery={setQuery} onSelect={(id) => { selectTask(id); if (view === 'sessions') showChat() }} onCreate={() => setDialog('new-task')} onClose={toggleSidebar} threads={chats.threads} />)}
+      {sidebarVisible && (view === 'sessions' && copilot.bridge ? <LocalSessions status={copilot.status} listing={copilot.listing} busy={links.busy ? 'Loading session links' : copilot.busy} selectedId={task ? bindings[task.id]?.id : undefined} sessionTasks={Object.fromEntries(Object.entries(bindings).map(([taskId, binding]) => [binding.id, taskId]))} onConnect={connectCopilot} onDisconnect={() => { for (const id of Object.keys(chats.threads)) chats.stop(id); void copilot.disconnect() }} onRefresh={() => { void copilot.refresh() }} onNew={() => { if (!links.ready) { copilot.setError('Reload the workspace session links before creating a conversation.'); return } if (!tasks.length) { copilot.setError('This workspace has no tasks to attach a conversation to.'); return } copilot.setError(null); setSessionDialog({ kind: 'new' }) }} onOpen={(session) => { void openSession(session) }} onClose={toggleSidebar} workspaceControls={workspaceControls} /> : <TaskSidebar tasks={tasks} selectedId={selectedId} view={view} query={query} onQuery={setQuery} onSelect={(id) => { selectTask(id); if (view === 'sessions') showChat() }} onCreate={() => setDialog('new-task')} onClose={toggleSidebar} threads={chats.threads} workspace={workspace ?? undefined} workspaceControls={workspaceControls} />)}
 
       {(!compact || compactPanel === null) && <main className="main-panel" aria-label="Task workspace">
         <div className="editor-tabs" role="tablist" aria-label="Open tasks">
@@ -205,25 +285,27 @@ export default function App({ adapter: suppliedAdapter }: { adapter?: ChatAdapte
           })}
         </div>
         <div id="active-task" className="active-task">
-          {task ? <TaskViewer task={task} onCheck={(id) => changeTask((current) => ({ ...current, checklist: current.checklist.map((item) => item.id === id ? { ...item, done: !item.done } : item) }))} onStatus={(status: TaskStatus) => changeTask((current) => ({ ...current, status }))} onChat={showChat} /> : <div className="empty-workbench"><Icon name="layers" /><h1>Make room for meaningful work.</h1><p>Open a task to pick up where you left off.</p><button type="button" className="primary-button" onClick={() => { setQuickQuery(''); setDialog('quick-open') }}>Open a task <kbd>Ctrl P</kbd></button></div>}
+          {task ? <TaskViewer task={task} readOnly={Boolean(workspace)} workspaceName={workspace?.name} onCheck={(id) => changeTask((current) => ({ ...current, checklist: current.checklist.map((item) => item.id === id ? { ...item, done: !item.done } : item) }))} onStatus={(status: TaskStatus) => changeTask((current) => ({ ...current, status }))} onChat={showChat} /> : <div className="empty-workbench workspace-empty"><Icon name="layers" /><h1>{workspace && !tasks.length ? 'No tasks in this workspace' : 'Make room for meaningful work.'}</h1><p>{workspace ? workspace.name : 'Open a task to pick up where you left off.'}</p>{tasks.length > 0 && <button type="button" className="primary-button" onClick={() => { setQuickQuery(''); setDialog('quick-open') }}>Open a task <kbd>Ctrl P</kbd></button>}{workspace && !tasks.length && <button type="button" className="secondary-button" onClick={openWorkspace}><Icon name="folder-opened" />Open workspace folder</button>}</div>}
         </div>
       </main>}
 
-      {chatVisible && (task ? <ChatPanel task={task} thread={chats.getThread(task.id)} adapter={adapter} connected={copilot.status.state === 'ready'} sessionName={bindings[task.id]?.title} onSessions={copilot.bridge ? () => openSidebar('sessions') : undefined} onConnect={connectCopilot} onDraft={(value) => chats.setDraft(task.id, value)} onSend={(value) => { void chats.send(task, value) }} onStop={() => chats.stop(task.id)} onClear={() => setDialog('clear-chat')} onClose={toggleChat} /> : <aside className="chat-panel empty-chat" aria-label="Task chat"><IconButton icon="close" label="Hide chat panel" onClick={toggleChat} /><p>Select a task to start a conversation.</p></aside>)}
+      {chatVisible && sharedChat && workspace ? <SharedSessionPanel task={task} root={workspace.root} onStatus={setSharedStatus} onClose={() => setSharedChat(false)} /> : chatVisible && (task ? <ChatPanel task={task} thread={chats.getThread(task.id)} adapter={adapter} connected={copilot.status.state === 'ready'} boundSessionId={bindings[task.id]?.id} disabled={!links.ready || Boolean(copilot.busy)} sessionName={copilot.listing?.sessions.find((session) => session.id === bindings[task.id]?.id)?.title ?? bindings[task.id]?.title} onSessions={copilot.bridge ? () => openSidebar('sessions') : undefined} onConnect={connectCopilot} onDraft={(value) => chats.setDraft(task.id, value)} onSend={(value) => { if (links.ready && (!live || chats.getThread(task.id).sessionId === bindings[task.id]?.id)) void chats.send(task, value) }} onStop={() => chats.stop(task.id)} onClear={() => setDialog('clear-chat')} onClose={toggleChat} /> : <aside className="chat-panel empty-chat" aria-label="Task chat"><IconButton icon="close" label="Hide chat panel" onClick={toggleChat} /><p>Select a task to start a conversation.</p></aside>)}
     </div>
 
-    <footer className="statusbar" aria-label="Workbench status"><span className="local-status"><Icon name={copilot.enabled ? 'terminal' : 'beaker'} />{copilot.enabled ? 'LOCAL COPILOT' : 'LOCAL DEMO'}</span><span><Icon name="checklist" />{tasks.length} {copilot.enabled ? 'sample tasks' : 'tasks'}</span><span>{selectedId ?? 'No task selected'}</span><span className="statusbar-spacer" /><span className="response-status" role="status">{copilot.busy ?? (activeResponses ? `${activeResponses} responding` : 'Ready')}</span><button type="button" onClick={() => copilot.bridge ? openSidebar('sessions') : setDialog('settings')}><Icon name="plug" />{copilot.status.state === 'ready' ? 'Copilot connected' : copilot.enabled ? 'Copilot disconnected' : 'No services connected'}</button><span className="platform-status">{desktopError ? 'Desktop bridge error' : desktop ? `Desktop · ${desktop.version}` : 'Browser preview'}</span></footer>
+    <footer className="statusbar" aria-label="Workbench status"><span className="local-status"><Icon name={sharedChat ? 'organization' : live ? 'terminal' : workspace ? 'folder' : 'beaker'} />{sharedChat ? 'SHARED SESSION' : live ? 'LOCAL COPILOT' : workspace ? 'LOCAL WORKSPACE' : 'LOCAL DEMO'}</span><span><Icon name="checklist" />{tasks.length} {!workspace && live ? 'sample tasks' : 'tasks'}</span><span>{selectedId ?? 'No task selected'}</span><span className="statusbar-spacer" /><span className="response-status" role="status">{workspaces.busy ? 'Loading workspace...' : sharedChat ? sharedStatus.message : links.busy ? 'Saving or loading session links...' : copilot.busy ?? (activeResponses ? `${activeResponses} responding` : 'Ready')}</span><button type="button" onClick={() => { if (sharedChat) showChat(); else if (copilot.bridge) openSidebar('sessions'); else setDialog('settings') }}><Icon name="plug" />{sharedChat ? sharedStatus.online ? 'Shared Host connected' : 'Shared Host offline' : copilot.status.state === 'ready' ? 'Copilot connected' : live ? 'Copilot disconnected' : 'No services connected'}</button><span className="platform-status">{desktopError ? 'Desktop bridge error' : desktop ? `Desktop · ${desktop.version}` : 'Browser preview'}</span></footer>
 
     {dialog === 'quick-open' && <Dialog title="Quick open" className="quick-open" onClose={() => setDialog(null)}><input className="quick-input" aria-label="Find a task" placeholder="Type a task name or ID…" value={quickQuery} onChange={(event) => setQuickQuery(event.target.value)} autoFocus /><div className="quick-results">{filterTasks(tasks, quickQuery, 'all').map((item) => <button type="button" key={item.id} onClick={() => { selectTask(item.id); setDialog(null) }}><Icon name="file-text" /><strong>{item.title}</strong><span>{item.id}</span></button>)}{!filterTasks(tasks, quickQuery, 'all').length && <p>No matching tasks.</p>}</div><p className="dialog-hint">Tab to a result · Enter to open · Esc to close</p></Dialog>}
 
-    {dialog === 'settings' && <Dialog title="Preferences" onClose={() => setDialog(null)}><section className="settings-section"><h3>Appearance</h3><div className="theme-options">{(['dark', 'light'] as const).map((theme) => <label key={theme}><input type="radio" name="theme" checked={layout.theme === theme} onChange={() => setLayout((value) => ({ ...value, theme }))} /><span>{theme === 'dark' ? 'Dark' : 'Light'}</span></label>)}</div><button type="button" className="secondary-button" onClick={() => { setLayout((value) => ({ ...defaultLayout, theme: value.theme })); setCompactPanel(null) }}>Reset panel layout</button></section><section className="settings-section"><h3>Integrations</h3>{[copilot.bridge ? 'GitHub Copilot CLI' : 'Agent Harness / model provider', 'SSH session sharing', 'OneDrive artifacts', 'GitHub EMU repository'].map((name) => <div className="integration-row" key={name}><span>{name}</span><span className="integration-state">{name === 'GitHub Copilot CLI' && copilot.status.state === 'ready' ? 'Connected' : 'Not connected'}</span></div>)}</section><section className="settings-section"><h3>Keyboard shortcuts</h3><div className="shortcut-row"><span>Quick open</span><kbd>Ctrl / ⌘ P</kbd></div><div className="shortcut-row"><span>Toggle task sidebar</span><kbd>Ctrl / ⌘ B</kbd></div><div className="shortcut-row"><span>Toggle chat</span><kbd>Ctrl / ⌘ Alt B</kbd></div></section><p className="dialog-hint">{copilot.enabled ? 'Copilot history: local disk. Task data: sample workspace.' : 'Only display preferences are saved. Demo tasks and conversations reset when the window reloads.'} Icons: Microsoft Codicons · CC BY 4.0.</p></Dialog>}
+    {dialog === 'settings' && <Dialog title="Preferences" onClose={() => setDialog(null)}><section className="settings-section"><h3>Appearance</h3><div className="theme-options">{(['dark', 'light'] as const).map((theme) => <label key={theme}><input type="radio" name="theme" checked={layout.theme === theme} onChange={() => setLayout((value) => ({ ...value, theme }))} /><span>{theme === 'dark' ? 'Dark' : 'Light'}</span></label>)}</div><button type="button" className="secondary-button" onClick={() => { setLayout((value) => ({ ...defaultLayout, theme: value.theme })); setCompactPanel(null) }}>Reset panel layout</button></section><section className="settings-section"><h3>Integrations</h3>{[copilot.bridge ? 'GitHub Copilot CLI' : 'Agent Harness / model provider', 'SSH session sharing', 'OneDrive artifacts', 'GitHub EMU repository'].map((name) => <div className="integration-row" key={name}><span>{name}</span><span className="integration-state">{name === 'GitHub Copilot CLI' && copilot.status.state === 'ready' ? 'Connected' : 'Not connected'}</span></div>)}</section><section className="settings-section"><h3>Keyboard shortcuts</h3><div className="shortcut-row"><span>Quick open</span><kbd>Ctrl / ⌘ P</kbd></div><div className="shortcut-row"><span>Toggle task sidebar</span><kbd>Ctrl / ⌘ B</kbd></div><div className="shortcut-row"><span>Toggle chat</span><kbd>Ctrl / ⌘ Alt B</kbd></div></section><p className="dialog-hint">{workspace ? `Workspace: ${workspace.root}. Tasks: read-only. Session links: repository metadata.` : copilot.enabled ? 'Copilot history: local disk. Task data: sample workspace.' : 'Only display preferences are saved. Demo tasks and conversations reset when the window reloads.'} Icons: Microsoft Codicons · CC BY 4.0.</p></Dialog>}
 
-    {dialog === 'clear-chat' && task && <Dialog title={copilot.enabled ? 'Detach conversation' : 'Clear conversation'} onClose={() => setDialog(null)}><p>{copilot.enabled ? `Detach this session from ${task.id}? Copilot history stays on disk.` : `Clear the local messages and draft for ${task.id}? Other task conversations will not change.`}</p><div className="dialog-actions"><button type="button" className="secondary-button" onClick={() => setDialog(null)}>Keep conversation</button><button type="button" className="primary-button" onClick={() => { chats.clear(task.id); setBindings((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== task.id))); setDialog(null) }}>{copilot.enabled ? 'Detach session' : 'Clear messages'}</button></div></Dialog>}
+    {dialog === 'clear-chat' && task && <Dialog title={live ? 'Detach conversation' : 'Clear conversation'} onClose={() => { if (!links.busy) setDialog(null) }}><p>{live ? `Detach this session from ${task.id}? ${workspace ? `The entry in ${sessionLinksPath} will be removed. ` : ''}Copilot history stays on disk.` : `Clear the local messages and draft for ${task.id}? Other task conversations will not change.`}</p><div className="dialog-actions"><button type="button" className="secondary-button" disabled={links.busy} onClick={() => setDialog(null)}>Keep conversation</button><button type="button" className="primary-button" disabled={!links.ready || Boolean(copilot.busy)} onClick={() => { void detachSession(task.id) }}>{live ? 'Detach session' : 'Clear messages'}</button></div></Dialog>}
 
-    {sessionDialog && copilot.bridge && <CopilotSessionDialog key={sessionDialog.kind === 'import' ? sessionDialog.preview.token : 'new'} preview={sessionDialog.kind === 'import' ? sessionDialog.preview : undefined} directory={copilot.status.workingDirectory} models={copilot.models} ready={copilot.status.state === 'ready'} busy={Boolean(copilot.busy)} error={copilot.error} onBrowse={() => copilot.run('Choosing directory', () => copilot.bridge!.chooseDirectory())} onConnect={connectCopilot} onSubmit={(options) => { void createSession(options) }} onClose={() => setSessionDialog(null)} />}
+    {dialog === 'migrate-links' && workspace && <Dialog title="Save session links to workspace" onClose={() => { if (!links.busy) setDialog(null) }}><p>Write these task and session IDs to <code>{sessionLinksPath}</code>? The file can be committed to Git. Titles, conversation content, credentials, and local paths are excluded.</p><dl className="session-link-list">{Object.entries(links.legacy).map(([taskId, binding]) => <div key={taskId}><dt>{taskId}</dt><dd>{binding.id}</dd></div>)}</dl>{links.error && <p className="copilot-error" role="alert">{links.error}</p>}<div className="dialog-actions"><button type="button" className="secondary-button" disabled={links.busy} onClick={() => setDialog(null)}>Cancel</button><button type="button" className="primary-button" disabled={!links.ready || Boolean(copilot.busy)} onClick={() => { void migrateLinks() }}><Icon name="save" />Save links to workspace</button></div></Dialog>}
+
+    {sessionDialog && copilot.bridge && <CopilotSessionDialog key={sessionDialog.kind === 'import' ? sessionDialog.preview.token : 'new'} preview={sessionDialog.kind === 'import' ? sessionDialog.preview : undefined} directory={workspace?.root ?? copilot.status.workingDirectory} models={copilot.models} ready={copilot.status.state === 'ready'} busy={Boolean(copilot.busy)} error={copilot.error} onBrowse={() => copilot.run('Choosing directory', () => copilot.bridge!.chooseDirectory())} onConnect={connectCopilot} onSubmit={(options) => { void createSession(options) }} onClose={() => setSessionDialog(null)} />}
     {interaction && <CopilotInteractionDialog key={interaction.id} interaction={interaction} busy={Boolean(copilot.busy)} error={copilot.error} onRespond={(value) => { void copilot.respond(interaction.id, value) }} />}
 
-    {dialog === 'new-task' && <Dialog title="New demo task" onClose={() => setDialog(null)}><form onSubmit={(event) => {
+    {dialog === 'new-task' && !workspace && <Dialog title="New demo task" onClose={() => setDialog(null)}><form onSubmit={(event) => {
       event.preventDefault()
       const data = new FormData(event.currentTarget)
       const title = String(data.get('title') ?? '').trim()

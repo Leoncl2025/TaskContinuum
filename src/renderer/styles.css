@@ -62,7 +62,7 @@ kbd { font-family: inherit; font-size: 10px; color: var(--muted); border: 1px so
 
 .panel-header { display: flex; justify-content: space-between; align-items: center; height: 43px; min-height: 43px; padding: 0 14px 0 19px; font-size: 11px; letter-spacing: .7px; color: var(--muted); }
 .header-actions { display: flex; align-items: center; gap: 1px; }
-.sidebar { display: flex; flex-direction: column; width: 258px; flex-shrink: 0; min-height: 0; border-right: 1px solid var(--border); background: var(--panel); }
+.sidebar { display: flex; flex-direction: column; width: 258px; flex-shrink: 0; min-width: 0; min-height: 0; border-right: 1px solid var(--border); background: var(--panel); }
 .workspace-heading { padding: 15px 18px 22px; display: flex; align-items: center; gap: 11px; }
 .workspace-mark { width: 33px; height: 33px; display: grid; place-items: center; background: #3984c01a; border: 1px solid #3984c038; border-radius: 7px; color: var(--accent); }
 .workspace-mark .codicon { font-size: 20px; }
@@ -82,7 +82,6 @@ kbd { font-family: inherit; font-size: 10px; color: var(--muted); border: 1px so
 .task-list { margin: 0; padding: 0 6px; list-style: none; }
 .task-list-item { position: relative; }
 .task-row { display: flex; align-items: flex-start; gap: 9px; width: 100%; min-height: 57px; padding: 11px 11px 11px 23px; border-radius: 4px; text-align: left; }
-.task-list-item.is-child .task-row { padding-left: 26px; }
 .task-row:hover { background: var(--hover); }
 .task-row.is-selected { background: var(--selected); }
 .task-row-copy { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
@@ -94,7 +93,22 @@ kbd { font-family: inherit; font-size: 10px; color: var(--muted); border: 1px so
 .task-icon.status-in-progress { color: var(--accent); }
 .task-icon.status-done { color: var(--green); }
 .active-indicator { margin-left: auto; margin-top: 5px; width: 5px; height: 5px; flex-shrink: 0; border-radius: 50%; background: var(--accent); }
-.tree-disclosure { position: absolute; z-index: 1; left: 1px; top: 9px; width: 20px; height: 24px; display: grid; place-items: center; color: var(--muted); }
+.task-tree-item { min-width: 0; }
+.task-tree-item:focus-visible { outline: none; }
+.task-tree-item:focus-visible > .tree-row { outline: 1px solid var(--accent); outline-offset: -1px; }
+.tree-row { position: relative; display: flex; align-items: flex-start; min-width: 0; border-radius: 4px; }
+.tree-row:hover { background: var(--hover); }
+.tree-row.is-selected { background: var(--selected); }
+.tree-row.is-context > .task-row { color: var(--muted); }
+.task-tree .task-row { flex: 1; min-width: 0; width: auto; padding: 11px 7px 11px 3px; background: none; }
+.task-tree .task-row-copy { flex: 1; }
+.task-tree .task-row-copy strong { white-space: normal; overflow-wrap: anywhere; line-height: 1.5; }
+.task-tree .task-row-copy > span { display: flex; flex-wrap: wrap; align-items: center; font-size: 10px; }
+.tree-disclosure { flex: 0 0 18px; width: 18px; height: 24px; margin-top: 9px; padding: 0; display: grid; place-items: center; border-radius: 3px; color: var(--muted); }
+.tree-disclosure:hover { background: var(--raised); color: var(--text); }
+.tree-disclosure-spacer { flex: 0 0 18px; }
+.task-tree-group { margin: 0 0 0 8px; padding: 0 0 0 13px; list-style: none; border-left: 1px solid var(--border); }
+.task-tree-group > .task-tree-item > .tree-row::before { content: ''; position: absolute; width: 10px; height: 1px; top: 22px; left: -14px; background: var(--border); }
 .sidebar-footer { display: flex; align-items: flex-start; gap: 9px; margin: 18px 16px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--subtle); }
 .sidebar-footer > .codicon { font-size: 16px; margin-top: 1px; }
 .sidebar-footer strong { color: var(--muted); font-size: 11px; font-weight: 500; }

@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { DesktopBridge, DesktopInfo } from '../shared/desktop'
 import type { CopilotBridge, CopilotEvent } from '../shared/sessions'
+import type { WorkspaceBridge } from '../shared/workspace'
+import type { SharedDesktopBridge, SharedDesktopUpdate } from '../shared/sharedSessions'
 
 const bridge: DesktopBridge = {
   getInfo: async () => {
@@ -36,3 +38,44 @@ const copilot: CopilotBridge = {
 }
 
 contextBridge.exposeInMainWorld('copilot', copilot)
+
+const workspace: WorkspaceBridge = {
+  getState: () => ipcRenderer.invoke('workspace:state'),
+  openFolder: () => ipcRenderer.invoke('workspace:open-folder'),
+  openRecent: (id) => ipcRenderer.invoke('workspace:open-recent', id),
+  refresh: () => ipcRenderer.invoke('workspace:refresh'),
+  useDemo: () => ipcRenderer.invoke('workspace:demo'),
+  getSessionLinks: (id) => ipcRenderer.invoke('workspace:session-links', id),
+  updateSessionLink: (request) => ipcRenderer.invoke('workspace:update-session-link', request),
+  migrateSessionLinks: (request) => ipcRenderer.invoke('workspace:migrate-session-links', request),
+}
+
+contextBridge.exposeInMainWorld('workspace', workspace)
+
+const sharedSessions: SharedDesktopBridge = {
+  identity: () => ipcRenderer.invoke('shared:identity'),
+  exportIdentity: () => ipcRenderer.invoke('shared:export-identity'),
+  list: () => ipcRenderer.invoke('shared:list'),
+  publish: (options) => ipcRenderer.invoke('shared:publish', options),
+  join: () => ipcRenderer.invoke('shared:join'),
+  open: (id) => ipcRenderer.invoke('shared:open', id),
+  cached: (id) => ipcRenderer.invoke('shared:cached', id),
+  disconnect: (id) => ipcRenderer.invoke('shared:disconnect', id),
+  send: (id, commandId, text) => ipcRenderer.invoke('shared:send', id, commandId, text),
+  stop: (id, commandId) => ipcRenderer.invoke('shared:stop', id, commandId),
+  respond: (id, interactionId, answer) => ipcRenderer.invoke('shared:respond', id, interactionId, answer),
+  invite: (id, host, role) => ipcRenderer.invoke('shared:invite', id, host, role),
+  exportCheckpoint: (id) => ipcRenderer.invoke('shared:export-checkpoint', id),
+  previewCheckpoint: () => ipcRenderer.invoke('shared:preview-checkpoint'),
+  keepCheckpoint: (token) => ipcRenderer.invoke('shared:keep-checkpoint', token),
+  fork: (token, directory) => ipcRenderer.invoke('shared:fork', token, directory),
+  stopHost: (id) => ipcRenderer.invoke('shared:stop-host', id),
+  restartHost: (id) => ipcRenderer.invoke('shared:restart-host', id),
+  onUpdate: (listener) => {
+    const receive = (_event: Electron.IpcRendererEvent, update: SharedDesktopUpdate) => listener(update)
+    ipcRenderer.on('shared:update', receive)
+    return () => ipcRenderer.removeListener('shared:update', receive)
+  },
+}
+
+contextBridge.exposeInMainWorld('sharedSessions', sharedSessions)

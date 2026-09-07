@@ -1,0 +1,35 @@
+.workspace-picker { padding: 12px 13px 14px; }
+.workspace-picker-row { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.workspace-picker .workspace-mark { flex-shrink: 0; width: 30px; height: 30px; border-radius: 5px; }
+.workspace-choice { display: flex; flex: 1; flex-direction: column; min-width: 0; gap: 6px; }
+.workspace-choice select { width: 100%; min-width: 0; background: var(--input); border: 1px solid var(--border); border-radius: 3px; padding: 4px; font-size: 12px; }
+.workspace-choice > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; }
+.workspace-picker-actions { display: flex; align-items: center; gap: 5px; margin-top: 9px; }
+.workspace-picker-actions > span { flex: 1; font-size: 10px; color: var(--muted); }
+.workspace-loading { color: var(--muted); }
+.workspace-warning { margin: 12px 14px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; max-height: 145px; overflow: auto; }
+.workspace-warning summary { cursor: pointer; }
+.workspace-warning p { line-height: 1.5; }
+.workspace-breadcrumb { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.workspace-markdown { line-height: 1.75; font-size: 12px; overflow-wrap: anywhere; }
+.workspace-markdown h2 { font-size: 16px; line-height: 1.5; font-weight: 600; margin: 24px 0 12px; letter-spacing: 0; }
+.workspace-markdown h3 { font-size: 13px; margin: 18px 0 10px; }
+.workspace-markdown h4 { font-size: 12px; margin: 16px 0 8px; }
+.workspace-markdown p { margin: 12px 0; }
+.workspace-markdown ul, .workspace-markdown ol { padding-left: 23px; }
+.workspace-markdown li { padding: 3px 0; }
+.workspace-markdown pre { max-width: 100%; overflow: auto; background: var(--input); border: 1px solid var(--border); padding: 12px; border-radius: 4px; }
+.workspace-markdown code { font-family: Consolas, 'Cascadia Code', monospace; font-size: 11px; }
+.workspace-markdown blockquote { border-left: 2px solid var(--border); padding-left: 14px; margin-left: 0; color: var(--muted); }
+.workspace-markdown .document-table { overflow-x: auto; margin: 16px 0; }
+.workspace-markdown table { width: 100%; border-collapse: collapse; text-align: left; }
+.workspace-markdown th, .workspace-markdown td { padding: 8px 10px; border: 1px solid var(--border); min-width: 70px; vertical-align: top; }
+.workspace-markdown th { background: var(--raised); font-weight: 500; }
+.workspace-markdown .document-link { color: var(--accent); }
+.status-select select:disabled { opacity: 1; color: inherit; }
+.workspace-empty { min-height: 0; }
+.workspace-empty h1 { font-size: 20px; }
+@media (max-width: 660px) {
+  .workspace-picker { max-width: 100%; }
+  .workspace-markdown th, .workspace-markdown td { padding: 6px; }
+}
