@@ -103,6 +103,30 @@ describe('managed Dev Tunnel lifecycle', () => {
       expect((await owner.keys.get('host')).publicKey).toBe(previousKey)
     } finally { await client.close(); await owner.close(); http.closeAllConnections(); await new Promise<void>((resolve) => http.close(() => resolve())); await rm(root, { recursive: true, force: true }) }
   })
+  it('refreshes a completed external sign-in without hiding unrelated publication failures', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'continuum-login-recovery-'))
+    const protector = { available: () => true, encrypt: (value: string) => Buffer.from(value), decrypt: (value: Buffer) => value.toString() }
+    let signedIn = false
+    const cli = new DevTunnelCli(async (args) => {
+      if (args[0] === 'user' && args[1] === 'login') throw new Error('Sign-in did not complete')
+      if (args[0] === 'user') return signedIn ? { status: 'Logged in', provider: 'microsoft', username: 'owner@example.test', tenantId: 'tenant', objectId: 'owner' } : { status: 'Not logged in' }
+      return { tunnel: { tunnelId: `taskcontinuum-${'d'.repeat(32)}.jpe1`, accessControl: [], hostConnections: 0 } }
+    })
+    const cloud: TunnelCloud = { host: vi.fn(async () => { throw new Error('Publication denied') }), connect: vi.fn() }
+    const manager = new ManagedDevTunnels(root, new DeviceSshKeys(root, protector), cli, cloud)
+    try {
+      await expect(manager.login()).rejects.toThrow('Sign-in did not complete')
+      expect(await manager.status(true)).toMatchObject({ state: 'offline', error: 'Sign-in did not complete' })
+      signedIn = true
+      const recovered = await manager.status(true)
+      expect(recovered).toMatchObject({ installed: true, account: 'owner@example.test', state: 'idle' })
+      expect(recovered.error).toBeUndefined()
+      expect(cloud.host).not.toHaveBeenCalled()
+      await expect(manager.publish()).rejects.toThrow('Publication denied')
+      expect(await manager.status(true)).toMatchObject({ account: 'owner@example.test', state: 'offline', error: 'Publication denied' })
+    } finally { await manager.close(); await rm(root, { recursive: true, force: true }) }
+  })
+
   it('cancels pending browser sign-in and publication without leaving an SSH listener', async () => {
     const root = await mkdtemp(join(tmpdir(), 'continuum-cancel-tunnel-'))
     const protector = { available: () => true, encrypt: (value: string) => Buffer.from(value), decrypt: (value: Buffer) => value.toString() }

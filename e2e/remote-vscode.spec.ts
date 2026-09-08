@@ -13,7 +13,8 @@ import { startSshFixture } from '../test/ssh-fixture'
 
 for (const managed of [false, true]) test(`authorizes an original VS Code conversation through two isolated desktops and ${managed ? 'managed Dev Tunnel + SSH' : 'an SSH alias'}`, async () => {
   test.skip(managed && process.env.TASKCONTINUUM_LIVE_DEV_TUNNEL !== '1', 'Requires an explicitly enabled Microsoft Dev Tunnel account.')
-  test.setTimeout(managed ? 180000 : 120000)
+  const verifySignIn = managed && process.env.TASKCONTINUUM_VERIFY_DEV_TUNNEL_LOGIN === '1'
+  test.setTimeout(verifySignIn ? 360000 : managed ? 180000 : 120000)
   const root = await mkdtemp(join(tmpdir(), 'continuum-remote-desktop-'))
   const identity = { nativeSessionId: randomUUID(), workspaceStorageId: 'a'.repeat(32) }
   const ownerCode = join(root, 'owner-code')
@@ -76,11 +77,11 @@ for (const managed of [false, true]) test(`authorizes an original VS Code conver
       dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false })
     }, { input, output })
   }
-  async function remoteDialog(page: Page) {
+  async function remoteDialog(page: Page, requireSignIn = true) {
     await page.getByRole('button', { name: 'Remote VS Code sessions', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Remote VS Code sessions', exact: true })
     if (!managed) await dialog.getByRole('radio', { name: 'SSH alias', exact: true }).click()
-    else await expect(dialog.getByText('Signed in', { exact: true })).toBeVisible({ timeout: 30000 })
+    else if (requireSignIn) await expect(dialog.getByText('Signed in', { exact: true })).toBeVisible({ timeout: 30000 })
     return dialog
   }
   async function removePublication(): Promise<void> {
@@ -98,7 +99,14 @@ for (const managed of [false, true]) test(`authorizes an original VS Code conver
     await updateRepositorySessionLink(ownerWorkspace, 'T-0001', identity.nativeSessionId, null, identity.workspaceStorageId)
     let client = await launch(receiverProfile, receiverWorkspace, join(root, 'empty-code-A'), ssh?.config)
     await dialogs(client.app, invitationFile, participantFile)
-    let manager = await remoteDialog(client.page)
+    let manager = await remoteDialog(client.page, !verifySignIn)
+    if (verifySignIn) {
+      await manager.getByRole('button', { name: /^Sign in (with Microsoft|again)$/ }).click()
+      await expect(manager.getByRole('button', { name: 'Sign in again', exact: true })).toBeEnabled({ timeout: 180000 })
+      await expect(manager.getByRole('alert')).toHaveCount(0)
+      await expect(manager.getByText('Signed in', { exact: true })).toBeVisible()
+      expect(await client.page.evaluate(() => window.remoteVSCode!.devTunnels!.status(true))).toMatchObject({ installed: true, state: 'idle', account: expect.any(String) })
+    }
     await manager.getByRole('button', { name: 'Export client identity', exact: true }).click()
     await expect(manager).toContainText('Client identity exported.')
     const exported = remoteIdentityFileSchema.parse(JSON.parse(await readFile(participantFile, 'utf8')))

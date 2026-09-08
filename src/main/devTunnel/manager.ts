@@ -17,6 +17,7 @@ type Publication = z.infer<typeof publicationSchema>
 
 export class ManagedDevTunnels {
   private operation?: { abort: AbortController; promise: Promise<void> }
+  private failedOperation?: 'signing-in' | 'starting'
   private publication?: Publication
   private host?: Awaited<ReturnType<typeof startSessionSshHost>>
   private cloudHost?: CloudConnection
@@ -34,6 +35,11 @@ export class ManagedDevTunnels {
         const login = await this.cli.status()
         this.state.installed = login.installed
         this.state.account = login.account
+        if (login.accountId && this.failedOperation === 'signing-in') {
+          this.failedOperation = undefined
+          this.state.state = 'idle'
+          this.state.error = undefined
+        }
         if (this.cloudHost && this.publication?.accountId !== login.accountId) await this.stop()
       } catch (error) { this.state.error = error instanceof Error ? error.message : 'Dev Tunnel status unavailable.' }
     }
@@ -46,9 +52,11 @@ export class ManagedDevTunnels {
     const abort = new AbortController()
     this.state.state = state
     this.state.error = undefined
+    this.failedOperation = undefined
     const timeout = setTimeout(() => abort.abort(), state === 'signing-in' ? 300000 : 60000)
     timeout.unref()
     const promise = action(abort.signal).catch((error: unknown) => {
+      this.failedOperation = state
       this.state.state = 'offline'
       this.state.error = error instanceof Error ? error.message : 'Dev Tunnel operation failed.'
       throw error

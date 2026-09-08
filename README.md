@@ -343,6 +343,13 @@ on both ends; it is not a tenant-wide device registry or SSH certificate authori
 No Copilot CLI login is needed on A, and no conversation is created, resumed, imported,
 or forked. The legacy **SSH alias** mode remains available on both dialogs.
 
+On Windows, Microsoft sign-in opens a temporary **Task Continuum Microsoft sign-in**
+console for the native/browser account flow and closes it afterward. Other tunnel
+operations stay in the background. Earlier builds could remain at **Signing in**
+when launched from Electron. Preserve drafts and reopen Task Continuum to load the
+fix; **Refresh Dev Tunnel status** picks up an existing CLI sign-in and clears stale
+login errors without publishing anything. VS Code does not need reloading for this fix.
+
 See the [remote VS Code runbook](docs/remote-vscode.md) for both-machine setup,
 access control, renewal, disconnect/offline behavior, and recovery. Stopping or
 restarting B's managed publication requires new invitations, but never stops its

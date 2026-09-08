@@ -43,6 +43,27 @@ CLI Host, import history into another runtime, or create a fork.
   It is transport, not a durable message queue or ownership authority. The app never
   reconnects or replays prompts automatically.
 
+## Windows Sign-in Recovery
+
+Microsoft sign-in uses a temporary **Task Continuum Microsoft sign-in** console on
+Windows. Complete the native account or browser verification when requested; the
+console closes after login. It is not a terminal that must stay open for SSH. Cancel
+and the five-minute login deadline terminate only the app's own login process tree.
+Other CLI operations remain hidden, and no authentication output enters the renderer.
+
+An earlier build could remain at **Signing in** because Electron's child process
+had no usable console, even when merely disabling window hiding. The same CLI command
+worked from a terminal. The repaired build creates a dedicated console and verifies
+the resulting company identity before enabling publication.
+
+Preserve unsent drafts and fully reopen Task Continuum to load this main-process
+repair; do not reload the current VS Code conversation for a Dev Tunnel login error.
+If an older window is stuck, cancel its login before signing in through the official
+CLI with `devtunnel user login --entra --use-browser-auth`. Then choose **Refresh Dev
+Tunnel status**. A verified external sign-in clears a stale login failure in the
+repaired build; an unrelated publication error is not hidden. Do not repeatedly
+start competing logins or reset device keys to solve a sign-in problem.
+
 ## Existing SSH Alias (Optional)
 
 Select **SSH alias** on both the client and owner dialogs to retain the earlier
@@ -228,6 +249,14 @@ Remove-Item Env:TASKCONTINUUM_LIVE_DEV_TUNNEL
 ```
 
 These tests use isolated profiles and temporary SSH keys on one Windows machine.
+The additional opt-in `TASKCONTINUUM_VERIFY_DEV_TUNNEL_LOGIN=1`, together with
+`TASKCONTINUUM_LIVE_DEV_TUNNEL=1`, verifies the actual sign-in button before the
+managed desktop scenario. It can request interactive account verification and is
+not enabled by ordinary tests. The repaired Windows flow passed that scenario,
+including subsequent private publication, connect, revoke, and resource cleanup.
+Login regressions plus the full suite passed 222 tests across 42 files using
+`npm test -- --maxWorkers=2`; lint, strict types, and production build also passed.
+
 The deterministic test participant is not shipped. They do not certify physical
 A/B/C networking or an authenticated production Copilot reply in your environment.
 The final manual check is A/C -> Dev Tunnel + SSH (or approved direct SSH) -> B's

@@ -1,12 +1,13 @@
 import { spawn } from 'node:child_process'
 import { access } from 'node:fs/promises'
-import { delimiter, join } from 'node:path'
+import { delimiter, join, win32 } from 'node:path'
 import { z } from 'zod'
 import { devTunnelIdSchema } from './protocol'
 
 export type TunnelLogin = { installed: boolean; account?: string; accountId?: string }
 export type CliRunner = (args: string[], signal: AbortSignal) => Promise<unknown>
 const infoSchema = z.object({ tunnel: z.object({ tunnelId: devTunnelIdSchema, accessControl: z.array(z.unknown()), hostConnections: z.number().optional() }) })
+const signInFailure = 'Microsoft sign-in did not complete. Complete the account window, or sign in with the official Dev Tunnel CLI and refresh.'
 
 export function parseDevTunnelJson(output: string): unknown {
   let value = output.trim()
@@ -26,12 +27,46 @@ async function executable(): Promise<string> {
   throw new Error('Install the Microsoft Dev Tunnel CLI, then refresh. No system SSH Server is needed for this mode.')
 }
 
+async function windowsSignIn(file: string, signal: AbortSignal): Promise<void> {
+  if (!win32.isAbsolute(file) || /[\r\n"%!&|<>^]/.test(file)) throw new Error('The Dev Tunnel CLI path cannot be opened in a sign-in console. Install it in a standard location.')
+  const system = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(join(system, 'cmd.exe'), ['/d', '/v:off', '/s', '/c', `start "Task Continuum Microsoft sign-in" /wait "${file}" user login --entra --use-browser-auth --json`], { windowsHide: true, windowsVerbatimArguments: true, shell: false, stdio: 'ignore' })
+    let stopping: Promise<void> | undefined
+    let settled = false
+    const abort = () => {
+      if (settled || stopping) return
+      stopping = new Promise<void>((complete) => {
+        if (!child.pid) { child.kill(); complete(); return }
+        const cleanup = spawn(join(system, 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, shell: false, stdio: 'ignore' })
+        cleanup.once('error', () => { child.kill(); complete() })
+        cleanup.once('close', (code) => { if (code !== 0) child.kill(); complete() })
+      })
+    }
+    const finish = async (error?: Error) => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', abort)
+      await stopping
+      if (signal.aborted) reject(new Error('Dev Tunnel operation cancelled.'))
+      else if (error) reject(error)
+      else resolve()
+    }
+    signal.addEventListener('abort', abort, { once: true })
+    child.once('error', () => { void finish(new Error('The Dev Tunnel sign-in console could not start.')) })
+    child.once('close', (code) => { void finish(code === 0 ? undefined : new Error(signInFailure)) })
+    if (signal.aborted) abort()
+  })
+}
+
 export async function runDevTunnelJson(args: string[], signal: AbortSignal): Promise<unknown> {
   const file = await executable()
-  signal = AbortSignal.any([signal, AbortSignal.timeout(args[0] === 'user' && args[1] === 'login' ? 300000 : 30000)])
+  const signingIn = args[0] === 'user' && args[1] === 'login'
+  signal = AbortSignal.any([signal, AbortSignal.timeout(signingIn ? 300000 : 30000)])
   signal.throwIfAborted()
+  if (signingIn && process.platform === 'win32') { await windowsSignIn(file, signal); return {} }
   return new Promise((resolve, reject) => {
-    const child = spawn(file, args, { windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'], signal })
+    const child = spawn(file, args, { windowsHide: !signingIn, shell: false, stdio: ['ignore', 'pipe', 'pipe'], signal })
     const chunks: Buffer[] = []
     let bytes = 0
     let diagnostic = ''
@@ -49,10 +84,10 @@ export async function runDevTunnelJson(args: string[], signal: AbortSignal): Pro
       const output = Buffer.concat(chunks).toString('utf8').trim()
       if (code !== 0) {
         if (args[0] === 'user' && args[1] === 'show' && /not logged in|not signed in|no user/i.test(output + diagnostic)) { resolve({ status: 'Signed out' }); return }
-        reject(new Error(`Dev Tunnel ${args[0]} failed. Check company sign-in, tunnel ownership, quota and approved network access.`))
+        reject(new Error(signingIn ? signInFailure : `Dev Tunnel ${args[0]} failed. Check company sign-in, tunnel ownership, quota and approved network access.`))
         return
       }
-      if (args[0] === 'delete' || args[0] === 'user' && args[1] === 'login') { resolve({}); return }
+      if (args[0] === 'delete' || signingIn) { resolve({}); return }
       try { resolve(output ? parseDevTunnelJson(output) : {}) } catch {
         reject(new Error(`The Dev Tunnel CLI returned an unsupported ${args[0]} response. Update the official CLI.`))
       }
