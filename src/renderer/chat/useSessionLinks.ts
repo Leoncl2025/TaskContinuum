@@ -5,12 +5,12 @@ import { clearSessionBindings, readSessionBindings, saveSessionBindings, session
 import type { SessionBinding, SessionBindings } from './sessionBindings'
 
 function uiBindings(snapshot: SessionLinksSnapshot): SessionBindings {
-  return Object.fromEntries(Object.entries(snapshot.document.bindings).map(([taskId, link]) => [taskId, { id: link.sessionId, title: 'GitHub Copilot', ...(link.provider === 'vscode-copilot' ? { vscodeWorkspaceStorageId: link.workspaceStorageId } : {}) }]))
+  return Object.fromEntries(Object.entries(snapshot.document.bindings).map(([taskId, link]) => [taskId, { id: link.sessionId, title: 'GitHub Copilot', ...(link.provider === 'vscode-copilot' ? { vscodeWorkspaceStorageId: link.workspaceStorageId, ...(link.remoteMachineName ? { remoteMachineName: link.remoteMachineName } : {}) } : {}) }]))
 }
 
 function repositoryLink(binding: SessionBinding): SessionLink {
   return binding.vscodeWorkspaceStorageId
-    ? { provider: 'vscode-copilot', sessionId: binding.id, workspaceStorageId: binding.vscodeWorkspaceStorageId }
+    ? { provider: 'vscode-copilot', sessionId: binding.id, workspaceStorageId: binding.vscodeWorkspaceStorageId, ...(binding.remoteMachineName ? { remoteMachineName: binding.remoteMachineName } : {}) }
     : { provider: 'github-copilot', sessionId: binding.id }
 }
 
@@ -73,7 +73,7 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
       setBindings((current) => ({ ...Object.fromEntries(Object.entries(current).filter(([id, link]) => id === taskId || sessionBindingKey(link) !== sessionBindingKey(binding))), [taskId]: binding }))
       return
     }
-    await run(() => bridge!.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: binding.id, expectedRevision: snapshot!.revision, ...(binding.vscodeWorkspaceStorageId ? { vscodeWorkspaceStorageId: binding.vscodeWorkspaceStorageId } : {}) }))
+    await run(() => bridge!.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: binding.id, expectedRevision: snapshot!.revision, ...(binding.vscodeWorkspaceStorageId ? { vscodeWorkspaceStorageId: binding.vscodeWorkspaceStorageId, ...(binding.remoteMachineName ? { vscodeRemoteMachineName: binding.remoteMachineName } : {}) } : {}) }))
   }
 
   async function detach(taskId: string): Promise<void> {

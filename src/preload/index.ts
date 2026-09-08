@@ -3,7 +3,8 @@ import type { DesktopBridge, DesktopInfo } from '../shared/desktop'
 import type { CopilotBridge, CopilotEvent } from '../shared/sessions'
 import type { WorkspaceBridge } from '../shared/workspace'
 import type { SharedDesktopBridge, SharedDesktopUpdate } from '../shared/sharedSessions'
-import type { VSCodeChatBridge, VSCodeChatIdentity } from '../shared/vscodeChat'
+import type { VSCodeChatBridge } from '../shared/vscodeChat'
+import type { RemoteVSCodeBridge, VSCodeChatTarget } from '../shared/remoteVSCode'
 
 const bridge: DesktopBridge = {
   getInfo: async () => {
@@ -47,12 +48,34 @@ const vscodeChat: VSCodeChatBridge = {
   send: (identity, commandId, text) => ipcRenderer.invoke('vscode-chat:send', identity, commandId, text),
   watch: (identity) => ipcRenderer.invoke('vscode-chat:watch', identity),
   onChange: (listener) => {
-    const receive = (_event: Electron.IpcRendererEvent, identity: VSCodeChatIdentity) => listener(identity)
+    const receive = (_event: Electron.IpcRendererEvent, identity: VSCodeChatTarget) => listener(identity)
     ipcRenderer.on('vscode-chat:changed', receive)
     return () => ipcRenderer.removeListener('vscode-chat:changed', receive)
   },
 }
 contextBridge.exposeInMainWorld('vscodeChat', vscodeChat)
+
+const remoteVSCode: RemoteVSCodeBridge = {
+  devTunnels: {
+    status: (refresh) => ipcRenderer.invoke('remote-vscode:tunnel-status', refresh),
+    login: () => ipcRenderer.invoke('remote-vscode:tunnel-login'),
+    publish: () => ipcRenderer.invoke('remote-vscode:tunnel-publish'),
+    stop: () => ipcRenderer.invoke('remote-vscode:tunnel-stop'),
+    cancel: () => ipcRenderer.invoke('remote-vscode:tunnel-cancel'),
+    reset: () => ipcRenderer.invoke('remote-vscode:tunnel-reset'),
+    installationGuide: () => ipcRenderer.invoke('remote-vscode:tunnel-installation'),
+  },
+  exportIdentity: (managed) => ipcRenderer.invoke('remote-vscode:export-identity', managed),
+  importInvitation: (hostAlias) => ipcRenderer.invoke('remote-vscode:import-invitation', hostAlias),
+  list: () => ipcRenderer.invoke('remote-vscode:list'),
+  connect: (id) => ipcRenderer.invoke('remote-vscode:connect', id),
+  disconnect: (id) => ipcRenderer.invoke('remote-vscode:disconnect', id),
+  forget: (id) => ipcRenderer.invoke('remote-vscode:forget', id),
+  share: (identity, canSend, managed) => ipcRenderer.invoke('remote-vscode:share', identity, canSend, managed),
+  grants: (identity) => ipcRenderer.invoke('remote-vscode:grants', identity),
+  revoke: (identity, grantId) => ipcRenderer.invoke('remote-vscode:revoke', identity, grantId),
+}
+contextBridge.exposeInMainWorld('remoteVSCode', remoteVSCode)
 
 const workspace: WorkspaceBridge = {
   getState: () => ipcRenderer.invoke('workspace:state'),

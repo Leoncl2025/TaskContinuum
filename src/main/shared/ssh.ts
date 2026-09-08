@@ -10,14 +10,16 @@ export function sshArguments(host: string, localPort: number, remotePort: number
   return [...configFile ? ['-F', configFile] : [], '-N', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ExitOnForwardFailure=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=2', '-L', `127.0.0.1:${localPort}:127.0.0.1:${remotePort}`, '--', host]
 }
 
-export async function openSshTunnel(host: string, remotePort: number, configFile?: string): Promise<{ port: number; close(): void }> {
+export async function openSshTunnel(host: string, remotePort: number, configFile?: string, signal?: AbortSignal): Promise<{ port: number; close(): void }> {
+  signal?.throwIfAborted()
   const listener = createServer()
   await new Promise<void>((resolve, reject) => { listener.once('error', reject); listener.listen(0, '127.0.0.1', resolve) })
   const address = listener.address()
   if (!address || typeof address === 'string') throw new Error('A local SSH port could not be allocated.')
   const port = address.port
   await new Promise<void>((resolve) => listener.close(() => resolve()))
-  const process = spawn('ssh', sshArguments(host, port, remotePort, configFile), { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'], shell: false })
+  signal?.throwIfAborted()
+  const process = spawn('ssh', sshArguments(host, port, remotePort, configFile), { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'], shell: false, signal })
   let failure: Error | undefined
   let diagnostic = ''
   process.stderr.on('data', (value: Buffer) => { diagnostic = (diagnostic + value.toString()).slice(-1200) })
@@ -34,6 +36,7 @@ export async function openSshTunnel(host: string, remotePort: number, configFile
         socket.once('connect', () => finish(true))
         socket.once('error', () => finish(false))
       })
+      signal?.throwIfAborted()
       if (ready) return { port, close: () => { process.kill() } }
       await new Promise<void>((resolve) => setTimeout(resolve, 150))
     }

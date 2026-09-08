@@ -4,15 +4,16 @@ import { isAbsolute, join, relative, sep } from 'node:path'
 import { z } from 'zod'
 import type { SessionLink, SessionLinksDocument, SessionLinksSnapshot } from '../shared/sessionBindings'
 import { sessionLinksPath } from '../shared/sessionBindings'
+import { remoteMachineSchema } from './vscodeRemoteProtocol'
 
 const taskIdSchema = z.string().regex(/^T-\d{4,}$/)
 const sessionIdSchema = z.string().min(1).max(240).regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/)
 export const sessionLinkSchema = z.discriminatedUnion('provider', [
   z.object({ provider: z.literal('github-copilot'), sessionId: sessionIdSchema }).strict(),
-  z.object({ provider: z.literal('vscode-copilot'), sessionId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,199}$/), workspaceStorageId: z.string().regex(/^[a-f0-9]{32}$/) }).strict(),
+  z.object({ provider: z.literal('vscode-copilot'), sessionId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,199}$/), workspaceStorageId: z.string().regex(/^[a-f0-9]{32}$/), remoteMachineName: remoteMachineSchema.optional() }).strict(),
 ])
 function linkKey(link: SessionLink): string {
-  return `${link.provider}:${link.provider === 'vscode-copilot' ? `${link.workspaceStorageId}:` : ''}${link.sessionId}`
+  return `${link.provider}:${link.provider === 'vscode-copilot' ? `${link.remoteMachineName?.toLowerCase() ?? ''}:${link.workspaceStorageId}:` : ''}${link.sessionId}`
 }
 const documentSchema = z.object({
   schemaVersion: z.literal(1),
@@ -70,12 +71,13 @@ export async function readRepositorySessionLinks(root: string): Promise<SessionL
   return { document: parse(content.toString('utf8')), revision: createHash('sha256').update(content).digest('hex') }
 }
 
-export async function updateRepositorySessionLink(root: string, taskId: string, sessionId: string | null, expectedRevision: string | null, vscodeWorkspaceStorageId?: string): Promise<SessionLinksSnapshot> {
+export async function updateRepositorySessionLink(root: string, taskId: string, sessionId: string | null, expectedRevision: string | null, vscodeWorkspaceStorageId?: string, vscodeRemoteMachineName?: string): Promise<SessionLinksSnapshot> {
   taskIdSchema.parse(taskId)
   if (sessionId !== null) sessionIdSchema.parse(sessionId)
+  if (vscodeRemoteMachineName !== undefined && vscodeWorkspaceStorageId === undefined) throw new Error('A remote VS Code binding requires its original workspace identity.')
   const selected: SessionLink | null = sessionId === null ? null : sessionLinkSchema.parse(vscodeWorkspaceStorageId === undefined
     ? { provider: 'github-copilot', sessionId }
-    : { provider: 'vscode-copilot', sessionId, workspaceStorageId: vscodeWorkspaceStorageId })
+    : { provider: 'vscode-copilot', sessionId, workspaceStorageId: vscodeWorkspaceStorageId, ...(vscodeRemoteMachineName ? { remoteMachineName: vscodeRemoteMachineName } : {}) })
   return writeRepositorySessionLinks(root, expectedRevision, (before) => {
     if (selected) {
       const existingTask = Object.entries(before.bindings).find(([id, link]) => id !== taskId && linkKey(link) === linkKey(selected))?.[0]

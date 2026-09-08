@@ -1,9 +1,10 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import type { TaskRecord } from '../../shared/tasks'
-import type { VSCodeChatDelivery, VSCodeChatIdentity, VSCodeChatView } from '../../shared/vscodeChat'
+import type { VSCodeChatDelivery, VSCodeChatView } from '../../shared/vscodeChat'
+import type { VSCodeChatTarget } from '../../shared/remoteVSCode'
 import { Icon, IconButton } from './Primitives'
 
-export function VSCodeChatPanel({ task, identity, onDetach, onClose }: { task: TaskRecord; identity: VSCodeChatIdentity; onDetach(): void; onClose(): void }) {
+export function VSCodeChatPanel({ task, identity, onDetach, onClose, onRemoteAccess, onRemoteConnections }: { task: TaskRecord; identity: VSCodeChatTarget; onDetach(): void; onClose(): void; onRemoteAccess?(): void; onRemoteConnections?(): void }) {
   const bridge = window.vscodeChat
   const sendStatusId = useId()
   const [snapshot, setSnapshot] = useState<VSCodeChatView>()
@@ -17,11 +18,11 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose }: { task: T
   const operating = useRef(false)
   const followBottom = useRef(true)
   const log = useRef<HTMLDivElement>(null)
-  const { nativeSessionId, workspaceStorageId } = identity
+  const { nativeSessionId, workspaceStorageId, remoteMachineName } = identity
   useEffect(() => {
     let active = true
     let request = 0
-    const selected = { nativeSessionId, workspaceStorageId }
+    const selected = { nativeSessionId, workspaceStorageId, ...(remoteMachineName ? { remoteMachineName } : {}) }
     async function read(): Promise<void> {
       const current = ++request
       try {
@@ -33,12 +34,12 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose }: { task: T
       }
     }
     const unsubscribe = bridge?.onChange((changed) => {
-      if (changed.nativeSessionId === nativeSessionId && changed.workspaceStorageId === workspaceStorageId) void read()
+      if (changed.nativeSessionId === nativeSessionId && changed.workspaceStorageId === workspaceStorageId && changed.remoteMachineName?.toLowerCase() === remoteMachineName?.toLowerCase()) void read()
     })
     void read()
     void bridge?.watch(selected).catch((failure: unknown) => { if (active) setReadError(failure instanceof Error ? failure.message : 'History updates are unavailable. Use Refresh.') })
     return () => { active = false; unsubscribe?.(); void bridge?.watch(null).catch(() => undefined) }
-  }, [bridge, nativeSessionId, workspaceStorageId, revision])
+  }, [bridge, nativeSessionId, workspaceStorageId, remoteMachineName, revision])
 
   async function connect(): Promise<void> {
     if (!bridge?.connect || operating.current) return
@@ -46,7 +47,7 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose }: { task: T
     setBusy(true)
     setError(undefined)
     try {
-      await bridge.connect({ nativeSessionId, workspaceStorageId })
+      await bridge.connect(identity)
       setRevision((current) => current + 1)
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'The VS Code connection could not be started.')
@@ -58,7 +59,7 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose }: { task: T
     operating.current = true
     setBusy(true)
     setError(undefined)
-    try { await bridge.open({ nativeSessionId, workspaceStorageId }) } catch (failure) {
+    try { await bridge.open(identity) } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'The original VS Code conversation could not be opened.')
     } finally { operating.current = false; setBusy(false) }
   }
@@ -77,7 +78,7 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose }: { task: T
   const lastDelivery = deliveries.at(-1)
   const execution = snapshot?.execution ?? lastDelivery?.execution
   const participant = snapshot?.participant ?? lastDelivery?.participant
-  const executionName = execution ? `${execution.agentName} @ ${execution.machineName}${snapshot?.execution ? '' : ' (last recorded)'}` : 'GitHub Copilot @ unknown machine'
+  const executionName = execution ? `${execution.agentName} @ ${execution.machineName}${snapshot?.execution ? '' : ' (last recorded)'}` : remoteMachineName ? `GitHub Copilot @ ${remoteMachineName} (not connected)` : 'GitHub Copilot @ unknown machine'
   useEffect(() => {
     if (followBottom.current && log.current) log.current.scrollTop = log.current.scrollHeight
   }, [snapshot, receipt])
@@ -91,7 +92,7 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose }: { task: T
     setBusy(true)
     setError(undefined)
     try {
-      const result = await bridge.send({ nativeSessionId, workspaceStorageId }, command.id, command.text)
+      const result = await bridge.send(identity, command.id, command.text)
       setReceipt(result)
       pending.current = undefined
       setDraft((current) => current.trim() === text ? '' : current)
@@ -103,9 +104,9 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose }: { task: T
   }
 
   return <aside className="chat-panel" aria-label="VS Code task chat">
-    <header className="panel-header"><span>VS CODE CHAT</span><div className="header-actions"><IconButton icon="refresh" label="Refresh original conversation" disabled={busy} onClick={() => setRevision((value) => value + 1)} /><IconButton icon="debug-disconnect" label="Detach conversation" disabled={busy} onClick={onDetach} /><IconButton icon="layout-sidebar-right-off" label="Hide chat panel" onClick={onClose} /></div></header>
+    <header className="panel-header"><span>{remoteMachineName ? 'REMOTE VS CODE' : 'VS CODE CHAT'}</span><div className="header-actions">{onRemoteAccess && !remoteMachineName && <IconButton icon="broadcast" label="Share original conversation remotely" disabled={busy || snapshot?.connectionState !== 'connected'} onClick={onRemoteAccess} />}{onRemoteConnections && remoteMachineName && <IconButton icon="remote" label="Manage remote VS Code connection" disabled={busy} onClick={onRemoteConnections} />}<IconButton icon="refresh" label="Refresh original conversation" disabled={busy} onClick={() => setRevision((value) => value + 1)} /><IconButton icon="debug-disconnect" label="Detach conversation" disabled={busy} onClick={onDetach} /><IconButton icon="layout-sidebar-right-off" label="Hide chat panel" onClick={onClose} /></div></header>
     <div className="chat-context"><Icon name="vscode" /><div><strong>{snapshot?.session.title ?? 'GitHub Copilot in VS Code'}</strong><span title={nativeSessionId}>{nativeSessionId}</span></div><span className="context-badge">{task.id}</span></div>
-    <div className="session-toolbar"><span className="session-connection-state">{snapshot?.connectionState === 'offline' ? 'Not connected' : snapshot?.connectionState === 'unsupported' ? 'Bridge update required' : snapshot?.responding ? 'Agent responding' : waiting ? 'Delivery pending' : 'Original session'}</span><div className="header-actions">{bridge?.connect && snapshot?.connectionState !== 'connected' && !snapshot?.canSend && <button type="button" className="text-button" disabled={busy || !snapshot} onClick={() => { void connect() }}><Icon name="plug" />Connect VS Code</button>}<IconButton icon="link-external" label="Open in VS Code" disabled={busy || !bridge} onClick={() => { void open() }} /></div></div>
+    <div className="session-toolbar"><span className="session-connection-state">{snapshot?.connectionState === 'offline' || remoteMachineName && !snapshot ? 'Not connected' : snapshot?.connectionState === 'unsupported' ? 'Bridge update required' : snapshot?.responding ? 'Agent responding' : waiting ? 'Delivery pending' : 'Original session'}</span><div className="header-actions">{bridge?.connect && snapshot?.connectionState !== 'connected' && !snapshot?.canSend && <button type="button" className="text-button" disabled={busy || !snapshot && !remoteMachineName} onClick={() => { void connect() }}><Icon name="plug" />{remoteMachineName ? 'Connect SSH' : 'Connect VS Code'}</button>}{!remoteMachineName && <IconButton icon="link-external" label="Open in VS Code" disabled={busy || !bridge} onClick={() => { void open() }} />}</div></div>
     <div className="vscode-execution-identity"><Icon name="server" /><span>{executionName}</span></div>
     {(error || readError) && <p className="copilot-error vscode-chat-notice" role="alert">{error ?? readError}</p>}
     {snapshot?.bridgeError && !readError && !bridge?.send && <p className="vscode-chat-notice muted" role="status">{snapshot.bridgeError}</p>}

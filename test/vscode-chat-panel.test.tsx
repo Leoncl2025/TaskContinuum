@@ -3,21 +3,22 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { VSCodeChatPanel } from '../src/renderer/components/VSCodeChatPanel'
 import { demoTasks } from '../src/renderer/data/tasks'
-import type { VSCodeChatBridge, VSCodeChatDelivery, VSCodeChatIdentity, VSCodeChatView } from '../src/shared/vscodeChat'
+import type { VSCodeChatBridge, VSCodeChatDelivery, VSCodeChatView } from '../src/shared/vscodeChat'
 import type { SessionSnapshot } from '../src/shared/sessions'
+import type { VSCodeChatTarget } from '../src/shared/remoteVSCode'
 
 afterEach(() => { delete window.vscodeChat })
 const identity = { nativeSessionId: 'original', workspaceStorageId: 'a'.repeat(32) }
 
 function fixture() {
-  const listeners = new Set<(identity: VSCodeChatIdentity) => void>()
+  const listeners = new Set<(identity: VSCodeChatTarget) => void>()
   const bridge: VSCodeChatBridge = {
     read: vi.fn(async (): Promise<SessionSnapshot> => ({ session: { id: 'original', source: 'vscode', title: 'Existing conversation', updatedAt: '2026-09-07T00:00:00Z' }, messages: [{ id: 'answer', role: 'assistant', text: 'Original answer', status: 'complete' }] })),
     open: vi.fn(async () => {}), watch: vi.fn(async () => {}),
     onChange: (listener) => { listeners.add(listener); return () => listeners.delete(listener) },
   }
   window.vscodeChat = bridge
-  return { bridge, changed: () => { for (const listener of listeners) listener(identity) } }
+  return { bridge, changed: (target: VSCodeChatTarget = identity) => { for (const listener of listeners) listener(target) } }
 }
 
 describe('original VS Code conversation panel', () => {
@@ -143,5 +144,33 @@ describe('original VS Code conversation panel', () => {
     expect(screen.getByRole('textbox')).toHaveValue('Unsent text')
     expect(screen.getByRole('button', { name: 'Send to original VS Code session' })).toBeDisabled()
     expect(bridge.send).not.toHaveBeenCalled()
+  })
+
+  it('routes remote reads and sends with the execution machine and never opens a local substitute', async () => {
+    const { bridge, changed } = fixture()
+    const target = { ...identity, remoteMachineName: 'Machine-B' }
+    vi.mocked(bridge.read).mockRejectedValue(new Error('Import a private invitation first.'))
+    bridge.connect = vi.fn(async () => {})
+    const participant = { username: 'Alice', machineName: 'Machine-A' }
+    const execution = { agentName: 'GitHub Copilot', machineName: 'Machine-B' }
+    bridge.send = vi.fn(async (_target, id, text): Promise<VSCodeChatDelivery> => ({ id, text, nativeSessionId: identity.nativeSessionId, state: 'pending', createdAt: new Date().toISOString(), participant, execution }))
+    render(<VSCodeChatPanel task={demoTasks[1]} identity={target} onDetach={vi.fn()} onClose={vi.fn()} onRemoteAccess={vi.fn()} onRemoteConnections={vi.fn()} />)
+    await screen.findByRole('alert')
+    expect(bridge.read).toHaveBeenCalledWith(target)
+    expect(bridge.watch).toHaveBeenCalledWith(target)
+    expect(screen.queryByRole('button', { name: 'Open in VS Code' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Share original conversation remotely' })).not.toBeInTheDocument()
+    const calls = vi.mocked(bridge.read).mock.calls.length
+    act(() => changed())
+    expect(bridge.read).toHaveBeenCalledTimes(calls)
+    const snapshot: VSCodeChatView = { session: { id: 'original', title: 'Original on B', source: 'vscode', updatedAt: '' }, messages: [], canSend: true, connectionState: 'connected', participant, execution }
+    vi.mocked(bridge.read).mockResolvedValue(snapshot)
+    await userEvent.click(screen.getByRole('button', { name: 'Connect SSH' }))
+    expect(bridge.connect).toHaveBeenCalledWith(target)
+    await screen.findByText('Original on B')
+    await userEvent.type(screen.getByRole('textbox'), 'Continue remotely')
+    await userEvent.click(screen.getByRole('button', { name: 'Send to original VS Code session' }))
+    expect(bridge.send).toHaveBeenCalledWith(target, expect.any(String), 'Continue remotely')
+    expect(bridge.open).not.toHaveBeenCalled()
   })
 })

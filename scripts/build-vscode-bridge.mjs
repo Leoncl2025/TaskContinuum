@@ -1,5 +1,6 @@
 import { copyFile, mkdir, readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
+import { isBuiltin } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { build } from 'vite'
 import { createVSIX } from '@vscode/vsce'
@@ -11,6 +12,16 @@ const packageName = `taskcontinuum-vscode-bridge-${manifest.version}.vsix`
 await build({
   configFile: false,
   root,
+  plugins: [{
+    name: 'companion-runtime-boundary',
+    generateBundle(_options, bundle) {
+      for (const chunk of Object.values(bundle)) {
+        if (chunk.type !== 'chunk') continue
+        const unsupported = [...chunk.imports, ...chunk.dynamicImports].filter((name) => name !== 'vscode' && !isBuiltin(name) && !Object.hasOwn(bundle, name))
+        if (unsupported.length) throw new Error(`Unbundled companion runtime dependencies: ${unsupported.join(', ')}`)
+      }
+    },
+  }],
   build: {
     ssr: true,
     outDir: resolve(root, 'vscode-bridge/out'),

@@ -34,6 +34,25 @@
 .vscode-execution-identity { display: flex; align-items: flex-start; gap: 7px; padding: 8px 14px; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; flex-shrink: 0; }
 .vscode-execution-identity > span { min-width: 0; }
 .vscode-chat-notice { margin: 0; padding: 8px 14px; font-size: 11px; overflow-wrap: anywhere; flex-shrink: 0; max-height: 100px; overflow: auto; }
+.remote-vscode-dialog { width: min(620px, calc(100vw - 24px)); }
+.remote-vscode-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.remote-vscode-import { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; margin-block: 18px; }
+.remote-vscode-import .form-field { flex: 1; min-width: 160px; margin: 0; }
+.remote-vscode-list { max-height: 50vh; overflow: auto; }
+.remote-vscode-row { padding-block: 14px; border-top: 1px solid var(--border); }
+.remote-vscode-row-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.remote-vscode-row-title strong { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+.remote-vscode-meta { margin-block: 12px; font-size: 12px; }
+.remote-vscode-meta > div { display: grid; grid-template-columns: 86px minmax(0, 1fr); gap: 8px; margin-block: 4px; }
+.remote-vscode-meta dt { color: var(--muted); }
+.remote-vscode-meta dd { margin: 0; overflow-wrap: anywhere; }
+.remote-transport-picker { border: 0; padding: 0 0 14px; margin: 0; display: flex; flex-wrap: wrap; gap: 14px; }
+.remote-transport-picker label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
+.dev-tunnel-controls { padding-block: 12px; border-block: 1px solid var(--border); margin-bottom: 16px; }
+.dev-tunnel-controls .remote-vscode-actions { margin-top: 10px; }
+.dev-tunnel-controls .copilot-error { overflow-wrap: anywhere; font-size: 12px; }
+.dev-tunnel-details { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; color: var(--muted); font-size: 11px; }
+.dev-tunnel-details code { overflow-wrap: anywhere; min-width: 0; }
 .vscode-composer-identity { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .copilot-error { color: #e58d83; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; }
 .workbench[data-theme='light'] .copilot-error { color: #ad2f22; }

@@ -5,6 +5,7 @@ export type SessionLink = {
   provider: 'vscode-copilot'
   sessionId: string
   workspaceStorageId: string
+  remoteMachineName?: string
 }
 
 export interface SessionLinksDocument {
@@ -22,6 +23,7 @@ export interface UpdateSessionLink {
   taskId: string
   sessionId: string | null
   vscodeWorkspaceStorageId?: string
+  vscodeRemoteMachineName?: string
   expectedRevision: string | null
 }
 

@@ -59,4 +59,22 @@ describe('original VS Code message delivery', () => {
     expect(dispatch).not.toHaveBeenCalled()
     await service.close()
   })
+
+  it('attributes remote clients independently from the execution owner and rejects cross-client retries', async () => {
+    const setup = await fixture()
+    const remote = { clientId: randomUUID(), username: 'Remote user', machineName: 'Machine C' }
+    const request = { id: randomUUID(), text: 'Work on the original Agent machine' }
+    const dispatch = vi.fn(async () => ({ state: 'submitted' as const, nativeRequestId: 'remote-native-request' }))
+    const service = new VSCodeChatDeliveryService(setup.root, setup.store, setup.participant, setup.execution, dispatch)
+    try {
+      const record = await service.submit(setup.identity, request, remote)
+      expect(record).toMatchObject({ participant: remote, execution: { machineName: 'Machine B' } })
+      await vi.waitFor(async () => expect((await service.list(setup.identity))[0].state).toBe('submitted'))
+      expect(await service.submit(setup.identity, request, remote)).toMatchObject({ state: 'submitted' })
+      await expect(service.submit(setup.identity, request, { ...remote, clientId: randomUUID() })).rejects.toThrow('different submission')
+      await expect(service.submit(setup.identity, request)).rejects.toThrow('different submission')
+      expect(dispatch).toHaveBeenCalledTimes(1)
+      expect(deliveryPrompt(record)).toContain('Message from "Remote user" on "Machine C"')
+    } finally { await service.close() }
+  })
 })

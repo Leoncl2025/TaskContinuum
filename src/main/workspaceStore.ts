@@ -6,6 +6,7 @@ import type { WorkspaceDescriptor, WorkspaceSnapshot, WorkspaceState } from '../
 import { readTaskWorkspace } from './workspaceReader'
 import { migrateRepositorySessionLinks, readRepositorySessionLinks, sessionLinkSchema, updateRepositorySessionLink } from './repositorySessionLinks'
 import type { SessionLinksSnapshot } from '../shared/sessionBindings'
+import { remoteMachineSchema } from './vscodeRemoteProtocol'
 
 const descriptorSchema = z.object({ id: z.string().regex(/^[a-f\d]{64}$/), name: z.string().max(300), title: z.string().max(200), root: z.string().min(1).max(4096) })
 const stateSchema = z.object({ currentId: z.string().nullable(), recent: z.array(descriptorSchema).max(10) })
@@ -13,6 +14,7 @@ const linkChangeSchema = z.object({
   workspaceId: z.string().regex(/^[a-f\d]{64}$/), taskId: z.string().regex(/^T-\d{4,}$/),
   sessionId: z.string().min(1).max(240).regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/).nullable(),
   vscodeWorkspaceStorageId: z.string().regex(/^[a-f0-9]{32}$/).optional(),
+  vscodeRemoteMachineName: remoteMachineSchema.optional(),
   expectedRevision: z.string().regex(/^[a-f\d]{64}$/).nullable(),
 }).strict()
 const migrationSchema = z.object({
@@ -130,7 +132,7 @@ export class WorkspaceStore {
       if (request.sessionId !== null && !(await readTaskWorkspace(workspace.root)).tasks.some((task) => task.id === request.taskId)) {
         throw new Error('This task no longer exists in the selected workspace.')
       }
-      return updateRepositorySessionLink(workspace.root, request.taskId, request.sessionId, request.expectedRevision, request.vscodeWorkspaceStorageId)
+      return updateRepositorySessionLink(workspace.root, request.taskId, request.sessionId, request.expectedRevision, request.vscodeWorkspaceStorageId, request.vscodeRemoteMachineName)
     })
   }
 

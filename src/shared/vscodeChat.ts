@@ -1,4 +1,5 @@
 import type { SessionSnapshot } from './sessions'
+import type { VSCodeChatTarget } from './remoteVSCode'
 
 export interface VSCodeChatIdentity {
   nativeSessionId: string
@@ -6,6 +7,7 @@ export interface VSCodeChatIdentity {
 }
 
 export interface VSCodeChatParticipant {
+  clientId?: string
   username: string
   machineName: string
 }
@@ -78,10 +80,10 @@ export function identityFromVSCodeBridgeUri(value: string, scheme: string, works
 }
 
 export interface VSCodeChatBridge {
-  read(identity: VSCodeChatIdentity): Promise<VSCodeChatView>
-  connect?(identity: VSCodeChatIdentity): Promise<void>
-  open(identity: VSCodeChatIdentity): Promise<void>
-  send?(identity: VSCodeChatIdentity, commandId: string, text: string): Promise<VSCodeChatDelivery>
-  watch(identity: VSCodeChatIdentity | null): Promise<void>
-  onChange(listener: (identity: VSCodeChatIdentity) => void): () => void
+  read(identity: VSCodeChatTarget): Promise<VSCodeChatView>
+  connect?(identity: VSCodeChatTarget): Promise<void>
+  open(identity: VSCodeChatTarget): Promise<void>
+  send?(identity: VSCodeChatTarget, commandId: string, text: string): Promise<VSCodeChatDelivery>
+  watch(identity: VSCodeChatTarget | null): Promise<void>
+  onChange(listener: (identity: VSCodeChatTarget) => void): () => void
 }

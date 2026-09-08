@@ -24,8 +24,10 @@ import { WorkspacePicker } from './components/WorkspacePicker'
 import { SharedSessionPanel } from './components/SharedSessionPanel'
 import { VSCodeChatPanel } from './components/VSCodeChatPanel'
 import type { SharedPanelStatus } from './components/SharedSessionPanel'
+import { RemoteVSCodeAccessDialog, RemoteVSCodeDialog } from './components/RemoteVSCodeDialogs'
+import type { RemoteVSCodeConnection } from '../shared/remoteVSCode'
 
-type DialogName = 'quick-open' | 'settings' | 'new-task' | 'clear-chat' | 'migrate-links' | null
+type DialogName = 'quick-open' | 'settings' | 'new-task' | 'clear-chat' | 'migrate-links' | 'remote-sessions' | 'remote-access' | null
 
 export default function App({ adapter: suppliedAdapter }: { adapter?: ChatAdapter }) {
   const workspaces = useWorkspaces()
@@ -66,7 +68,7 @@ function Workbench({ suppliedAdapter, workspaces }: { suppliedAdapter?: ChatAdap
   const chatVisible = compact ? compactPanel === 'chat' : layout.chat
   const activeResponses = Object.values(chats.threads).filter((thread) => thread.messages.some((message) => message.status === 'streaming')).length
   const interaction = copilot.interactions[0]
-  const workspaceLocked = activeResponses > 0 || Boolean(copilot.busy) || links.busy || Boolean(sessionDialog) || Boolean(interaction) || dialog === 'migrate-links' || sharedChat && (sharedStatus.busy || sharedStatus.pending)
+  const workspaceLocked = activeResponses > 0 || Boolean(copilot.busy) || links.busy || Boolean(sessionDialog) || Boolean(interaction) || dialog === 'migrate-links' || dialog === 'remote-sessions' || dialog === 'remote-access' || sharedChat && (sharedStatus.busy || sharedStatus.pending)
 
   useEffect(() => { saveLayout(layout) }, [layout])
   const currentSession = useEffectEvent((taskId: string) => chats.getThread(taskId).sessionId)
@@ -185,6 +187,23 @@ function Workbench({ suppliedAdapter, workspaces }: { suppliedAdapter?: ChatAdap
     })
   }
 
+  async function linkRemoteVSCode(connection: RemoteVSCodeConnection): Promise<void> {
+    if (!workspace || !selectedId || !links.ready) throw new Error('Select a task in a real workspace before linking remote VS Code.')
+    const binding = { id: connection.target.nativeSessionId, title: connection.title, vscodeWorkspaceStorageId: connection.target.workspaceStorageId, remoteMachineName: connection.target.remoteMachineName }
+    const existingTask = Object.entries(bindings).find(([, current]) => sessionBindingKey(current) === sessionBindingKey(binding))?.[0]
+    if (existingTask) {
+      if (!tasks.some((item) => item.id === existingTask)) throw new Error(`The remote conversation belongs to unavailable task ${existingTask}.`)
+      selectTask(existingTask)
+    } else {
+      if (bindings[selectedId]) throw new Error('Detach the current conversation before linking a different remote session.')
+      await links.attach(selectedId, binding)
+      chats.clear(selectedId)
+    }
+    setDialog(null)
+    setSharedChat(false)
+    showChat()
+  }
+
   async function openSession(session: LocalSessionSummary): Promise<void> {
     const bridge = copilot.bridge
     if (!bridge) return
@@ -301,6 +320,7 @@ function Workbench({ suppliedAdapter, workspaces }: { suppliedAdapter?: ChatAdap
         <button type="button" className={sidebarVisible && view === 'tasks' ? 'activity active' : 'activity'} aria-label="Tasks" title="Tasks" aria-pressed={sidebarVisible && view === 'tasks'} onClick={() => openSidebar('tasks')}><Icon name="checklist" /></button>
         <button type="button" className={sidebarVisible && view === 'sessions' ? 'activity active' : 'activity'} aria-label="Sessions" title="Local Copilot and VS Code sessions" aria-pressed={sidebarVisible && view === 'sessions'} onClick={() => openSidebar('sessions')}><Icon name="comment-discussion" />{activeResponses > 0 && <span className="activity-badge">{activeResponses}</span>}</button>
         {workspace && window.sharedSessions && <button type="button" className={sharedChat && chatVisible ? 'activity active' : 'activity'} aria-label="Shared sessions" title="Shared sessions" aria-pressed={sharedChat && chatVisible} onClick={() => { setSharedChat((value) => !value); showChat() }}><Icon name="organization" /></button>}
+        {workspace && window.remoteVSCode && <button type="button" className="activity" aria-label="Remote VS Code sessions" title="Remote VS Code sessions" onClick={() => setDialog('remote-sessions')}><Icon name="remote" /></button>}
         <button type="button" className="activity" aria-label="Search tasks" title="Search tasks" onClick={() => { openSidebar('tasks'); requestAnimationFrame(() => document.getElementById('task-filter')?.focus()) }}><Icon name="search" /></button>
         <div className="activity-spacer" />
         <span className="avatar profile-avatar" title={workspace ? 'Local profile' : 'Local demo profile'}>Y</span>
@@ -332,7 +352,7 @@ function Workbench({ suppliedAdapter, workspaces }: { suppliedAdapter?: ChatAdap
         </div>
       </main>}
 
-      {chatVisible && sharedChat && workspace ? <SharedSessionPanel task={task} root={workspace.root} onStatus={setSharedStatus} onClose={() => setSharedChat(false)} /> : chatVisible && task && vscodeBinding ? <VSCodeChatPanel key={`${task.id}:${sessionBindingKey(vscodeBinding)}`} task={task} identity={{ nativeSessionId: vscodeBinding.id, workspaceStorageId: vscodeBinding.vscodeWorkspaceStorageId! }} onDetach={() => setDialog('clear-chat')} onClose={toggleChat} /> : chatVisible && (task ? <ChatPanel task={task} thread={chats.getThread(task.id)} adapter={adapter} connected={copilot.status.state === 'ready'} boundSessionId={bindings[task.id]?.id} disabled={!links.ready || Boolean(copilot.busy)} sessionName={copilot.listing?.sessions.find((session) => session.id === bindings[task.id]?.id)?.title ?? bindings[task.id]?.title} onSessions={copilot.bridge ? () => openSidebar('sessions') : undefined} onConnect={connectCopilot} onDraft={(value) => chats.setDraft(task.id, value)} onSend={(value) => { if (links.ready && (!live || chats.getThread(task.id).sessionId === bindings[task.id]?.id)) void chats.send(task, value) }} onStop={() => chats.stop(task.id)} onClear={() => setDialog('clear-chat')} onClose={toggleChat} /> : <aside className="chat-panel empty-chat" aria-label="Task chat"><IconButton icon="close" label="Hide chat panel" onClick={toggleChat} /><p>Select a task to start a conversation.</p></aside>)}
+      {chatVisible && sharedChat && workspace ? <SharedSessionPanel task={task} root={workspace.root} onStatus={setSharedStatus} onClose={() => setSharedChat(false)} /> : chatVisible && task && vscodeBinding ? <VSCodeChatPanel key={`${task.id}:${sessionBindingKey(vscodeBinding)}`} task={task} identity={{ nativeSessionId: vscodeBinding.id, workspaceStorageId: vscodeBinding.vscodeWorkspaceStorageId!, ...(vscodeBinding.remoteMachineName ? { remoteMachineName: vscodeBinding.remoteMachineName } : {}) }} onDetach={() => setDialog('clear-chat')} onClose={toggleChat} onRemoteAccess={workspace && window.remoteVSCode ? () => setDialog('remote-access') : undefined} onRemoteConnections={workspace && window.remoteVSCode ? () => setDialog('remote-sessions') : undefined} /> : chatVisible && (task ? <ChatPanel task={task} thread={chats.getThread(task.id)} adapter={adapter} connected={copilot.status.state === 'ready'} boundSessionId={bindings[task.id]?.id} disabled={!links.ready || Boolean(copilot.busy)} sessionName={copilot.listing?.sessions.find((session) => session.id === bindings[task.id]?.id)?.title ?? bindings[task.id]?.title} onSessions={copilot.bridge ? () => openSidebar('sessions') : undefined} onConnect={connectCopilot} onDraft={(value) => chats.setDraft(task.id, value)} onSend={(value) => { if (links.ready && (!live || chats.getThread(task.id).sessionId === bindings[task.id]?.id)) void chats.send(task, value) }} onStop={() => chats.stop(task.id)} onClear={() => setDialog('clear-chat')} onClose={toggleChat} /> : <aside className="chat-panel empty-chat" aria-label="Task chat"><IconButton icon="close" label="Hide chat panel" onClick={toggleChat} /><p>Select a task to start a conversation.</p></aside>)}
     </div>
 
     <footer className="statusbar" aria-label="Workbench status"><span className="local-status"><Icon name={sharedChat ? 'organization' : originalChat ? 'vscode' : live ? 'terminal' : workspace ? 'folder' : 'beaker'} />{sharedChat ? 'SHARED SESSION' : originalChat ? 'VS CODE CHAT' : live ? 'LOCAL COPILOT' : workspace ? 'LOCAL WORKSPACE' : 'LOCAL DEMO'}</span><span><Icon name="checklist" />{tasks.length} {!workspace && live ? 'sample tasks' : 'tasks'}</span><span>{selectedId ?? 'No task selected'}</span><span className="statusbar-spacer" /><span className="response-status" role="status">{workspaces.busy ? 'Loading workspace...' : sharedChat ? sharedStatus.message : links.busy ? 'Saving or loading session links...' : copilot.busy ?? (originalChat ? 'Execution in VS Code' : activeResponses ? `${activeResponses} responding` : 'Ready')}</span><button type="button" onClick={() => { if (sharedChat) showChat(); else if (copilot.bridge) openSidebar('sessions'); else setDialog('settings') }}><Icon name={originalChat ? 'link' : 'plug'} />{sharedChat ? sharedStatus.online ? 'Shared Host connected' : 'Shared Host offline' : originalChat ? 'Original session linked' : copilot.status.state === 'ready' ? 'Copilot connected' : live ? 'Copilot disconnected' : 'No services connected'}</button><span className="platform-status">{desktopError ? 'Desktop bridge error' : desktop ? `Desktop · ${desktop.version}` : 'Browser preview'}</span></footer>
@@ -347,6 +367,8 @@ function Workbench({ suppliedAdapter, workspaces }: { suppliedAdapter?: ChatAdap
 
     {sessionDialog && copilot.bridge && <CopilotSessionDialog key={sessionDialog.kind === 'import' ? sessionDialog.preview.token : 'new'} preview={sessionDialog.kind === 'import' ? sessionDialog.preview : undefined} directory={workspace?.root ?? copilot.status.workingDirectory} models={copilot.models} ready={copilot.status.state === 'ready'} busy={Boolean(copilot.busy)} error={copilot.error} onBrowse={() => copilot.run('Choosing directory', () => copilot.bridge!.chooseDirectory())} onConnect={connectCopilot} onSubmit={(options) => { void createSession(options) }} onLink={sessionDialog.kind === 'import' && window.vscodeChat ? () => { void linkOriginalVSCode() } : undefined} onClose={() => setSessionDialog(null)} />}
     {interaction && <CopilotInteractionDialog key={interaction.id} interaction={interaction} busy={Boolean(copilot.busy)} error={copilot.error} onRespond={(value) => { void copilot.respond(interaction.id, value) }} />}
+    {dialog === 'remote-sessions' && workspace && <RemoteVSCodeDialog taskId={selectedId ?? undefined} onLink={linkRemoteVSCode} onClose={() => setDialog(null)} />}
+    {dialog === 'remote-access' && workspace && vscodeBinding && !vscodeBinding.remoteMachineName && <RemoteVSCodeAccessDialog identity={{ nativeSessionId: vscodeBinding.id, workspaceStorageId: vscodeBinding.vscodeWorkspaceStorageId! }} onClose={() => setDialog(null)} />}
 
     {dialog === 'new-task' && !workspace && <Dialog title="New demo task" onClose={() => setDialog(null)}><form onSubmit={(event) => {
       event.preventDefault()

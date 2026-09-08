@@ -48,6 +48,19 @@ product affiliation or grant permission to use hosted Copilot services.
 - Transitive dependencies retain their upstream notices in the dependency installation.
   Markdown parser modules are included in the main-process bundle for ESM compatibility.
 
+## Managed remote transport
+
+- `@microsoft/dev-tunnels-connections`, `@microsoft/dev-tunnels-management`, and
+  `@microsoft/dev-tunnels-contracts` 1.3.56: https://github.com/microsoft/dev-tunnels (MIT).
+- `ssh2` 1.17.0: https://github.com/mscdex/ssh2 (MIT). It provides the application-owned
+  restricted SSH server and client, as well as isolated test fixtures.
+- These packages run in Electron main, not in the companion extension. Their SSH,
+  WebSocket, HTTP, and other transitive packages retain their upstream license files.
+- The official Dev Tunnel CLI is installed independently and is not redistributed
+  by this app. Microsoft service terms and organizational policies still apply.
+- Legacy SSH-alias forwarding invokes the operating system's OpenSSH executable,
+  which is not bundled and retains its own license notices.
+
 ## MIT permission notice
 
 The following permission text accompanies the MIT-licensed components above;
@@ -73,10 +86,8 @@ SOFTWARE.
 
 ## Development dependencies
 
-`ssh2` 1.17.0 (https://github.com/mscdex/ssh2, MIT) supplies only the isolated
-SSH test server; `@types/ssh2` retains its upstream DefinitelyTyped MIT notice.
-Production forwarding uses the operating system's OpenSSH executable, which is
-not bundled by this application and retains its own license notices.
+`@types/ssh2` retains its upstream DefinitelyTyped MIT notice. The `ssh2` runtime
+is listed under managed remote transport above.
 
 The local companion is packaged with `@vscode/vsce` 3.7.1
 (https://github.com/microsoft/vscode-vsce, MIT) and typed with `@types/vscode` 1.134.0

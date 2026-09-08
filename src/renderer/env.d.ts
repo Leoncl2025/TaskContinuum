@@ -3,6 +3,7 @@ import type { CopilotBridge } from '../shared/sessions'
 import type { WorkspaceBridge } from '../shared/workspace'
 import type { SharedDesktopBridge } from '../shared/sharedSessions'
 import type { VSCodeChatBridge } from '../shared/vscodeChat'
+import type { RemoteVSCodeBridge } from '../shared/remoteVSCode'
 
 declare global {
   interface Window {
@@ -11,5 +12,6 @@ declare global {
     workspace?: WorkspaceBridge
     sharedSessions?: SharedDesktopBridge
     vscodeChat?: VSCodeChatBridge
+    remoteVSCode?: RemoteVSCodeBridge
   }
 }

@@ -4,7 +4,7 @@ import type { VSCodeChatDelivery, VSCodeChatIdentity, VSCodeChatParticipant, VSC
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 import type { VSCodeSessionStore } from './vscodeSessions'
 
-export const participantSchema = z.object({ username: z.string().trim().min(1).max(300), machineName: z.string().trim().min(1).max(300) }).strict()
+export const participantSchema = z.object({ clientId: z.uuid().optional(), username: z.string().trim().min(1).max(300), machineName: z.string().trim().min(1).max(300) }).strict()
 export const executionIdentitySchema = z.object({ agentName: z.string().trim().min(1).max(300), machineName: z.string().trim().min(1).max(300) }).strict()
 export const deliverySchema = z.object({
   id: z.uuid(), nativeSessionId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,199}$/), text: z.string().trim().min(1).max(4000),
@@ -71,23 +71,31 @@ export class VSCodeChatDeliveryService {
     })
   }
 
-  submit(identity: VSCodeChatIdentity, value: unknown): Promise<VSCodeChatDelivery> {
+  submit(identity: VSCodeChatIdentity, value: unknown, authorizedParticipant: VSCodeChatParticipant = this.participant, assertAuthorized: () => void = () => {}): Promise<VSCodeChatDelivery> {
     const request = z.object({ id: z.uuid(), text: z.string().trim().min(1).max(4000) }).strict().parse(value)
+    const participant = participantSchema.parse(authorizedParticipant)
     return this.update(async () => {
+      assertAuthorized()
       if (this.closed) throw new Error('The VS Code bridge is stopping.')
       const prior = this.records.get(request.id)
       if (prior) {
-        if (prior.nativeSessionId !== identity.nativeSessionId || prior.text !== request.text || prior.participant.username !== this.participant.username || prior.participant.machineName !== this.participant.machineName) throw new Error('This message ID belongs to a different submission.')
+        if (prior.nativeSessionId !== identity.nativeSessionId || prior.text !== request.text || prior.participant.clientId !== participant.clientId || prior.participant.username !== participant.username || prior.participant.machineName !== participant.machineName) throw new Error('This message ID belongs to a different submission.')
         return structuredClone(prior)
       }
       if (this.running.size) throw new Error('Another message is being delivered. Wait for its confirmation before sending again.')
       if (this.records.size >= 500) throw new Error('The local delivery journal has reached its 500-message limit.')
       const original = await this.store.locateOriginal(identity)
+      assertAuthorized()
       if (original.state.turns.at(-1)?.complete === false) throw new Error('The original VS Code conversation is still responding. Wait or stop it in VS Code first.')
       if (original.state.hasDraft) throw new Error('The original VS Code conversation has an unsent draft. Send or clear it in VS Code first.')
       if ([...this.records.values()].some((record) => record.nativeSessionId === identity.nativeSessionId && (record.state === 'pending' || record.state === 'uncertain'))) throw new Error('An earlier delivery is unconfirmed. Inspect the original conversation before sending another message.')
-      const delivery: VSCodeChatDelivery = { ...request, nativeSessionId: identity.nativeSessionId, participant: this.participant, execution: this.execution, createdAt: new Date().toISOString(), state: 'pending' }
+      const delivery: VSCodeChatDelivery = { ...request, nativeSessionId: identity.nativeSessionId, participant, execution: this.execution, createdAt: new Date().toISOString(), state: 'pending' }
       await this.save(delivery)
+      try { assertAuthorized() } catch {
+        const rejected: VSCodeChatDelivery = { ...delivery, state: 'failed', error: 'Remote access ended before dispatch. The message was not sent.' }
+        await this.save(rejected)
+        return structuredClone(rejected)
+      }
       const controller = new AbortController()
       this.running.set(request.id, controller)
       const operation = this.dispatch(identity, structuredClone(delivery), controller.signal).then(async (result) => {
@@ -106,5 +114,12 @@ export class VSCodeChatDeliveryService {
     for (const controller of this.running.values()) controller.abort()
     await Promise.all(this.operations.values())
     await this.writing
+  }
+
+  revokeParticipant(clientId: string, nativeSessionId: string): void {
+    for (const [id, controller] of this.running) {
+      const record = this.records.get(id)
+      if (record?.participant.clientId === clientId && record.nativeSessionId === nativeSessionId) controller.abort(new Error('Remote access was revoked. Inspect the original conversation before retrying.'))
+    }
   }
 }

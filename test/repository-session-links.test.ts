@@ -45,6 +45,24 @@ describe('versioned task/session links', () => {
     expect(await readFile(join(root, sessionLinksPath), 'utf8')).not.toContain(root)
   })
 
+  it('distinguishes remote execution machines without storing invitation credentials or local routes', async () => {
+    const root = await folder()
+    const workspaceId = 'a'.repeat(32)
+    const local = await updateRepositorySessionLink(root, 'T-0001', 'same-native', null, workspaceId)
+    const remote = await updateRepositorySessionLink(root, 'T-0002', 'same-native', local.revision, workspaceId, 'Machine-B')
+    expect(remote.document.bindings['T-0002']).toEqual({ provider: 'vscode-copilot', sessionId: 'same-native', workspaceStorageId: workspaceId, remoteMachineName: 'Machine-B' })
+    await expect(updateRepositorySessionLink(root, 'T-0003', 'same-native', remote.revision, workspaceId, 'machine-b')).rejects.toThrow('already linked to T-0002')
+    const another = await updateRepositorySessionLink(root, 'T-0003', 'same-native', remote.revision, workspaceId, 'Machine-C')
+    const clone = await folder()
+    await mkdir(join(clone, '.taskcontinuum'))
+    const content = await readFile(join(root, sessionLinksPath), 'utf8')
+    await writeFile(join(clone, sessionLinksPath), content)
+    expect(await readRepositorySessionLinks(clone)).toEqual(another)
+    expect(content).not.toMatch(/token|hostAlias|port|clientId/)
+    await expect(updateRepositorySessionLink(root, 'T-0004', 'native', another.revision, undefined, 'Machine-B')).rejects.toThrow('original workspace identity')
+    await expect(updateRepositorySessionLink(root, 'T-0004', 'native', another.revision, workspaceId, '../Machine-B')).rejects.toThrow()
+  })
+
   it('preserves other task links and never implicitly moves a session to another task', async () => {
     const root = await folder()
     const first = await updateRepositorySessionLink(root, 'T-0002', 'first-session', null)

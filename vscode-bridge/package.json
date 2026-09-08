@@ -1,8 +1,8 @@
 {
   "name": "vscode-bridge",
   "displayName": "Task Continuum Bridge",
-  "description": "Send attributed messages to an existing VS Code Copilot conversation from Task Continuum.",
-  "version": "0.2.6",
+  "description": "Read and send to an original VS Code Copilot conversation locally or through scoped SSH invitations.",
+  "version": "0.3.0",
   "publisher": "taskcontinuum",
   "license": "UNLICENSED",
   "engines": {

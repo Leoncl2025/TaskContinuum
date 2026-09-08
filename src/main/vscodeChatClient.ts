@@ -6,10 +6,13 @@ import { vsCodeBridgeConnectUri } from '../shared/vscodeChat'
 import { companionSchema, vscodeIdentitySchema } from './vscodeChatCompanion'
 import { readJsonBounded } from './shared/storage'
 import type { VSCodeSessionStore } from './vscodeSessions'
-import { deliveryPrompt, deliverySchema, executionIdentitySchema, participantSchema } from './vscodeChatDelivery'
-import { boundedHistory } from './localSessionHost'
+import { deliverySchema, executionIdentitySchema, participantSchema } from './vscodeChatDelivery'
+import { originalChatView } from './vscodeChatView'
+import { remoteClientSchema, remoteGrantSchema, remoteInvitationSchema } from './vscodeRemoteProtocol'
+import type { RemoteVSCodeClientIdentity, RemoteVSCodeGrant } from '../shared/remoteVSCode'
+import type { RemoteVSCodeInvitation } from './vscodeRemoteProtocol'
 
-const identityResponse = z.object({ protocol: z.literal(1), instanceId: z.uuid(), workspaceStorageId: z.string(), vscodeVersion: z.string(), participant: participantSchema.optional(), execution: executionIdentitySchema.optional(), capabilities: z.object({ open: z.literal(true), send: z.boolean() }).strict() }).strict()
+const identityResponse = z.object({ protocol: z.literal(1), instanceId: z.uuid(), workspaceStorageId: z.string(), vscodeVersion: z.string(), participant: participantSchema.optional(), execution: executionIdentitySchema.optional(), capabilities: z.object({ open: z.literal(true), send: z.boolean(), remote: z.boolean().optional() }).strict() }).strict()
 interface CompanionConnection { descriptor: z.infer<typeof companionSchema>; actual: z.infer<typeof identityResponse> }
 
 async function responseJson(response: Response, maximum = 8192): Promise<unknown> {
@@ -55,7 +58,7 @@ async function discoverCompanion(directory: string, identity: VSCodeChatIdentity
   return live[0]
 }
 
-async function post(connection: CompanionConnection, path: '/open' | '/send' | '/deliveries', value: unknown, maximum = 32768): Promise<unknown> {
+async function post(connection: CompanionConnection, path: '/open' | '/send' | '/deliveries' | '/remote/grant' | '/remote/grants' | '/remote/revoke', value: unknown, maximum = 32768): Promise<unknown> {
   const { descriptor } = connection
   const response = await fetch(`http://127.0.0.1:${descriptor.port}${path}`, {
     method: 'POST', headers: { Authorization: `Bearer ${descriptor.token}`, 'Content-Type': 'application/json' },
@@ -73,6 +76,29 @@ export async function connectOriginalVSCode(store: VSCodeSessionStore, value: VS
   const identity = vscodeIdentitySchema.parse(value)
   const original = await store.locateOriginal(identity)
   await openExternal(vsCodeBridgeConnectUri(identity, original.uriScheme))
+}
+
+async function remoteAdministration(store: VSCodeSessionStore, value: VSCodeChatIdentity): Promise<CompanionConnection> {
+  const identity = vscodeIdentitySchema.parse(value)
+  const original = await store.locateOriginal(identity)
+  const connection = await discoverCompanion(original.bridgeDirectory, identity)
+  if (!connection.actual.capabilities.remote) throw new Error('Update and reconnect the execution machine\'s VS Code bridge before sharing this conversation.')
+  return connection
+}
+
+export async function grantRemoteVSCode(store: VSCodeSessionStore, value: VSCodeChatIdentity, participant: RemoteVSCodeClientIdentity, canSend: boolean): Promise<RemoteVSCodeInvitation> {
+  const identity = vscodeIdentitySchema.parse(value)
+  return remoteInvitationSchema.parse(await post(await remoteAdministration(store, identity), '/remote/grant', { ...identity, participant: remoteClientSchema.parse(participant), canSend: z.boolean().parse(canSend) }))
+}
+
+export async function listRemoteVSCodeGrants(store: VSCodeSessionStore, value: VSCodeChatIdentity): Promise<RemoteVSCodeGrant[]> {
+  const identity = vscodeIdentitySchema.parse(value)
+  return z.array(remoteGrantSchema).max(32).parse(await post(await remoteAdministration(store, identity), '/remote/grants', identity))
+}
+
+export async function revokeRemoteVSCode(store: VSCodeSessionStore, value: VSCodeChatIdentity, grantId: string): Promise<void> {
+  const identity = vscodeIdentitySchema.parse(value)
+  z.object({ revoked: z.literal(true) }).strict().parse(await post(await remoteAdministration(store, identity), '/remote/revoke', { ...identity, grantId: z.uuid().parse(grantId) }))
 }
 
 export async function openOriginalVSCode(store: VSCodeSessionStore, value: VSCodeChatIdentity): Promise<void> {
@@ -115,32 +141,8 @@ export async function readOriginalVSCode(store: VSCodeSessionStore, value: VSCod
     } catch { deliveries = [] }
   }
   if (deliveries.some((delivery) => delivery.nativeSessionId !== identity.nativeSessionId)) throw new Error('The VS Code bridge returned deliveries from a different conversation.')
-  const byRequest = new Map<string, VSCodeChatDelivery>()
-  for (const delivery of deliveries) {
-    const requestId = delivery.nativeRequestId ?? original.state.turns.find((turn) => turn.prompt === deliveryPrompt(delivery))?.id
-    if (requestId) byRequest.set(requestId, delivery)
-  }
-  const messages = original.snapshot.messages.map((message) => {
-    const delivery = message.nativeRequestId ? byRequest.get(message.nativeRequestId) : undefined
-    if (!delivery) return message
-    if (message.role === 'user') return { ...message, text: delivery.text, author: { name: delivery.participant.username, machineName: delivery.participant.machineName } }
-    const turn = original.state.turns.find((item) => item.id === message.nativeRequestId)
-    return { ...message, author: { name: message.author?.name ?? delivery.execution.agentName, machineName: delivery.execution.machineName },
-      status: turn?.cancelled ? 'cancelled' as const : turn?.error ? 'error' as const : turn?.complete ? 'complete' as const : 'streaming' as const }
-  })
-  const responding = original.state.turns.at(-1)?.complete === false
-  const blocked = deliveries.some((record) => record.state === 'pending' || record.state === 'uncertain')
   const supportsSending = Boolean(connection?.actual.capabilities.send && connection.actual.participant && connection.actual.execution)
-  const connectionState = !connection ? 'offline' : supportsSending ? 'connected' : 'unsupported'
-  if (connectionState === 'unsupported') bridgeError = 'The running VS Code bridge does not support sending. Reload the updated companion and reconnect.'
-  else if (connectionState === 'connected') {
-    if (blocked) bridgeError = deliveries.some((record) => record.state === 'uncertain') ? 'A previous delivery has an unknown outcome. Check the original conversation before sending again.' : 'Delivering to the original VS Code session.'
-    else if (responding) bridgeError = 'The original Agent is still responding. Sending becomes available after its saved state is idle.'
-    else if (original.state.mode?.kind !== 'agent') bridgeError = 'Select Agent mode in the original VS Code conversation before sending.'
-    else if (original.state.hasDraft) bridgeError = 'The original VS Code conversation has a saved draft. Send or clear it there first.'
-  }
-  return { ...original.snapshot, ...boundedHistory(messages), deliveries, responding, connectionState,
+  return originalChatView(original, deliveries, { connected: Boolean(connection), supportsSending, bridgeError,
     participant: connection?.actual.participant, execution: connection?.actual.execution,
-    canSend: Boolean(supportsSending && !responding && !blocked && !original.state.hasDraft && original.state.mode?.kind === 'agent'), bridgeError,
-  }
+  })
 }

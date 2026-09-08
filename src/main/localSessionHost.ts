@@ -6,6 +6,8 @@ import type { ImportPreview, LocalSessionSummary, SendMessageRequest, SessionLis
 import { checkedString } from './copilotService'
 import type { CopilotService } from './copilotService'
 import type { VSCodeSessionStore } from './vscodeSessions'
+import { boundedHistory } from '../shared/boundedHistory'
+export { boundedHistory } from '../shared/boundedHistory'
 
 interface StoredImport {
   sessionId: string
@@ -22,22 +24,6 @@ function validImport(value: unknown): value is StoredImport {
   return typeof record.sessionId === 'string' && typeof record.source?.id === 'string' && record.source.source === 'vscode'
     && Array.isArray(record.messages) && record.messages.every((message) => typeof message?.id === 'string'
       && typeof message.text === 'string' && ['user', 'assistant'].includes(message.role) && message.status === 'complete')
-}
-
-export function boundedHistory(messages: ChatMessage[], maximum = 60000): { messages: ChatMessage[]; truncated: boolean; omittedMessages: number } {
-  const selected: ChatMessage[] = []
-  let remaining = maximum
-  let truncated = false
-  for (const message of [...messages].reverse()) {
-    if (remaining <= 0 || selected.length >= 500) { truncated = true; break }
-    const marker = '[Earlier text omitted]\n'
-    const prefix = remaining > marker.length ? marker : ''
-    const text = message.text.length > remaining ? `${prefix}${message.text.slice(-(remaining - prefix.length))}` : message.text
-    truncated ||= text !== message.text
-    selected.unshift({ ...message, text })
-    remaining -= text.length
-  }
-  return { messages: selected, truncated, omittedMessages: messages.length - selected.length }
 }
 
 export class LocalSessionHost {

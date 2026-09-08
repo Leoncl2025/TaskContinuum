@@ -1,6 +1,6 @@
 # Task Continuum Bridge
 
-Companion to the local Task Continuum desktop. It opens an existing Copilot Chat
+Companion on the execution machine for local or remote Task Continuum desktops. It opens an existing Copilot Chat
 conversation in its original VS Code workspace and delivers explicitly submitted
 messages to that session. It does not import, fork, or start a CLI conversation.
 Replies identify the execution machine; user messages identify their sender.
@@ -24,11 +24,43 @@ Replies identify the execution machine; user messages identify their sender.
 6. Run **Task Continuum: Stop VS Code Bridge** to stop accepting deliveries. This
    cancels unconfirmed delivery work, not an already-running Copilot response.
 
-Upgrade earlier versions by installing the 0.2.6 VSIX. An already-loaded extension may
+Upgrade earlier versions by installing the 0.3.0 VSIX. An already-loaded extension may
 need **Developer: Reload Window** before starting the new bridge. Finish active
 work first; the desktop does not reload the VS Code window automatically. Reopen
 an older Task Continuum desktop to load its connection button. Connection attempts
 retain the current draft and show send-blocking reasons next to the input area.
+
+## Remote access over SSH
+
+Version 0.3.0 supports clients A/C connecting to this machine B's same original
+VS Code GitHub Copilot session. B still runs a local, trusted VS Code 1.136.x
+workspace; this does not enable Remote SSH/WSL/container VS Code windows.
+
+1. On A's current Task Continuum desktop, open a task workspace and use the
+   activity-bar **Remote VS Code sessions** icon to **Export client identity**.
+2. On B, connect the original chat as above and click **Share original conversation
+   remotely** in its Task Continuum chat panel. Choose read-only or read/send access,
+   select A's exported identity, and confirm the recipient and original conversation.
+3. Save the private invitation outside Git and transfer it securely to A. A imports
+   it with an independently configured SSH alias, explicitly connects, and links
+   its selected task. A needs neither local B history nor CLI sign-in.
+
+The companion binds only to loopback. Provision SSH public-key authentication,
+verified host keys, forwarding permissions, and approved firewall/network access
+separately. Task Continuum does not install services or change those policies.
+Remote tokens allow only the approved session's history and permitted sends,
+not local administration, other chats, opening/moving windows, or arbitrary commands.
+Owner-approved username/client-machine labels are distinct from B's execution
+hostname; possession of the invitation is authority, not hardware attestation.
+
+Invitations expire in 24 hours or when the bridge stops. B can revoke individual
+grants in the remote-access dialog. Revocation rejects future operations and cancels
+unconfirmed delivery waits, not an already-executing Agent. A's disconnect or exit
+closes its tunnel only. Cached history is read-only; restart never auto-connects
+or replays. A matching renewed invitation must be imported after B restarts.
+Native questions, cancellation, and tool approvals stay in B's VS Code. The existing
+extra-send-confirmation preference applies to remote messages without alteration.
+Treat private invitations, delivery journals, and caches as sensitive data.
 
 ## Optional Send Confirmation
 
@@ -106,7 +138,8 @@ uses a per-run private credential, and accepts only existing sessions from this
 workspace. The private discovery record stays in VS Code workspace storage, never
 the task repository. It exposes identity/open/send/delivery-status operations, not
 shell access, generic commands, or automatic tool approvals. The sender name is
-the bridge OS user's name, not a caller-supplied label or GitHub identity claim.
+the bridge OS user's name for local sends and the owner-approved grant participant
+for remote sends. No identity can be overridden in a message body.
 
 Messages are journaled before delivery. Retries reuse their command ID; uncertain
 deliveries and bridge restarts never replay automatically. The original request ID
@@ -142,7 +175,10 @@ second-message text, duplicate-command handling, other-session isolation, unchan
 layout, and restored empty template. Test participants are not sticky, so they do
 not introduce an artificial `@participant` draft between submissions.
 It also checks exact-session delivery, reply persistence, sender
-and execution-machine attribution. The latest 191 unit/component tests, lint, types, and
+and execution-machine attribution. Version 0.3.0 routes the second distinct request
+over real system OpenSSH from an enrolled client with no local source history.
+The native ID, remote username, execution host, other-chat isolation, and layout
+remain verified. The latest 202 unit/component tests, lint, types, and
 production build passed. This does not certify
 an authenticated production Copilot model response; that requires the user's signed-in
 VS Code environment. The test participant/model is not packaged in this extension.

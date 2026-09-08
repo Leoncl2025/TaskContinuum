@@ -8,8 +8,11 @@ import { promisify } from 'node:util'
 import { _electron as electron, expect, test } from '@playwright/test'
 import type { ElectronApplication, Page } from '@playwright/test'
 import { VSCodeSessionStore } from '../src/main/vscodeSessions'
-import { connectOriginalVSCode, openOriginalVSCode, readOriginalVSCode, sendOriginalVSCode } from '../src/main/vscodeChatClient'
+import { connectOriginalVSCode, grantRemoteVSCode, openOriginalVSCode, readOriginalVSCode, sendOriginalVSCode } from '../src/main/vscodeChatClient'
 import { identityFromVSCodeHistory, vsCodeChatResource } from '../src/shared/vscodeChat'
+import { RemoteVSCodeManager } from '../src/main/vscodeRemoteClient'
+import { openSshTunnel } from '../src/main/shared/ssh'
+import { startSshFixture } from '../test/ssh-fixture'
 
 test('connects from the desktop and sends to the original sidebar conversation without moving its layout in installed VS Code', async () => {
   test.skip(!process.env.TASKCONTINUUM_VERIFY_VSCODE, 'Set the local Code executable path to verify the companion without model requests.')
@@ -35,6 +38,8 @@ test('connects from the desktop and sends to the original sidebar conversation w
   let app: ElectronApplication | undefined
   let page: Page | undefined
   let mainPid: number | undefined
+  let remote: RemoteVSCodeManager | undefined
+  let ssh: Awaited<ReturnType<typeof startSshFixture>> | undefined
   try {
     app = await electron.launch({
       executablePath: process.env.TASKCONTINUUM_VERIFY_VSCODE,
@@ -172,11 +177,18 @@ test('connects from the desktop and sends to the original sidebar conversation w
       await expect(page.getByRole('button', { name: 'Delivery confirmation disabled', exact: true })).toBeVisible()
       const secondCommandId = randomUUID()
       const secondPrompt = '@continuum_test Second distinct message. Reply with exactly TASKCONTINUUM_ORIGINAL_SEND_OK. Do not call tools or change files.'
+      const remoteParticipant = { clientId: randomUUID(), username: 'Remote test user', machineName: 'Machine-A' }
+      const invitation = await grantRemoteVSCode(store, identity, remoteParticipant, true)
+      const forwarding = await startSshFixture(join(root, 'ssh'), invitation.port)
+      ssh = forwarding
+      remote = new RemoteVSCodeManager(join(root, 'remote-client'), { identity: async () => remoteParticipant, tunnel: (host, port, signal) => openSshTunnel(host, port, forwarding.config, signal) })
+      const enrollment = await remote.importInvitation(workspace, invitation, 'owner-machine')
+      await remote.connect(workspace, enrollment.id)
       await expect.poll(async () => {
         const view = await readOriginalVSCode(store, identity)
         return { canSend: view.canSend, reason: view.bridgeError }
       }).toEqual({ canSend: true, reason: undefined })
-      expect(await sendOriginalVSCode(store, identity, secondCommandId, secondPrompt)).toMatchObject({ state: 'pending', id: secondCommandId })
+      expect(await remote.send(workspace, enrollment.target, secondCommandId, secondPrompt)).toMatchObject({ state: 'pending', id: secondCommandId, participant: remoteParticipant, execution: { machineName: hostname() } })
       await expect(confirmation).toBeHidden()
       await expect(originalSidebar).toContainText(secondCommandId, { timeout: 20000 })
       await expect(confirmation).toBeHidden()
@@ -191,6 +203,9 @@ test('connects from the desktop and sends to the original sidebar conversation w
       const finalView = await readOriginalVSCode(store, identity)
       const secondDelivery = finalView.deliveries!.find((entry) => entry.id === secondCommandId)!
       expect(secondDelivery.nativeRequestId).not.toBe(record.nativeRequestId)
+      const remoteView = await remote.read(workspace, enrollment.target)
+      expect(remoteView.messages.find((message) => message.role === 'user' && message.nativeRequestId === secondDelivery.nativeRequestId)).toMatchObject({ author: { name: remoteParticipant.username, machineName: remoteParticipant.machineName } })
+      expect(forwarding.forwardedConnections()).toBeGreaterThan(0)
       expect(finalView.messages.find((message) => message.role === 'user' && message.nativeRequestId === secondDelivery.nativeRequestId)?.text).toBe(secondPrompt)
       expect((await store.locateOriginal(identity)).state.turns).toHaveLength(3)
       expect((await store.locateOriginal({ nativeSessionId: otherId, workspaceStorageId })).state.turns).toHaveLength(1)
@@ -204,6 +219,8 @@ test('connects from the desktop and sends to the original sidebar conversation w
     await page.getByRole('button', { name: /Original-chat bridge is running/ }).click()
     await expect.poll(() => readdir(join(storageRoot, workspaceStorageId, 'taskcontinuum.vscode-bridge', 'bridges'))).toEqual([])
   } finally {
+    remote?.close()
+    await ssh?.close()
     if (page && !page.isClosed()) await page.screenshot({ path: resolve('artifacts/vscode-send-final-state.png'), timeout: 3000 }).catch(() => undefined)
     let cleanup: ReturnType<typeof setTimeout> | undefined
     try {

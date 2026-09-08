@@ -32,6 +32,9 @@ semantic fork. Git and OneDrive synchronization remain user-managed.
     companion extension that opens and sends to the original chat without forking.
 - Original-session messages display the sender's username; replies include the
     actual execution machine. Delivery confirmation and tool approvals stay in VS Code.
+- Remote original VS Code sessions over managed Dev Tunnel + SSH, with browser
+    sign-in, encrypted device keys, explicit publication, scoped invitations,
+    revocation, and private offline caches. Existing SSH aliases remain supported.
 - Deny/allow-once tool decisions and agent questions, with pending requests cleaned
     up on stop, reload, or disconnect.
 - Persisted native history, reviewed imports, and repository-backed task/session links.
@@ -53,10 +56,14 @@ semantic fork. Git and OneDrive synchronization remain user-managed.
 - Real chat requires an authorized Copilot account and network access to its service.
     The official SDK 1.0.13 includes runtime 1.0.83 and reuses local authentication.
     Sign in directly through the Copilot CLI when required; never put tokens in the UI.
-- Remote live views require system OpenSSH on the participant and an independently
-    configured SSH server on the owner. Public-key authentication, a trusted host key,
-    and loopback TCP forwarding must already work. The app does not install SSH,
-    edit your SSH configuration, accept passwords, or bypass host-key verification.
+- Managed original VS Code access requires the official Microsoft Dev Tunnel CLI,
+    the same Microsoft work-account owner signed in on both machines, approved
+    outbound connectivity, and OS secure storage. The app manages its own restricted
+    SSH endpoint; no OS SSH server, port 22 mapping, account, or SSH alias is required.
+    Dev Tunnels is a preview development/testing service without a production SLA.
+- The optional SSH-alias mode and separate shared CLI Host still require system
+    OpenSSH, an independently configured owner SSH server, public-key authentication,
+    and a verified host key. No user SSH configuration or firewall rules are changed.
 
 ## Run and verify
 
@@ -167,7 +174,7 @@ approving tools still happen in VS Code.**
     No CLI sign-in is needed to link or view saved history. If the task already has a
     different link, detach it first; this does not delete the underlying conversation.
 2. Build the companion with `npm run build:vscode-bridge`. Install the resulting
-    `artifacts/taskcontinuum-vscode-bridge-0.2.6.vsix` through VS Code's
+    `artifacts/taskcontinuum-vscode-bridge-0.3.0.vsix` through VS Code's
     **Extensions: Install from VSIX** command. Component details are in
     [vscode-bridge/README.md](vscode-bridge/README.md).
 3. In VS Code, open the conversation's original workspace, which may differ from
@@ -262,11 +269,11 @@ URI (or `vscode-insiders://`) contains only the original session/workspace IDs. 
 handler checks the existing session and asks for connection consent; it accepts no
 message, command, token, or caller-provided filesystem path.
 
-User messages display the OS username recorded by the authenticated local bridge,
-and replies display `Agent name @ execution machine`. These are different from
-the `GitHub Copilot CLI` connection shown in the session explorer. The bridge's
-`hostname()` supplies the actual execution machine for this local-only adapter;
-names are not renderer guesses or caller-supplied identity claims. Historical
+Local messages display the bridge OS username; remote messages use the recipient
+identity approved by the owner when granting access. Replies display
+`Agent name @ execution machine`, supplied by B's bridge, not the renderer.
+These are different from the `GitHub Copilot CLI` connection in the session explorer.
+Remote bearer grants bind approved labels, not hardware-attested identities. Historical
 authors/machines without evidence remain unknown, not assigned to the current user.
 Recorded attribution survives restart and offline viewing; last-recorded identity
 is explicitly distinguished from an online execution owner.
@@ -311,10 +318,44 @@ stay outside the renderer. Protect the local profile and trust
 installed extensions; this credential does not defend against a compromised OS user.
 
 Bindings include `provider: "vscode-copilot"`, the original `sessionId`, and
-`workspaceStorageId`. The storage ID identifies the local VS Code workspace and is
-not a portable shared-session route. A clone without that original history cannot
-resume it from Git alone. If Stable and Insiders both contain the same source identity,
+`workspaceStorageId`. Remote bindings also carry `remoteMachineName`, with private
+invitations and SSH aliases stored separately in the desktop profile. Git alone
+does not provide history or remote authorization. If Stable and Insiders both contain the same source identity,
 select the intended data root with `TASKCONTINUUM_VSCODE_USER_DATA_DIR`.
+
+## Remote original VS Code mode
+
+Companion 0.3.0 lets A/C converse with the same original GitHub Copilot Agent in
+B's local VS Code window. The default **Dev Tunnel + SSH** mode manages the relay,
+device keys, and loopback forwarding inside Task Continuum, without terminal windows
+or Windows SSH setup. It currently requires the same Microsoft work-account owner
+on both ends; it is not a tenant-wide device registry or SSH certificate authority.
+
+1. On A, open **Remote VS Code sessions**, sign in with Microsoft, and **Export client
+    identity**. The file contains a public device key, not its private key.
+2. On B, connect the original conversation, open **Share original conversation
+    remotely**, sign in, and **Publish this machine**. Keep this desktop and VS Code open.
+3. B chooses A's identity and read-only or read/send access, then saves a private
+    invitation. Transfer it securely; compare the displayed SSH host fingerprint.
+4. A chooses **Import invitation**, explicitly **Connect**s, and **Link to T-XXXX**.
+    No SSH alias or port entry is needed. Import itself does not connect, link, or send.
+
+No Copilot CLI login is needed on A, and no conversation is created, resumed, imported,
+or forked. The legacy **SSH alias** mode remains available on both dialogs.
+
+See the [remote VS Code runbook](docs/remote-vscode.md) for both-machine setup,
+access control, renewal, disconnect/offline behavior, and recovery. Stopping or
+restarting B's managed publication requires new invitations, but never stops its
+Agent. B's account, tools, and native approvals remain on B. The app does not change
+existing SSH services, firewall rules, or user private keys.
+The separate **Shared sessions** feature below starts a CLI Host and is not this mode.
+
+With an already signed-in, approved Dev Tunnel account, set
+`$env:TASKCONTINUUM_LIVE_DEV_TUNNEL = '1'` in PowerShell, then run
+`npm test -- test/dev-tunnel-manager.test.ts` and, after building,
+`npx playwright test e2e/remote-vscode.spec.ts`. Clear the opt-in afterward with
+`Remove-Item Env:TASKCONTINUUM_LIVE_DEV_TUNNEL`. These tests create and delete private
+test tunnels; they do not send to a production Copilot Agent.
 
 ## Versioned task/session links
 
@@ -345,7 +386,8 @@ CLI-linked task resumes that ID; a VS Code-linked task loads its saved original
 history without calling the CLI. Selecting an already-linked session returns to its task.
 The current MVP permits one session per task and one task per session in a workspace.
 Detach an existing link explicitly before moving the session to a different task.
-Session uniqueness includes its provider and, for VS Code, its source workspace.
+Session uniqueness includes its provider and, for VS Code, its source workspace
+and optional remote execution machine (case-insensitive).
 Existing CLI-only files remain valid. Older Task Continuum builds that understand
 only CLI links cannot read the new provider variant; use this build on those clients.
 
@@ -371,7 +413,8 @@ after external edits. A stale lock should only be removed when all app instances
 that could be writing the file have stopped.
 
 Git synchronizes the relation, not the session. Another machine still needs the
-corresponding native Copilot history or a separately published shared Host. Unavailable
+corresponding native Copilot history, a separately published shared Host, or an
+explicitly imported private invitation for the recorded remote VS Code machine. Unavailable
 sessions keep their repository link and are reported explicitly; the UI does not
 silently create a new session or fall back to demo replies. Detach deletes only
 the relationship entry, never the underlying conversation history.
@@ -408,8 +451,10 @@ The versioned shared route stores workspace/logical session UUIDs, task ID, mode
 owner machine/Agent/native ID, epoch, and optional fork lineage. Its `active` map
 identifies the published source for each task; independent forks do not replace it.
 It contains no SSH credentials, tokens, transcripts, or execution paths. Legacy
-`.taskcontinuum/session-bindings.json` remains local-only and is never promoted
-silently. Git merge conflicts and competing active routes require manual resolution.
+`.taskcontinuum/session-bindings.json` entries without `remoteMachineName` remain
+local-only; remote original VS Code links are separate from shared CLI routes.
+Neither is promoted silently. Git merge conflicts and competing active routes
+require manual resolution.
 
 Enrollment is a bearer grant bound to exported profile identity, not hardware or
 enterprise identity attestation. Protect invitations and the desktop profile.
