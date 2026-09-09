@@ -17,6 +17,9 @@ import { VSCodeDeviceHost } from './vscodeDeviceHost'
 import { VSCodeDeviceClient } from './vscodeDeviceClient'
 import { deviceInvitationSchema } from './vscodeDeviceProtocol'
 import { hostname } from 'node:os'
+import { readClientIdentity } from './clientIdentity'
+import { canonicalPolicyRoot, locallyLinkedSessions, recordLocalLink } from './linkedSessionPolicy'
+import { readRepositorySessionLinks, updateRepositorySessionLink } from './repositorySessionLinks'
 
 async function requirePrivateDestination(file: string): Promise<void> {
   let directory = await realpath(dirname(file))
@@ -39,7 +42,8 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
   const store = new VSCodeSessionStore()
   const host = new VSCodeDeviceHost(app.getPath('userData'), protector,
     (identity, participant, canSend, prior) => resolveDeviceSession(store, identity, participant, canSend, prior),
-    (invitation) => revokeRemoteVSCode(store, invitation.identity, invitation.grant.id))
+    (invitation) => revokeRemoteVSCode(store, invitation.identity, invitation.grant.id),
+    async (root) => locallyLinkedSessions(app.getPath('userData'), root, await readClientIdentity(app.getPath('userData'))))
   const devices = new VSCodeDeviceClient(app.getPath('userData'), protector,
     (invitation, signal) => tunnels.connect(invitation.devTunnel, invitation.id, invitation.port, signal),
     async (invitation) => {
@@ -65,10 +69,40 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     if (await currentRoot() !== root) throw new Error('The task workspace changed. Reopen the remote connection action; no replacement workspace was used.')
   }
   handle('devices', async () => devices.list(await currentRoot()))
-  handle('device-recipients', async () => { await currentRoot(); return (await host.list()).map((pair) => ({ id: pair.id, username: pair.participant.username, machineName: pair.participant.machineName, expiresAt: pair.expiresAt })) })
-  handle('device-pair', async (window) => {
+  handle('device-recipients', async () => {
+    const root = await canonicalPolicyRoot(await currentRoot())
+    return (await host.list()).map((pair) => ({ id: pair.id, username: pair.participant.username, machineName: pair.participant.machineName, expiresAt: pair.expiresAt, linkedAccess: pair.workspaces.find((item) => item.root === root)?.canSend === true ? 'send' as const : pair.workspaces.some((item) => item.root === root) ? 'read' as const : 'none' as const }))
+  })
+  handle('device-workspace', async (window, value, permission) => {
     const root = await currentRoot()
-    if ((await tunnels.status()).state !== 'hosting') throw new Error('Publish this machine before pairing.')
+    const selected = id(value)
+    const mode = z.enum(['none', 'read', 'send']).parse(permission)
+    const consent = await dialog.showMessageBox(window, { type: 'warning', message: mode === 'none' ? 'Disable linked-session sharing for this workspace?' : `Allow ${mode === 'send' ? 'read and send' : 'read'} for this workspace's linked sessions?`, detail: `Workspace: ${root}\nExisting and future locally confirmed owner links follow this policy. Git-only edits cannot authorize unrelated sessions. Native tool approvals stay on the execution machine.`, buttons: ['Cancel', 'Confirm'], defaultId: 0, cancelId: 0 })
+    if (consent.response !== 1) return false
+    await unchanged(root)
+    if (mode !== 'none') await tunnels.publish()
+    await host.setWorkspace(selected, await canonicalPolicyRoot(root), mode === 'none' ? null : mode === 'send')
+    return true
+  })
+  handle('device-adopt-links', async (window) => {
+    const root = await currentRoot()
+    let snapshot = await readRepositorySessionLinks(root)
+    const local = await manager.identity()
+    const candidates = Object.entries(snapshot.document.bindings).filter(([, link]) => link.provider === 'vscode-copilot' && !link.owner && !link.remoteMachineName)
+    if (!candidates.length) return false
+    for (const [, link] of candidates) if (link.provider === 'vscode-copilot') await store.locateOriginal({ nativeSessionId: link.sessionId, workspaceStorageId: link.workspaceStorageId })
+    const consent = await dialog.showMessageBox(window, { type: 'warning', message: `Register ${candidates.length} existing local links as owned by ${local.machineName}?`, detail: 'This writes owner metadata to the Git-managed links and locally confirms them for enabled workspace sharing. Do this only on the original owner machine; it does not transfer ownership or push Git.', buttons: ['Cancel', 'Register local links'], defaultId: 0, cancelId: 0 })
+    if (consent.response !== 1) return false
+    await unchanged(root)
+    for (const [taskId, link] of candidates) if (link.provider === 'vscode-copilot') {
+      snapshot = await updateRepositorySessionLink(root, taskId, link.sessionId, snapshot.revision, link.workspaceStorageId, undefined, { clientId: local.clientId, machineName: local.machineName })
+      await recordLocalLink(app.getPath('userData'), root, taskId, snapshot.document.bindings[taskId], local)
+    }
+    return true
+  })
+  handle('device-pair', async (window, permission) => {
+    const root = await currentRoot()
+    const canSend = z.boolean().optional().parse(permission) ?? true
     const input = await dialog.showOpenDialog(window, { title: 'Select client identity to pair once', properties: ['openFile'], filters: json })
     if (input.canceled || !input.filePaths[0]) return false
     const identity = remoteIdentityFileSchema.parse(await readJsonBounded(input.filePaths[0], 4096))
@@ -76,13 +110,15 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     const output = await dialog.showSaveDialog(window, { title: 'Save private device invitation outside Git', defaultPath: join(app.getPath('documents'), `taskcontinuum-device-${randomUUID()}.json`), filters: json })
     if (output.canceled || !output.filePath) return false
     await requirePrivateDestination(output.filePath)
-    const consent = await dialog.showMessageBox(window, { type: 'warning', title: 'Pair remote device', message: `Pair ${identity.participant.username} on ${identity.participant.machineName}?`, detail: 'Trust this device for 30 days. Pairing alone shares no sessions. Each session must be authorized separately. Pairing and session policies survive restarts; enabled publication reconnects automatically. Native tool approvals remain in VS Code.', buttons: ['Cancel', 'Pair device'], defaultId: 0, cancelId: 0 })
+    const consent = await dialog.showMessageBox(window, { type: 'warning', title: 'Pair remote device', message: `Pair ${identity.participant.username} on ${identity.participant.machineName}?`, detail: `Trust this device for 30 days and start the private client connection automatically. Allow ${canSend ? 'read and send' : 'read only'} for existing and future locally confirmed Task links in ${root}. No per-session publication is needed. Pairing and workspace policy survive restarts; Stop disables publication. Native tool approvals remain on the owner.`, buttons: ['Cancel', 'Pair device'], defaultId: 0, cancelId: 0 })
     if (consent.response !== 1) return false
     await unchanged(root)
+    await tunnels.publish()
     const pair = await host.pair(identity.participant, identity.sshPublicKey)
+    await host.setWorkspace(pair.id, await canonicalPolicyRoot(root), canSend)
     const port = await host.start()
     const devTunnel = tunnels.authorize(pair, pair.publicKey, port, true)
-    await writeJsonAtomic(output.filePath, deviceInvitationSchema.parse({ schemaVersion: 2, provider: 'vscode-copilot-device', id: pair.id, ownerId: await host.ownerId(), machineName: hostname(), participant: pair.participant, expiresAt: pair.expiresAt, token: pair.token, port, devTunnel }))
+    await writeJsonAtomic(output.filePath, deviceInvitationSchema.parse({ schemaVersion: 2, provider: 'vscode-copilot-device', id: pair.id, ownerId: await host.ownerId(), ownerClientId: (await manager.identity()).clientId, machineName: hostname(), participant: pair.participant, expiresAt: pair.expiresAt, token: pair.token, port, devTunnel }))
     return true
   })
   handle('device-import', async (window) => {
@@ -90,10 +126,10 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     const input = await dialog.showOpenDialog(window, { title: 'Import private device invitation', properties: ['openFile'], filters: json })
     if (input.canceled || !input.filePaths[0]) return false
     const invitation = deviceInvitationSchema.parse(await readJsonBounded(input.filePaths[0], 16384))
-    const consent = await dialog.showMessageBox(window, { type: 'warning', title: 'Trust execution device', message: `Pair with ${invitation.machineName}?`, detail: `Host fingerprint: ${sshFingerprint(invitation.devTunnel.hostPublicKey)}\nExpires: ${invitation.expiresAt}\n\nVerify this fingerprint with the owner. Only explicitly shared sessions are discoverable. After Connect, this device reconnects across network loss and app restarts until Disconnect. No message is replayed.`, buttons: ['Cancel', 'Import device'], defaultId: 0, cancelId: 0 })
+    const consent = await dialog.showMessageBox(window, { type: 'warning', title: 'Trust execution device', message: `Pair with ${invitation.machineName}?`, detail: `Host fingerprint: ${sshFingerprint(invitation.devTunnel.hostPublicKey)}\nOwner client: ${invitation.ownerClientId ?? 'Legacy invitation: re-export for Git owner routing'}\nExpires: ${invitation.expiresAt}\n\nVerify this identity with the owner. Enable automatic connection for this AD workspace, including after restart, until Disconnect. Git owner links select sessions; B enforces its workspace access policy. No execution message is replayed.`, buttons: ['Cancel', 'Import device'], defaultId: 0, cancelId: 0 })
     if (consent.response !== 1) return false
     await unchanged(root)
-    await devices.import(root, invitation)
+    await devices.import(root, invitation, true)
     return true
   })
   handle('device-connect', async (_window, value) => devices.connect(await currentRoot(), id(value)))

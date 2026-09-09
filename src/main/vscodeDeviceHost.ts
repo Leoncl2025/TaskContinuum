@@ -12,9 +12,11 @@ import type { VSCodeChatIdentity } from '../shared/vscodeChat'
 import { sshPublicKeySchema } from './devTunnel/protocol'
 import { deviceRequest } from './vscodeDeviceHttp'
 
-const policySchema = z.object({ identity: vscodeIdentitySchema, canSend: z.boolean(), revision: z.uuid(), invitation: remoteInvitationSchema.optional() }).strict()
+const policySchema = z.object({ identity: vscodeIdentitySchema, canSend: z.boolean(), revision: z.uuid(), invitation: remoteInvitationSchema.optional(), linkedRoot: z.string().optional() }).strict()
+const workspacePolicySchema = z.object({ root: z.string().min(1), canSend: z.boolean() }).strict()
 const pairingSchema = z.object({ id: z.uuid(), participant: remoteClientSchema, publicKey: sshPublicKeySchema,
   token: z.string().regex(/^[a-zA-Z0-9_-]{43}$/), expiresAt: z.iso.datetime(), sessions: z.array(policySchema).max(32),
+  workspaces: z.array(workspacePolicySchema).max(10).default([]),
 }).strict()
 const stateSchema = z.object({ ownerId: z.uuid(), port: z.number().int().min(1024).max(65535).optional(), pairs: z.array(pairingSchema).max(32) }).strict()
 type Pairing = z.infer<typeof pairingSchema>
@@ -33,7 +35,8 @@ export class VSCodeDeviceHost {
 
   constructor(private readonly directory: string, private readonly protector: DeviceProtector,
     private readonly resolve: (identity: VSCodeChatIdentity, participant: Pairing['participant'], canSend: boolean, prior?: RemoteVSCodeInvitation) => Promise<RemoteVSCodeInvitation>,
-    private readonly revokeGrant: (invitation: RemoteVSCodeInvitation) => Promise<void> = async () => {}) {}
+    private readonly revokeGrant: (invitation: RemoteVSCodeInvitation) => Promise<void> = async () => {},
+    private readonly linkedSessions?: (root: string) => Promise<VSCodeChatIdentity[]>) {}
 
   private async load(): Promise<void> {
     this.loading ??= (async () => {
@@ -75,7 +78,7 @@ export class VSCodeDeviceHost {
         return structuredClone(existing)
       }
       if (state.pairs.length >= 32) throw new Error('Device pairing limit reached.')
-      const pair: Pairing = { id: randomUUID(), participant, publicKey, token: randomBytes(32).toString('base64url'), expiresAt: new Date(Date.now() + 30 * 86400000).toISOString(), sessions: [] }
+      const pair: Pairing = { id: randomUUID(), participant, publicKey, token: randomBytes(32).toString('base64url'), expiresAt: new Date(Date.now() + 30 * 86400000).toISOString(), sessions: [], workspaces: [] }
       state.pairs.push(pair)
       return structuredClone(pair)
     })
@@ -83,6 +86,51 @@ export class VSCodeDeviceHost {
 
   async list(): Promise<Pairing[]> { await this.load(); return structuredClone(this.state!.pairs) }
   async ownerId(): Promise<string> { await this.load(); return this.state!.ownerId }
+  async setWorkspace(id: string, root: string, permission: boolean | null): Promise<void> {
+    const revoke: RemoteVSCodeInvitation[] = []
+    await this.update((state) => {
+      const pair = state.pairs.find((item) => item.id === id)
+      if (!pair) throw new Error('Device not paired.')
+      pair.workspaces = pair.workspaces.filter((item) => item.root !== root)
+      if (permission !== null) pair.workspaces.push(workspacePolicySchema.parse({ root, canSend: permission }))
+      pair.sessions = pair.sessions.filter((policy) => {
+        if (policy.linkedRoot !== root) return true
+        const invitation = policy.invitation ?? this.invitations.get(this.key(id, policy.identity))
+        if (invitation) revoke.push(invitation)
+        this.invitations.delete(this.key(id, policy.identity))
+        return false
+      })
+    })
+    for (const invitation of revoke) await this.revokeGrant(invitation).catch(() => undefined)
+  }
+  private async refreshLinked(id: string): Promise<void> {
+    const pair = this.state!.pairs.find((item) => item.id === id)
+    if (!pair || !this.linkedSessions) return
+    const roots = JSON.stringify(pair.workspaces)
+    const desired: { identity: VSCodeChatIdentity; canSend: boolean; linkedRoot: string }[] = []
+    for (const policy of pair.workspaces) {
+      let identities: VSCodeChatIdentity[] = []
+      try { identities = await this.linkedSessions(policy.root) } catch { identities = [] }
+      for (const identity of identities) desired.push({ identity: vscodeIdentitySchema.parse(identity), canSend: policy.canSend, linkedRoot: policy.root })
+    }
+    const signature = (policy: { identity: VSCodeChatIdentity; canSend: boolean; linkedRoot?: string }) => JSON.stringify([policy.linkedRoot, policy.identity, policy.canSend])
+    const old = pair.sessions.filter((item) => item.linkedRoot)
+    if (JSON.stringify(old.map(signature).sort()) === JSON.stringify(desired.map(signature).sort())) return
+    const removed: RemoteVSCodeInvitation[] = []
+    await this.update((state) => {
+      const current = state.pairs.find((item) => item.id === id)
+      if (!current || JSON.stringify(current.workspaces) !== roots) throw new Error('Workspace policy changed.')
+      for (const policy of current.sessions.filter((item) => item.linkedRoot)) {
+        if (desired.some((item) => signature(item) === signature(policy))) continue
+        const invitation = policy.invitation ?? this.invitations.get(this.key(id, policy.identity))
+        if (invitation) removed.push(invitation)
+        this.invitations.delete(this.key(id, policy.identity))
+      }
+      const manual = current.sessions.filter((item) => !item.linkedRoot)
+      current.sessions = manual.concat(desired.filter((item) => !manual.some((policy) => sameRemoteTarget(policy.identity, item.identity))).map((item) => current.sessions.find((policy) => signature(policy) === signature(item)) ?? { ...item, revision: randomUUID() }))
+    })
+    for (const invitation of removed) await this.revokeGrant(invitation).catch(() => undefined)
+  }
   async approve(id: string, identity: VSCodeChatIdentity, canSend: boolean): Promise<void> {
     const policy = policySchema.parse({ identity, canSend, revision: randomUUID() })
     const previous = (await this.list()).find((pair) => pair.id === id)?.sessions.find((item) => sameRemoteTarget(item.identity, identity))?.invitation
@@ -150,9 +198,12 @@ export class VSCodeDeviceHost {
         void (async () => {
           if (request.method !== 'POST' || request.headers.origin || request.headers.host !== `127.0.0.1:${this.state!.port}`) { response.writeHead(403).end(); return }
           const bearer = request.headers.authorization?.replace(/^Bearer /, '') ?? ''
-          const pair = this.state!.pairs.find((item) => bearer.length === item.token.length && timingSafeEqual(Buffer.from(bearer), Buffer.from(item.token)))
+          let pair = this.state!.pairs.find((item) => Buffer.byteLength(bearer) === Buffer.byteLength(item.token) && timingSafeEqual(Buffer.from(bearer), Buffer.from(item.token)))
           if (!pair || !this.permitted(pair.id)) { response.writeHead(403).end(); return }
           const body = await this.body(request)
+          await this.refreshLinked(pair.id)
+          pair = this.state!.pairs.find((item) => item.id === pair!.id)
+          if (!pair) { response.writeHead(403).end(); return }
           if (!this.permitted(pair.id)) { response.writeHead(403).end(); return }
           let result: unknown
           if (request.url === '/device/sessions') {
@@ -161,6 +212,7 @@ export class VSCodeDeviceHost {
             for (const policy of pair.sessions) {
               try { sessions.push(await this.invitation(pair, policy)) } catch { continue }
             }
+            await this.refreshLinked(pair.id)
             result = { ownerId: this.state!.ownerId, deviceId: pair.id, sessions: sessions.filter((item) => this.permitted(pair.id, item.identity, item.grant.canSend)) }
           } else {
             const route = /^\/device\/session\/(read|send)$/.exec(request.url ?? '')
@@ -171,8 +223,10 @@ export class VSCodeDeviceHost {
             if (!this.permitted(pair.id, command.identity, sending)) { response.writeHead(403).end(); return }
             const policy = pair.sessions.find((item) => sameRemoteTarget(item.identity, command.identity))!
             const invitation = await this.invitation(pair, policy)
+            await this.refreshLinked(pair.id)
             if (!this.currentPolicy(pair.id, policy)) { response.writeHead(403).end(); return }
             result = await deviceRequest(invitation.port, invitation.port, invitation.token, `/remote/${route[1]}`, { ...command.identity, ...(sending ? { id: command.id, text: command.text } : {}) }, this.abort.signal)
+            await this.refreshLinked(pair.id)
             if (!this.currentPolicy(pair.id, policy)) { response.writeHead(403).end(); return }
           }
           if (!this.permitted(pair.id)) { response.writeHead(403).end(); return }

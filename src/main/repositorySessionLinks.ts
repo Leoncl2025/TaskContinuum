@@ -2,18 +2,19 @@ import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, open, readFile, realpath, rename, rm } from 'node:fs/promises'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { z } from 'zod'
-import type { SessionLink, SessionLinksDocument, SessionLinksSnapshot } from '../shared/sessionBindings'
+import type { SessionLink, SessionLinksDocument, SessionLinksSnapshot, SessionOwner } from '../shared/sessionBindings'
 import { sessionLinksPath } from '../shared/sessionBindings'
 import { remoteMachineSchema } from './vscodeRemoteProtocol'
 
 const taskIdSchema = z.string().regex(/^T-\d{4,}$/)
 const sessionIdSchema = z.string().min(1).max(240).regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/)
+export const sessionOwnerSchema = z.object({ clientId: z.uuid(), machineName: remoteMachineSchema }).strict()
 export const sessionLinkSchema = z.discriminatedUnion('provider', [
-  z.object({ provider: z.literal('github-copilot'), sessionId: sessionIdSchema }).strict(),
-  z.object({ provider: z.literal('vscode-copilot'), sessionId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,199}$/), workspaceStorageId: z.string().regex(/^[a-f0-9]{32}$/), remoteMachineName: remoteMachineSchema.optional() }).strict(),
+  z.object({ provider: z.literal('github-copilot'), sessionId: sessionIdSchema, owner: sessionOwnerSchema.optional() }).strict(),
+  z.object({ provider: z.literal('vscode-copilot'), sessionId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,199}$/), workspaceStorageId: z.string().regex(/^[a-f0-9]{32}$/), remoteMachineName: remoteMachineSchema.optional(), owner: sessionOwnerSchema.optional() }).strict(),
 ])
 function linkKey(link: SessionLink): string {
-  return `${link.provider}:${link.provider === 'vscode-copilot' ? `${link.remoteMachineName?.toLowerCase() ?? ''}:${link.workspaceStorageId}:` : ''}${link.sessionId}`
+  return `${link.provider}:${link.owner?.clientId ?? (link.provider === 'vscode-copilot' ? link.remoteMachineName?.toLowerCase() ?? '' : '')}:${link.provider === 'vscode-copilot' ? `${link.workspaceStorageId}:` : ''}${link.sessionId}`
 }
 const documentSchema = z.object({
   schemaVersion: z.literal(1),
@@ -71,14 +72,16 @@ export async function readRepositorySessionLinks(root: string): Promise<SessionL
   return { document: parse(content.toString('utf8')), revision: createHash('sha256').update(content).digest('hex') }
 }
 
-export async function updateRepositorySessionLink(root: string, taskId: string, sessionId: string | null, expectedRevision: string | null, vscodeWorkspaceStorageId?: string, vscodeRemoteMachineName?: string): Promise<SessionLinksSnapshot> {
+export async function updateRepositorySessionLink(root: string, taskId: string, sessionId: string | null, expectedRevision: string | null, vscodeWorkspaceStorageId?: string, vscodeRemoteMachineName?: string, owner?: SessionOwner): Promise<SessionLinksSnapshot> {
   taskIdSchema.parse(taskId)
   if (sessionId !== null) sessionIdSchema.parse(sessionId)
   if (vscodeRemoteMachineName !== undefined && vscodeWorkspaceStorageId === undefined) throw new Error('A remote VS Code binding requires its original workspace identity.')
   const selected: SessionLink | null = sessionId === null ? null : sessionLinkSchema.parse(vscodeWorkspaceStorageId === undefined
-    ? { provider: 'github-copilot', sessionId }
-    : { provider: 'vscode-copilot', sessionId, workspaceStorageId: vscodeWorkspaceStorageId, ...(vscodeRemoteMachineName ? { remoteMachineName: vscodeRemoteMachineName } : {}) })
+    ? { provider: 'github-copilot', sessionId, ...(owner ? { owner } : {}) }
+    : { provider: 'vscode-copilot', sessionId, workspaceStorageId: vscodeWorkspaceStorageId, ...(owner ? { owner } : vscodeRemoteMachineName ? { remoteMachineName: vscodeRemoteMachineName } : {}) })
   return writeRepositorySessionLinks(root, expectedRevision, (before) => {
+    const prior = before.bindings[taskId]
+    if (prior?.owner && selected && prior.sessionId === selected.sessionId && prior.provider === selected.provider && prior.owner.clientId !== selected.owner?.clientId) throw new Error('Session ownership cannot be changed by linking. Ownership transfer is not supported.')
     if (selected) {
       const existingTask = Object.entries(before.bindings).find(([id, link]) => id !== taskId && linkKey(link) === linkKey(selected))?.[0]
       if (existingTask) throw new Error(`This session is already linked to ${existingTask}. Detach it there before moving it.`)

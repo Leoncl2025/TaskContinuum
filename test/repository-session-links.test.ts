@@ -15,6 +15,18 @@ async function folder() {
 }
 
 describe('versioned task/session links', () => {
+  it('carries stable ownership through Git clones without relative remote fields or ownership takeover', async () => {
+    const root = await folder()
+    const owner = { clientId: '00000000-0000-4000-8000-000000000001', machineName: 'Machine-B' }
+    const saved = await updateRepositorySessionLink(root, 'T-0001', 'original', null, 'a'.repeat(32), undefined, owner)
+    expect(saved.document.bindings['T-0001']).toEqual({ provider: 'vscode-copilot', sessionId: 'original', workspaceStorageId: 'a'.repeat(32), owner })
+    const clone = await folder()
+    await mkdir(join(clone, '.taskcontinuum'))
+    await writeFile(join(clone, sessionLinksPath), await readFile(join(root, sessionLinksPath)))
+    expect(await readRepositorySessionLinks(clone)).toEqual(saved)
+    await expect(updateRepositorySessionLink(clone, 'T-0001', 'original', saved.revision, 'a'.repeat(32), undefined, { ...owner, clientId: '00000000-0000-4000-8000-000000000002' })).rejects.toThrow('ownership')
+  })
+
   it('does not create a file just by reading an unlinked workspace', async () => {
     const root = await folder()
     expect(await readRepositorySessionLinks(root)).toEqual({ document: { schemaVersion: 1, bindings: {} }, revision: null })

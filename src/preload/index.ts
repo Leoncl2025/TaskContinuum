@@ -59,7 +59,9 @@ const remoteVSCode: RemoteVSCodeBridge = {
   devices: {
     list: () => ipcRenderer.invoke('remote-vscode:devices'),
     recipients: () => ipcRenderer.invoke('remote-vscode:device-recipients'),
-    pair: () => ipcRenderer.invoke('remote-vscode:device-pair'),
+    pair: (canSend) => ipcRenderer.invoke('remote-vscode:device-pair', canSend),
+    workspace: (id, access) => ipcRenderer.invoke('remote-vscode:device-workspace', id, access),
+    adoptLinks: () => ipcRenderer.invoke('remote-vscode:device-adopt-links'),
     import: () => ipcRenderer.invoke('remote-vscode:device-import'),
     connect: (id) => ipcRenderer.invoke('remote-vscode:device-connect', id),
     disconnect: (id) => ipcRenderer.invoke('remote-vscode:device-disconnect', id),

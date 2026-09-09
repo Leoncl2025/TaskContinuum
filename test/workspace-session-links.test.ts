@@ -4,6 +4,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { WorkspaceStore } from '../src/main/workspaceStore'
 import { sessionLinksPath } from '../src/shared/sessionBindings'
+import { VSCodeSessionStore } from '../src/main/vscodeSessions'
+import { locallyLinkedSessions } from '../src/main/linkedSessionPolicy'
 
 const directories: string[] = []
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))) })
@@ -18,7 +20,10 @@ async function fixture() {
   const taskFile = join(taskDirectory, 'task.json')
   const original = JSON.stringify({ schemaVersion: '1.0', id: 'T-0002', title: 'Session links', type: 'feature', status: 'backlog', priority: 'P2', relations: { level: 'task', parent: null } })
   await writeFile(taskFile, original)
-  const store = new WorkspaceStore(join(root, 'profile'))
+  const history = join(root, 'code', 'a'.repeat(32), 'chatSessions')
+  await mkdir(history, { recursive: true })
+  await writeFile(join(history, 'original-chat.json'), JSON.stringify({ requests: [] }))
+  const store = new WorkspaceStore(join(root, 'profile'), undefined, undefined, new VSCodeSessionStore([join(root, 'code')]))
   const workspace = (await store.openFolder(root)).current!
   return { root, taskFile, original, store, workspace }
 }
@@ -32,7 +37,9 @@ describe('workspace-scoped repository link writes', () => {
     expect(await readFile(taskFile, 'utf8')).toBe(original)
     const newProfile = new WorkspaceStore(join(root, 'another-profile'))
     await newProfile.openFolder(root)
-    expect(await newProfile.getSessionLinks(workspace.id)).toEqual(saved)
+    const loaded = await newProfile.getSessionLinks(workspace.id)
+    expect(loaded.document).toEqual(saved.document)
+    expect(loaded.localOwner?.clientId).not.toBe(saved.localOwner?.clientId)
   })
 
   it('rejects stale workspace IDs, arbitrary paths, and nonexistent tasks', async () => {
@@ -47,10 +54,13 @@ describe('workspace-scoped repository link writes', () => {
   it('persists the original VS Code source and identity across desktop profiles', async () => {
     const { root, taskFile, original, store, workspace } = await fixture()
     const saved = await store.updateSessionLink({ workspaceId: workspace.id, taskId: 'T-0002', sessionId: 'original-chat', vscodeWorkspaceStorageId: 'a'.repeat(32), expectedRevision: null })
-    expect(saved.document.bindings['T-0002']).toEqual({ provider: 'vscode-copilot', sessionId: 'original-chat', workspaceStorageId: 'a'.repeat(32) })
+    expect(saved.document.bindings['T-0002']).toEqual({ provider: 'vscode-copilot', sessionId: 'original-chat', workspaceStorageId: 'a'.repeat(32), owner: saved.localOwner })
+    expect(await locallyLinkedSessions(join(root, 'profile'), root, saved.localOwner!)).toEqual([{ nativeSessionId: 'original-chat', workspaceStorageId: 'a'.repeat(32) }])
     const next = new WorkspaceStore(join(root, 'another-profile'))
     await next.openFolder(root)
-    expect(await next.getSessionLinks(workspace.id)).toEqual(saved)
+    const loaded = await next.getSessionLinks(workspace.id)
+    expect(loaded.document).toEqual(saved.document)
+    expect(loaded.localOwner?.clientId).not.toBe(saved.localOwner?.clientId)
     expect(await readFile(taskFile, 'utf8')).toBe(original)
   })
 

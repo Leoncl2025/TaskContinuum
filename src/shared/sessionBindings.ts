@@ -1,4 +1,6 @@
-export type SessionLink = {
+export interface SessionOwner { clientId: string; machineName: string }
+
+export type SessionLink = ({
   provider: 'github-copilot'
   sessionId: string
 } | {
@@ -6,7 +8,7 @@ export type SessionLink = {
   sessionId: string
   workspaceStorageId: string
   remoteMachineName?: string
-}
+}) & { owner?: SessionOwner }
 
 export interface SessionLinksDocument {
   schemaVersion: 1
@@ -16,6 +18,7 @@ export interface SessionLinksDocument {
 export interface SessionLinksSnapshot {
   document: SessionLinksDocument
   revision: string | null
+  localOwner?: SessionOwner
 }
 
 export interface UpdateSessionLink {
@@ -24,6 +27,7 @@ export interface UpdateSessionLink {
   sessionId: string | null
   vscodeWorkspaceStorageId?: string
   vscodeRemoteMachineName?: string
+  owner?: SessionOwner
   expectedRevision: string | null
 }
 

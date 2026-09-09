@@ -11,6 +11,8 @@ import { deviceRequest, DeviceRequestError } from './vscodeDeviceHttp'
 import { remoteHistorySchema, remoteInvitationSchema, sameRemoteTarget } from './vscodeRemoteProtocol'
 import { deliverySchema } from './vscodeChatDelivery'
 import type { DeviceProtector } from './vscodeDeviceHost'
+import { readRepositorySessionLinks } from './repositorySessionLinks'
+import type { SessionOwner } from '../shared/sessionBindings'
 
 const knownSchema = z.object({ id: z.uuid(), invitation: remoteInvitationSchema }).strict()
 const peerSchema = z.object({ id: z.uuid(), root: z.string().min(1), invitation: deviceInvitationSchema,
@@ -72,7 +74,7 @@ export class VSCodeDeviceClient {
     if (!peer) throw new Error('Device does not belong to this task workspace.')
     return peer
   }
-  async import(root: string, value: unknown): Promise<void> {
+  async import(root: string, value: unknown, autoConnect = false): Promise<void> {
     const invitation = deviceInvitationSchema.parse(value)
     if (Date.parse(invitation.expiresAt) <= Date.now()) throw new Error('Device pairing expired.')
     await this.validateRecipient(invitation)
@@ -83,7 +85,7 @@ export class VSCodeDeviceClient {
       if (prior && prior.invitation.devTunnel.hostPublicKey !== invitation.devTunnel.hostPublicKey) throw new Error('Device host key changed. Forget the previous device before pairing.')
       if (prior) this.drop(prior.id)
       if (!prior && this.peers.length >= 32) throw new Error('Device limit reached.')
-      this.peers = this.peers.filter((peer) => peer !== prior).concat({ id: prior?.id ?? randomUUID(), root: canonical, invitation, enabled: false, known: prior?.known ?? [] })
+      this.peers = this.peers.filter((peer) => peer !== prior).concat({ id: prior?.id ?? randomUUID(), root: canonical, invitation, enabled: autoConnect, known: prior?.known ?? [] })
     })
   }
   async list(root: string) {
@@ -108,7 +110,31 @@ export class VSCodeDeviceClient {
     }))
   }
   async find(root: string, target: VSCodeChatTarget) {
+    const owner = await this.repositoryOwner(root, target)
+    if (owner) {
+      await this.load()
+      const canonical = await this.root(root)
+      const peer = this.peers.find((item) => item.root === canonical && item.invitation.ownerClientId === owner.clientId)
+      if (!peer) throw new Error(`Pair with session owner ${owner.machineName} in Devices. Git links do not grant device access.`)
+      if (!peer.known.some((item) => sameRemoteTarget(item.invitation.identity, targetIdentity(target)))) {
+        await this.ensure(peer)
+      }
+      const session = (await this.sessions(root)).find((item) => item.deviceId === peer.id && sameRemoteTarget(item.target, target))
+      if (!session) throw new Error('The owner has not made this Git-linked session available. Check its local link, workspace policy, and original VS Code bridge.')
+      return session
+    }
     return (await this.sessions(root)).find((item) => sameRemoteTarget(item.target, target))
+  }
+  private async repositoryOwner(root: string, target: VSCodeChatTarget): Promise<SessionOwner | undefined> {
+    const { document } = await readRepositorySessionLinks(root)
+    const candidates = Object.values(document.bindings).filter((link) => link.provider === 'vscode-copilot' && link.sessionId === target.nativeSessionId && link.workspaceStorageId === target.workspaceStorageId && (!target.remoteMachineName || (link.owner?.machineName ?? link.remoteMachineName)?.toLowerCase() === target.remoteMachineName.toLowerCase()))
+    if (candidates.length > 1) throw new Error('Ambiguous repository session owner.')
+    return candidates[0]?.owner
+  }
+  async owner(root: string, target: VSCodeChatTarget): Promise<SessionOwner | undefined> {
+    const known = (await this.sessions(root)).find((session) => sameRemoteTarget(session.target, target))
+    const peer = this.peers.find((item) => item.id === known?.deviceId)
+    return peer?.invitation.ownerClientId ? { clientId: peer.invitation.ownerClientId, machineName: peer.invitation.machineName } : undefined
   }
   private drop(id: string): void {
     this.attempts.get(id)?.abort()

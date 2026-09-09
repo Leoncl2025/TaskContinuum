@@ -56,6 +56,7 @@ describe('remote original-session dialogs', () => {
     window.remoteVSCode = remote
     render(<RemoteVSCodeDialog taskId="T-0003" onLink={vi.fn()} onClose={vi.fn()} />)
     await screen.findByText('owner@example.test')
+    fireEvent.click(screen.getByText('Legacy session invitation'))
     expect(screen.queryByLabelText('SSH host alias')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Import invitation' })).toBeEnabled()
     fireEvent.click(screen.getByRole('button', { name: 'Export client identity' }))

@@ -12,6 +12,11 @@ import { vscodeTargetSchema } from './vscodeRemoteProtocol'
 
 export function registerVSCodeChatBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentWindow: () => BrowserWindow | undefined, remote: RemoteVSCodeManager, currentRoot: () => Promise<string>) {
   const store = new VSCodeSessionStore()
+  async function targetFor(value: unknown) {
+    const target = vscodeTargetSchema.parse(value)
+    const root = await currentRoot().catch(() => undefined)
+    return root ? remote.resolveTarget(root, target) : target
+  }
   let watcher: FSWatcher | undefined
   let generation = 0
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -19,23 +24,24 @@ export function registerVSCodeChatBridge(requireWindow: (event: IpcMainInvokeEve
   const close = () => { generation++; watcher?.close(); watcher = undefined; clearTimeout(timer); clearInterval(refresh) }
   ipcMain.handle('vscode-chat:read', async (event, value: unknown) => {
     requireWindow(event)
-    const target = vscodeTargetSchema.parse(value)
+    const target = await targetFor(value)
     return target.remoteMachineName ? remote.read(await currentRoot(), target) : readOriginalVSCode(store, vscodeIdentitySchema.parse(target))
   })
   ipcMain.handle('vscode-chat:connect', async (event, value: unknown) => {
     requireWindow(event)
-    const target = vscodeTargetSchema.parse(value)
+    const target = await targetFor(value)
     if (target.remoteMachineName) await remote.connectTarget(await currentRoot(), target)
     else await connectOriginalVSCode(store, vscodeIdentitySchema.parse(target), (uri) => shell.openExternal(uri))
   })
   ipcMain.handle('vscode-chat:open', async (event, value: unknown) => {
     requireWindow(event)
-    if (vscodeTargetSchema.parse(value).remoteMachineName) throw new Error('Open the original conversation on its execution machine. Remote access does not change VS Code window layouts.')
-    await openOriginalVSCode(store, vscodeIdentitySchema.parse(value))
+    const target = await targetFor(value)
+    if (target.remoteMachineName) throw new Error('Open the original conversation on its execution machine. Remote access does not change VS Code window layouts.')
+    await openOriginalVSCode(store, vscodeIdentitySchema.parse(target))
   })
   ipcMain.handle('vscode-chat:send', async (event, value: unknown, commandId: unknown, text: unknown) => {
     requireWindow(event)
-    const target = vscodeTargetSchema.parse(value)
+    const target = await targetFor(value)
     const id = z.uuid().parse(commandId)
     const message = z.string().trim().min(1).max(4000).parse(text)
     return target.remoteMachineName ? remote.send(await currentRoot(), target, id, message) : sendOriginalVSCode(store, vscodeIdentitySchema.parse(target), id, message)
@@ -44,7 +50,8 @@ export function registerVSCodeChatBridge(requireWindow: (event: IpcMainInvokeEve
     requireWindow(event)
     close()
     if (value === null) return
-    const identity = vscodeTargetSchema.parse(value)
+    const requested = vscodeTargetSchema.parse(value)
+    const identity = await targetFor(requested)
     const current = generation
     const original = identity.remoteMachineName ? undefined : await store.locateOriginal(identity)
     if (identity.remoteMachineName) await currentRoot()
@@ -53,7 +60,7 @@ export function registerVSCodeChatBridge(requireWindow: (event: IpcMainInvokeEve
       clearTimeout(timer)
       timer = setTimeout(() => {
         const window = currentWindow()
-        if (current === generation && window && !window.isDestroyed()) window.webContents.send('vscode-chat:changed', identity)
+        if (current === generation && window && !window.isDestroyed()) window.webContents.send('vscode-chat:changed', requested)
       }, 150)
     }
     if (original) {

@@ -20,24 +20,55 @@ CLI Host, import history into another runtime, or create a fork.
 
 ### Device scope (2026-09-09)
 
-Upgrade both desktops. Export A's managed client identity once. In B's original
-conversation access dialog, publish, then **Pair device** and export a private
-device invitation. A imports it with **Import device invitation** and connects the
-device once. Pairing lasts 30 days and shares no sessions by itself.
+Upgrade both desktops. Use the activity-bar **Remote VS Code sessions** device panel,
+not a particular Session's sharing dialog. A exports its managed client identity.
+B signs in, selects **Linked-session access** (read/send by default), and clicks
+**Pair device**. After native confirmation, pairing enables the selected AD workspace's
+linked-session policy and automatically starts the private publication. A imports
+the device invitation once, verifies the owner/fingerprint, and enables automatic
+connection. No manual Publish step or session-by-session invitation is necessary.
 
-For each selected original, B chooses A under **Paired devices**, sets the Access
-level, and clicks **Share session**. No additional file exchange is needed. A's
-device gateway lists only approved sessions, across connected local VS Code
-workspaces; select a task and link the desired session. One SSH connection carries
-the catalog and all selected sessions. Catalog refresh is approximately ten seconds;
-saved history is read only for an opened session, still bounded snapshots rather
-than a new token-stream or incremental journal protocol.
+B links an original Session to a Task and commits/pushes the normal Git metadata.
+A pulls and opens the Task: the owner Client ID selects an already trusted device;
+its SSH connection is established/reused on demand. Git changes refresh approximately
+every five seconds in an open workspace; no second Link or Share session action.
+Device catalog refresh remains approximately ten seconds. Only opened histories are
+transferred, as bounded saved snapshots rather than native-file or token streaming.
 
-The loopback gateway authorizes every read/send against the stored exact-session
-policy, then uses the existing companion grant and delivery checks. It cannot open
+Each new binding in `.taskcontinuum/session-bindings.json` includes:
+
+```json
+{
+  "provider": "vscode-copilot",
+  "sessionId": "original-session-id",
+  "workspaceStorageId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "owner": {
+    "clientId": "00000000-0000-4000-8000-000000000001",
+    "machineName": "CPC-lianc-L5CN7"
+  }
+}
+```
+
+This object sits under the Task ID in `bindings`; `schemaVersion` remains 1. The
+owner is absolute, not relative to the reader. Old `remoteMachineName` bindings
+remain readable. Older app versions may reject the new optional owner field;
+upgrade both clients. A Git owner change is not an ownership-transfer protocol.
+
+On B, **Register existing local links** explicitly validates and stamps owner-less
+local links, then records local receipts. It never automatically claims Git-pulled
+or remote links. Already-paired recipients use **Enable linked sessions** to opt
+into this workspace policy. Older device invitations lacking the stable owner
+Client ID must be re-exported/imported once. Unlinking a Task, changing its owner,
+or disabling workspace access removes derived permission on the next request.
+
+The loopback gateway authorizes every read/send against B's approved workspace,
+current Git links, and private local binding receipts, then uses the existing
+companion grant and delivery checks. A forged Git link alone cannot authorize a
+different local Session. Legacy explicitly granted sessions remain compatible. It cannot open
 windows, invoke generic commands, list private sessions, or forward arbitrary ports.
 Owner policies and issued grants are encrypted in `remote-vscode-device-host.json`;
 client enrollment is encrypted in `remote-vscode-devices.json`, outside Git.
+`local-session-link-receipts.json` holds local binding confirmations outside Git.
 `remote-vscode-device-cache/` contains private bounded read-only history views.
 
 Enabled publication retries with bounded backoff and restores after desktop restart.
@@ -49,11 +80,15 @@ cache returns an explicit empty offline view, not a misleading successful histor
 
 Removing device access to one session or revoking the whole device rejects future
 reads/sends; already accepted prompts and downloaded copies cannot be recalled.
-Persistent approvals can renew companion grants after Bridge restart, but only for
+Persistent workspace policies can renew companion grants after Bridge restart, but only for
 the exact approved session and participant. B must reconnect the original Bridge;
 the gateway never starts a substitute Agent. Expired pairings require fresh pairing.
 Resetting the tunnel resource changes its route and requires exporting/importing the
 device invitation again. Occupied ports and changed keys fail closed.
+
+This increment does not upload native sessions to OneDrive, transfer ownership,
+push/pull Git, or migrate execution to A. Native CLI ownership metadata does not
+enable remote original-CLI execution; that route fails locally without a replacement.
 
 The session-invitation instructions below are retained for compatibility. They do
 not acquire persistent device scope merely by upgrading the app. An already-lost

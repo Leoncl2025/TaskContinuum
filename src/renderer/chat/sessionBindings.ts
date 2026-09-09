@@ -1,4 +1,5 @@
-export interface SessionBinding { id: string; title: string; vscodeWorkspaceStorageId?: string; remoteMachineName?: string }
+import type { SessionOwner } from '../../shared/sessionBindings'
+export interface SessionBinding { id: string; title: string; vscodeWorkspaceStorageId?: string; remoteMachineName?: string; owner?: SessionOwner; ownerIsRemote?: boolean }
 export type SessionBindings = Record<string, SessionBinding>
 const key = 'taskcontinuum:session-bindings:v1'
 

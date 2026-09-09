@@ -33,6 +33,36 @@ function fixture() {
 }
 
 describe('repository-backed session binding state', () => {
+  it('refreshes Git-pulled links without a second attach operation', async () => {
+    const { workspace, bridge } = fixture()
+    const view = renderHook(() => useSessionLinks(workspace))
+    await waitFor(() => expect(view.result.current.ready).toBe(true))
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    view.unmount()
+    const refreshed = renderHook(() => useSessionLinks(workspace))
+    try {
+      await act(async () => { await Promise.resolve() })
+      vi.mocked(bridge.getSessionLinks).mockResolvedValue({ document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'vscode-copilot', sessionId: 'pulled', workspaceStorageId: 'a'.repeat(32), owner: { clientId: 'b', machineName: 'Machine-B' } } } }, revision: 'e'.repeat(64), localOwner: { clientId: 'a', machineName: 'Machine-A' } })
+      await act(() => vi.advanceTimersByTimeAsync(5000))
+      expect(refreshed.result.current.bindings['T-0002']).toMatchObject({ id: 'pulled', remoteMachineName: 'Machine-B' })
+      expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+    } finally { refreshed.unmount(); vi.useRealTimers() }
+  })
+
+  it('interprets the same Git owner link locally on B and remotely on A without rewriting it', async () => {
+    const { workspace, bridge } = fixture()
+    const owner = { clientId: 'owner-b', machineName: 'Machine-B' }
+    const snapshot: SessionLinksSnapshot = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'vscode-copilot', sessionId: 'original', workspaceStorageId: 'a'.repeat(32), owner } } }, revision: 'd'.repeat(64), localOwner: owner }
+    vi.mocked(bridge.getSessionLinks).mockResolvedValue(snapshot)
+    const view = renderHook(() => useSessionLinks(workspace))
+    await waitFor(() => expect(view.result.current.ready).toBe(true))
+    expect(view.result.current.bindings['T-0002'].remoteMachineName).toBeUndefined()
+    vi.mocked(bridge.getSessionLinks).mockResolvedValue({ ...snapshot, localOwner: { clientId: 'client-a', machineName: 'Machine-A' } })
+    await act(() => view.result.current.reload())
+    expect(view.result.current.bindings['T-0002']).toMatchObject({ owner, remoteMachineName: 'Machine-B' })
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+  })
+
   it('waits for a successful disk write before exposing the binding and never writes real links to localStorage', async () => {
     const { workspace, bridge } = fixture()
     const { result } = renderHook(() => useSessionLinks(workspace))

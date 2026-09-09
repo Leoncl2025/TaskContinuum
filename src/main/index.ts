@@ -71,11 +71,12 @@ async function createWindow(): Promise<void> {
     },
   })
   mainWindow = window
+  let initialNavigation = true
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', (event) => event.preventDefault())
   window.webContents.on('will-frame-navigate', (event) => event.preventDefault())
   window.webContents.on('will-redirect', (event) => event.preventDefault())
-  window.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { copilotHost?.cancelAll(); vscodeChat?.close(); void remoteVSCode?.close().catch(() => undefined) } })
+  window.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { if (initialNavigation) { initialNavigation = false; return }; copilotHost?.cancelAll(); vscodeChat?.close() } })
   window.webContents.on('render-process-gone', () => { copilotHost?.cancelAll(); void remoteVSCode?.close().catch(() => undefined) })
   window.webContents.on('destroyed', () => { copilotHost?.cancelAll(); vscodeChat?.close(); void remoteVSCode?.close().catch(() => undefined) })
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
@@ -113,7 +114,7 @@ void app.whenReady().then(async () => {
   })
   registerDesktopBridge()
   copilotHost = registerCopilotBridge(requireTrustedWindow, () => mainWindow)
-  const workspaces = registerWorkspaceBridge(requireTrustedWindow, copilotHost.allowDirectory)
+  const workspaces = registerWorkspaceBridge(requireTrustedWindow, copilotHost.allowDirectory, async (root, target) => remoteVSCode?.manager.remoteOwner(root, target))
   remoteVSCode = registerRemoteVSCodeBridge(requireTrustedWindow, workspaces.currentRoot)
   vscodeChat = registerVSCodeChatBridge(requireTrustedWindow, () => mainWindow, remoteVSCode.manager, workspaces.currentRoot)
   sharedDesktop = registerSharedBridge(requireTrustedWindow, () => mainWindow, workspaces.currentRoot, copilotHost.requireDirectory)

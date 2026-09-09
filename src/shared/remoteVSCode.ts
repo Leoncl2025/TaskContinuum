@@ -34,8 +34,10 @@ export interface RemoteVSCodeGrant {
 export interface RemoteVSCodeBridge {
   devices?: {
     list(): Promise<{ id: string; machineName: string; state: 'connected' | 'connecting' | 'offline'; enabled: boolean; expiresAt: string; error?: string }[]>
-    recipients(): Promise<{ id: string; username: string; machineName: string; expiresAt: string }[]>
-    pair(): Promise<boolean>
+    recipients(): Promise<{ id: string; username: string; machineName: string; expiresAt: string; linkedAccess?: 'none' | 'read' | 'send' }[]>
+    pair(canSend?: boolean): Promise<boolean>
+    workspace?(id: string, access: 'none' | 'read' | 'send'): Promise<boolean>
+    adoptLinks?(): Promise<boolean>
     import(): Promise<boolean>
     connect(id: string): Promise<void>
     disconnect(id: string): Promise<void>

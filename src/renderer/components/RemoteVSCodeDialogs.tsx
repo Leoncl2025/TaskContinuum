@@ -16,6 +16,8 @@ export function RemoteVSCodeDialog({ taskId, onLink, onClose }: { taskId?: strin
   const [managed, setManaged] = useState(Boolean(bridge?.devTunnels))
   const [serviceBusy, setServiceBusy] = useState(false)
   const [connectingId, setConnectingId] = useState<string>()
+  const [deviceCanSend, setDeviceCanSend] = useState(true)
+  const [deviceStatus, setDeviceStatus] = useState<DevTunnelStatus>()
   const running = useRef(false)
   useEffect(() => {
     let active = true
@@ -36,13 +38,14 @@ export function RemoteVSCodeDialog({ taskId, onLink, onClose }: { taskId?: strin
   }
   return <Dialog title="Remote VS Code sessions" className="remote-vscode-dialog" onClose={() => { if (!busy && !serviceBusy) onClose() }}>
     {bridge?.devTunnels && <RemoteTransportPicker managed={managed} disabled={busy || serviceBusy} onChange={setManaged} />}
-    {managed && <DevTunnelControls onBusy={setServiceBusy} />}
+    {managed && <DevTunnelControls hosting onStatus={setDeviceStatus} onBusy={setServiceBusy} />}
     {managed && <RemoteDeviceConnections />}
+    {managed && <><label className="form-field">Linked-session access<select aria-label="Linked-session workspace access" value={deviceCanSend ? 'send' : 'read'} onChange={(event) => setDeviceCanSend(event.target.value === 'send')}><option value="send">Read and send</option><option value="read">Read only</option></select></label><RemoteDeviceAccess canSend={deviceCanSend} hosting={Boolean(deviceStatus?.account) && !serviceBusy} /></>}
     <div className="remote-vscode-actions"><button type="button" className="secondary-button" disabled={!bridge || busy || serviceBusy} onClick={() => { void run(async () => { if (await (managed ? bridge!.exportIdentity(true) : bridge!.exportIdentity())) setNotice('Client identity exported.') }) }}><Icon name="export" />Export client identity</button><IconButton icon="refresh" label="Refresh remote connections" disabled={!bridge || busy} onClick={() => { void run(async () => {}) }} /></div>
-    <form className="remote-vscode-import" onSubmit={(event) => { event.preventDefault(); void run(async () => { const imported = await (managed ? bridge!.importInvitation() : bridge!.importInvitation(hostAlias.trim())); if (imported) setNotice(`Invitation imported for ${imported.execution.machineName}.`) }) }}>
+    <details open={!managed}><summary>Legacy session invitation</summary><form className="remote-vscode-import" onSubmit={(event) => { event.preventDefault(); void run(async () => { const imported = await (managed ? bridge!.importInvitation() : bridge!.importInvitation(hostAlias.trim())); if (imported) setNotice(`Invitation imported for ${imported.execution.machineName}.`) }) }}>
       {!managed && <label className="form-field">SSH host alias<input aria-label="SSH host alias" value={hostAlias} maxLength={150} placeholder="copilot-owner" onChange={(event) => setHostAlias(event.target.value)} /></label>}
       <button type="submit" className="primary-button" disabled={!bridge || busy || serviceBusy || !managed && !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,149}$/.test(hostAlias.trim())}><Icon name="import" />Import invitation</button>
-    </form>
+    </form></details>
     {error && <p className="copilot-error" role="alert">{error}</p>}
     {notice && <p className="muted" role="status">{notice}</p>}
     <div className="remote-vscode-list" aria-busy={busy}>

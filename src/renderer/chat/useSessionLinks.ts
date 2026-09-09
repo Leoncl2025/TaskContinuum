@@ -5,7 +5,10 @@ import { clearSessionBindings, readSessionBindings, saveSessionBindings, session
 import type { SessionBinding, SessionBindings } from './sessionBindings'
 
 function uiBindings(snapshot: SessionLinksSnapshot): SessionBindings {
-  return Object.fromEntries(Object.entries(snapshot.document.bindings).map(([taskId, link]) => [taskId, { id: link.sessionId, title: 'GitHub Copilot', ...(link.provider === 'vscode-copilot' ? { vscodeWorkspaceStorageId: link.workspaceStorageId, ...(link.remoteMachineName ? { remoteMachineName: link.remoteMachineName } : {}) } : {}) }]))
+  return Object.fromEntries(Object.entries(snapshot.document.bindings).map(([taskId, link]) => {
+    const machine = link.owner ? link.owner.clientId !== snapshot.localOwner?.clientId ? link.owner.machineName : undefined : link.provider === 'vscode-copilot' ? link.remoteMachineName : undefined
+    return [taskId, { id: link.sessionId, title: 'GitHub Copilot', ...(link.owner ? { owner: link.owner, ownerIsRemote: link.owner.clientId !== snapshot.localOwner?.clientId } : {}), ...(link.provider === 'vscode-copilot' ? { vscodeWorkspaceStorageId: link.workspaceStorageId, ...(machine ? { remoteMachineName: machine } : {}) } : {}) }]
+  }))
 }
 
 function repositoryLink(binding: SessionBinding): SessionLink {
@@ -29,9 +32,12 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
     if (!workspace) return () => { mounted.current = false }
     pending.current = true
     let cancelled = false
+    let lastRevision: string | null | undefined
+    let refreshing = false
     const load = bridge ? bridge.getSessionLinks(workspace.id) : Promise.reject(new Error('The workspace session link bridge is unavailable.'))
     void load.then((value) => {
       if (cancelled) return
+      lastRevision = value.revision
       setSnapshot(value)
       setBindings(uiBindings(value))
       setError(null)
@@ -40,7 +46,16 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
     }).finally(() => {
       if (!cancelled) { pending.current = false; setBusy(false) }
     })
-    return () => { cancelled = true; mounted.current = false }
+    const timer = setInterval(() => {
+      if (!bridge || pending.current || refreshing || cancelled) return
+      refreshing = true
+      void bridge.getSessionLinks(workspace.id).then((value) => {
+        if (cancelled || pending.current) return
+        if (value.revision !== lastRevision) { lastRevision = value.revision; setSnapshot(value); setBindings(uiBindings(value)) }
+        setError(null)
+      }).catch((failure: unknown) => { if (!cancelled && !pending.current) setError(failure instanceof Error ? failure.message : 'Repository session links could not be refreshed.') }).finally(() => { refreshing = false })
+    }, 5000)
+    return () => { cancelled = true; mounted.current = false; clearInterval(timer) }
   }, [bridge, workspace])
 
   useEffect(() => { if (!workspace) saveSessionBindings(bindings) }, [bindings, workspace])
@@ -73,7 +88,7 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
       setBindings((current) => ({ ...Object.fromEntries(Object.entries(current).filter(([id, link]) => id === taskId || sessionBindingKey(link) !== sessionBindingKey(binding))), [taskId]: binding }))
       return
     }
-    await run(() => bridge!.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: binding.id, expectedRevision: snapshot!.revision, ...(binding.vscodeWorkspaceStorageId ? { vscodeWorkspaceStorageId: binding.vscodeWorkspaceStorageId, ...(binding.remoteMachineName ? { vscodeRemoteMachineName: binding.remoteMachineName } : {}) } : {}) }))
+    await run(() => bridge!.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: binding.id, expectedRevision: snapshot!.revision, ...(binding.owner ? { owner: binding.owner } : {}), ...(binding.vscodeWorkspaceStorageId ? { vscodeWorkspaceStorageId: binding.vscodeWorkspaceStorageId, ...(binding.remoteMachineName ? { vscodeRemoteMachineName: binding.remoteMachineName } : {}) } : {}) }))
   }
 
   async function detach(taskId: string): Promise<void> {

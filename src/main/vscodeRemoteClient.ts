@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { realpath, rm } from 'node:fs/promises'
 import { request as httpRequest } from 'node:http'
-import { hostname, userInfo } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 import type { RemoteVSCodeClientIdentity, RemoteVSCodeConnection, VSCodeChatTarget } from '../shared/remoteVSCode'
@@ -13,6 +12,8 @@ import { remoteClientSchema, remoteHandshakeSchema, remoteHistorySchema, remoteI
 import type { RemoteVSCodeInvitation } from './vscodeRemoteProtocol'
 import type { DevTunnelRoute } from './devTunnel/protocol'
 import type { VSCodeDeviceClient } from './vscodeDeviceClient'
+import { readClientIdentity } from './clientIdentity'
+import { readRepositorySessionLinks } from './repositorySessionLinks'
 
 const enrollmentSchema = z.object({ id: z.uuid(), root: z.string().min(1).max(4000), hostAlias: sshHostAliasSchema.optional(), invitation: remoteInvitationFileSchema }).strict()
   .refine((entry) => Boolean(entry.invitation.devTunnel) !== Boolean(entry.hostAlias), 'Exactly one remote transport is required.')
@@ -53,21 +54,21 @@ export class RemoteVSCodeManager {
   identity(): Promise<RemoteVSCodeClientIdentity> {
     this.identityValue ??= (async () => {
       if (this.options.identity) return remoteClientSchema.parse(await this.options.identity())
-      const file = join(this.directory, 'remote-vscode-identity.json')
-      const schema = z.object({ clientId: z.uuid() }).strict()
-      let stored: z.infer<typeof schema>
-      try { stored = schema.parse(await readJsonBounded(file, 1024)) } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-        stored = { clientId: randomUUID() }
-        try { await writeJsonAtomic(file, stored, true) } catch (failure) {
-          if ((failure as NodeJS.ErrnoException).code !== 'EEXIST') throw failure
-          stored = schema.parse(await readJsonBounded(file, 1024))
-        }
-      }
-      return remoteClientSchema.parse({ ...stored, username: userInfo().username, machineName: hostname() })
+      return readClientIdentity(this.directory)
     })()
     return this.identityValue
   }
+  async resolveTarget(root: string, value: unknown): Promise<VSCodeChatTarget> {
+    const target = vscodeTargetSchema.parse(value)
+    const { document } = await readRepositorySessionLinks(root)
+    const candidates = Object.values(document.bindings).filter((link) => link.provider === 'vscode-copilot' && link.sessionId === target.nativeSessionId && link.workspaceStorageId === target.workspaceStorageId && (!target.remoteMachineName || (link.owner?.machineName ?? link.remoteMachineName)?.toLowerCase() === target.remoteMachineName.toLowerCase()))
+    if (candidates.length > 1) throw new Error('Ambiguous repository session identity.')
+    const owner = candidates[0]?.owner
+    if (!owner) return target
+    const local = await this.identity()
+    return { nativeSessionId: target.nativeSessionId, workspaceStorageId: target.workspaceStorageId, ...(owner.clientId === local.clientId ? {} : { remoteMachineName: owner.machineName }) }
+  }
+  async remoteOwner(root: string, target: VSCodeChatTarget) { return this.options.devices?.owner(root, target) }
 
   private load(): Promise<void> {
     this.loading ??= (async () => {

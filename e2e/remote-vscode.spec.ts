@@ -139,6 +139,7 @@ for (const managed of [false, true]) test(`authorizes an original VS Code conver
     expect(invitation.grant.canSend).toBe(true)
     if (managed) expect(invitation.devTunnel?.clientPublicKey).toBe(exported.sshPublicKey)
     else await manager.getByRole('textbox', { name: 'SSH host alias' }).fill('owner-machine')
+    if (managed) await manager.getByText('Legacy session invitation', { exact: true }).click()
     await manager.getByRole('button', { name: 'Import invitation', exact: true }).click()
     await expect(manager).toContainText('Invitation imported for')
     if (ssh) expect(ssh.forwardedConnections()).toBe(0)

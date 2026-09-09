@@ -4,8 +4,11 @@ import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import type { WorkspaceDescriptor, WorkspaceSnapshot, WorkspaceState } from '../shared/workspace'
 import { readTaskWorkspace } from './workspaceReader'
-import { migrateRepositorySessionLinks, readRepositorySessionLinks, sessionLinkSchema, updateRepositorySessionLink } from './repositorySessionLinks'
-import type { SessionLinksSnapshot } from '../shared/sessionBindings'
+import { migrateRepositorySessionLinks, readRepositorySessionLinks, sessionLinkSchema, sessionOwnerSchema, updateRepositorySessionLink } from './repositorySessionLinks'
+import type { SessionLinksSnapshot, SessionOwner } from '../shared/sessionBindings'
+import { readClientIdentity } from './clientIdentity'
+import { recordLocalLink } from './linkedSessionPolicy'
+import { VSCodeSessionStore } from './vscodeSessions'
 import { remoteMachineSchema } from './vscodeRemoteProtocol'
 
 const descriptorSchema = z.object({ id: z.string().regex(/^[a-f\d]{64}$/), name: z.string().max(300), title: z.string().max(200), root: z.string().min(1).max(4096) })
@@ -15,6 +18,7 @@ const linkChangeSchema = z.object({
   sessionId: z.string().min(1).max(240).regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/).nullable(),
   vscodeWorkspaceStorageId: z.string().regex(/^[a-f0-9]{32}$/).optional(),
   vscodeRemoteMachineName: remoteMachineSchema.optional(),
+  owner: sessionOwnerSchema.optional(),
   expectedRevision: z.string().regex(/^[a-f\d]{64}$/).nullable(),
 }).strict()
 const migrationSchema = z.object({
@@ -33,7 +37,7 @@ export class WorkspaceStore {
   private loading?: Promise<void>
   private pending: Promise<unknown> = Promise.resolve()
 
-  constructor(stateDirectory: string, startupFolder?: string) {
+  constructor(private readonly stateDirectory: string, startupFolder?: string, private readonly resolveRemoteOwner?: (root: string, identity: { nativeSessionId: string; workspaceStorageId: string; remoteMachineName: string }) => Promise<SessionOwner | undefined>, private readonly originals = new VSCodeSessionStore()) {
     this.stateFile = join(stateDirectory, 'workspaces.json')
     this.startupFolder = startupFolder
   }
@@ -122,7 +126,12 @@ export class WorkspaceStore {
   }
 
   getSessionLinks(workspaceId: unknown): Promise<SessionLinksSnapshot> {
-    return this.update(() => readRepositorySessionLinks(this.selectedWorkspace(workspaceId).root))
+    return this.update(async () => ({ ...await readRepositorySessionLinks(this.selectedWorkspace(workspaceId).root), localOwner: await this.localOwner() }))
+  }
+
+  private async localOwner(): Promise<SessionOwner> {
+    const { clientId, machineName } = await readClientIdentity(this.stateDirectory)
+    return { clientId, machineName }
   }
 
   updateSessionLink(value: unknown): Promise<SessionLinksSnapshot> {
@@ -132,7 +141,16 @@ export class WorkspaceStore {
       if (request.sessionId !== null && !(await readTaskWorkspace(workspace.root)).tasks.some((task) => task.id === request.taskId)) {
         throw new Error('This task no longer exists in the selected workspace.')
       }
-      return updateRepositorySessionLink(workspace.root, request.taskId, request.sessionId, request.expectedRevision, request.vscodeWorkspaceStorageId, request.vscodeRemoteMachineName)
+      const localOwner = await this.localOwner()
+      let owner = request.sessionId === null ? undefined : localOwner
+      if (request.vscodeRemoteMachineName && request.vscodeWorkspaceStorageId) {
+        owner = await this.resolveRemoteOwner?.(workspace.root, { nativeSessionId: request.sessionId!, workspaceStorageId: request.vscodeWorkspaceStorageId, remoteMachineName: request.vscodeRemoteMachineName })
+      }
+      if (request.owner && request.owner.clientId !== owner?.clientId) throw new Error('The selected owner does not match the authenticated session route.')
+      if (request.sessionId && request.vscodeWorkspaceStorageId && owner?.clientId === localOwner.clientId) await this.originals.locateOriginal({ nativeSessionId: request.sessionId, workspaceStorageId: request.vscodeWorkspaceStorageId })
+      const saved = await updateRepositorySessionLink(workspace.root, request.taskId, request.sessionId, request.expectedRevision, request.vscodeWorkspaceStorageId, request.vscodeRemoteMachineName, owner)
+      await recordLocalLink(this.stateDirectory, workspace.root, request.taskId, saved.document.bindings[request.taskId], localOwner)
+      return { ...saved, localOwner }
     })
   }
 

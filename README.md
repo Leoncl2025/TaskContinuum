@@ -333,15 +333,22 @@ on both ends; it is not a tenant-wide device registry or SSH certificate authori
 
 1. On A, open **Remote VS Code sessions**, sign in with Microsoft, and **Export client
     identity**. The file contains a public device key, not its private key.
-2. On B, connect the original conversation, open **Share original conversation
-    remotely**, sign in, and **Publish this machine**. Keep this desktop and VS Code open.
-3. B chooses **Pair device**, selects A's identity, and saves a private device invitation.
-    Transfer it once and verify the host fingerprint. A uses **Import device invitation**
-    and **Connect device**. Pairing alone grants no conversation access.
-4. For each conversation, B selects A under **Paired devices**, chooses the Access
-    level, and clicks **Share session**. A discovers approved sessions over the same
-    device connection and selects **Link to T-XXXX**. No further invitation file or
-    per-session SSH connection is required. History is fetched only when opened.
+2. On B, open the same device panel, sign in, choose **Linked-session access**, then
+    **Pair device** with A's identity. Confirmation enables this AD workspace's linked
+    sessions and starts publication automatically; no Session dialog or Publish step.
+3. Transfer the private device invitation once and verify B's fingerprint. A uses
+    **Import device invitation**, consenting to automatic connection for this workspace.
+4. B links an original VS Code Session to a Task. The Git-managed link records its
+    stable owner Client ID and machine name. B commits/pushes normally; A pulls and
+    opens the Task. Owner routing reuses the device connection, without Share session
+    or a second Link action. Open-workspace links refresh about every five seconds.
+
+Existing device pairs can enable this policy with **Enable linked sessions**. Existing
+owner-less links need **Register existing local links** on B, followed by a Git push.
+The app validates the original locally and records private binding receipts; changing
+Git alone cannot grant access to unrelated local histories. Git operations are manual.
+The current device gateway supports original VS Code sessions. Foreign CLI-owner links
+are not automatically resumed locally; the independent shared CLI Host is unchanged.
 
 No Copilot CLI login is needed on A, and no conversation is created, resumed, imported,
 or forked. The legacy **SSH alias** mode remains available on both dialogs.
@@ -356,7 +363,7 @@ login errors without publishing anything. VS Code does not need reloading for th
 See the [remote VS Code runbook](docs/remote-vscode.md) for both-machine setup,
 access control, renewal, disconnect/offline behavior, and recovery. Enabled publication
 recovers after network loss and desktop restart; **Stop publication** disables recovery.
-Device pairing and exact-session approvals persist encrypted for up to 30 days.
+Device pairing and workspace sharing policies persist encrypted for up to 30 days.
 **Disconnect device** stops client recovery; no execution message is automatically replayed.
 The old **Choose recipient / Import invitation** path remains session-scoped and needs
 new invitations after Bridge restart or expiry. Neither path stops B's Agent.

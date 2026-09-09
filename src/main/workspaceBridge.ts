@@ -2,9 +2,11 @@ import { app, dialog, ipcMain } from 'electron'
 import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import type { WorkspaceState } from '../shared/workspace'
 import { WorkspaceStore } from './workspaceStore'
+import type { SessionOwner } from '../shared/sessionBindings'
+import type { VSCodeChatTarget } from '../shared/remoteVSCode'
 
-export function registerWorkspaceBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, allowDirectory: (root: string) => void) {
-  const store = new WorkspaceStore(app.getPath('userData'), process.env.TASKCONTINUUM_WORKSPACE)
+export function registerWorkspaceBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, allowDirectory: (root: string) => void, remoteOwner?: (root: string, target: VSCodeChatTarget) => Promise<SessionOwner | undefined>) {
+  const store = new WorkspaceStore(app.getPath('userData'), process.env.TASKCONTINUUM_WORKSPACE, remoteOwner)
   function authorize(state: WorkspaceState): WorkspaceState {
     if (state.current) allowDirectory(state.current.root)
     return state

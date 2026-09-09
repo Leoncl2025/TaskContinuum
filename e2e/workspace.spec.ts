@@ -265,7 +265,7 @@ test('links an original VS Code conversation with long history without import an
     const panel = page.getByRole('complementary', { name: 'VS Code task chat' })
     await expect(panel.getByRole('log')).toContainText('Existing original answer')
     await expect(panel.getByRole('button', { name: 'Send to original VS Code session' })).toBeDisabled()
-    const expected = { provider: 'vscode-copilot', sessionId: nativeSessionId, workspaceStorageId }
+    const expected = { provider: 'vscode-copilot', sessionId: nativeSessionId, workspaceStorageId, owner: expect.objectContaining({ clientId: expect.any(String), machineName: expect.any(String) }) }
     expect(JSON.parse(await readFile(linkFile, 'utf8')).bindings['T-0002']).toEqual(expected)
     expect((await page.evaluate(() => window.copilot!.getStatus())).state).toBe('disconnected')
     await panel.getByRole('button', { name: 'Open in VS Code' }).click()
@@ -368,7 +368,7 @@ test('sends from the desktop with original-session identity and preserves user a
     await expect(answer.locator('header')).toContainText(`GitHub Copilot @ ${hostname()}`)
     expect(requests).toBe(1)
     expect((await page.evaluate(() => window.copilot!.getStatus())).state).toBe('disconnected')
-    expect(JSON.parse(await readFile(linkFile, 'utf8')).bindings['T-0002']).toEqual({ provider: 'vscode-copilot', sessionId: nativeSessionId, workspaceStorageId })
+    expect(JSON.parse(await readFile(linkFile, 'utf8')).bindings['T-0002']).toEqual({ provider: 'vscode-copilot', sessionId: nativeSessionId, workspaceStorageId, owner: expect.objectContaining({ clientId: expect.any(String), machineName: expect.any(String) }) })
     await page.screenshot({ path: resolve('artifacts/vscode-sending-desktop.png') })
     await app.close()
     await launch()
