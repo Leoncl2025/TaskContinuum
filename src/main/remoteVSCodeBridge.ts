@@ -18,7 +18,7 @@ import { VSCodeDeviceClient } from './vscodeDeviceClient'
 import { deviceInvitationSchema } from './vscodeDeviceProtocol'
 import { hostname } from 'node:os'
 import { readClientIdentity } from './clientIdentity'
-import { canonicalPolicyRoot, locallyLinkedSessions, recordLocalLink } from './linkedSessionPolicy'
+import { canonicalPolicyRoot, locallyLinkedSessions, recordLocalLink, unregisteredLocalLinks } from './linkedSessionPolicy'
 import { readRepositorySessionLinks, updateRepositorySessionLink } from './repositorySessionLinks'
 
 async function requirePrivateDestination(file: string): Promise<void> {
@@ -88,7 +88,7 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     const root = await currentRoot()
     let snapshot = await readRepositorySessionLinks(root)
     const local = await manager.identity()
-    const candidates = Object.entries(snapshot.document.bindings).filter(([, link]) => link.provider === 'vscode-copilot' && !link.owner && !link.remoteMachineName)
+    const candidates = await unregisteredLocalLinks(app.getPath('userData'), root, snapshot.document.bindings, local)
     if (!candidates.length) return false
     for (const [, link] of candidates) if (link.provider === 'vscode-copilot') await store.locateOriginal({ nativeSessionId: link.sessionId, workspaceStorageId: link.workspaceStorageId })
     const consent = await dialog.showMessageBox(window, { type: 'warning', message: `Register ${candidates.length} existing local links as owned by ${local.machineName}?`, detail: 'This writes owner metadata to the Git-managed links and locally confirms them for enabled workspace sharing. Do this only on the original owner machine; it does not transfer ownership or push Git.', buttons: ['Cancel', 'Register local links'], defaultId: 0, cancelId: 0 })
@@ -105,7 +105,9 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     const canSend = z.boolean().optional().parse(permission) ?? true
     const input = await dialog.showOpenDialog(window, { title: 'Select client identity to pair once', properties: ['openFile'], filters: json })
     if (input.canceled || !input.filePaths[0]) return false
-    const identity = remoteIdentityFileSchema.parse(await readJsonBounded(input.filePaths[0], 4096))
+    const parsedIdentity = remoteIdentityFileSchema.safeParse(await readJsonBounded(input.filePaths[0], 16384))
+    if (!parsedIdentity.success) throw new Error('Pair device requires the receiving desktop\'s Export client identity file. If you received a device invitation from the execution machine, use Import device invitation instead.')
+    const identity = parsedIdentity.data
     if (!identity.sshPublicKey) throw new Error('Export a managed client identity with its public key.')
     const output = await dialog.showSaveDialog(window, { title: 'Save private device invitation outside Git', defaultPath: join(app.getPath('documents'), `taskcontinuum-device-${randomUUID()}.json`), filters: json })
     if (output.canceled || !output.filePath) return false
@@ -125,7 +127,9 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     const root = await currentRoot()
     const input = await dialog.showOpenDialog(window, { title: 'Import private device invitation', properties: ['openFile'], filters: json })
     if (input.canceled || !input.filePaths[0]) return false
-    const invitation = deviceInvitationSchema.parse(await readJsonBounded(input.filePaths[0], 16384))
+    const parsedInvitation = deviceInvitationSchema.safeParse(await readJsonBounded(input.filePaths[0], 16384))
+    if (!parsedInvitation.success) throw new Error('Import device invitation requires the private file created by Pair device on the execution machine. A client identity file must be given to that machine first; legacy session invitations use Import invitation.')
+    const invitation = parsedInvitation.data
     const consent = await dialog.showMessageBox(window, { type: 'warning', title: 'Trust execution device', message: `Pair with ${invitation.machineName}?`, detail: `Host fingerprint: ${sshFingerprint(invitation.devTunnel.hostPublicKey)}\nOwner client: ${invitation.ownerClientId ?? 'Legacy invitation: re-export for Git owner routing'}\nExpires: ${invitation.expiresAt}\n\nVerify this identity with the owner. Enable automatic connection for this AD workspace, including after restart, until Disconnect. Git owner links select sessions; B enforces its workspace access policy. No execution message is replayed.`, buttons: ['Cancel', 'Import device'], defaultId: 0, cancelId: 0 })
     if (consent.response !== 1) return false
     await unchanged(root)
