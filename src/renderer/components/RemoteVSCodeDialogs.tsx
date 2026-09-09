@@ -4,6 +4,7 @@ import type { VSCodeChatIdentity } from '../../shared/vscodeChat'
 import { Dialog, Icon, IconButton } from './Primitives'
 import { DevTunnelControls, RemoteTransportPicker } from './DevTunnelControls'
 import type { DevTunnelStatus } from '../../shared/devTunnel'
+import { RemoteDeviceAccess, RemoteDeviceConnections } from './RemoteDeviceControls'
 
 export function RemoteVSCodeDialog({ taskId, onLink, onClose }: { taskId?: string; onLink(connection: RemoteVSCodeConnection): Promise<void>; onClose(): void }) {
   const bridge = window.remoteVSCode
@@ -18,8 +19,10 @@ export function RemoteVSCodeDialog({ taskId, onLink, onClose }: { taskId?: strin
   const running = useRef(false)
   useEffect(() => {
     let active = true
-    void bridge?.list().then((value) => { if (active) setConnections(value) }).catch((failure: unknown) => { if (active) setError(failure instanceof Error ? failure.message : 'Remote connections could not be loaded.') })
-    return () => { active = false }
+    const refresh = () => { void bridge?.list().then((value) => { if (active) setConnections(value) }).catch((failure: unknown) => { if (active) setError(failure instanceof Error ? failure.message : 'Remote connections could not be loaded.') }) }
+    refresh()
+    const timer = setInterval(refresh, 2000)
+    return () => { active = false; clearInterval(timer) }
   }, [bridge])
   async function run(action: () => Promise<void>): Promise<void> {
     if (!bridge || running.current) return
@@ -34,6 +37,7 @@ export function RemoteVSCodeDialog({ taskId, onLink, onClose }: { taskId?: strin
   return <Dialog title="Remote VS Code sessions" className="remote-vscode-dialog" onClose={() => { if (!busy && !serviceBusy) onClose() }}>
     {bridge?.devTunnels && <RemoteTransportPicker managed={managed} disabled={busy || serviceBusy} onChange={setManaged} />}
     {managed && <DevTunnelControls onBusy={setServiceBusy} />}
+    {managed && <RemoteDeviceConnections />}
     <div className="remote-vscode-actions"><button type="button" className="secondary-button" disabled={!bridge || busy || serviceBusy} onClick={() => { void run(async () => { if (await (managed ? bridge!.exportIdentity(true) : bridge!.exportIdentity())) setNotice('Client identity exported.') }) }}><Icon name="export" />Export client identity</button><IconButton icon="refresh" label="Refresh remote connections" disabled={!bridge || busy} onClick={() => { void run(async () => {}) }} /></div>
     <form className="remote-vscode-import" onSubmit={(event) => { event.preventDefault(); void run(async () => { const imported = await (managed ? bridge!.importInvitation() : bridge!.importInvitation(hostAlias.trim())); if (imported) setNotice(`Invitation imported for ${imported.execution.machineName}.`) }) }}>
       {!managed && <label className="form-field">SSH host alias<input aria-label="SSH host alias" value={hostAlias} maxLength={150} placeholder="copilot-owner" onChange={(event) => setHostAlias(event.target.value)} /></label>}
@@ -46,7 +50,7 @@ export function RemoteVSCodeDialog({ taskId, onLink, onClose }: { taskId?: strin
       {connections.map((connection) => <section className="remote-vscode-row" key={connection.id} aria-label={`Remote ${connection.title}`}>
         <div className="remote-vscode-row-title"><Icon name="remote" /><strong>{connection.title}</strong><span className="muted">{connectingId === connection.id ? 'connecting' : connection.state}</span></div>
         <dl className="remote-vscode-meta"><div><dt>Agent</dt><dd>{connection.execution.agentName} @ {connection.execution.machineName}</dd></div><div><dt>Participant</dt><dd>{connection.participant.username} @ {connection.participant.machineName}</dd></div><div><dt>Transport</dt><dd>{connection.transport === 'dev-tunnel' ? 'Dev Tunnel + SSH' : connection.hostAlias}</dd></div><div><dt>Access</dt><dd>{connection.canSend ? 'Read and send' : 'Read only'}</dd></div><div><dt>Expires</dt><dd><time dateTime={connection.expiresAt}>{new Date(connection.expiresAt).toLocaleString()}</time></dd></div></dl>
-        <div className="remote-vscode-actions">{connectingId === connection.id ? <IconButton icon="close" label={`Cancel connection to ${connection.execution.machineName}`} onClick={() => { void bridge!.disconnect(connection.id).catch((failure: unknown) => setError(failure instanceof Error ? failure.message : 'Disconnect failed.')) }} /> : <IconButton icon={connection.state === 'connected' ? 'debug-disconnect' : 'plug'} label={`${connection.state === 'connected' ? 'Disconnect' : 'Connect'} ${connection.execution.machineName}`} disabled={busy || serviceBusy} onClick={() => { void run(async () => { if (connection.state === 'connected') await bridge!.disconnect(connection.id); else { setConnectingId(connection.id); try { await bridge!.connect(connection.id) } finally { setConnectingId(undefined) } } }) }} />}<button type="button" className="secondary-button" disabled={busy || !taskId} onClick={() => { void run(() => onLink(connection)) }}><Icon name="link" />{taskId ? `Link to ${taskId}` : 'No task selected'}</button><IconButton icon="trash" label={`Forget ${connection.title}`} disabled={busy} onClick={() => { void run(() => bridge!.forget(connection.id)) }} /></div>
+        <div className="remote-vscode-actions">{!connection.deviceId && (connectingId === connection.id ? <IconButton icon="close" label={`Cancel connection to ${connection.execution.machineName}`} onClick={() => { void bridge!.disconnect(connection.id).catch((failure: unknown) => setError(failure instanceof Error ? failure.message : 'Disconnect failed.')) }} /> : <IconButton icon={connection.state === 'connected' ? 'debug-disconnect' : 'plug'} label={`${connection.state === 'connected' ? 'Disconnect' : 'Connect'} ${connection.execution.machineName}`} disabled={busy || serviceBusy} onClick={() => { void run(async () => { if (connection.state === 'connected') await bridge!.disconnect(connection.id); else { setConnectingId(connection.id); try { await bridge!.connect(connection.id) } finally { setConnectingId(undefined) } } }) }} />)}<button type="button" className="secondary-button" disabled={busy || !taskId} onClick={() => { void run(() => onLink(connection)) }}><Icon name="link" />{taskId ? `Link to ${taskId}` : 'No task selected'}</button>{!connection.deviceId && <IconButton icon="trash" label={`Forget ${connection.title}`} disabled={busy} onClick={() => { void run(() => bridge!.forget(connection.id)) }} />}</div>
       </section>)}
     </div>
   </Dialog>
@@ -82,6 +86,7 @@ export function RemoteVSCodeAccessDialog({ identity, onClose }: { identity: VSCo
   return <Dialog title="Remote access to original conversation" className="remote-vscode-dialog" onClose={() => { if (!busy && !serviceBusy) onClose() }}>
     {bridge?.devTunnels && <RemoteTransportPicker managed={managed} disabled={busy || serviceBusy} onChange={setManaged} />}
     {managed && <DevTunnelControls hosting onStatus={setServiceStatus} onBusy={setServiceBusy} />}
+    {managed && <RemoteDeviceAccess identity={identity} canSend={canSend} hosting={serviceStatus?.state === 'hosting'} />}
     <form className="remote-vscode-import" onSubmit={(event) => { event.preventDefault(); void run(async () => { if (await (managed ? bridge!.share(identity, canSend, true) : bridge!.share(identity, canSend))) setNotice('Private invitation saved. Expires in 24 hours or when the bridge stops.') }) }}>
       <label className="form-field">Access<select aria-label="Remote invitation access" value={canSend ? 'send' : 'read'} onChange={(event) => setCanSend(event.target.value === 'send')}><option value="read">Read only</option><option value="send">Read and send</option></select></label>
       <button type="submit" className="primary-button" disabled={!bridge || busy || serviceBusy || managed && serviceStatus?.state !== 'hosting'}><Icon name="person-add" />Choose recipient</button>

@@ -11,6 +11,7 @@ export interface RemoteVSCodeClientIdentity extends VSCodeChatParticipant {
 
 export interface RemoteVSCodeConnection {
   id: string
+  deviceId?: string
   target: VSCodeChatTarget
   title: string
   hostAlias: string
@@ -31,6 +32,18 @@ export interface RemoteVSCodeGrant {
 }
 
 export interface RemoteVSCodeBridge {
+  devices?: {
+    list(): Promise<{ id: string; machineName: string; state: 'connected' | 'connecting' | 'offline'; enabled: boolean; expiresAt: string; error?: string }[]>
+    recipients(): Promise<{ id: string; username: string; machineName: string; expiresAt: string }[]>
+    pair(): Promise<boolean>
+    import(): Promise<boolean>
+    connect(id: string): Promise<void>
+    disconnect(id: string): Promise<void>
+    forget(id: string): Promise<void>
+    revoke(id: string): Promise<void>
+    share(id: string, identity: VSCodeChatIdentity, canSend: boolean): Promise<boolean>
+    unshare(id: string, identity: VSCodeChatIdentity): Promise<void>
+  }
   devTunnels?: DevTunnelBridge
   exportIdentity(managed?: boolean): Promise<boolean>
   importInvitation(hostAlias?: string): Promise<RemoteVSCodeConnection | null>

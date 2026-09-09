@@ -12,7 +12,7 @@ import { devTunnelIdSchema, devTunnelRouteSchema, sshFingerprint } from './proto
 import type { DevTunnelRoute } from './protocol'
 import { openSessionSshBridge, startSessionSshHost } from './sessionSsh'
 
-const publicationSchema = z.object({ tunnelId: devTunnelIdSchema, sshPort: z.number().int().min(1024).max(65535), accountId: z.string().min(1).max(300) }).strict()
+const publicationSchema = z.object({ tunnelId: devTunnelIdSchema, sshPort: z.number().int().min(1024).max(65535), accountId: z.string().min(1).max(300), enabled: z.boolean().optional() }).strict()
 type Publication = z.infer<typeof publicationSchema>
 
 export class ManagedDevTunnels {
@@ -24,6 +24,11 @@ export class ManagedDevTunnels {
   private state: DevTunnelStatus = { installed: false, state: 'idle' }
   private readonly file: string
   private readonly clients = new Set<() => void>()
+  private recovery?: ReturnType<typeof setInterval>
+  private restoreGrants?: () => Promise<void>
+  private recoveryEnabled = false
+  private retryAfter = 0
+  private failures = 0
 
   constructor(directory: string, readonly keys: DeviceSshKeys, private readonly cli = new DevTunnelCli(), private readonly cloud: TunnelCloud = new SdkTunnelCloud(cli)) {
     this.file = join(directory, 'dev-tunnel-publication.json')
@@ -43,8 +48,21 @@ export class ManagedDevTunnels {
         if (this.cloudHost && this.publication?.accountId !== login.accountId) await this.stop()
       } catch (error) { this.state.error = error instanceof Error ? error.message : 'Dev Tunnel status unavailable.' }
     }
-    if (this.cloudHost && !this.cloudHost.connected()) { this.state.state = 'offline'; this.state.error = 'The private publication disconnected. Publish again explicitly.' }
+    if (this.cloudHost && !this.cloudHost.connected()) { this.state.state = 'offline'; this.state.error = 'The private publication disconnected. Waiting to reconnect; no message will be replayed.' }
     return structuredClone(this.state)
+  }
+
+  async startRecovery(restoreGrants: () => Promise<void>): Promise<void> {
+    this.restoreGrants = restoreGrants
+    try { this.recoveryEnabled = publicationSchema.parse(await readJsonBounded(this.file, 4096)).enabled === true } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.state.state = 'offline'; this.state.error = 'Saved publication is unreadable. It was not replaced.'; return }
+    }
+    const recover = () => {
+      if (!this.recoveryEnabled || this.operation || this.cloudHost?.connected() || Date.now() < this.retryAfter) return
+      void this.publish().catch(() => { this.failures++; this.retryAfter = Date.now() + Math.min(60000, 2000 * 2 ** Math.min(this.failures, 5)) })
+    }
+    if (!this.recovery) { this.recovery = setInterval(recover, 5000); this.recovery.unref() }
+    recover()
   }
 
   private run(state: 'signing-in' | 'starting', action: (signal: AbortSignal) => Promise<void>): Promise<void> {
@@ -78,7 +96,6 @@ export class ManagedDevTunnels {
   publish(): Promise<void> {
     if (this.cloudHost?.connected()) return Promise.resolve()
     return this.run('starting', async (signal) => {
-      await this.releaseHost()
       const login = await this.cli.status(signal)
       if (!login.accountId) throw new Error('Sign in with your company account before publishing.')
       let saved: Publication | undefined
@@ -87,26 +104,41 @@ export class ManagedDevTunnels {
       }
       if (saved && saved.accountId !== login.accountId) throw new Error('This publication belongs to a different company identity. Sign in with its original owner.')
       const key = await this.keys.get('host')
-      const ssh = await startSessionSshHost(key, saved?.sshPort)
+      const recovering = !!this.host
+      const previousCloud = this.cloudHost
+      this.cloudHost = undefined
+      await previousCloud?.close()
+      const ssh = this.host ?? await startSessionSshHost(key, saved?.sshPort)
       this.host = ssh
       try {
         signal.throwIfAborted()
         const tunnelId = saved?.tunnelId ?? await this.cli.create(`taskcontinuum-${randomUUID().replaceAll('-', '')}`, signal)
-        this.publication = { tunnelId, sshPort: ssh.port, accountId: login.accountId }
+        this.publication = { tunnelId, sshPort: ssh.port, accountId: login.accountId, enabled: saved?.enabled ?? false }
         this.state.tunnelId = tunnelId
         await writeJsonAtomic(this.file, this.publication)
         await this.cli.inspect(tunnelId, signal)
         this.cloudHost = await this.cloud.host(tunnelId, ssh.port, signal)
         signal.throwIfAborted()
+        await this.restoreGrants?.()
+        signal.throwIfAborted()
+        this.publication.enabled = true
+        await writeJsonAtomic(this.file, this.publication)
+        this.recoveryEnabled = true
+        this.failures = 0
+        this.retryAfter = 0
         this.state = { installed: true, account: login.account, state: 'hosting', tunnelId, hostFingerprint: sshFingerprint(key.publicKey) }
-      } catch (error) { await this.releaseHost(); throw error }
+      } catch (error) {
+        if (!recovering) await this.releaseHost()
+        else { const cloud = this.cloudHost; this.cloudHost = undefined; await cloud?.close() }
+        throw error
+      }
     })
   }
 
-  authorize(grant: { id: string; expiresAt: string }, clientPublicKey: string, bridgePort: number): DevTunnelRoute {
+  authorize(grant: { id: string; expiresAt: string }, clientPublicKey: string, bridgePort: number, device = false): DevTunnelRoute {
     if (!this.host || !this.publication || !this.cloudHost?.connected()) throw new Error('Publish this machine before creating a Dev Tunnel invitation.')
     const route = devTunnelRouteSchema.parse({ kind: 'dev-tunnel', tunnelId: this.publication.tunnelId, sshPort: this.host.port, hostPublicKey: this.host.publicKey, clientPublicKey })
-    this.host.allow(grant.id, clientPublicKey, bridgePort, grant.expiresAt)
+    this.host.allow(grant.id, clientPublicKey, bridgePort, grant.expiresAt, device)
     return route
   }
 
@@ -158,13 +190,16 @@ export class ManagedDevTunnels {
   }
 
   async stop(): Promise<void> {
+    this.recoveryEnabled = false
     await this.cancel()
     await this.releaseHost()
+    if (this.publication) { this.publication.enabled = false; await writeJsonAtomic(this.file, this.publication) }
     this.state.state = 'idle'
     this.state.error = undefined
   }
 
   reset(): Promise<void> {
+    this.recoveryEnabled = false
     return this.run('starting', async (signal) => {
       await this.releaseHost()
       signal.throwIfAborted()
@@ -175,7 +210,10 @@ export class ManagedDevTunnels {
   }
 
   async close(): Promise<void> {
+    clearInterval(this.recovery)
+    this.recoveryEnabled = false
     for (const close of this.clients) close()
-    await this.stop()
+    await this.cancel()
+    await this.releaseHost()
   }
 }

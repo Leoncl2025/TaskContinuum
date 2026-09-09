@@ -41,6 +41,7 @@ describe('remote original-session client', () => {
       const enrollment = await manager.importInvitation(workspace, invitation, 'owner-machine')
       expect(JSON.stringify(enrollment)).not.toContain(invitation.token)
       expect(tunnel).not.toHaveBeenCalled()
+      expect(await manager.read(workspace, enrollment.target)).toMatchObject({ messages: [], connectionState: 'offline', canSend: false, bridgeError: expect.stringContaining('No verified cached history') })
       expect(await manager.list(otherWorkspace)).toEqual([])
       await expect(manager.connect(otherWorkspace, enrollment.id)).rejects.toThrow('selected task workspace')
       await manager.connect(workspace, enrollment.id)

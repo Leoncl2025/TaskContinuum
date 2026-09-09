@@ -146,3 +146,14 @@ export async function readOriginalVSCode(store: VSCodeSessionStore, value: VSCod
     participant: connection?.actual.participant, execution: connection?.actual.execution,
   })
 }
+
+export async function resolveDeviceSession(store: VSCodeSessionStore, identity: VSCodeChatIdentity, participant: RemoteVSCodeClientIdentity, canSend: boolean, prior?: RemoteVSCodeInvitation): Promise<RemoteVSCodeInvitation> {
+  const connection = await remoteAdministration(store, identity)
+  if (prior && prior.instanceId === connection.actual.instanceId && prior.grant.canSend === canSend && Date.parse(prior.grant.expiresAt) > Date.now() + 60000) {
+    const grants = z.array(remoteGrantSchema).max(32).parse(await post(connection, '/remote/grants', identity))
+    if (!grants.some((grant) => grant.id === prior.grant.id)) throw new Error('Original-session access was revoked.')
+    return prior
+  }
+  if (prior && prior.instanceId === connection.actual.instanceId) await post(connection, '/remote/revoke', { ...identity, grantId: prior.grant.id })
+  return remoteInvitationSchema.parse(await post(connection, '/remote/grant', { ...identity, participant, canSend }))
+}

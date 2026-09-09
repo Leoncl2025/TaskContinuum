@@ -335,10 +335,13 @@ on both ends; it is not a tenant-wide device registry or SSH certificate authori
     identity**. The file contains a public device key, not its private key.
 2. On B, connect the original conversation, open **Share original conversation
     remotely**, sign in, and **Publish this machine**. Keep this desktop and VS Code open.
-3. B chooses A's identity and read-only or read/send access, then saves a private
-    invitation. Transfer it securely; compare the displayed SSH host fingerprint.
-4. A chooses **Import invitation**, explicitly **Connect**s, and **Link to T-XXXX**.
-    No SSH alias or port entry is needed. Import itself does not connect, link, or send.
+3. B chooses **Pair device**, selects A's identity, and saves a private device invitation.
+    Transfer it once and verify the host fingerprint. A uses **Import device invitation**
+    and **Connect device**. Pairing alone grants no conversation access.
+4. For each conversation, B selects A under **Paired devices**, chooses the Access
+    level, and clicks **Share session**. A discovers approved sessions over the same
+    device connection and selects **Link to T-XXXX**. No further invitation file or
+    per-session SSH connection is required. History is fetched only when opened.
 
 No Copilot CLI login is needed on A, and no conversation is created, resumed, imported,
 or forked. The legacy **SSH alias** mode remains available on both dialogs.
@@ -351,9 +354,13 @@ fix; **Refresh Dev Tunnel status** picks up an existing CLI sign-in and clears s
 login errors without publishing anything. VS Code does not need reloading for this fix.
 
 See the [remote VS Code runbook](docs/remote-vscode.md) for both-machine setup,
-access control, renewal, disconnect/offline behavior, and recovery. Stopping or
-restarting B's managed publication requires new invitations, but never stops its
-Agent. B's account, tools, and native approvals remain on B. The app does not change
+access control, renewal, disconnect/offline behavior, and recovery. Enabled publication
+recovers after network loss and desktop restart; **Stop publication** disables recovery.
+Device pairing and exact-session approvals persist encrypted for up to 30 days.
+**Disconnect device** stops client recovery; no execution message is automatically replayed.
+The old **Choose recipient / Import invitation** path remains session-scoped and needs
+new invitations after Bridge restart or expiry. Neither path stops B's Agent.
+B's account, tools, and native approvals remain on B. The app does not change
 existing SSH services, firewall rules, or user private keys.
 The separate **Shared sessions** feature below starts a CLI Host and is not this mode.
 

@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
-import { grantRemoteVSCode, listRemoteVSCodeGrants, revokeRemoteVSCode } from './vscodeChatClient'
+import { grantRemoteVSCode, listRemoteVSCodeGrants, revokeRemoteVSCode, resolveDeviceSession } from './vscodeChatClient'
 import { VSCodeSessionStore } from './vscodeSessions'
 import { RemoteVSCodeManager } from './vscodeRemoteClient'
 import { remoteIdentityFileSchema, remoteInvitationFileSchema, sshHostAliasSchema } from './vscodeRemoteProtocol'
@@ -13,6 +13,10 @@ import { vscodeIdentitySchema } from './vscodeChatSchemas'
 import { DeviceSshKeys } from './devTunnel/identity'
 import { ManagedDevTunnels } from './devTunnel/manager'
 import { sshFingerprint } from './devTunnel/protocol'
+import { VSCodeDeviceHost } from './vscodeDeviceHost'
+import { VSCodeDeviceClient } from './vscodeDeviceClient'
+import { deviceInvitationSchema } from './vscodeDeviceProtocol'
+import { hostname } from 'node:os'
 
 async function requirePrivateDestination(file: string): Promise<void> {
   let directory = await realpath(dirname(file))
@@ -26,16 +30,32 @@ async function requirePrivateDestination(file: string): Promise<void> {
 }
 
 export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>) {
-  const keys = new DeviceSshKeys(app.getPath('userData'), {
+  const protector = {
     available: () => safeStorage.isEncryptionAvailable() && (process.platform !== 'linux' || safeStorage.getSelectedStorageBackend() !== 'basic_text'),
-    encrypt: (value) => safeStorage.encryptString(value), decrypt: (value) => safeStorage.decryptString(value),
-  })
+    encrypt: (value: string) => safeStorage.encryptString(value), decrypt: (value: Buffer) => safeStorage.decryptString(value),
+  }
+  const keys = new DeviceSshKeys(app.getPath('userData'), protector)
   const tunnels = new ManagedDevTunnels(app.getPath('userData'), keys)
+  const store = new VSCodeSessionStore()
+  const host = new VSCodeDeviceHost(app.getPath('userData'), protector,
+    (identity, participant, canSend, prior) => resolveDeviceSession(store, identity, participant, canSend, prior),
+    (invitation) => revokeRemoteVSCode(store, invitation.identity, invitation.grant.id))
+  const devices = new VSCodeDeviceClient(app.getPath('userData'), protector,
+    (invitation, signal) => tunnels.connect(invitation.devTunnel, invitation.id, invitation.port, signal),
+    async (invitation) => {
+      if (JSON.stringify(invitation.participant) !== JSON.stringify(await manager.identity()) || invitation.devTunnel.clientPublicKey !== (await keys.get('client')).publicKey) throw new Error('This invitation belongs to a different device identity.')
+    })
   const manager = new RemoteVSCodeManager(app.getPath('userData'), {
+    devices,
     devTunnel: (route, grantId, port, signal) => tunnels.connect(route, grantId, port, signal),
     devTunnelPublicKey: async () => (await keys.get('client')).publicKey,
   })
-  const store = new VSCodeSessionStore()
+  void tunnels.startRecovery(async () => {
+    const pairs = (await host.list()).filter((pair) => Date.parse(pair.expiresAt) > Date.now())
+    if (!pairs.length) return
+    const port = await host.start()
+    for (const pair of pairs) tunnels.authorize(pair, pair.publicKey, port, true)
+  }).catch(() => undefined)
   const json = [{ name: 'JSON', extensions: ['json'] }]
   const id = (value: unknown) => z.uuid().parse(value)
   function handle(channel: string, action: (window: BrowserWindow, ...values: unknown[]) => unknown): void {
@@ -44,6 +64,70 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
   async function unchanged(root: string): Promise<void> {
     if (await currentRoot() !== root) throw new Error('The task workspace changed. Reopen the remote connection action; no replacement workspace was used.')
   }
+  handle('devices', async () => devices.list(await currentRoot()))
+  handle('device-recipients', async () => { await currentRoot(); return (await host.list()).map((pair) => ({ id: pair.id, username: pair.participant.username, machineName: pair.participant.machineName, expiresAt: pair.expiresAt })) })
+  handle('device-pair', async (window) => {
+    const root = await currentRoot()
+    if ((await tunnels.status()).state !== 'hosting') throw new Error('Publish this machine before pairing.')
+    const input = await dialog.showOpenDialog(window, { title: 'Select client identity to pair once', properties: ['openFile'], filters: json })
+    if (input.canceled || !input.filePaths[0]) return false
+    const identity = remoteIdentityFileSchema.parse(await readJsonBounded(input.filePaths[0], 4096))
+    if (!identity.sshPublicKey) throw new Error('Export a managed client identity with its public key.')
+    const output = await dialog.showSaveDialog(window, { title: 'Save private device invitation outside Git', defaultPath: join(app.getPath('documents'), `taskcontinuum-device-${randomUUID()}.json`), filters: json })
+    if (output.canceled || !output.filePath) return false
+    await requirePrivateDestination(output.filePath)
+    const consent = await dialog.showMessageBox(window, { type: 'warning', title: 'Pair remote device', message: `Pair ${identity.participant.username} on ${identity.participant.machineName}?`, detail: 'Trust this device for 30 days. Pairing alone shares no sessions. Each session must be authorized separately. Pairing and session policies survive restarts; enabled publication reconnects automatically. Native tool approvals remain in VS Code.', buttons: ['Cancel', 'Pair device'], defaultId: 0, cancelId: 0 })
+    if (consent.response !== 1) return false
+    await unchanged(root)
+    const pair = await host.pair(identity.participant, identity.sshPublicKey)
+    const port = await host.start()
+    const devTunnel = tunnels.authorize(pair, pair.publicKey, port, true)
+    await writeJsonAtomic(output.filePath, deviceInvitationSchema.parse({ schemaVersion: 2, provider: 'vscode-copilot-device', id: pair.id, ownerId: await host.ownerId(), machineName: hostname(), participant: pair.participant, expiresAt: pair.expiresAt, token: pair.token, port, devTunnel }))
+    return true
+  })
+  handle('device-import', async (window) => {
+    const root = await currentRoot()
+    const input = await dialog.showOpenDialog(window, { title: 'Import private device invitation', properties: ['openFile'], filters: json })
+    if (input.canceled || !input.filePaths[0]) return false
+    const invitation = deviceInvitationSchema.parse(await readJsonBounded(input.filePaths[0], 16384))
+    const consent = await dialog.showMessageBox(window, { type: 'warning', title: 'Trust execution device', message: `Pair with ${invitation.machineName}?`, detail: `Host fingerprint: ${sshFingerprint(invitation.devTunnel.hostPublicKey)}\nExpires: ${invitation.expiresAt}\n\nVerify this fingerprint with the owner. Only explicitly shared sessions are discoverable. After Connect, this device reconnects across network loss and app restarts until Disconnect. No message is replayed.`, buttons: ['Cancel', 'Import device'], defaultId: 0, cancelId: 0 })
+    if (consent.response !== 1) return false
+    await unchanged(root)
+    await devices.import(root, invitation)
+    return true
+  })
+  handle('device-connect', async (_window, value) => devices.connect(await currentRoot(), id(value)))
+  handle('device-disconnect', async (_window, value) => devices.disconnect(await currentRoot(), id(value)))
+  handle('device-forget', async (window, value) => {
+    const root = await currentRoot()
+    const consent = await dialog.showMessageBox(window, { type: 'question', message: 'Forget this device and its cached histories?', detail: 'Repository links and original sessions are not deleted.', buttons: ['Cancel', 'Forget'], defaultId: 0, cancelId: 0 })
+    if (consent.response === 1) { await unchanged(root); await devices.forget(root, id(value)) }
+  })
+  handle('device-revoke', async (window, value) => {
+    const root = await currentRoot()
+    const selected = id(value)
+    const consent = await dialog.showMessageBox(window, { type: 'warning', message: 'Revoke this device and all its session access?', buttons: ['Cancel', 'Revoke'], defaultId: 0, cancelId: 0 })
+    if (consent.response === 1) { await unchanged(root); tunnels.revoke(selected); await host.revoke(selected) }
+  })
+  handle('device-share', async (window, value, target, permission) => {
+    const root = await currentRoot()
+    const selected = id(value)
+    const identity = vscodeIdentitySchema.parse(target)
+    const canSend = z.boolean().parse(permission)
+    const pair = (await host.list()).find((item) => item.id === selected)
+    if (!pair) throw new Error('Device is not paired.')
+    const original = await store.locateOriginal(identity)
+    const consent = await dialog.showMessageBox(window, { type: 'warning', message: `Share ${original.snapshot.session.title} with ${pair.participant.username} on ${pair.participant.machineName}?`, detail: `${canSend ? 'Read and send' : 'Read only'}. This exact-session approval persists until revoked or the device pairing expires. The bridge grant can renew after restart; other sessions are not shared.`, buttons: ['Cancel', 'Share session'], defaultId: 0, cancelId: 0 })
+    if (consent.response !== 1) return false
+    await unchanged(root)
+    await host.approve(selected, identity, canSend)
+    return true
+  })
+  handle('device-unshare', async (window, value, target) => {
+    const root = await currentRoot()
+    const consent = await dialog.showMessageBox(window, { type: 'warning', message: 'Remove this device from this session?', buttons: ['Cancel', 'Remove access'], defaultId: 0, cancelId: 0 })
+    if (consent.response === 1) { await unchanged(root); await host.revokeSession(id(value), vscodeIdentitySchema.parse(target)) }
+  })
   handle('tunnel-status', async (_window, refresh) => { await currentRoot(); return tunnels.status(z.boolean().optional().parse(refresh) ?? false) })
   handle('tunnel-login', async () => { await currentRoot(); await tunnels.login() })
   handle('tunnel-cancel', async () => { await currentRoot(); await tunnels.cancel() })
@@ -57,7 +141,7 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
   handle('tunnel-publish', async (window) => {
     const root = await currentRoot()
     const confirmation = await dialog.showMessageBox(window, { type: 'question', title: 'Publish private Dev Tunnel', message: 'Allow paired Task Continuum desktops to connect to this machine?',
-      detail: 'This creates or reuses an owner-only Microsoft Dev Tunnel and a loopback-only SSH endpoint inside this desktop. No Windows accounts, SSH services, firewall rules, or user SSH files are changed. Only explicitly invited original VS Code sessions may be forwarded. Keep this desktop and VS Code running. Dev Tunnels is a preview service for development and testing.', buttons: ['Cancel', 'Publish'], defaultId: 0, cancelId: 0 })
+      detail: 'This creates or reuses an owner-only Microsoft Dev Tunnel and a loopback-only SSH endpoint. Publication reconnects after network loss and app restart until you Stop publication. Only explicitly authorized sessions are accessible; execution messages are never replayed. Keep this desktop and VS Code running. No OS SSH or firewall settings change. Dev Tunnels is a preview service.', buttons: ['Cancel', 'Publish'], defaultId: 0, cancelId: 0 })
     if (confirmation.response !== 1) return
     await unchanged(root)
     await tunnels.publish()
@@ -142,5 +226,5 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     const confirmation = await dialog.showMessageBox(window, { type: 'warning', title: 'Revoke remote access', message: 'Revoke this remote invitation?', detail: 'Future reads and submissions will be rejected. An already-running Agent response is not stopped.', buttons: ['Cancel', 'Revoke'], defaultId: 0, cancelId: 0 })
     if (confirmation.response === 1) { await unchanged(root); await revokeRemoteVSCode(store, identity, selected); tunnels.revoke(selected) }
   })
-  return { manager, close: async () => { manager.close(); await tunnels.close() } }
+  return { manager, close: async () => { manager.close(); await tunnels.close(); await host.close() } }
 }

@@ -18,6 +18,49 @@ CLI Host, import history into another runtime, or create a fork.
 
 ## Managed Dev Tunnel + SSH (Default)
 
+### Device scope (2026-09-09)
+
+Upgrade both desktops. Export A's managed client identity once. In B's original
+conversation access dialog, publish, then **Pair device** and export a private
+device invitation. A imports it with **Import device invitation** and connects the
+device once. Pairing lasts 30 days and shares no sessions by itself.
+
+For each selected original, B chooses A under **Paired devices**, sets the Access
+level, and clicks **Share session**. No additional file exchange is needed. A's
+device gateway lists only approved sessions, across connected local VS Code
+workspaces; select a task and link the desired session. One SSH connection carries
+the catalog and all selected sessions. Catalog refresh is approximately ten seconds;
+saved history is read only for an opened session, still bounded snapshots rather
+than a new token-stream or incremental journal protocol.
+
+The loopback gateway authorizes every read/send against the stored exact-session
+policy, then uses the existing companion grant and delivery checks. It cannot open
+windows, invoke generic commands, list private sessions, or forward arbitrary ports.
+Owner policies and issued grants are encrypted in `remote-vscode-device-host.json`;
+client enrollment is encrypted in `remote-vscode-devices.json`, outside Git.
+`remote-vscode-device-cache/` contains private bounded read-only history views.
+
+Enabled publication retries with bounded backoff and restores after desktop restart.
+**Stop publication** persists the disabled state. A device explicitly connected by A
+can reconnect when its workspace is opened or read again; **Disconnect device** stops
+that recovery. No failed or uncertain execution message is automatically resent.
+Source sleep/exit still makes the Agent unavailable until B returns. Corrupt/missing
+cache returns an explicit empty offline view, not a misleading successful history read.
+
+Removing device access to one session or revoking the whole device rejects future
+reads/sends; already accepted prompts and downloaded copies cannot be recalled.
+Persistent approvals can renew companion grants after Bridge restart, but only for
+the exact approved session and participant. B must reconnect the original Bridge;
+the gateway never starts a substitute Agent. Expired pairings require fresh pairing.
+Resetting the tunnel resource changes its route and requires exporting/importing the
+device invitation again. Occupied ports and changed keys fail closed.
+
+The session-invitation instructions below are retained for compatibility. They do
+not acquire persistent device scope merely by upgrading the app. An already-lost
+legacy in-memory grant cannot be recovered from its expiry timestamp alone.
+
+### Transport requirements
+
 - Install the [official Microsoft Dev Tunnel CLI](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/get-started)
   once on A and B. The dialog opens that installation guide if the CLI is missing.
   **Sign in with Microsoft** uses the CLI's browser-based work-account flow; no
@@ -32,16 +75,16 @@ CLI Host, import history into another runtime, or create a fork.
   the official Dev Tunnels SDK for the cloud connection. No shell, exec, SFTP,
   arbitrary destination forwarding, OS SSH account, or OS service is provisioned.
   Existing OpenSSH services, firewall rules, and user SSH files remain unchanged.
-- Each invitation pins the host and recipient public keys. The SSH username is a
-  single companion grant ID, authorized only for that grant's exact loopback Bridge
-  port and expiry. The normal original-session/instance/role handshake still runs
-  after SSH. The inner SSH connection encrypts the Bridge traffic across the relay.
-- Device-key export is reusable, but each original conversation still requires an
-  owner-approved invitation. This removes manual pairwise SSH configuration; it
+- Each invitation pins the host and recipient public keys. Device invitations use
+  the pairing ID as SSH username, authorized only for the private gateway port;
+  legacy invitations use the companion grant ID and exact Bridge port. Per-session
+  checks remain enforced after SSH, which encrypts traffic across the relay.
+- Device-key export is reusable; each original still requires owner approval,
+  either through the device policy or a legacy invitation. This removes manual SSH configuration; it
   does not implement a central ten-machine registry, group policy, or SSH CA.
 - Dev Tunnels is a preview service for development/testing with no production SLA.
-  It is transport, not a durable message queue or ownership authority. The app never
-  reconnects or replays prompts automatically.
+  It is transport, not a durable message queue or ownership authority. Connection
+  recovery never implies prompt replay or execution takeover.
 
 ## Windows Sign-in Recovery
 
@@ -92,7 +135,7 @@ Use a dedicated forwarding-only account where possible. The SSH account's OS
 permissions are separate from an invitation: a full shell or privileged account
 can access resources outside this application's scoped HTTP authorization.
 
-## Connect A to B
+## Legacy Session Invitations
 
 1. On **A**, open a real AgentDesk task workspace in Task Continuum. Click the
   activity-bar icon **Remote VS Code sessions**, keep **Dev Tunnel + SSH** selected,
@@ -143,8 +186,9 @@ invitation's transport or copy another desktop's private key to make it connect.
 - Responses come from saved VS Code history, which can lag the UI by about a minute.
   The view refreshes every two seconds. It is not a guaranteed token stream.
 - **Disconnect**, desktop shutdown, or cancelling a connection closes only the
-  app-owned client transport. It does not stop B's executing Agent. Restart restores cached
-  history read-only and never reconnects or replays messages automatically.
+  app-owned client transport. It does not stop B's executing Agent. Legacy enrollment
+  restart restores cached history read-only; an explicitly connected legacy managed
+  invitation can retry reads after transient network loss during the same run.
 - **Forget** removes the selected private enrollment and cached history after
   confirmation. It does not revoke B's grant or delete the repository task link.
 - B can revoke each invitation in its original chat's remote-access dialog.
@@ -153,25 +197,26 @@ invitation's transport or copy another desktop's private key to make it connect.
   Revocation aborts unconfirmed delivery waits, but cannot undo a prompt already
   accepted by VS Code or erase history already received by another client.
 
-Invitations expire after 24 hours or when B's bridge stops/reloads. After a bridge
+Legacy session invitations expire after 24 hours or when B's bridge stops/reloads. After a bridge
 restart, create and import a new invitation; a changed instance is never silently
 trusted. A matching re-import replaces only that target's private enrollment.
 Keep a failed or uncertain message's outcome under review; there is no offline
 outbox. An explicit unchanged-text retry within the same panel uses the same UUID.
-No automatic retry or ownership takeover occurs when B is unreachable.
+No automatic send retry or ownership takeover occurs when B is unreachable.
 
 ## Publication Lifecycle and Recovery
 
 **Publish this machine** creates or reuses a private tunnel configured with
 `--expiration 30d`; service expiry rules apply independently of 24-hour conversation
-grants. The app remembers the resource and a stable SSH port but does not start it
-at desktop launch. Only the app's single SSH port may exist on this resource.
+grants. The app remembers the resource, a stable SSH port, and explicit publication
+intent. Enabled publication resumes on desktop launch; older records without an
+enabled flag remain opt-in. Only the app's single SSH port may exist on this resource.
 
 **Stop publication** closes the cloud host and app SSH listener after native
 confirmation. Closing B's desktop has the same transport effect, without stopping
-VS Code or its Agent. SSH grants are memory-only: after stopping, restarting, or
-re-publishing a disconnected host, revoke stale grants and issue/import new invitations
-even if the original Bridge did not restart. Do not reuse the earlier file.
+VS Code or its Agent. Device grants are restored from encrypted pairing policies.
+Legacy SSH grants remain memory-only: explicit stop or desktop restart requires new
+legacy invitations, while transient cloud reconnection preserves the live SSH host.
 
 **Cancel Dev Tunnel operation** cancels pending browser login or publication setup;
 it does not stop an already running publication. Each pending remote connection has
@@ -214,7 +259,7 @@ cloud owner identity. Private keys never leave their originating profile. Electr
 secure storage is required, with no plaintext fallback. Official CLI account storage
 remains CLI-owned; narrowly scoped cloud tokens are used only in main-process memory.
 
-Remote credentials can only handshake, read the single approved conversation, and
+Legacy remote credentials can only handshake, read the single approved conversation, and
 submit if granted write access. They cannot list other sessions, administer grants,
 open/move windows, forward approvals, or run arbitrary commands through the bridge.
 Native source histories remain on B. New clients without a successful read have no

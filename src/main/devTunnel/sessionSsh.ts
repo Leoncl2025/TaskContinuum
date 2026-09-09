@@ -43,8 +43,12 @@ export async function startSessionSshHost(key: SshKeyPair, port = 0) {
       access = candidate
       connections.set(connection, candidate.id)
       clearTimeout(expiry)
-      expiry = setTimeout(() => connection.end(), Math.max(1, candidate.expires - Date.now()))
-      expiry.unref()
+      const checkExpiry = () => {
+        if (!allowed()) { connection.end(); return }
+        expiry = setTimeout(checkExpiry, Math.min(86400000, Math.max(1, candidate.expires - Date.now())))
+        expiry.unref()
+      }
+      checkExpiry()
       context.accept()
     })
     connection.on('request', (_accept, reject) => reject?.())
@@ -70,14 +74,18 @@ export async function startSessionSshHost(key: SshKeyPair, port = 0) {
   if (!address || typeof address === 'string') { server.close(); throw new Error('The private SSH endpoint could not bind.') }
   return {
     port: address.port, publicKey: key.publicKey,
-    allow(id: string, publicKey: string, port: number, expiresAt: string): void {
+    allow(id: string, publicKey: string, port: number, expiresAt: string, device = false): void {
       z.uuid().parse(id)
       z.number().int().min(1024).max(65535).parse(port)
       const expires = Date.parse(z.iso.datetime().parse(expiresAt))
-      if (closed || expires <= Date.now() || expires > Date.now() + 25 * 60 * 60 * 1000) throw new Error('This SSH grant is expired or invalid.')
+      if (closed || expires <= Date.now() || expires > Date.now() + (device ? 31 * 24 : 25) * 60 * 60 * 1000) throw new Error('This SSH grant is expired or invalid.')
       for (const [grantId, grant] of grants) if (grant.expires <= Date.now()) grants.delete(grantId)
       if (!grants.has(id) && grants.size >= 32) throw new Error('The private SSH invitation limit is 32.')
-      grants.set(id, { id, key: Buffer.from(sshPublicKeySchema.parse(publicKey).split(' ')[1], 'base64'), port, expires })
+      const parsedKey = Buffer.from(sshPublicKeySchema.parse(publicKey).split(' ')[1], 'base64')
+      const prior = grants.get(id)
+      if (prior && prior.key.equals(parsedKey) && prior.port === port && prior.expires === expires) return
+      for (const [connection, grantId] of connections) if (grantId === id) connection.end()
+      grants.set(id, { id, key: parsedKey, port, expires })
     },
     revoke(id: string): void {
       grants.delete(id)

@@ -56,6 +56,18 @@ const vscodeChat: VSCodeChatBridge = {
 contextBridge.exposeInMainWorld('vscodeChat', vscodeChat)
 
 const remoteVSCode: RemoteVSCodeBridge = {
+  devices: {
+    list: () => ipcRenderer.invoke('remote-vscode:devices'),
+    recipients: () => ipcRenderer.invoke('remote-vscode:device-recipients'),
+    pair: () => ipcRenderer.invoke('remote-vscode:device-pair'),
+    import: () => ipcRenderer.invoke('remote-vscode:device-import'),
+    connect: (id) => ipcRenderer.invoke('remote-vscode:device-connect', id),
+    disconnect: (id) => ipcRenderer.invoke('remote-vscode:device-disconnect', id),
+    forget: (id) => ipcRenderer.invoke('remote-vscode:device-forget', id),
+    revoke: (id) => ipcRenderer.invoke('remote-vscode:device-revoke', id),
+    share: (id, identity, canSend) => ipcRenderer.invoke('remote-vscode:device-share', id, identity, canSend),
+    unshare: (id, identity) => ipcRenderer.invoke('remote-vscode:device-unshare', id, identity),
+  },
   devTunnels: {
     status: (refresh) => ipcRenderer.invoke('remote-vscode:tunnel-status', refresh),
     login: () => ipcRenderer.invoke('remote-vscode:tunnel-login'),

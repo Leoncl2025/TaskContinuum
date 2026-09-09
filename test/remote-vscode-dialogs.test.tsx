@@ -25,6 +25,31 @@ function pendingOperation() {
 afterEach(() => { cleanup(); delete window.remoteVSCode })
 
 describe('remote original-session dialogs', () => {
+  it('connects at device scope and shares another session without exporting another invitation', async () => {
+    const remote = bridge()
+    remote.devTunnels = { status: vi.fn(async (): Promise<DevTunnelStatus> => ({ installed: true, account: 'owner@example.test', state: 'hosting' })), login: vi.fn(async () => {}), publish: vi.fn(async () => {}), stop: vi.fn(async () => {}), cancel: vi.fn(async () => {}), reset: vi.fn(async () => {}), installationGuide: vi.fn(async () => {}) }
+    remote.devices = { list: vi.fn(async () => [{ id: 'device-b', machineName: 'Machine-B', state: 'offline' as const, enabled: false, expiresAt: connection.expiresAt }]),
+      recipients: vi.fn(async () => [{ id: 'device-a', username: 'Alice', machineName: 'Machine-A', expiresAt: connection.expiresAt }]),
+      pair: vi.fn(async () => true), import: vi.fn(async () => true), connect: vi.fn(async () => {}), disconnect: vi.fn(async () => {}), forget: vi.fn(async () => {}), revoke: vi.fn(async () => {}), share: vi.fn(async () => true), unshare: vi.fn(async () => {}) }
+    remote.list = vi.fn(async () => [{ ...connection, deviceId: 'device-b' }])
+    window.remoteVSCode = remote
+    const view = render(<RemoteVSCodeDialog taskId="T-0003" onLink={vi.fn()} onClose={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Connect device Machine-B' }))
+    await waitFor(() => expect(remote.devices!.connect).toHaveBeenCalledWith('device-b'))
+    expect(screen.queryByRole('button', { name: 'Connect Machine-B' })).not.toBeInTheDocument()
+    expect(remote.connect).not.toHaveBeenCalled()
+    view.unmount()
+    const identity = { nativeSessionId: 'second', workspaceStorageId: 'a'.repeat(32) }
+    render(<RemoteVSCodeAccessDialog identity={identity} onClose={vi.fn()} />)
+    await screen.findByRole('option', { name: 'Alice @ Machine-A' })
+    fireEvent.change(screen.getByLabelText('Paired recipient device'), { target: { value: 'device-a' } })
+    fireEvent.change(screen.getByLabelText('Remote invitation access'), { target: { value: 'send' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Share session' }))
+    await waitFor(() => expect(remote.devices!.share).toHaveBeenCalledWith('device-a', identity, true))
+    expect(remote.share).not.toHaveBeenCalled()
+    expect(remote.devices.pair).not.toHaveBeenCalled()
+  })
+
   it('exports a managed key and imports a Dev Tunnel invitation without manual SSH fields or auto-connect', async () => {
     const remote = bridge()
     remote.devTunnels = { status: vi.fn(async (): Promise<DevTunnelStatus> => ({ installed: true, account: 'owner@example.test', state: 'idle' })), login: vi.fn(async () => {}), publish: vi.fn(async () => {}), stop: vi.fn(async () => {}), cancel: vi.fn(async () => {}), reset: vi.fn(async () => {}), installationGuide: vi.fn(async () => {}) }

@@ -12,6 +12,7 @@ import { deliverySchema } from './vscodeChatDelivery'
 import { remoteClientSchema, remoteHandshakeSchema, remoteHistorySchema, remoteInvitationFileSchema, sameRemoteTarget, sshHostAliasSchema, vscodeTargetSchema } from './vscodeRemoteProtocol'
 import type { RemoteVSCodeInvitation } from './vscodeRemoteProtocol'
 import type { DevTunnelRoute } from './devTunnel/protocol'
+import type { VSCodeDeviceClient } from './vscodeDeviceClient'
 
 const enrollmentSchema = z.object({ id: z.uuid(), root: z.string().min(1).max(4000), hostAlias: sshHostAliasSchema.optional(), invitation: remoteInvitationFileSchema }).strict()
   .refine((entry) => Boolean(entry.invitation.devTunnel) !== Boolean(entry.hostAlias), 'Exactly one remote transport is required.')
@@ -35,6 +36,7 @@ export class RemoteVSCodeManager {
   private readonly attempts = new Map<string, AbortController>()
   private readonly reads = new Map<string, Promise<VSCodeChatView>>()
   private readonly revisions = new Map<string, number>()
+  private readonly reconnect = new Map<string, { root: string; after: number }>()
   private loading?: Promise<void>
   private writing: Promise<unknown> = Promise.resolve()
   private identityValue?: Promise<RemoteVSCodeClientIdentity>
@@ -45,6 +47,7 @@ export class RemoteVSCodeManager {
     devTunnel?: (route: DevTunnelRoute, grantId: string, remotePort: number, signal: AbortSignal) => Promise<Tunnel>
     devTunnelPublicKey?: () => Promise<string>
     identity?: () => Promise<RemoteVSCodeClientIdentity>
+    devices?: VSCodeDeviceClient
   } = {}) { this.file = join(directory, 'remote-vscode-enrollments.json') }
 
   identity(): Promise<RemoteVSCodeClientIdentity> {
@@ -103,7 +106,8 @@ export class RemoteVSCodeManager {
   async list(root: string): Promise<RemoteVSCodeConnection[]> {
     await this.load()
     const canonical = await this.root(root)
-    return [...this.entries.values()].filter((entry) => entry.root === canonical).map((entry) => this.summary(entry))
+    const devices = await this.options.devices?.sessions(root) ?? []
+    return [...devices, ...[...this.entries.values()].filter((entry) => entry.root === canonical && !devices.some((session) => sameRemoteTarget(session.target, targetOf(entry.invitation)))).map((entry) => this.summary(entry))]
   }
 
   async importInvitation(root: string, value: unknown, hostAlias?: string): Promise<RemoteVSCodeConnection> {
@@ -148,7 +152,8 @@ export class RemoteVSCodeManager {
     if (!sameParticipant(entry.invitation.grant.participant, await this.identity())) throw new Error('The enrolled remote identity no longer matches this desktop.')
   }
 
-  private drop(id: string): void {
+  private drop(id: string, recover = false): void {
+    if (!recover) this.reconnect.delete(id)
     this.revisions.set(id, (this.revisions.get(id) ?? 0) + 1)
     this.attempts.get(id)?.abort(new Error('The connection attempt was cancelled.'))
     const active = this.active.get(id)
@@ -187,8 +192,11 @@ export class RemoteVSCodeManager {
   }
 
   async connect(root: string, id: string): Promise<void> {
+    const device = (await this.options.devices?.sessions(root))?.find((session) => session.id === id)
+    if (device) return this.options.devices!.connect(root, device.deviceId!)
     const entry = await this.enrollment(root, id)
     await this.authorized(entry)
+    if (entry.invitation.devTunnel) this.reconnect.set(id, { root, after: Date.now() + 10000 })
     if (this.active.has(id)) return
     if (this.connecting.has(id)) return this.connecting.get(id)
     const revision = this.revisions.get(id) ?? 0
@@ -238,13 +246,24 @@ export class RemoteVSCodeManager {
       const view = this.validateHistory(entry, await readJsonBounded(this.cacheFile(entry.id), maximumResponseBytes))
       return { ...view, canSend: false, responding: false, connectionState: 'offline', bridgeError: error,
         deliveries: view.deliveries?.map((record) => record.state === 'pending' ? { ...record, state: 'uncertain', error: 'Disconnected before confirmation. This message is not replayed automatically.' } : record) }
-    } catch { throw new Error(error) }
+    } catch {
+      return { session: { id: entry.invitation.identity.nativeSessionId, source: 'vscode', title: entry.invitation.title, updatedAt: new Date().toISOString() }, messages: [], deliveries: [], participant: entry.invitation.grant.participant,
+        execution: entry.invitation.execution, connectionState: 'offline', canSend: false, responding: false, bridgeError: `${error} No verified cached history is available.` }
+    }
   }
 
   async read(root: string, target: VSCodeChatTarget): Promise<VSCodeChatView> {
+    if (await this.options.devices?.find(root, target)) return this.options.devices!.read(root, target)
     const entry = await this.forTarget(root, target)
     const active = this.active.get(entry.id)
-    if (!active) return this.cached(entry, 'Remote VS Code is disconnected. Connect to the original execution machine; cached history is read-only.')
+    if (!active) {
+      const reconnect = this.reconnect.get(entry.id)
+      if (reconnect && Date.now() >= reconnect.after && !this.connecting.has(entry.id)) {
+        reconnect.after = Date.now() + 10000
+        void this.connect(reconnect.root, entry.id).catch(() => undefined)
+      }
+      return this.cached(entry, 'Remote VS Code is disconnected. Connect to the original execution machine; cached history is read-only.')
+    }
     const existing = this.reads.get(entry.id)
     if (existing) return structuredClone(await existing)
     const operation = (async () => {
@@ -258,7 +277,7 @@ export class RemoteVSCodeManager {
         })
         return this.active.get(entry.id) === active ? view : { ...view, canSend: false, connectionState: 'offline' as const, bridgeError: 'The remote connection was closed.' }
       } catch (error) {
-        if (this.active.get(entry.id) === active) this.drop(entry.id)
+        if (this.active.get(entry.id) === active) this.drop(entry.id, !(error instanceof Error && /revoked|expired|identity|different/.test(error.message)))
         return this.cached(entry, error instanceof Error ? error.message : 'Remote VS Code could not be reached. No message was replayed.')
       }
     })()
@@ -267,6 +286,7 @@ export class RemoteVSCodeManager {
   }
 
   async send(root: string, target: VSCodeChatTarget, commandId: string, text: string): Promise<VSCodeChatDelivery> {
+    if (await this.options.devices?.find(root, target)) return this.options.devices!.send(root, target, commandId, text)
     const entry = await this.forTarget(root, target)
     await this.authorized(entry)
     if (!entry.invitation.grant.canSend) throw new Error('This invitation allows reading only.')
@@ -284,8 +304,16 @@ export class RemoteVSCodeManager {
     }
   }
 
-  async connectTarget(root: string, target: VSCodeChatTarget): Promise<void> { await this.connect(root, (await this.forTarget(root, target)).id) }
-  async disconnect(root: string, id: string): Promise<void> { await this.enrollment(root, id); this.drop(id) }
+  async connectTarget(root: string, target: VSCodeChatTarget): Promise<void> {
+    const device = await this.options.devices?.find(root, target)
+    if (device) return this.options.devices!.connect(root, device.deviceId!)
+    await this.connect(root, (await this.forTarget(root, target)).id)
+  }
+  async disconnect(root: string, id: string): Promise<void> {
+    const device = (await this.options.devices?.sessions(root))?.find((session) => session.id === id)
+    if (device) return this.options.devices!.disconnect(root, device.deviceId!)
+    await this.enrollment(root, id); this.drop(id)
+  }
   async forget(root: string, id: string): Promise<void> {
     await this.enrollment(root, id)
     await this.update(async () => {
@@ -295,5 +323,5 @@ export class RemoteVSCodeManager {
       await rm(this.cacheFile(id), { force: true })
     })
   }
-  close(): void { for (const id of this.entries.keys()) this.drop(id) }
+  close(): void { this.options.devices?.close(); for (const id of this.entries.keys()) this.drop(id) }
 }
