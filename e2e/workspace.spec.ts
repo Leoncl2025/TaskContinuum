@@ -15,11 +15,13 @@ let firstRoot: string
 let secondRoot: string
 let environment: Record<string, string>
 const errors: string[] = []
+const externalRequests: string[] = []
 
 async function launch(): Promise<void> {
   app = await electron.launch({ args: [resolve('.')], cwd: resolve('.'), env: environment })
   page = await app.firstWindow()
   page.on('pageerror', (error) => errors.push(error.message))
+  page.on('request', (request) => { if (/^(https?|wss?):/.test(request.url())) externalRequests.push(request.url()) })
   await expect(page.locator('.workbench')).toHaveAttribute('aria-busy', 'false')
 }
 
@@ -66,7 +68,7 @@ test.beforeEach(async () => {
   await expect(page.getByRole('heading', { level: 1, name: 'UI based on Electron' })).toBeVisible()
 })
 
-test.afterEach(() => { expect(errors).toEqual([]) })
+test.afterEach(() => { expect(errors).toEqual([]); expect(externalRequests).toEqual([]) })
 test.afterAll(async () => { await app?.close() })
 
 test('opens a real folder through the restricted native bridge and reads task documents', async () => {
@@ -242,8 +244,15 @@ test('links an original VS Code conversation with long history without import an
   await mkdir(directory, { recursive: true })
   const sourceFile = join(directory, `${nativeSessionId}.jsonl`)
   const progress = JSON.stringify({ kind: 1, k: ['requests', 0, 'response'], v: [{ kind: 'toolInvocation', value: 'x'.repeat(256 * 1024) }] }) + '\n'
+  const code = `const originalSession = "${'original-'.repeat(24)}";\n`
+  const markdown = [
+    '## Markdown response', '**Formatted reply** with `inline code`.',
+    '1. Read the history\n2. Keep the original session', '- [x] Verified\n- [ ] Review', '> Execution stays on B.',
+    '| Session | Agent | Machine | Participant | State | Workspace | Source | Result |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| Original | Copilot | Machine-B | Alice | Idle | Tasks | VS Code | Ready |',
+    `\`\`\`ts\n${code}\`\`\``, '[Documentation](https://example.invalid/docs)', '![Blocked image](https://example.invalid/tracking.png)', 'Existing original answer',
+  ].join('\n\n')
   const source = JSON.stringify({ kind: 0, v: { customTitle: 'Original VS Code link fixture', requests: [{ message: { text: 'Existing original question' }, response: [] }] } }) + '\n'
-    + progress.repeat(132) + JSON.stringify({ kind: 1, k: ['requests', 0, 'response'], v: [{ value: 'Existing original answer' }] }) + '\n'
+    + progress.repeat(132) + JSON.stringify({ kind: 1, k: ['requests', 0, 'response'], v: [{ value: markdown }] }) + '\n'
   expect(Buffer.byteLength(source)).toBeGreaterThan(32 * 1024 * 1024)
   await writeFile(sourceFile, source)
   let opened: string | undefined
@@ -264,6 +273,33 @@ test('links an original VS Code conversation with long history without import an
     await page.getByRole('button', { name: 'Link to current task' }).click()
     const panel = page.getByRole('complementary', { name: 'VS Code task chat' })
     await expect(panel.getByRole('log')).toContainText('Existing original answer')
+    await expect(panel.getByRole('heading', { name: 'Markdown response', level: 2 })).toBeVisible()
+    await expect(panel.locator('strong').filter({ hasText: 'Formatted reply' })).toBeVisible()
+    await expect(panel.getByRole('table')).toContainText('Machine-B')
+    await expect(panel.getByRole('checkbox').first()).toBeDisabled()
+    await expect(panel.getByRole('button', { name: 'Copy code' })).toBeVisible()
+    expect(await panel.locator('pre code').textContent()).toBe(code)
+    await expect(panel.locator('.message-markdown a, .message-markdown img, .message-markdown script')).toHaveCount(0)
+    expect(await panel.getByLabel('Code block').evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true)
+    expect(await panel.getByRole('region', { name: 'Message table' }).evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true)
+    await page.getByRole('separator', { name: 'Resize Chat' }).press('Home')
+    expect(await panel.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+    await panel.getByRole('heading', { name: 'Markdown response' }).scrollIntoViewIfNeeded()
+    await page.screenshot({ path: resolve('artifacts/chat-markdown-desktop.png') })
+    const clipboardProbe = await app.evaluateHandle(({ clipboard }) => {
+      const original = clipboard.writeText
+      const values: string[] = []
+      clipboard.writeText = async (text) => { values.push(text) }
+      return { values, restore: () => { clipboard.writeText = original } }
+    })
+    try {
+      await panel.getByRole('button', { name: 'Copy code' }).click()
+      await expect(panel.getByRole('button', { name: 'Code copied' })).toBeVisible()
+      expect(await clipboardProbe.evaluate((probe) => probe.values)).toEqual([code])
+      await expect(page.evaluate(() => window.desktop!.copyText(42 as unknown as string))).rejects.toThrow('Clipboard text must be a string')
+      await expect(page.evaluate(() => window.desktop!.copyText('x'.repeat(1024 * 1024 + 1)))).rejects.toThrow('no larger than 1 MiB')
+      expect(await clipboardProbe.evaluate((probe) => probe.values)).toEqual([code])
+    } finally { await clipboardProbe.evaluate((probe) => probe.restore()); await clipboardProbe.dispose() }
     await expect(panel.getByRole('button', { name: 'Send to original VS Code session' })).toBeDisabled()
     const expected = { provider: 'vscode-copilot', sessionId: nativeSessionId, workspaceStorageId, owner: expect.objectContaining({ clientId: expect.any(String), machineName: expect.any(String) }) }
     expect(JSON.parse(await readFile(linkFile, 'utf8')).bindings['T-0002']).toEqual(expected)
@@ -284,7 +320,12 @@ test('links an original VS Code conversation with long history without import an
     await page.getByRole('button', { name: 'Toggle chat panel' }).click()
     const narrowPanel = page.getByRole('complementary', { name: 'VS Code task chat' })
     await expect(narrowPanel.getByRole('button', { name: 'Open in VS Code' })).toBeInViewport()
+    await expect(narrowPanel.getByRole('heading', { name: 'Markdown response' })).toBeVisible()
+    await expect(narrowPanel.getByRole('button', { name: 'Copy code' })).toBeInViewport()
+    expect(await narrowPanel.getByLabel('Code block').evaluate((element) => element.getBoundingClientRect().right <= innerWidth)).toBe(true)
+    expect(await narrowPanel.getByRole('region', { name: 'Message table' }).evaluate((element) => element.getBoundingClientRect().right <= innerWidth)).toBe(true)
     expect(await narrowPanel.evaluate((element) => element.scrollWidth <= element.clientWidth && element.getBoundingClientRect().right <= innerWidth)).toBe(true)
+    await page.screenshot({ path: resolve('artifacts/chat-markdown-narrow.png') })
     await page.screenshot({ path: resolve('artifacts/vscode-linked-narrow.png') })
     await narrowPanel.getByRole('button', { name: 'Detach conversation' }).click()
     await page.getByRole('button', { name: 'Detach session', exact: true }).click()

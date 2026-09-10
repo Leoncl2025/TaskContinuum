@@ -77,7 +77,7 @@ test('launches the production workbench with a sandboxed renderer', async () => 
     process: typeof Reflect.get(window, 'process'),
     bridge: Object.keys(window.desktop ?? {}).sort(),
   }))
-  expect(surface).toEqual({ require: 'undefined', process: 'undefined', bridge: ['close', 'getInfo', 'minimize', 'toggleMaximize'] })
+  expect(surface).toEqual({ require: 'undefined', process: 'undefined', bridge: ['close', 'copyText', 'getInfo', 'minimize', 'toggleMaximize'] })
   await expect(page.getByRole('complementary', { name: 'Task explorer' })).toBeVisible()
   await expect(page.getByRole('complementary', { name: 'Task chat' })).toBeVisible()
   await page.screenshot({ path: resolve('artifacts/workbench-dark.png') })

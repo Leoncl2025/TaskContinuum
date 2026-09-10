@@ -10,4 +10,5 @@ export interface DesktopBridge {
   minimize(): Promise<void>
   toggleMaximize(): Promise<void>
   close(): Promise<void>
+  copyText(text: string): Promise<void>
 }

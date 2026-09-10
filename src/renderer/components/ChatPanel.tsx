@@ -3,6 +3,7 @@ import type { ChatAdapter } from '../../shared/chat'
 import type { TaskRecord } from '../../shared/tasks'
 import type { TaskChat } from '../chat/useTaskChats'
 import { Icon, IconButton } from './Primitives'
+import { ChatMarkdown } from './ChatMarkdown'
 
 interface Props {
   task: TaskRecord
@@ -42,7 +43,7 @@ export function ChatPanel({ task, thread, adapter, connected = false, boundSessi
       {!thread.messages.length && (live ? <div className="chat-welcome live-welcome"><span className="chat-welcome-icon"><Icon name="copilot" /></span><h2>{thread.sessionId ? 'GitHub Copilot' : 'No session selected'}</h2>{thread.sessionId ? <div className="suggestions">{['Continue this session', 'Summarize progress', 'Review next steps'].map((prompt) => <button type="button" key={prompt} disabled={!canSend} onClick={() => send(prompt)}><Icon name="arrow-right" />{prompt}</button>)}</div> : <button type="button" className="text-button" onClick={onSessions}><Icon name="history" />Open local sessions</button>}</div> : <div className="chat-welcome"><span className="chat-welcome-icon"><Icon name="comment-discussion" /></span><h2>Keep the conversation<br />with the task.</h2><p>Explore the goal, find a next step, or review what is missing.</p><div className="suggestions">{['Summarize this task', 'Suggest next steps', 'Review risks'].map((prompt) => <button type="button" key={prompt} onClick={() => send(prompt)}><Icon name={prompt.startsWith('Summarize') ? 'note' : prompt.startsWith('Suggest') ? 'arrow-right' : 'shield'} />{prompt}<Icon name="chevron-right" /></button>)}</div><p className="demo-explainer"><Icon name="beaker" />Local demo. No AI provider is connected.</p></div>)}
       {thread.messages.map((message) => <article key={message.id} className={`message message-${message.role}`} aria-label={message.role === 'user' ? 'Your message' : live ? 'Copilot response' : 'Demo agent response'}>
         <header><span className={`avatar ${message.role === 'assistant' ? 'agent-avatar' : ''}`}>{message.role === 'user' ? 'Y' : <Icon name={live ? 'copilot' : 'sparkle'} />}</span><strong>{message.role === 'user' ? 'You' : live ? 'GitHub Copilot' : 'Demo agent'}</strong>{message.role === 'assistant' && <span className="message-model">{live ? 'Local session' : 'Local'}</span>}</header>
-        <div className="message-text">{message.text || (message.status === 'streaming' ? live ? 'Waiting for Copilot...' : 'Preparing a local response…' : '')}</div>
+        {message.role === 'assistant' && message.text ? <ChatMarkdown source={message.text} /> : <div className="message-text">{message.text || (message.status === 'streaming' ? live ? 'Waiting for Copilot...' : 'Preparing a local response…' : '')}</div>}
         {message.status === 'streaming' && <span className="stream-marker" aria-label="Responding" />}
         {message.status === 'cancelled' && <p className="message-notice"><Icon name="debug-stop" />Response stopped</p>}
         {message.status === 'error' && <p className="message-notice error" role="alert"><Icon name="error" />Response failed. You can send another message.</p>}

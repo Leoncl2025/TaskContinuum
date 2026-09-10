@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { app, BrowserWindow, ipcMain, Menu, net, protocol } from 'electron'
+import { app, BrowserWindow, clipboard, ipcMain, Menu, net, protocol } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
 import { APP_URL, PRODUCTION_CSP, isTrustedRendererUrl, rendererSecurityPreferences, resolveRendererAsset, validateDevUrl } from './security'
 import { registerCopilotBridge } from './copilotBridge'
@@ -54,6 +54,11 @@ function registerDesktopBridge(): void {
     else window.maximize()
   })
   ipcMain.handle('desktop:close', (event) => requireTrustedWindow(event).close())
+  ipcMain.handle('desktop:copy-text', (event, value: unknown) => {
+    requireTrustedWindow(event)
+    if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > 1024 * 1024) throw new Error('Clipboard text must be a string no larger than 1 MiB.')
+    return clipboard.writeText(value)
+  })
 }
 
 async function createWindow(): Promise<void> {

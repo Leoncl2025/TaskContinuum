@@ -47,10 +47,12 @@ describe('shared session desktop panel', () => {
     const event = { sessionId: host.view.session.id, epoch: 1, at: new Date().toISOString(), actor: { ...host.view.actor, kind: 'agent' as const, id: 'agent-B', machineId: 'B', machineName: 'Machine B' }, commandId: 'request' }
     act(() => {
       host.emit({ sessionId: host.view.session.id, event: { ...event, type: 'started', seq: 1 } })
-      host.emit({ sessionId: host.view.session.id, event: { ...event, type: 'delta', seq: 2, text: 'Working on B' } })
+      host.emit({ sessionId: host.view.session.id, event: { ...event, type: 'delta', seq: 2, text: '**Working on B**\n\n```ts\nconst result = 1;\n```' } })
       host.emit({ sessionId: host.view.session.id, online: false, error: 'Owner disconnected' })
     })
     expect(screen.getByText('Working on B')).toBeInTheDocument()
+    expect(screen.getByText('Working on B').tagName).toBe('STRONG')
+    expect(screen.getByLabelText('Code block')).toHaveTextContent('const result = 1;')
     expect(screen.getByText('Offline / 2 cached events')).toBeInTheDocument()
     await user.type(screen.getByRole('textbox', { name: 'Message shared Agent' }), 'Unsent draft')
     expect(screen.getByRole('button', { name: 'Send shared message' })).toBeDisabled()

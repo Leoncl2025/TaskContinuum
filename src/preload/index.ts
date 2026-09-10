@@ -14,6 +14,7 @@ const bridge: DesktopBridge = {
   minimize: () => ipcRenderer.invoke('desktop:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('desktop:toggle-maximize'),
   close: () => ipcRenderer.invoke('desktop:close'),
+  copyText: (text) => ipcRenderer.invoke('desktop:copy-text', text),
 }
 
 contextBridge.exposeInMainWorld('desktop', bridge)

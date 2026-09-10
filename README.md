@@ -21,6 +21,8 @@ semantic fork. Git and OneDrive synchronization remain user-managed.
 - Local status/checklist edits with derived progress, and local demo task creation.
 - Per-task conversations and drafts, streamed deterministic replies, cancellation,
   failure states, suggestion buttons, and scoped conversation clearing.
+- Markdown assistant replies in local, shared, and original VS Code chats, with
+    GFM tables/task lists, readable code blocks, and explicit code-text copying.
 - Independent desktop sidebar/chat toggles, compact single-pane navigation,
   keyboard quick-open, and dark/light appearance.
 - Sandboxed Electron renderer with a minimal typed preload bridge.
@@ -91,6 +93,32 @@ preview if its port is already occupied.
 Desktop tests use the installed Electron executable, not a downloaded Playwright
 browser. Their isolated profiles, screenshots, and reports are ignored by Git.
 Screenshots cover dark, light, contextual chat, and compact layouts.
+
+## Chat Markdown
+
+Assistant replies use the existing `react-markdown` and `remark-gfm` stack instead
+of displaying Markdown source as plain text. Headings, emphasis, inline code,
+lists, disabled task checkboxes, quotes, strikethrough, and tables are rendered.
+Single line breaks remain visible. Code blocks show their language and a **Copy
+code** action; long code and tables scroll within the message, including narrow
+Chat panels. User messages and delivery receipts retain their original literal text.
+
+The same renderer handles local/CLI output, shared live or cached replies, and
+original VS Code saved history. Updated text is rendered again, including an
+unfinished code fence; unchanged replies avoid repeated parsing while composing.
+It does not change source history, native session IDs, or synchronization latency.
+
+Messages are untrusted content. Raw HTML is omitted, links remain inert text,
+and images show their alternative text without making external requests. Copying
+writes only the code text through a trusted-window, 1 MiB-limited desktop API;
+clipboard reading and general browser permissions remain unavailable. Browser
+preview uses the browser's clipboard permission and reports a failed copy.
+Math, Mermaid diagrams, syntax highlighting, and VS Code editor/diff actions are
+not part of this renderer. The inspected
+[VS Code chat Markdown implementation](https://github.com/microsoft/vscode/blob/645f29cc3176500b4b5762ba887cf2a7f0ffdf2c/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatMarkdownContentPart.ts)
+uses a separate Markdown pipeline with GFM, line breaks, code-block rendering,
+sanitization, and scrollable tables. No VS Code installation changes are needed;
+load the updated Task Continuum desktop and preload to use this display fix.
 
 ## Open a task workspace
 

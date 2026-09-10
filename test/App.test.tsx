@@ -141,6 +141,28 @@ describe('workbench', () => {
 })
 
 describe('task-scoped chat', () => {
+  it('renders partial and completed Markdown responses without formatting the submitted user text', async () => {
+    let finish!: () => void
+    const adapter: ChatAdapter = { label: 'Test', kind: 'demo', async *stream() {
+      yield { type: 'delta', text: '## Reply\n\n**Formatted**\n\n```ts\nconst result = ' }
+      await new Promise<void>((resolve) => { finish = resolve })
+      yield { type: 'delta', text: '1;\n```\n\n| State |\n| --- |\n| Done |' }
+      yield { type: 'complete' }
+    } }
+    const user = userEvent.setup()
+    render(<App adapter={adapter} />)
+    await user.type(screen.getByRole('textbox', { name: 'Message to demo agent' }), '**Raw request**')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+    await screen.findByRole('heading', { name: 'Reply', level: 2 })
+    expect(screen.getByText('Formatted').tagName).toBe('STRONG')
+    expect(screen.getByRole('article', { name: 'Your message' })).toHaveTextContent('**Raw request**')
+    expect(screen.getByLabelText('Code block')).toHaveTextContent('const result =')
+    await act(async () => { finish() })
+    expect(await screen.findByRole('table')).toHaveTextContent('Done')
+    expect(screen.getByLabelText('Code block')).toHaveTextContent('const result = 1;')
+    expect(screen.queryByRole('button', { name: 'Stop response' })).not.toBeInTheDocument()
+  })
+
   it('keeps drafts and conversations separate when switching tasks', async () => {
     const user = userEvent.setup(); render(<App />)
     await user.type(screen.getByRole('textbox', { name: 'Message to demo agent' }), 'Plan for the UI')
