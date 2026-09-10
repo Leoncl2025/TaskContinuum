@@ -13,7 +13,7 @@ export const remoteInvitationSchema = z.object({
   schemaVersion: z.literal(1), provider: z.literal('vscode-copilot'),
   grant: remoteGrantSchema, instanceId: z.uuid(), identity: vscodeIdentitySchema,
   execution: executionIdentitySchema.extend({ machineName: remoteMachineSchema }).strict(),
-  title: z.string().min(1).max(160), vscodeVersion: z.string().regex(/^1\.136\./).max(100),
+  title: z.string().min(1).max(160), vscodeVersion: z.string().regex(/^1\.(136|137)\./).max(100),
   port: z.number().int().min(1024).max(65535), token: z.string().regex(/^[a-zA-Z0-9_-]{43}$/),
 }).strict()
 export type RemoteVSCodeInvitation = z.infer<typeof remoteInvitationSchema>

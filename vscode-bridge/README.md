@@ -12,7 +12,8 @@ Replies identify the execution machine; user messages identify their sender.
    foremost among your VS Code windows.
 3. In Task Continuum, preview the VS Code conversation, choose **Link to current
    task**, then **Connect VS Code**. Confirm **Connect** in VS Code. This starts
-   the bridge without sending a message. The external-link icon opens the original
+   the bridge and remembers authorization for this workspace without sending a
+   message. Later VS Code startup or reload restores it automatically. The external-link icon opens the original
    conversation. **Task Continuum: Start VS Code Bridge** remains a manual alternative.
 4. Sign in to Copilot in VS Code and keep the original chat open in its current
    sidebar or editor with the original Agent mode/model. Finish existing work and
@@ -22,13 +23,34 @@ Replies identify the execution machine; user messages identify their sender.
    **Send to original session**. With it disabled, desktop submission sends directly. Tool
    approvals, agent questions, and stopping an executing response remain in VS Code.
 6. Run **Task Continuum: Stop VS Code Bridge** to stop accepting deliveries. This
-   cancels unconfirmed delivery work, not an already-running Copilot response.
+   also disables automatic restoration for this workspace and cancels unconfirmed
+   delivery work, not an already-running Copilot response.
 
-Upgrade earlier versions by installing the 0.4.0 VSIX. An already-loaded extension may
+Upgrade earlier versions by installing the 0.4.1 VSIX. An already-loaded extension may
 need **Developer: Reload Window** before starting the new bridge. Finish active
 work first; the desktop does not reload the VS Code window automatically. Reopen
 an older Task Continuum desktop to load its connection button. Connection attempts
 retain the current draft and show send-blocking reasons next to the input area.
+
+## Automatic Local Connection
+
+Version 0.4.1 activates after VS Code startup and restores only workspaces previously
+enabled through **Connect** or **Start VS Code Bridge**. Consent is kept in the
+extension's private `workspaceState`, not Git or a shared workspace setting. Existing
+0.4.0 workspaces need one explicit connection to establish this remembered choice.
+
+Cold-start readiness failures retry up to three times with 5/10/15-second delays.
+Stop cancels pending restoration and clears remembered enablement; shutdown alone
+retains it. Untrusted, remote, virtual, and unverified-version workspaces do not
+auto-start. The desktop still requires the original VS Code window to be running.
+Automatic connection does not open a conversation, send/replay prompts, start an
+Agent, or grant remote access. A saved conversation must be explicitly opened before
+sending if its chat widget is not already present.
+
+VS Code 1.136.x and 1.137.x are supported. After the local installation updated to
+1.137.0, the old version guard rejected connection before consent. The exact-session
+commands, deterministic delivery, remote opening, and remembered restart/Stop behavior
+were verified with isolated installed VS Code 1.137.0. Unknown versions remain blocked.
 
 ## Remote access over SSH
 

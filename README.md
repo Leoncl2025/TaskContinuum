@@ -174,7 +174,7 @@ approving tools still happen in VS Code.**
     No CLI sign-in is needed to link or view saved history. If the task already has a
     different link, detach it first; this does not delete the underlying conversation.
 2. Build the companion with `npm run build:vscode-bridge`. Install the resulting
-    `artifacts/taskcontinuum-vscode-bridge-0.3.0.vsix` through VS Code's
+    `artifacts/taskcontinuum-vscode-bridge-0.4.1.vsix` through VS Code's
     **Extensions: Install from VSIX** command. Component details are in
     [vscode-bridge/README.md](vscode-bridge/README.md).
 3. In VS Code, open the conversation's original workspace, which may differ from
@@ -182,7 +182,10 @@ approving tools still happen in VS Code.**
     needs that VS Code window, not a new window opened only on TaskContinuum-ad.
 4. In Task Continuum's linked panel, choose **Connect VS Code**, then confirm
     **Connect** in the original VS Code workspace. The bridge starts without sending
-    a message or creating a conversation. **Open in VS Code** remains available as
+    a message or creating a conversation. Companion 0.4.1 remembers this workspace
+    and automatically restores the Bridge after VS Code startup/reload. **Stop VS
+    Code Bridge** disables that restoration. Existing installations need one explicit
+    connection after upgrading. **Open in VS Code** remains available as
     the external-link icon. The Command Palette's **Task Continuum: Start VS Code
     Bridge** command is still available for manual startup.
 5. Sign in to Copilot in VS Code and keep the original conversation open in its
@@ -288,8 +291,8 @@ Replies are a saved-history view, not a guaranteed token stream. `Submitted` mea
 the native request was found, not that its Agent finished. Check VS Code if a delivery
 remains uncertain; do not submit a duplicate while its outcome is unknown.
 
-The companion currently permits VS Code 1.136.x local trusted workspaces only;
-the actual original-chat commands were verified with VS Code 1.136.1. Sending uses
+The companion currently permits VS Code 1.136.x and 1.137.x local trusted workspaces;
+the actual original-chat commands were verified with VS Code 1.136.1 and 1.137.0. Sending uses
 `workbench.action.chat.executeHandoff` with an explicit original `sessionResource`,
 a unique delivery item, and the original Agent mode. A temporary extension-owned
 template provides the message, guarded by a cross-window lock and cleaned after
@@ -325,7 +328,7 @@ select the intended data root with `TASKCONTINUUM_VSCODE_USER_DATA_DIR`.
 
 ## Remote original VS Code mode
 
-Companion 0.4.0 lets A/C converse with the same original GitHub Copilot Agent in
+Companion 0.4.1 lets A/C converse with the same original GitHub Copilot Agent in
 B's local VS Code window. The default **Dev Tunnel + SSH** mode manages the relay,
 device keys, and loopback forwarding inside Task Continuum, without terminal windows
 or Windows SSH setup. It currently requires the same Microsoft work-account owner
