@@ -15,6 +15,7 @@ import { VSCodeSessionStore } from '../src/main/vscodeSessions'
 import { deviceInvitationSchema } from '../src/main/vscodeDeviceProtocol'
 import { updateRepositorySessionLink, readRepositorySessionLinks } from '../src/main/repositorySessionLinks'
 import { canonicalPolicyRoot, locallyLinkedSessions, recordLocalLink } from '../src/main/linkedSessionPolicy'
+import { vsCodeChatResource } from '../src/shared/vscodeChat'
 
 it('opens Git-pulled owner links over one SSH device without manual session share or relinking', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuum-git-device-'))
@@ -24,7 +25,8 @@ it('opens Git-pulled owner links over one SSH device without manual session shar
   await Promise.all([mkdir(tasksB), mkdir(join(tasksA, '.taskcontinuum'), { recursive: true }), mkdir(history, { recursive: true })])
   for (const name of ['first', 'second', 'secret']) await writeFile(join(history, `${name}.json`), JSON.stringify({ customTitle: name, inputState: { mode: { id: 'agent', kind: 'agent' } }, requests: [{ requestId: 'old', message: name, response: [{ value: `Answer ${name}` }], result: {} }] }))
   const dispatch = vi.fn(async () => ({ state: 'submitted' as const, nativeRequestId: 'new' }))
-  const bridge = await startVSCodeChatCompanion({ storageRoot: storage, workspaceStorageId, discoveryDirectory: join(storage, workspaceStorageId, 'taskcontinuum.vscode-bridge', 'bridges'), vscodeVersion: '1.136.1', open: async () => {}, dispatch })
+  const open = vi.fn(async () => {})
+  const bridge = await startVSCodeChatCompanion({ storageRoot: storage, workspaceStorageId, discoveryDirectory: join(storage, workspaceStorageId, 'taskcontinuum.vscode-bridge', 'bridges'), vscodeVersion: '1.136.1', open, dispatch })
   const owner = { clientId: randomUUID(), machineName: hostname() }
   const participant = { clientId: randomUUID(), username: 'Alice', machineName: 'A' }
   const protector = { available: () => true, encrypt: (value: string) => Buffer.from(value), decrypt: (value: Buffer) => value.toString() }
@@ -53,19 +55,28 @@ it('opens Git-pulled owner links over one SSH device without manual session shar
     const target = await manager.resolveTarget(tasksA, first)
     expect(target.remoteMachineName).toBe(owner.machineName)
     expect(JSON.stringify(await manager.read(tasksA, target))).toContain('Answer first')
+    expect(open).not.toHaveBeenCalled()
+    await manager.open(tasksA, target)
+    expect(open).toHaveBeenLastCalledWith(vsCodeChatResource('first'))
+    expect(dispatch).not.toHaveBeenCalled()
     await manager.send(tasksA, target, randomUUID(), 'Explicit user request')
     await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce())
     await link('T-0002', 'second')
     expect(JSON.stringify(await manager.read(tasksA, await manager.resolveTarget(tasksA, { ...first, nativeSessionId: 'second' })))).toContain('Answer second')
+    await manager.open(tasksA, await manager.resolveTarget(tasksA, { ...first, nativeSessionId: 'second' }))
+    expect(open).toHaveBeenLastCalledWith(vsCodeChatResource('second'))
     expect(transport).toHaveBeenCalledOnce()
     await link('T-0003', 'secret', false)
     await expect(manager.read(tasksA, await manager.resolveTarget(tasksA, { ...first, nativeSessionId: 'secret' }))).rejects.toThrow()
     expect((await manager.list(tasksA)).map((item) => item.title)).not.toContain('secret')
+    await expect(manager.open(tasksA, await manager.resolveTarget(tasksA, { ...first, nativeSessionId: 'secret' }))).rejects.toThrow()
     const before = await readRepositorySessionLinks(tasksB)
     await updateRepositorySessionLink(tasksB, 'T-0001', null, before.revision)
     expect(await manager.read(tasksA, target)).toMatchObject({ connectionState: 'offline', canSend: false })
+    await expect(manager.open(tasksA, target)).rejects.toThrow()
     await expect(manager.send(tasksA, target, randomUUID(), 'Must not execute')).rejects.toThrow()
     expect(dispatch).toHaveBeenCalledOnce()
+    expect(open).toHaveBeenCalledTimes(2)
     await host.setWorkspace(pair.id, await canonicalPolicyRoot(tasksB), null)
     const second = await manager.resolveTarget(tasksA, { ...first, nativeSessionId: 'second' })
     expect(await manager.read(tasksA, second)).toMatchObject({ connectionState: 'offline', canSend: false })

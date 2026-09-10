@@ -1,4 +1,4 @@
-import { ipcMain, shell } from 'electron'
+import { dialog, ipcMain, shell } from 'electron'
 import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import { watch } from 'node:fs'
 import type { FSWatcher } from 'node:fs'
@@ -34,9 +34,16 @@ export function registerVSCodeChatBridge(requireWindow: (event: IpcMainInvokeEve
     else await connectOriginalVSCode(store, vscodeIdentitySchema.parse(target), (uri) => shell.openExternal(uri))
   })
   ipcMain.handle('vscode-chat:open', async (event, value: unknown) => {
-    requireWindow(event)
+    const window = requireWindow(event)
     const target = await targetFor(value)
-    if (target.remoteMachineName) throw new Error('Open the original conversation on its execution machine. Remote access does not change VS Code window layouts.')
+    if (target.remoteMachineName) {
+      const root = await currentRoot()
+      const consent = await dialog.showMessageBox(window, { type: 'question', title: 'Open original session on owner', message: `Open this original session in VS Code on ${target.remoteMachineName}?`, detail: `Session: ${target.nativeSessionId}\nWorkspace: ${target.workspaceStorageId}\n\nThis changes the visible chat on the execution machine. No message is sent or retried, no new session is created, and tool approvals remain there.`, buttons: ['Cancel', 'Open on owner'], defaultId: 0, cancelId: 0 })
+      if (consent.response !== 1) return
+      if (await currentRoot() !== root || JSON.stringify(await targetFor(value)) !== JSON.stringify(target)) throw new Error('The task workspace or owner changed. No session was opened.')
+      await remote.open(root, target)
+      return
+    }
     await openOriginalVSCode(store, vscodeIdentitySchema.parse(target))
   })
   ipcMain.handle('vscode-chat:send', async (event, value: unknown, commandId: unknown, text: unknown) => {

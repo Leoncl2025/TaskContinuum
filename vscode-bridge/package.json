@@ -2,7 +2,7 @@
   "name": "vscode-bridge",
   "displayName": "Task Continuum Bridge",
   "description": "Read and send to an original VS Code Copilot conversation locally or through scoped SSH invitations.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "taskcontinuum",
   "license": "UNLICENSED",
   "engines": {

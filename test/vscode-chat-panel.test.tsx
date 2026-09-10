@@ -22,6 +22,31 @@ function fixture() {
 }
 
 describe('original VS Code conversation panel', () => {
+  it('explicitly opens the remote original, refreshes readiness and keeps the draft without sending', async () => {
+    const { bridge, changed } = fixture()
+    const target = { ...identity, remoteMachineName: 'Machine-B' }
+    const snapshot: VSCodeChatView = { session: { id: 'original', source: 'vscode', title: 'On B', updatedAt: '' }, messages: [], connectionState: 'connected', canSend: false, canOpenRemote: true }
+    vi.mocked(bridge.read).mockResolvedValue(snapshot)
+    bridge.send = vi.fn()
+    vi.mocked(bridge.open).mockImplementation(async () => { vi.mocked(bridge.read).mockResolvedValue({ ...snapshot, canSend: true }) })
+    render(<VSCodeChatPanel task={demoTasks[1]} identity={target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    const user = userEvent.setup()
+    await screen.findByText('On B')
+    await user.type(screen.getByRole('textbox'), 'Retain this draft')
+    expect(bridge.open).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: 'Open session on Machine-B' }))
+    expect(bridge.open).toHaveBeenCalledExactlyOnceWith(target)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send to original VS Code session' })).toBeEnabled())
+    expect(screen.getByRole('textbox')).toHaveValue('Retain this draft')
+    expect(bridge.send).not.toHaveBeenCalled()
+    vi.mocked(bridge.read).mockResolvedValue({ ...snapshot, canOpenRemote: false })
+    act(() => changed(target))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open session on Machine-B' })).toBeDisabled())
+    vi.mocked(bridge.read).mockResolvedValue({ ...snapshot, connectionState: 'offline' })
+    act(() => changed(target))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open session on Machine-B' })).toBeDisabled())
+  })
+
   it('reads and opens the exact original without exposing a substitute sender', async () => {
     const { bridge, changed } = fixture()
     const user = userEvent.setup()
@@ -31,8 +56,9 @@ describe('original VS Code conversation panel', () => {
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Open in VS Code' }))
     expect(bridge.open).toHaveBeenCalledWith(identity)
-    act(() => changed())
     await waitFor(() => expect(bridge.read).toHaveBeenCalledTimes(2))
+    act(() => changed())
+    await waitFor(() => expect(bridge.read).toHaveBeenCalledTimes(3))
     view.unmount()
     expect(bridge.watch).toHaveBeenLastCalledWith(null)
   })

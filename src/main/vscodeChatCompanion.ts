@@ -59,7 +59,7 @@ export async function startVSCodeChatCompanion(options: {
       if (invitation && request.method === 'GET' && request.url === '/remote/identity') {
         response.end(JSON.stringify({ instanceId, identity: invitation.identity, grant: invitation.grant, execution, vscodeVersion: options.vscodeVersion })); return
       }
-      const routes = local ? ['/open', '/send', '/deliveries', '/remote/grant', '/remote/grants', '/remote/revoke'] : ['/remote/read', '/remote/send']
+      const routes = local ? ['/open', '/send', '/deliveries', '/remote/grant', '/remote/grants', '/remote/revoke'] : ['/remote/read', '/remote/send', '/remote/open']
       if (request.method !== 'POST' || !routes.includes(request.url ?? '')) { response.writeHead(404).end('{}'); return }
       if (['/send', '/deliveries', '/remote/send'].includes(request.url!) && !deliveries) { response.writeHead(404).end('{}'); return }
       if (!request.headers['content-type']?.startsWith('application/json')) { response.writeHead(415).end('{}'); return }
@@ -101,10 +101,12 @@ export async function startVSCodeChatCompanion(options: {
       const identity = submission ? { nativeSessionId: submission.nativeSessionId, workspaceStorageId: submission.workspaceStorageId } : vscodeIdentitySchema.parse(input)
       if (identity.workspaceStorageId !== workspaceStorageId) { response.writeHead(403).end(JSON.stringify({ error: 'This is a different VS Code workspace.' })); return }
       if (invitation && invitation.identity.nativeSessionId !== identity.nativeSessionId) { response.writeHead(403).end(JSON.stringify({ error: 'This invitation does not authorize that conversation.' })); return }
+      if (invitation && request.url === '/remote/open' && !invitation.grant.canSend) { response.writeHead(403).end(JSON.stringify({ error: 'Read-only access cannot open a conversation on the execution machine.' })); return }
       if (local && request.url === '/remote/grants') {
         response.end(JSON.stringify([...remoteGrants.values()].filter((value) => value.identity.nativeSessionId === identity.nativeSessionId && Date.parse(value.grant.expiresAt) > Date.now()).map((value) => remoteGrantSchema.parse(value.grant)))); return
       }
       if (submission) {
+        if (opening) { response.writeHead(409).end(JSON.stringify({ error: 'An original conversation is opening. Wait before sending.' })); return }
         if (invitation && !invitation.grant.canSend) { response.writeHead(403).end(JSON.stringify({ error: 'This invitation is read-only.' })); return }
         response.end(JSON.stringify(await deliveries!.submit(identity, { id: submission.id, text: submission.text }, invitation?.grant.participant ?? participant, assertAuthorized))); return
       }
@@ -114,6 +116,7 @@ export async function startVSCodeChatCompanion(options: {
         if (!authorized()) { response.writeHead(401).end('{}'); return }
         const view = originalChatView(original, records, { connected: true, supportsSending: Boolean(deliveries), participant: invitation.grant.participant, execution, readOnly: !invitation.grant.canSend })
         view.session = { id: identity.nativeSessionId, source: 'vscode', title: original.snapshot.session.title, updatedAt: original.snapshot.session.updatedAt }
+        view.canOpenRemote = invitation.grant.canSend
         response.end(JSON.stringify({ instanceId, grantId: invitation.grant.id, identity, view })); return
       }
       if (request.url === '/deliveries') {
@@ -124,7 +127,10 @@ export async function startVSCodeChatCompanion(options: {
       try {
         const original = await store.locateOriginal(identity)
         if (!original.snapshot.messages.length) throw new Error('The original conversation has no saved history. Open it in VS Code directly.')
+        if (invitation && deliveries && (await deliveries.list(identity)).some((record) => record.state === 'pending' || record.state === 'uncertain')) throw new Error('Resolve the pending or uncertain delivery before switching this original conversation.')
+        assertAuthorized()
         await options.open(vsCodeChatResource(identity.nativeSessionId))
+        assertAuthorized()
         response.end(JSON.stringify({ opened: true, ...identity }))
       } finally { opening = false }
     })().catch((error: unknown) => {

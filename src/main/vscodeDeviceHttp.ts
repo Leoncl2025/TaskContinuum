@@ -2,7 +2,7 @@ import { request } from 'node:http'
 
 export class DeviceRequestError extends Error {
   constructor(readonly status: number) {
-    super(status === 401 || status === 403 ? 'Device or session access was revoked or expired.' : 'The original session is unavailable. Reconnect its VS Code bridge on the owner.')
+    super(status === 401 || status === 403 ? 'Device or session access was revoked or expired.' : status === 404 ? 'This operation is unsupported. Update Task Continuum and its VS Code Bridge on the execution machine.' : status === 400 || status === 409 ? 'The original bridge could not complete this operation. Resolve pending delivery or inspect the original VS Code window before retrying.' : 'The original session is unavailable. Reconnect its VS Code bridge on the owner.')
   }
 }
 

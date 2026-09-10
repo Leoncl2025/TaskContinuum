@@ -10,7 +10,7 @@ import type { RemoteVSCodeInvitation } from './vscodeRemoteProtocol'
 import { vscodeIdentitySchema } from './vscodeChatSchemas'
 import type { VSCodeChatIdentity } from '../shared/vscodeChat'
 import { sshPublicKeySchema } from './devTunnel/protocol'
-import { deviceRequest } from './vscodeDeviceHttp'
+import { deviceRequest, DeviceRequestError } from './vscodeDeviceHttp'
 
 const policySchema = z.object({ identity: vscodeIdentitySchema, canSend: z.boolean(), revision: z.uuid(), invitation: remoteInvitationSchema.optional(), linkedRoot: z.string().optional() }).strict()
 const workspacePolicySchema = z.object({ root: z.string().min(1), canSend: z.boolean() }).strict()
@@ -215,12 +215,13 @@ export class VSCodeDeviceHost {
             await this.refreshLinked(pair.id)
             result = { ownerId: this.state!.ownerId, deviceId: pair.id, sessions: sessions.filter((item) => this.permitted(pair.id, item.identity, item.grant.canSend)) }
           } else {
-            const route = /^\/device\/session\/(read|send)$/.exec(request.url ?? '')
+            const route = /^\/device\/session\/(read|send|open)$/.exec(request.url ?? '')
             if (!route) { response.writeHead(404).end(); return }
             const command = z.object({ identity: vscodeIdentitySchema, id: z.uuid().optional(), text: z.string().trim().min(1).max(4000).optional() }).strict().parse(body)
             const sending = route[1] === 'send'
+            const controlling = sending || route[1] === 'open'
             if (sending && (!command.id || !command.text)) { response.writeHead(400).end(); return }
-            if (!this.permitted(pair.id, command.identity, sending)) { response.writeHead(403).end(); return }
+            if (!this.permitted(pair.id, command.identity, controlling)) { response.writeHead(403).end(); return }
             const policy = pair.sessions.find((item) => sameRemoteTarget(item.identity, command.identity))!
             const invitation = await this.invitation(pair, policy)
             await this.refreshLinked(pair.id)
@@ -232,7 +233,7 @@ export class VSCodeDeviceHost {
           if (!this.permitted(pair.id)) { response.writeHead(403).end(); return }
           response.setHeader('Content-Type', 'application/json')
           response.end(JSON.stringify(result))
-        })().catch(() => { if (!response.headersSent) response.writeHead(503); response.end() })
+        })().catch((error: unknown) => { if (!response.headersSent) response.writeHead(error instanceof DeviceRequestError ? error.status : 503); response.end() })
       })
       server.requestTimeout = 15000
       server.headersTimeout = 10000

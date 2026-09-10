@@ -29,6 +29,7 @@ export const remoteViewSchema = z.object({
   messages: z.array(remoteMessageSchema).max(500).refine((messages) => messages.reduce((size, message) => size + message.text.length, 0) <= 60000),
   deliveries: z.array(deliverySchema).max(500), participant: remoteClientSchema, execution: executionIdentitySchema,
   canSend: z.boolean(), responding: z.boolean(), connectionState: z.enum(['offline', 'connected', 'unsupported']),
+  canOpenRemote: z.boolean().optional(),
   bridgeError: z.string().max(1500).optional(), omittedMessages: z.number().int().nonnegative().optional(), truncated: z.boolean().optional(),
 }).strict()
 export const remoteHistorySchema = z.object({ instanceId: z.uuid(), grantId: z.uuid(), identity: vscodeIdentitySchema, view: remoteViewSchema }).strict()

@@ -24,13 +24,22 @@ Replies identify the execution machine; user messages identify their sender.
 6. Run **Task Continuum: Stop VS Code Bridge** to stop accepting deliveries. This
    cancels unconfirmed delivery work, not an already-running Copilot response.
 
-Upgrade earlier versions by installing the 0.3.0 VSIX. An already-loaded extension may
+Upgrade earlier versions by installing the 0.4.0 VSIX. An already-loaded extension may
 need **Developer: Reload Window** before starting the new bridge. Finish active
 work first; the desktop does not reload the VS Code window automatically. Reopen
 an older Task Continuum desktop to load its connection button. Connection attempts
 retain the current draft and show send-blocking reasons next to the input area.
 
 ## Remote access over SSH
+
+Version 0.4.0 adds an explicit `/remote/open` operation for the exact authorized
+session, restricted to read/send grants. A confirms **Open session on B** before
+the owner opens the original chat as an editor. The operation serializes opens,
+rejects pending/uncertain target deliveries, and rechecks grant validity before
+opening and returning. Read-only grants cannot change the owner's UI.
+Opening never sends; the existing send guards remain unchanged. The desktop refreshes
+saved state afterward, and the user submits a message separately. A new optional
+`canOpenRemote` field advertises capability; upgrade both desktops as well as B's Bridge.
 
 Version 0.3.0 supports clients A/C connecting to this machine B's same original
 VS Code GitHub Copilot session. B still runs a local, trusted VS Code 1.136.x
@@ -49,7 +58,8 @@ The companion binds only to loopback. Provision SSH public-key authentication,
 verified host keys, forwarding permissions, and approved firewall/network access
 separately. Task Continuum does not install services or change those policies.
 Remote tokens allow only the approved session's history and permitted sends,
-not local administration, other chats, opening/moving windows, or arbitrary commands.
+plus explicit read/write-authorized opening of that exact session. They do not allow
+local administration, other chats, unrelated window control, or arbitrary commands.
 Owner-approved username/client-machine labels are distinct from B's execution
 hostname; possession of the invitation is authority, not hardware attestation.
 

@@ -7,7 +7,7 @@ CLI Host, import history into another runtime, or create a fork.
 
 ## Prerequisites
 
-- Both desktops run the current Task Continuum build. B has companion 0.3.0 or
+- Both desktops run the current Task Continuum build. B has companion 0.4.0 or
   newer loaded in a trusted, local VS Code 1.136.x workspace. Verification used
   Windows and VS Code 1.136.1. Remote SSH, WSL, container, and virtual VS Code
   windows on B are not supported; connecting an external desktop to local B is.
@@ -17,6 +17,28 @@ CLI Host, import history into another runtime, or create a fork.
   stops the Agent, but disconnects remote desktops. A needs no Copilot CLI sign-in.
 
 ## Managed Dev Tunnel + SSH (Default)
+
+### Switch the original session from A
+
+Select the Task linked to the desired B session. Once connected, use the external-link
+icon beside the execution-machine name, **Open session on B** (the actual hostname
+appears in the tooltip). Confirm the exact machine/session in A's native dialog.
+The existing saved conversation opens as a VS Code chat editor on B; this explicitly
+changes B's visible chat and may move an already-open sidebar conversation into the
+editor. No session is created or forked, no Agent mode/model is replaced, and no
+message is sent. After the view refreshes, submit your message separately.
+
+Switching requires read/send access and Companion 0.4.0. Offline/read-only clients
+cannot open the owner's UI. Pending or uncertain target deliveries must be resolved
+first. Draft/busy/mode checks still apply when sending. Merely selecting a Task or
+retrying a failed send never opens B's UI or replays a message. If the icon remains
+disabled on an online read/write session, update and load the companion on B.
+
+Install the built `artifacts/taskcontinuum-vscode-bridge-0.4.0.vsix` on B using
+**Extensions: Install from VSIX**, finish active work, reload the VS Code window,
+and reconnect its Bridge. Both Task Continuum desktops must use the rebuilt app.
+Device policies can renew after Bridge restart; legacy single-session invitations
+still require renewal. Native approvals, code, and execution remain on B.
 
 ### Device scope (2026-09-09)
 
@@ -64,8 +86,10 @@ or disabling workspace access removes derived permission on the next request.
 The loopback gateway authorizes every read/send against B's approved workspace,
 current Git links, and private local binding receipts, then uses the existing
 companion grant and delivery checks. A forged Git link alone cannot authorize a
-different local Session. Legacy explicitly granted sessions remain compatible. It cannot open
-windows, invoke generic commands, list private sessions, or forward arbitrary ports.
+different local Session. Legacy explicitly granted sessions remain compatible.
+The only UI-control action is an explicit read/write-authorized open of that exact
+original session; generic commands, private-session enumeration, and arbitrary ports
+remain prohibited.
 Owner policies and issued grants are encrypted in `remote-vscode-device-host.json`;
 client enrollment is encrypted in `remote-vscode-devices.json`, outside Git.
 `local-session-link-receipts.json` holds local binding confirmations outside Git.
@@ -296,7 +320,8 @@ remains CLI-owned; narrowly scoped cloud tokens are used only in main-process me
 
 Legacy remote credentials can only handshake, read the single approved conversation, and
 submit if granted write access. They cannot list other sessions, administer grants,
-open/move windows, forward approvals, or run arbitrary commands through the bridge.
+control unrelated windows, forward approvals, or run arbitrary commands through the bridge.
+Read/write grants additionally permit the explicitly confirmed exact-session open operation.
 Native source histories remain on B. New clients without a successful read have no
 offline history; Git does not carry transcripts or access authority.
 

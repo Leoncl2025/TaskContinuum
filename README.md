@@ -325,7 +325,7 @@ select the intended data root with `TASKCONTINUUM_VSCODE_USER_DATA_DIR`.
 
 ## Remote original VS Code mode
 
-Companion 0.3.0 lets A/C converse with the same original GitHub Copilot Agent in
+Companion 0.4.0 lets A/C converse with the same original GitHub Copilot Agent in
 B's local VS Code window. The default **Dev Tunnel + SSH** mode manages the relay,
 device keys, and loopback forwarding inside Task Continuum, without terminal windows
 or Windows SSH setup. It currently requires the same Microsoft work-account owner
@@ -352,6 +352,13 @@ are not automatically resumed locally; the independent shared CLI Host is unchan
 
 No Copilot CLI login is needed on A, and no conversation is created, resumed, imported,
 or forked. The legacy **SSH alias** mode remains available on both dialogs.
+
+To switch an unopened original remotely, select its linked Task on A, click the
+external-link icon **Open session on B** beside the execution-machine name, and
+confirm. B opens that existing chat as an editor; A refreshes and can submit a new
+message separately. Read/send permission and the loaded 0.4.0 Bridge on B are required.
+The action may change B's layout, but never sends automatically, replays a failed
+prompt, changes ownership, or replaces the Agent. Native tool approvals stay on B.
 
 On Windows, Microsoft sign-in opens a temporary **Task Continuum Microsoft sign-in**
 console for the native/browser account flow and closes it afterward. Other tunnel

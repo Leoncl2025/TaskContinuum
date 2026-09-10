@@ -260,6 +260,14 @@ export class VSCodeDeviceClient {
       throw error
     }
   }
+  async open(root: string, target: VSCodeChatTarget): Promise<void> {
+    const { peer, known } = await this.selected(root, target)
+    if (!this.active.has(peer.id)) await this.ensure(peer)
+    const active = this.active.get(peer.id)
+    if (!active || !peer.enabled || !active.available.has(known.id) || !known.invitation.grant.canSend) throw new Error('Opening on the owner requires a connected session with read and send access.')
+    const result = z.object({ opened: z.literal(true), nativeSessionId: z.string(), workspaceStorageId: z.string() }).strict().parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/session/open', { identity: targetIdentity(target) }, active.abort.signal))
+    if (!sameRemoteTarget(result, targetIdentity(target))) throw new Error('The owner returned a different opened session. No message was sent.')
+  }
   close(): void { this.closed = true; for (const peer of this.peers) this.drop(peer.id) }
 }
 

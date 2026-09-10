@@ -216,6 +216,44 @@ test('connects from the desktop and sends to the original sidebar conversation w
       expect(await readFile(join(installedExtension, 'out', 'delivery.agent.md'), 'utf8')).toBe(await readFile(resolve('vscode-bridge/delivery.agent.md'), 'utf8'))
       await page.screenshot({ path: resolve('artifacts/vscode-template-repeat-send.png') })
     }
+    await test.step('Explicitly open a different saved original over SSH without creating or sending implicitly', async () => {
+      const switchId = randomUUID()
+      const switchFile = join(directory, `${switchId}.jsonl`)
+      await writeFile(switchFile, JSON.stringify({ kind: 0, v: { ...sourceData, sessionId: switchId, customTitle: 'Remote switch fixture' } }) + '\n')
+      const switchIdentity = { nativeSessionId: switchId, workspaceStorageId }
+      const participant = { clientId: randomUUID(), username: 'Switch user', machineName: 'Machine-C' }
+      const invitation = await grantRemoteVSCode(sourceStore, switchIdentity, participant, true)
+      if (!ssh) ssh = await startSshFixture(join(root, 'switch-ssh'), invitation.port)
+      const forwarding = ssh
+      if (!remote) remote = new RemoteVSCodeManager(join(root, 'switch-client'), { identity: async () => participant, tunnel: (host, port, signal) => openSshTunnel(host, port, forwarding.config, signal) })
+      const switchRemote = new RemoteVSCodeManager(join(root, 'switch-only-client'), { identity: async () => participant, tunnel: (host, port, signal) => openSshTunnel(host, port, forwarding.config, signal) })
+      try {
+        const enrolled = await switchRemote.importInvitation(workspace, invitation, 'owner-machine')
+        await switchRemote.connect(workspace, enrolled.id)
+        const before = (await sourceStore.locateOriginal(identity)).state.turns.length
+        const switched = page!.locator(`.part.editor [data-bound-chat-resource="${vsCodeChatResource(switchId)}"]`)
+        await expect(switched).toHaveCount(0)
+        await switchRemote.open(workspace, enrolled.target)
+        await expect(switched).toBeVisible()
+        await expect(switched.getByText(originalQuestion, { exact: true })).toBeVisible()
+        expect((await sourceStore.locateOriginal(switchIdentity)).state.turns).toHaveLength(1)
+        expect((await sourceStore.locateOriginal(identity)).state.turns).toHaveLength(before)
+        if (verifyingSend) {
+          const commandId = randomUUID()
+          const prompt = '@continuum_test Reply with exactly TASKCONTINUUM_ORIGINAL_SEND_OK. Do not call tools or change files.'
+          await switchRemote.send(workspace, enrolled.target, commandId, prompt)
+          await expect(switched).toContainText(commandId, { timeout: 20000 })
+          await expect.poll(async () => {
+            const view = await switchRemote.read(workspace, enrolled.target)
+            const receipt = view.deliveries?.find((item) => item.id === commandId)
+            const reply = view.messages.find((message) => message.role === 'assistant' && message.nativeRequestId === receipt?.nativeRequestId)
+            return { state: receipt?.state, reply: reply?.text, complete: reply?.status }
+          }, { timeout: 110000 }).toEqual({ state: 'submitted', reply: 'TASKCONTINUUM_ORIGINAL_SEND_OK', complete: 'complete' })
+          expect((await sourceStore.locateOriginal(identity)).state.turns).toHaveLength(before)
+        }
+        await page!.screenshot({ path: resolve('artifacts/vscode-explicit-remote-switch.png') })
+      } finally { switchRemote.close() }
+    }, { timeout: 140000 })
     await page.getByRole('button', { name: /Original-chat bridge is running/ }).click()
     await expect.poll(() => readdir(join(storageRoot, workspaceStorageId, 'taskcontinuum.vscode-bridge', 'bridges'))).toEqual([])
   } finally {

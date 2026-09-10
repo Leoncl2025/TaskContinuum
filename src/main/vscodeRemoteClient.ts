@@ -163,7 +163,7 @@ export class RemoteVSCodeManager {
     active?.tunnel.close()
   }
 
-  private async request(entry: Enrollment, active: ActiveConnection, route: '/remote/identity' | '/remote/read' | '/remote/send', value?: unknown): Promise<unknown> {
+  private async request(entry: Enrollment, active: ActiveConnection, route: '/remote/identity' | '/remote/read' | '/remote/send' | '/remote/open', value?: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const request = httpRequest({
         hostname: '127.0.0.1', port: active.tunnel.port, path: route, method: value === undefined ? 'GET' : 'POST',
@@ -173,7 +173,7 @@ export class RemoteVSCodeManager {
         response.once('error', reject)
         if (response.statusCode !== 200) {
           response.destroy()
-          reject(new Error(response.statusCode === 401 || response.statusCode === 403 ? 'Remote access was revoked, expired, or rejected. Re-enroll with the execution owner.' : 'The remote VS Code bridge rejected the request. Inspect its original conversation before retrying.'))
+          reject(new Error(response.statusCode === 401 || response.statusCode === 403 ? 'Remote access was revoked, expired, or rejected. Re-enroll with the execution owner.' : response.statusCode === 404 ? 'Update the VS Code Bridge on the execution machine to support this operation.' : 'The remote VS Code bridge rejected the request. Inspect its original conversation before retrying.'))
           return
         }
         const chunks: Buffer[] = []
@@ -309,6 +309,15 @@ export class RemoteVSCodeManager {
     const device = await this.options.devices?.find(root, target)
     if (device) return this.options.devices!.connect(root, device.deviceId!)
     await this.connect(root, (await this.forTarget(root, target)).id)
+  }
+  async open(root: string, target: VSCodeChatTarget): Promise<void> {
+    if (await this.options.devices?.find(root, target)) return this.options.devices!.open(root, target)
+    const entry = await this.forTarget(root, target)
+    await this.authorized(entry)
+    const active = this.active.get(entry.id)
+    if (!active || !entry.invitation.grant.canSend) throw new Error('Opening on the owner requires a connected session with read and send access.')
+    const opened = z.object({ opened: z.literal(true), nativeSessionId: z.string(), workspaceStorageId: z.string() }).strict().parse(await this.request(entry, active, '/remote/open', entry.invitation.identity))
+    if (!sameRemoteTarget(opened, entry.invitation.identity)) throw new Error('The owner returned a different opened session. No message was sent.')
   }
   async disconnect(root: string, id: string): Promise<void> {
     const device = (await this.options.devices?.sessions(root))?.find((session) => session.id === id)

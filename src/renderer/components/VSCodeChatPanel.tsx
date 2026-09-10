@@ -59,7 +59,7 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose, onRemoteAcc
     operating.current = true
     setBusy(true)
     setError(undefined)
-    try { await bridge.open(identity) } catch (failure) {
+    try { await bridge.open(identity); setRevision((current) => current + 1) } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'The original VS Code conversation could not be opened.')
     } finally { operating.current = false; setBusy(false) }
   }
@@ -107,7 +107,7 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose, onRemoteAcc
     <header className="panel-header"><span>{remoteMachineName ? 'REMOTE VS CODE' : 'VS CODE CHAT'}</span><div className="header-actions">{onRemoteAccess && !remoteMachineName && <IconButton icon="broadcast" label="Share original conversation remotely" disabled={busy || snapshot?.connectionState !== 'connected'} onClick={onRemoteAccess} />}{onRemoteConnections && remoteMachineName && <IconButton icon="remote" label="Manage remote VS Code connection" disabled={busy} onClick={onRemoteConnections} />}<IconButton icon="refresh" label="Refresh original conversation" disabled={busy} onClick={() => setRevision((value) => value + 1)} /><IconButton icon="debug-disconnect" label="Detach conversation" disabled={busy} onClick={onDetach} /><IconButton icon="layout-sidebar-right-off" label="Hide chat panel" onClick={onClose} /></div></header>
     <div className="chat-context"><Icon name="vscode" /><div><strong>{snapshot?.session.title ?? 'GitHub Copilot in VS Code'}</strong><span title={nativeSessionId}>{nativeSessionId}</span></div><span className="context-badge">{task.id}</span></div>
     <div className="session-toolbar"><span className="session-connection-state">{snapshot?.connectionState === 'offline' || remoteMachineName && !snapshot ? 'Not connected' : snapshot?.connectionState === 'unsupported' ? 'Bridge update required' : snapshot?.responding ? 'Agent responding' : waiting ? 'Delivery pending' : 'Original session'}</span><div className="header-actions">{bridge?.connect && snapshot?.connectionState !== 'connected' && !snapshot?.canSend && <button type="button" className="text-button" disabled={busy || !snapshot && !remoteMachineName} onClick={() => { void connect() }}><Icon name="plug" />{remoteMachineName ? 'Connect SSH' : 'Connect VS Code'}</button>}{!remoteMachineName && <IconButton icon="link-external" label="Open in VS Code" disabled={busy || !bridge} onClick={() => { void open() }} />}</div></div>
-    <div className="vscode-execution-identity"><Icon name="server" /><span>{executionName}</span></div>
+    <div className="vscode-execution-identity"><Icon name="server" /><span>{executionName}</span>{remoteMachineName && <IconButton icon="link-external" label={`Open session on ${remoteMachineName}`} disabled={busy || waiting || snapshot?.connectionState !== 'connected' || snapshot?.canOpenRemote !== true} onClick={() => { void open() }} />}</div>
     {(error || readError) && <p className="copilot-error vscode-chat-notice" role="alert">{error ?? readError}</p>}
     {snapshot?.bridgeError && !readError && !bridge?.send && <p className="vscode-chat-notice muted" role="status">{snapshot.bridgeError}</p>}
     <div className="chat-log" ref={log} role="log" aria-label={`Original conversation for ${task.id}`} aria-live="polite" onScroll={() => { if (log.current) followBottom.current = log.current.scrollHeight - log.current.scrollTop - log.current.clientHeight < 60 }}>

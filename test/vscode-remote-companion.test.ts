@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { startVSCodeChatCompanion } from '../src/main/vscodeChatCompanion'
 import { remoteHistorySchema, remoteInvitationSchema } from '../src/main/vscodeRemoteProtocol'
 import { deliveryPrompt } from '../src/main/vscodeChatDelivery'
+import { vsCodeChatResource } from '../src/shared/vscodeChat'
 
 describe('remote original VS Code authorization', () => {
   it('scopes read/send to an owner-approved participant and session without exposing local administration', async () => {
@@ -38,6 +39,12 @@ describe('remote original VS Code authorization', () => {
       expect((await call(invitation.token, '/remote/read', { ...identity, workspaceStorageId: 'b'.repeat(32) })).status).toBe(403)
       expect((await call(invitation.token, '/remote/send', { ...identity, id: randomUUID(), text: 'Bad', participant: { ...participant, username: 'B' } })).status).toBe(400)
       const initial = remoteHistorySchema.parse(await (await call(invitation.token, '/remote/read', identity)).json())
+      expect(initial.view.canOpenRemote).toBe(true)
+      expect((await call(invitation.token, '/remote/open', { ...identity, nativeSessionId: 'other' })).status).toBe(403)
+      expect((await call(invitation.token, '/remote/open', { ...identity, workspaceStorageId: 'b'.repeat(32) })).status).toBe(403)
+      expect(await (await call(invitation.token, '/remote/open', identity)).json()).toEqual({ opened: true, ...identity })
+      expect(open).toHaveBeenCalledExactlyOnceWith(vsCodeChatResource(identity.nativeSessionId))
+      expect(dispatch).not.toHaveBeenCalled()
       expect(initial.view.session).not.toHaveProperty('workingDirectory')
       expect(initial.view.participant).toEqual(participant)
       const command = { ...identity, id: randomUUID(), text: 'Continue on B' }
@@ -52,13 +59,16 @@ describe('remote original VS Code authorization', () => {
       expect(dispatch).toHaveBeenCalledTimes(1)
       const readOnly = remoteInvitationSchema.parse(await (await call(bridge.descriptor.token, '/remote/grant', { ...identity, participant: { ...participant, clientId: randomUUID() }, canSend: false })).json())
       expect((await call(readOnly.token, '/remote/send', { ...command, id: randomUUID() })).status).toBe(403)
+      expect((await call(readOnly.token, '/remote/open', identity)).status).toBe(403)
       const view = remoteHistorySchema.parse(await (await call(readOnly.token, '/remote/read', identity)).json()).view
       expect(view.canSend).toBe(false)
+      expect(view.canOpenRemote).toBe(false)
       expect(view.bridgeError).toContain('reading only')
       const grants = await (await call(bridge.descriptor.token, '/remote/grants', identity)).json()
       expect(JSON.stringify(grants)).not.toContain(invitation.token)
       expect((await call(bridge.descriptor.token, '/remote/revoke', { ...identity, grantId: invitation.grant.id })).ok).toBe(true)
       expect((await call(invitation.token, '/remote/read', identity)).status).toBe(401)
+      expect((await call(invitation.token, '/remote/open', identity)).status).toBe(401)
       const expiring = remoteInvitationSchema.parse(await (await call(bridge.descriptor.token, '/remote/grant', { ...identity, participant, canSend: true })).json())
       const slow = request(`${base}/remote/send`, { method: 'POST', headers: { Authorization: `Bearer ${expiring.token}`, 'Content-Type': 'application/json', Expect: '100-continue' } })
       try {
@@ -71,7 +81,7 @@ describe('remote original VS Code authorization', () => {
         expect(await status).toBe(401)
         expect(dispatch).toHaveBeenCalledTimes(1)
       } finally { slow.destroy() }
-      expect(open).not.toHaveBeenCalled()
+      expect(open).toHaveBeenCalledTimes(1)
     } finally { await bridge.close(); await rm(root, { recursive: true, force: true }) }
   })
 })
