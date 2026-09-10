@@ -25,8 +25,9 @@ it('opens Git-pulled owner links over one SSH device without manual session shar
   await Promise.all([mkdir(tasksB), mkdir(join(tasksA, '.taskcontinuum'), { recursive: true }), mkdir(history, { recursive: true })])
   for (const name of ['first', 'second', 'secret']) await writeFile(join(history, `${name}.json`), JSON.stringify({ customTitle: name, inputState: { mode: { id: 'agent', kind: 'agent' } }, requests: [{ requestId: 'old', message: name, response: [{ value: `Answer ${name}` }], result: {} }] }))
   const dispatch = vi.fn(async () => ({ state: 'submitted' as const, nativeRequestId: 'new' }))
-  const open = vi.fn(async () => {})
-  const bridge = await startVSCodeChatCompanion({ storageRoot: storage, workspaceStorageId, discoveryDirectory: join(storage, workspaceStorageId, 'taskcontinuum.vscode-bridge', 'bridges'), vscodeVersion: '1.136.1', open, dispatch })
+  const opened = new Set<string>()
+  const open = vi.fn(async (resource: string) => { opened.add(resource) })
+  const bridge = await startVSCodeChatCompanion({ storageRoot: storage, workspaceStorageId, discoveryDirectory: join(storage, workspaceStorageId, 'taskcontinuum.vscode-bridge', 'bridges'), vscodeVersion: '1.137.0', open, isOpen: async (resource) => opened.has(resource), autoOpenOnSend: true, dispatch })
   const owner = { clientId: randomUUID(), machineName: hostname() }
   const participant = { clientId: randomUUID(), username: 'Alice', machineName: 'A' }
   const protector = { available: () => true, encrypt: (value: string) => Buffer.from(value), decrypt: (value: Buffer) => value.toString() }
@@ -56,11 +57,13 @@ it('opens Git-pulled owner links over one SSH device without manual session shar
     expect(target.remoteMachineName).toBe(owner.machineName)
     expect(JSON.stringify(await manager.read(tasksA, target))).toContain('Answer first')
     expect(open).not.toHaveBeenCalled()
-    await manager.open(tasksA, target)
-    expect(open).toHaveBeenLastCalledWith(vsCodeChatResource('first'))
+    expect(await manager.read(tasksA, target)).toMatchObject({ sessionOpen: false, canSend: false, canPrepareSend: true })
+    await manager.connectTarget(tasksA, target)
+    expect(open).not.toHaveBeenCalled()
     expect(dispatch).not.toHaveBeenCalled()
     await manager.send(tasksA, target, randomUUID(), 'Explicit user request')
     await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce())
+    expect(open).toHaveBeenLastCalledWith(vsCodeChatResource('first'))
     await link('T-0002', 'second')
     expect(JSON.stringify(await manager.read(tasksA, await manager.resolveTarget(tasksA, { ...first, nativeSessionId: 'second' })))).toContain('Answer second')
     await manager.open(tasksA, await manager.resolveTarget(tasksA, { ...first, nativeSessionId: 'second' }))

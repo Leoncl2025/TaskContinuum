@@ -5,10 +5,12 @@ import { dispatchVSCodeMessage, verifyVSCodeDeliveryTemplate } from './vscodeCha
 import type { VSCodeDeliveryMode } from './vscodeChatDispatch'
 import { VSCodeSessionStore } from './vscodeSessions'
 import { identityFromVSCodeBridgeUri } from '../shared/vscodeChat'
+import { isVSCodeWidgetOpen, openVerifiedVSCodeWidget } from './vscodeChatWidget'
 
 let companion: Awaited<ReturnType<typeof startVSCodeChatCompanion>> | undefined
 let changing = false
 let readiness: AbortController | undefined
+let bridgeLifetime: AbortController | undefined
 let shutdown: (() => void) | undefined
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -18,7 +20,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let retry: ReturnType<typeof setTimeout> | undefined
   let retries = 0
   let lifecycle = 0
-  shutdown = () => { disposed = true; clearTimeout(retry); readiness?.abort(new Error('The bridge is shutting down.')) }
+  shutdown = () => { disposed = true; clearTimeout(retry); readiness?.abort(new Error('The bridge is shutting down.')); bridgeLifetime?.abort(new Error('The bridge is shutting down.')) }
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 20)
   status.text = '$(link) Task Continuum'
   status.tooltip = 'Original-chat bridge is running. Tool approvals stay in VS Code.'
@@ -60,18 +62,33 @@ export function activate(context: vscode.ExtensionContext): void {
         await verifyVSCodeDeliveryTemplate(templatePath, templateCommands, readiness.signal)
       }
       const store = new VSCodeSessionStore([dirname(workspaceStorage)])
+      const lifetime = new AbortController()
+      bridgeLifetime = lifetime
+      const probeWidget = async (resource: string, id: string) => {
+        lifetime.signal.throwIfAborted()
+        if (!vscode.workspace.isTrusted) throw new Error('The workspace is no longer trusted.')
+        return vscode.commands.executeCommand<{ success: boolean; error?: string }>('workbench.action.chat.executeHandoff', { sessionResource: resource, sourceCustomAgent: 'agent', id })
+      }
+      const isOpen = (resource: string) => isVSCodeWidgetOpen(resource, probeWidget)
       const openOriginal = async (resource: string) => {
         if (!vscode.workspace.isTrusted) throw new Error('The workspace is no longer trusted.')
-        await vscode.commands.executeCommand(openCommand, { resource: vscode.Uri.parse(resource) })
+        await openVerifiedVSCodeWidget(resource, { probe: probeWidget, open: async (target) => {
+          lifetime.signal.throwIfAborted()
+          if (!vscode.workspace.isTrusted) throw new Error('The workspace is no longer trusted.')
+          await vscode.commands.executeCommand(openCommand, { resource: vscode.Uri.parse(target) })
+        } }, lifetime.signal)
       }
       if (disposed || lifecycle !== startedAt) return
       companion = await startVSCodeChatCompanion({
         storageRoot: dirname(workspaceStorage), workspaceStorageId: basename(workspaceStorage),
         discoveryDirectory: join(workspaceStorage, context.extension.id, 'bridges'), vscodeVersion: vscode.version,
         open: openOriginal,
+        isOpen: canDispatch ? isOpen : undefined,
+        autoOpenOnSend: canDispatch,
         dispatch: canDispatch
           ? (identity, delivery, signal) => dispatchVSCodeMessage({ identity, delivery, signal, store, templatePath, commands: {
             ...templateCommands,
+            isOpen,
             confirm: async (target, message, title) => {
               if (!vscode.workspace.isTrusted) return false
               if (vscode.workspace.getConfiguration('taskcontinuum').get<boolean>('confirmOriginalSessionSend', true) === false) return true
@@ -123,6 +140,7 @@ export function activate(context: vscode.ExtensionContext): void {
     await context.workspaceState.update(autoStartKey, false)
     clearTimeout(retry)
     readiness?.abort(new Error('The bridge startup was stopped.'))
+    bridgeLifetime?.abort(new Error('The bridge was stopped.'))
     if (changing) return
     changing = true
     try { await companion?.close(); companion = undefined; status.hide() } finally { changing = false }
@@ -135,6 +153,7 @@ export function activate(context: vscode.ExtensionContext): void {
 export async function deactivate(): Promise<void> {
   shutdown?.()
   readiness?.abort(new Error('The bridge stopped during its readiness check.'))
+  bridgeLifetime?.abort(new Error('The bridge stopped while checking its original view.'))
   await companion?.close()
   companion = undefined
 }

@@ -35,6 +35,8 @@ export interface VSCodeChatView extends SessionSnapshot {
   connectionState?: 'offline' | 'connected' | 'unsupported'
   canSend?: boolean
   canOpenRemote?: boolean
+  sessionOpen?: boolean
+  canPrepareSend?: boolean
   responding?: boolean
   bridgeError?: string
   deliveries?: VSCodeChatDelivery[]

@@ -15,9 +15,10 @@ Replies identify the execution machine; user messages identify their sender.
    the bridge and remembers authorization for this workspace without sending a
    message. Later VS Code startup or reload restores it automatically. The external-link icon opens the original
    conversation. **Task Continuum: Start VS Code Bridge** remains a manual alternative.
-4. Sign in to Copilot in VS Code and keep the original chat open in its current
-   sidebar or editor with the original Agent mode/model. Finish existing work and
-   clear any unsent draft before sending from the desktop.
+4. Sign in to Copilot in the original VS Code workspace with its existing Agent
+   mode/model. Finish existing work and clear any unsent native draft. Sending from
+   the updated desktop restores the approved connection and opens this original
+   chat only if needed; no separate Connect or Open action is required.
 5. Enter a message in Task Continuum. With delivery confirmation enabled, review the
    target session, sender, execution machine, and text in VS Code, then choose
    **Send to original session**. With it disabled, desktop submission sends directly. Tool
@@ -26,11 +27,60 @@ Replies identify the execution machine; user messages identify their sender.
    also disables automatic restoration for this workspace and cancels unconfirmed
    delivery work, not an already-running Copilot response.
 
-Upgrade earlier versions by installing the 0.4.1 VSIX. An already-loaded extension may
+Upgrade earlier versions by installing the 0.4.3 VSIX. An already-loaded extension may
 need **Developer: Reload Window** before starting the new bridge. Finish active
-work first; the desktop does not reload the VS Code window automatically. Reopen
-an older Task Continuum desktop to load its connection button. Connection attempts
+work first; the desktop does not reload the VS Code window automatically. Both
+Task Continuum desktops must load the rebuilt app for the readiness protocol. Connection attempts
 retain the current draft and show send-blocking reasons next to the input area.
+
+## Single-action Sending
+
+Version 0.4.3 makes Send prepare the approved original session before submitting
+that one message. The desktop restores an existing remote connection, or requests
+local Bridge restoration and waits up to twenty seconds. It rechecks the captured
+workspace, owner and window after connecting. Initial consent and pairing are not
+bypassed; existing 0.4.1 enablement remains valid.
+
+If the exact widget is closed, the companion checks saved history, Agent mode,
+drafts, busy state and pending/uncertain receipts before opening it. Opening is
+serialized and verified within ten seconds; authorization is checked again before
+submission. An existing widget is not reopened or moved. A closed widget may be
+opened on B as part of Send, without a separate Open confirmation. The owner's
+optional delivery-confirmation setting and native tool policy are unchanged.
+
+Reads, browsing and background reconnection never submit a message or open a chat.
+Preparation failure leaves the desktop draft intact and sends nothing. Existing
+message IDs remain deduplicated, including retries after the original closes.
+There is no automatic replay or persistent send queue. Optional manual Open remains.
+
+256 tests, lint/types/build, real Git-owned multi-session SSH, two-desktop one-click
+reconnection and automatic opening, and installed VS Code 1.137 deterministic
+delivery to a previously unopened 40 MiB journal passed. Other conversations were
+unchanged. Desktop/420px screenshots were reviewed. No production user prompt or
+cloud request was used. Both desktops and the companion must load the new build.
+
+## Previous View Readiness (0.4.2)
+
+Version 0.4.2 reports whether the exact original chat widget is present, separately
+from Bridge connectivity and saved Agent state. A closed original remains readable
+and connected, but **Session not open** disables sending and offers an explicit
+open action. Opening waits up to ten seconds for that exact view, not merely the
+native command's return. An existing view still receives the explicit open command.
+Stop cancels readiness waits; reads and sends never open or replay anything.
+
+The version-gated probe calls `workbench.action.chat.executeHandoff` with the exact
+`sessionResource`, no label or prompt, and ID `taskcontinuum-widget-presence`. In
+the inspected native implementation every real handoff ID is `agent:label-slug`,
+so this colon-free ID cannot match a handoff. Widget lookup precedes handoff lookup;
+only the known missing-widget or missing-handoff results are accepted. Unknown
+results fail closed. No actual handoff, model request, draft edit, or mode switch
+occurs. Sending checks again before preparation and immediately before dispatch.
+
+Verification passed 244 tests, lint/types/build, real VS Code 1.137.0 local/SSH
+deterministic delivery, and a synthetic journal over 40 MiB with a 28 MiB initial
+record. Closed/open/reclosed/reopened states, silent-open rejection, deduplication,
+draft retention and other-session isolation are covered. This does not certify the
+user's particular production conversation; no failed user message was replayed.
 
 ## Automatic Local Connection
 

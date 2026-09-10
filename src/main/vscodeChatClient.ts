@@ -1,5 +1,6 @@
 import { lstat, readdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
 import type { VSCodeChatDelivery, VSCodeChatIdentity, VSCodeChatView } from '../shared/vscodeChat'
 import { vsCodeBridgeConnectUri } from '../shared/vscodeChat'
@@ -12,8 +13,9 @@ import { remoteClientSchema, remoteGrantSchema, remoteInvitationSchema } from '.
 import type { RemoteVSCodeClientIdentity, RemoteVSCodeGrant } from '../shared/remoteVSCode'
 import type { RemoteVSCodeInvitation } from './vscodeRemoteProtocol'
 
-const identityResponse = z.object({ protocol: z.literal(1), instanceId: z.uuid(), workspaceStorageId: z.string(), vscodeVersion: z.string(), participant: participantSchema.optional(), execution: executionIdentitySchema.optional(), capabilities: z.object({ open: z.literal(true), send: z.boolean(), remote: z.boolean().optional() }).strict() }).strict()
+const identityResponse = z.object({ protocol: z.literal(1), instanceId: z.uuid(), workspaceStorageId: z.string(), vscodeVersion: z.string(), participant: participantSchema.optional(), execution: executionIdentitySchema.optional(), capabilities: z.object({ open: z.literal(true), send: z.boolean(), remote: z.boolean().optional(), sessionState: z.boolean().optional(), prepareSend: z.boolean().optional() }).strict() }).strict()
 interface CompanionConnection { descriptor: z.infer<typeof companionSchema>; actual: z.infer<typeof identityResponse> }
+class OfflineVSCodeBridgeError extends Error {}
 
 async function responseJson(response: Response, maximum = 8192): Promise<unknown> {
   const reader = response.body?.getReader()
@@ -32,7 +34,7 @@ async function responseJson(response: Response, maximum = 8192): Promise<unknown
   } finally { await reader.cancel().catch(() => undefined) }
 }
 
-async function discoverCompanion(directory: string, identity: VSCodeChatIdentity): Promise<CompanionConnection> {
+async function discoverCompanion(directory: string, identity: VSCodeChatIdentity, signal?: AbortSignal): Promise<CompanionConnection> {
   const files = await readdir(directory, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
     if (error.code === 'ENOENT') return []
     throw error
@@ -41,24 +43,26 @@ async function discoverCompanion(directory: string, identity: VSCodeChatIdentity
   if (candidates.length > 32) throw new Error('Too many VS Code bridge records. Stop old bridges before reconnecting.')
   const live: CompanionConnection[] = []
   for (const entry of candidates) {
+    signal?.throwIfAborted()
     try {
       const file = join(directory, entry.name)
       const info = await lstat(file)
       if (!info.isFile() || info.isSymbolicLink() || info.nlink > 1) continue
       const descriptor = companionSchema.parse(await readJsonBounded(file, 8192))
       if (descriptor.workspaceStorageId !== identity.workspaceStorageId) continue
-      const response = await fetch(`http://127.0.0.1:${descriptor.port}/identity`, { headers: { Authorization: `Bearer ${descriptor.token}` }, redirect: 'error', signal: AbortSignal.timeout(1000) })
+      const response = await fetch(`http://127.0.0.1:${descriptor.port}/identity`, { headers: { Authorization: `Bearer ${descriptor.token}` }, redirect: 'error', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(1000)]) : AbortSignal.timeout(1000) })
       if (!response.ok) { await response.body?.cancel(); continue }
       const actual = identityResponse.parse(await responseJson(response))
       if (actual.instanceId === descriptor.instanceId && actual.workspaceStorageId === identity.workspaceStorageId && actual.vscodeVersion === descriptor.vscodeVersion) live.push({ descriptor, actual })
     } catch { continue }
   }
-  if (!live.length) throw new Error('The original VS Code workspace is not connected.')
+  signal?.throwIfAborted()
+  if (!live.length) throw new OfflineVSCodeBridgeError('The original VS Code workspace is not connected.')
   if (live.length > 1) throw new Error('More than one VS Code window owns this workspace bridge. Stop the extra bridge before opening the conversation.')
   return live[0]
 }
 
-async function post(connection: CompanionConnection, path: '/open' | '/send' | '/deliveries' | '/remote/grant' | '/remote/grants' | '/remote/revoke', value: unknown, maximum = 32768): Promise<unknown> {
+async function post(connection: CompanionConnection, path: '/open' | '/send' | '/deliveries' | '/session-state' | '/remote/grant' | '/remote/grants' | '/remote/revoke', value: unknown, maximum = 32768): Promise<unknown> {
   const { descriptor } = connection
   const response = await fetch(`http://127.0.0.1:${descriptor.port}${path}`, {
     method: 'POST', headers: { Authorization: `Bearer ${descriptor.token}`, 'Content-Type': 'application/json' },
@@ -109,11 +113,34 @@ export async function openOriginalVSCode(store: VSCodeSessionStore, value: VSCod
   if (opened.nativeSessionId !== identity.nativeSessionId || opened.workspaceStorageId !== identity.workspaceStorageId) throw new Error('VS Code returned a different conversation identity.')
 }
 
-export async function sendOriginalVSCode(store: VSCodeSessionStore, value: VSCodeChatIdentity, commandId: string, text: string): Promise<VSCodeChatDelivery> {
+export async function sendOriginalVSCode(store: VSCodeSessionStore, value: VSCodeChatIdentity, commandId: string, text: string, preparation?: {
+  openExternal(uri: string): Promise<void>
+  assertCurrent(): Promise<void>
+}): Promise<VSCodeChatDelivery> {
   const identity = vscodeIdentitySchema.parse(value)
   const request = z.object({ id: z.uuid(), text: z.string().trim().min(1).max(4000) }).strict().parse({ id: commandId, text })
   const original = await store.locateOriginal(identity)
-  const connection = await discoverCompanion(original.bridgeDirectory, identity)
+  let connection: CompanionConnection
+  try { connection = await discoverCompanion(original.bridgeDirectory, identity) } catch (error) {
+    if (!(error instanceof OfflineVSCodeBridgeError) || !preparation) throw error
+    await preparation.assertCurrent()
+    await preparation.openExternal(vsCodeBridgeConnectUri(identity, original.uriScheme))
+    const deadline = AbortSignal.timeout(20000)
+    try {
+      while (true) {
+        deadline.throwIfAborted()
+        await preparation.assertCurrent()
+        try { connection = await discoverCompanion(original.bridgeDirectory, identity, deadline); break } catch (failure) {
+          if (!(failure instanceof OfflineVSCodeBridgeError)) throw failure
+        }
+        await delay(250, undefined, { signal: deadline })
+      }
+    } catch (failure) {
+      if (deadline.aborted) throw new Error('The original VS Code workspace did not reconnect in time. No message was queued or sent.')
+      throw failure
+    }
+  }
+  await preparation?.assertCurrent()
   if (!connection.actual.capabilities.send || !connection.actual.participant || !connection.actual.execution) throw new Error('This VS Code bridge does not support attributed sending. Update the companion and restart its bridge.')
   const result = deliverySchema.parse(await post(connection, '/send', { ...identity, ...request }))
   if (result.id !== request.id || result.text !== request.text || result.nativeSessionId !== identity.nativeSessionId
@@ -128,9 +155,15 @@ export async function readOriginalVSCode(store: VSCodeSessionStore, value: VSCod
   let connection: CompanionConnection | undefined
   let bridgeError: string | undefined
   let deliveries: VSCodeChatDelivery[] = []
+  let sessionOpen: boolean | undefined
   try {
     connection = await discoverCompanion(original.bridgeDirectory, identity)
     if (connection.actual.capabilities.send) deliveries = z.array(deliverySchema).max(500).parse(await post(connection, '/deliveries', identity, 4 * 1024 * 1024))
+    if (connection.actual.capabilities.sessionState) {
+      const state = vscodeIdentitySchema.extend({ sessionOpen: z.boolean() }).strict().parse(await post(connection, '/session-state', identity))
+      if (state.nativeSessionId !== identity.nativeSessionId || state.workspaceStorageId !== identity.workspaceStorageId) throw new Error('The VS Code bridge returned a different session readiness identity.')
+      sessionOpen = state.sessionOpen
+    }
   } catch (error) {
     connection = undefined
     bridgeError = error instanceof Error ? error.message : 'The original VS Code bridge is unavailable.'
@@ -143,7 +176,7 @@ export async function readOriginalVSCode(store: VSCodeSessionStore, value: VSCod
   if (deliveries.some((delivery) => delivery.nativeSessionId !== identity.nativeSessionId)) throw new Error('The VS Code bridge returned deliveries from a different conversation.')
   const supportsSending = Boolean(connection?.actual.capabilities.send && connection.actual.participant && connection.actual.execution)
   return originalChatView(original, deliveries, { connected: Boolean(connection), supportsSending, bridgeError,
-    participant: connection?.actual.participant, execution: connection?.actual.execution,
+    participant: connection?.actual.participant, execution: connection?.actual.execution, sessionOpen, autoOpenOnSend: connection?.actual.capabilities.prepareSend,
   })
 }
 

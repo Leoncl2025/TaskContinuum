@@ -22,23 +22,52 @@ function fixture() {
 }
 
 describe('original VS Code conversation panel', () => {
+  it.each([
+    { remote: false, connectionState: 'connected' as const },
+    { remote: true, connectionState: 'connected' as const },
+    { remote: false, connectionState: 'offline' as const },
+    { remote: true, connectionState: 'offline' as const },
+  ])('submits with one Send action when remote=$remote and state=$connectionState', async ({ remote, connectionState }) => {
+    const { bridge } = fixture()
+    const target = { ...identity, ...(remote ? { remoteMachineName: 'Machine-B' } : {}) }
+    vi.mocked(bridge.read).mockResolvedValue({ session: { id: 'original', source: 'vscode', title: 'One action', updatedAt: '' }, messages: [], connectionState, canSend: false, sessionOpen: false, canPrepareSend: connectionState === 'connected', canOpenRemote: true })
+    bridge.connect = vi.fn(async () => {})
+    bridge.send = vi.fn(async (_target, id, text): Promise<VSCodeChatDelivery> => ({ id, text, nativeSessionId: identity.nativeSessionId, state: 'pending', createdAt: new Date().toISOString(), participant: { username: 'Alice', machineName: 'A' }, execution: { agentName: 'GitHub Copilot', machineName: 'B' } }))
+    const user = userEvent.setup()
+    render(<VSCodeChatPanel task={demoTasks[1]} identity={target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByText('One action')
+    await user.type(screen.getByRole('textbox'), 'Prepare and send')
+    const send = screen.getByRole('button', { name: 'Send to original VS Code session' })
+    expect(send).toBeEnabled()
+    expect(screen.queryByText('The original conversation is not ready for sending.')).not.toBeInTheDocument()
+    await user.dblClick(send)
+    expect(bridge.send).toHaveBeenCalledExactlyOnceWith(target, expect.any(String), 'Prepare and send')
+    expect(bridge.connect).not.toHaveBeenCalled()
+    expect(bridge.open).not.toHaveBeenCalled()
+    expect(screen.getByRole('textbox')).toHaveValue('')
+  })
+
   it('explicitly opens the remote original, refreshes readiness and keeps the draft without sending', async () => {
     const { bridge, changed } = fixture()
     const target = { ...identity, remoteMachineName: 'Machine-B' }
-    const snapshot: VSCodeChatView = { session: { id: 'original', source: 'vscode', title: 'On B', updatedAt: '' }, messages: [], connectionState: 'connected', canSend: false, canOpenRemote: true }
+    const snapshot: VSCodeChatView = { session: { id: 'original', source: 'vscode', title: 'On B', updatedAt: '' }, messages: [], connectionState: 'connected', canSend: false, canOpenRemote: true, sessionOpen: false }
     vi.mocked(bridge.read).mockResolvedValue(snapshot)
     bridge.send = vi.fn()
-    vi.mocked(bridge.open).mockImplementation(async () => { vi.mocked(bridge.read).mockResolvedValue({ ...snapshot, canSend: true }) })
+    vi.mocked(bridge.open).mockImplementation(async () => { vi.mocked(bridge.read).mockResolvedValue({ ...snapshot, sessionOpen: true, canSend: true }) })
     render(<VSCodeChatPanel task={demoTasks[1]} identity={target} onDetach={vi.fn()} onClose={vi.fn()} />)
     const user = userEvent.setup()
     await screen.findByText('On B')
+    expect(screen.getByText('Session not open')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Connect SSH' })).not.toBeInTheDocument()
     await user.type(screen.getByRole('textbox'), 'Retain this draft')
+    expect(screen.getByRole('button', { name: 'Send to original VS Code session' })).toBeDisabled()
     expect(bridge.open).not.toHaveBeenCalled()
     await user.click(screen.getByRole('button', { name: 'Open session on Machine-B' }))
     expect(bridge.open).toHaveBeenCalledExactlyOnceWith(target)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send to original VS Code session' })).toBeEnabled())
     expect(screen.getByRole('textbox')).toHaveValue('Retain this draft')
     expect(bridge.send).not.toHaveBeenCalled()
+    expect(screen.queryByText('Session not open')).not.toBeInTheDocument()
     vi.mocked(bridge.read).mockResolvedValue({ ...snapshot, canOpenRemote: false })
     act(() => changed(target))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Open session on Machine-B' })).toBeDisabled())
@@ -123,7 +152,7 @@ describe('original VS Code conversation panel', () => {
     expect(screen.getByRole('button', { name: 'Send to original VS Code session' })).toBeDisabled()
   })
 
-  it('connects from the desktop, preserves the draft, and enables sending only after the original Agent becomes idle', async () => {
+  it('retains optional connection controls and blocks the original Agent while it is busy', async () => {
     const { bridge, changed } = fixture()
     const session = { id: 'original', source: 'vscode' as const, title: 'Original', updatedAt: '' }
     const offline: VSCodeChatView = { session, messages: [], canSend: false, connectionState: 'offline', bridgeError: 'The source VS Code workspace is not connected.' }
@@ -136,8 +165,7 @@ describe('original VS Code conversation panel', () => {
     const input = screen.getByRole('textbox', { name: 'Message original VS Code Agent' })
     const send = screen.getByRole('button', { name: 'Send to original VS Code session' })
     await user.type(input, 'Keep this draft')
-    expect(send).toBeDisabled()
-    expect(send).toHaveAccessibleDescription(offline.bridgeError)
+    expect(send).toBeEnabled()
     await user.click(screen.getByRole('button', { name: 'Connect VS Code' }))
     expect(bridge.connect).toHaveBeenCalledExactlyOnceWith(identity)
     expect(bridge.send).not.toHaveBeenCalled()
@@ -156,20 +184,21 @@ describe('original VS Code conversation panel', () => {
     expect(bridge.send).not.toHaveBeenCalled()
   })
 
-  it('keeps sending disabled and retains the draft after a desktop connection failure', async () => {
+  it('retains the draft after automatic preparation fails and never retries it in the background', async () => {
     const { bridge } = fixture()
     vi.mocked(bridge.read).mockResolvedValue({ session: { id: 'original', source: 'vscode', title: 'Original', updatedAt: '' }, messages: [], canSend: false, connectionState: 'offline' })
-    bridge.connect = vi.fn().mockRejectedValue(new Error('VS Code could not open the connection request.'))
-    bridge.send = vi.fn()
+    bridge.connect = vi.fn(async () => {})
+    bridge.send = vi.fn().mockRejectedValue(new Error('VS Code could not open the connection request.'))
     const user = userEvent.setup()
     render(<VSCodeChatPanel task={demoTasks[1]} identity={identity} onDetach={vi.fn()} onClose={vi.fn()} />)
     await screen.findByText('Original')
     await user.type(screen.getByRole('textbox'), 'Unsent text')
-    await user.click(screen.getByRole('button', { name: 'Connect VS Code' }))
+    await user.click(screen.getByRole('button', { name: 'Send to original VS Code session' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('could not open the connection request')
     expect(screen.getByRole('textbox')).toHaveValue('Unsent text')
-    expect(screen.getByRole('button', { name: 'Send to original VS Code session' })).toBeDisabled()
-    expect(bridge.send).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Send to original VS Code session' })).toBeEnabled()
+    expect(bridge.send).toHaveBeenCalledOnce()
+    expect(bridge.connect).not.toHaveBeenCalled()
   })
 
   it('routes remote reads and sends with the execution machine and never opens a local substitute', async () => {

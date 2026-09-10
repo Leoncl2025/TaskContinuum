@@ -89,11 +89,13 @@ test('connects from the desktop and sends to the original sidebar conversation w
     await connectDialog.getByRole('button', { name: 'Connect', exact: true }).click()
     await expect(page.getByRole('button', { name: /Original-chat bridge is running/ })).toBeVisible({ timeout: 30000 })
     await expect.poll(async () => (await readOriginalVSCode(sourceStore, identity)).connectionState).toBe('connected')
+    expect(await readOriginalVSCode(sourceStore, identity)).toMatchObject({ sessionOpen: false, canSend: false, deliveries: [] })
     expect(await readFile(sourceFile, 'utf8')).toBe(source)
     await openOriginalVSCode(sourceStore, identity)
     const editor = page.locator('[data-bound-chat-resource]').filter({ has: page.getByText('Original bridge answer', { exact: true }) })
     await expect(editor).toHaveAttribute('data-bound-chat-resource', vsCodeChatResource(nativeSessionId))
     await expect(editor.getByText('Original bridge question', { exact: true })).toBeVisible()
+    expect(await readOriginalVSCode(sourceStore, identity)).toMatchObject({ sessionOpen: true, canSend: true, deliveries: [] })
     if (verifyingSend) await expect(editor.getByRole('button', { name: 'Models, Task Continuum Deterministic', exact: true })).toBeVisible()
     expect((await readdir(directory)).filter((file) => /\.jsonl?$/.test(file))).toEqual([`${nativeSessionId}.jsonl`])
     expect(await readFile(sourceFile, 'utf8')).toBe(source)
@@ -219,7 +221,16 @@ test('connects from the desktop and sends to the original sidebar conversation w
     await test.step('Explicitly open a different saved original over SSH without creating or sending implicitly', async () => {
       const switchId = randomUUID()
       const switchFile = join(directory, `${switchId}.jsonl`)
-      await writeFile(switchFile, JSON.stringify({ kind: 0, v: { ...sourceData, sessionId: switchId, customTitle: 'Remote switch fixture' } }) + '\n')
+      const switchData = { ...sourceData, sessionId: switchId, customTitle: 'Remote switch fixture' }
+      const initialResponse = [{ kind: 'markdownContent', content: { value: 'x'.repeat(28 * 1024 * 1024) } }]
+      const journalUpdate = JSON.stringify({ kind: 1, k: ['requests', 0, 'response'], v: [{ kind: 'markdownContent', content: { value: 'x'.repeat(1024 * 1024) } }] })
+      const switchSource = [
+        JSON.stringify({ kind: 0, v: { ...switchData, requests: [{ ...sourceData.requests[0], response: initialResponse }] } }),
+        ...Array.from({ length: 12 }, () => journalUpdate),
+        JSON.stringify({ kind: 1, k: ['requests', 0, 'response'], v: sourceData.requests[0].response }),
+      ].join('\n') + '\n'
+      expect(Buffer.byteLength(switchSource)).toBeGreaterThan(40 * 1024 * 1024)
+      await writeFile(switchFile, switchSource)
       const switchIdentity = { nativeSessionId: switchId, workspaceStorageId }
       const participant = { clientId: randomUUID(), username: 'Switch user', machineName: 'Machine-C' }
       const invitation = await grantRemoteVSCode(sourceStore, switchIdentity, participant, true)
@@ -233,15 +244,18 @@ test('connects from the desktop and sends to the original sidebar conversation w
         const before = (await sourceStore.locateOriginal(identity)).state.turns.length
         const switched = page!.locator(`.part.editor [data-bound-chat-resource="${vsCodeChatResource(switchId)}"]`)
         await expect(switched).toHaveCount(0)
-        await switchRemote.open(workspace, enrolled.target)
+        expect(await switchRemote.read(workspace, enrolled.target)).toMatchObject({ connectionState: 'connected', sessionOpen: false, canSend: false, canPrepareSend: true, canOpenRemote: true, deliveries: [] })
+        expect(await readFile(switchFile, 'utf8')).toBe(switchSource)
+        expect((await sourceStore.locateOriginal(switchIdentity)).state.turns).toHaveLength(1)
+        const commandId = randomUUID()
+        const prompt = '@continuum_test Reply with exactly TASKCONTINUUM_ORIGINAL_SEND_OK. Do not call tools or change files.'
+        if (verifyingSend) await switchRemote.send(workspace, enrolled.target, commandId, prompt)
+        else await switchRemote.open(workspace, enrolled.target)
         await expect(switched).toBeVisible()
         await expect(switched.getByText(originalQuestion, { exact: true })).toBeVisible()
-        expect((await sourceStore.locateOriginal(switchIdentity)).state.turns).toHaveLength(1)
+        expect(await switchRemote.read(workspace, enrolled.target)).toMatchObject({ sessionOpen: true })
         expect((await sourceStore.locateOriginal(identity)).state.turns).toHaveLength(before)
         if (verifyingSend) {
-          const commandId = randomUUID()
-          const prompt = '@continuum_test Reply with exactly TASKCONTINUUM_ORIGINAL_SEND_OK. Do not call tools or change files.'
-          await switchRemote.send(workspace, enrolled.target, commandId, prompt)
           await expect(switched).toContainText(commandId, { timeout: 20000 })
           await expect.poll(async () => {
             const view = await switchRemote.read(workspace, enrolled.target)
@@ -251,7 +265,16 @@ test('connects from the desktop and sends to the original sidebar conversation w
           }, { timeout: 110000 }).toEqual({ state: 'submitted', reply: 'TASKCONTINUUM_ORIGINAL_SEND_OK', complete: 'complete' })
           expect((await sourceStore.locateOriginal(identity)).state.turns).toHaveLength(before)
         }
-        await page!.screenshot({ path: resolve('artifacts/vscode-explicit-remote-switch.png') })
+        await page!.screenshot({ path: resolve('artifacts/vscode-automatic-send-preparation.png') })
+        const acceptedTurns = (await sourceStore.locateOriginal(switchIdentity)).state.turns.length
+        await page!.keyboard.press('Control+w')
+        await expect(switched).toHaveCount(0)
+        expect(await switchRemote.read(workspace, enrolled.target)).toMatchObject({ sessionOpen: false, canSend: false })
+        await switchRemote.open(workspace, enrolled.target)
+        await expect(switched).toBeVisible()
+        expect(await switchRemote.read(workspace, enrolled.target)).toMatchObject({ sessionOpen: true, canSend: true })
+        expect((await sourceStore.locateOriginal(switchIdentity)).state.turns).toHaveLength(acceptedTurns)
+        expect((await sourceStore.locateOriginal(identity)).state.turns).toHaveLength(before)
       } finally { switchRemote.close() }
     }, { timeout: 140000 })
     const bridgeDirectory = join(storageRoot, workspaceStorageId, 'taskcontinuum.vscode-bridge', 'bridges')

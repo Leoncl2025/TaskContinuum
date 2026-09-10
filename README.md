@@ -174,7 +174,7 @@ approving tools still happen in VS Code.**
     No CLI sign-in is needed to link or view saved history. If the task already has a
     different link, detach it first; this does not delete the underlying conversation.
 2. Build the companion with `npm run build:vscode-bridge`. Install the resulting
-    `artifacts/taskcontinuum-vscode-bridge-0.4.1.vsix` through VS Code's
+    `artifacts/taskcontinuum-vscode-bridge-0.4.3.vsix` through VS Code's
     **Extensions: Install from VSIX** command. Component details are in
     [vscode-bridge/README.md](vscode-bridge/README.md).
 3. In VS Code, open the conversation's original workspace, which may differ from
@@ -188,11 +188,12 @@ approving tools still happen in VS Code.**
     connection after upgrading. **Open in VS Code** remains available as
     the external-link icon. The Command Palette's **Task Continuum: Start VS Code
     Bridge** command is still available for manual startup.
-5. Sign in to Copilot in VS Code and keep the original conversation open in its
-    current sidebar or editor with its existing Agent mode and an available model.
-    Finish any active response and clear its
-    unsent draft. Enter a message in the desktop and choose **Send to original VS
-    Code session**. If delivery confirmation is enabled, review the exact target,
+5. Sign in to Copilot in the original VS Code workspace with its existing Agent
+    mode and an available model. Finish any active response and clear its unsent
+    draft. Enter a message in the desktop and choose **Send to original VS Code
+    session**. The app restores the approved connection and opens the exact original
+    chat only if needed, verifies it, then submits once. No separate Connect or Open
+    click is required. If delivery confirmation is enabled, review the exact target,
     username, machine, and message in VS Code, then confirm **Send to original
     session**. Otherwise the desktop submission sends directly. No CLI session is created.
 6. **Detach conversation** removes only the task link. **Task Continuum: Stop VS Code
@@ -202,6 +203,13 @@ approving tools still happen in VS Code.**
 After upgrading the companion, finish active work and reload its VS Code window
 if the old extension is still loaded, then start the bridge again. The desktop
 never reloads VS Code or silently starts a new Agent for you.
+
+Companion 0.4.3 combines connection, exact-view preparation, and one explicit Send.
+Existing open views are left in place; preparing a closed original can change B's
+visible chat. Browsing tasks never opens a view, and optional Open controls remain
+available. Preparation failures retain the desktop draft without a send queue or
+automatic replay. First workspace consent, pairing, and native tool approvals are
+unchanged. Both desktops and B's companion must load the updated build.
 
 The 0.2.6 reader fixes long JSONL conversations disappearing from the session list.
 Previously the 32 MiB whole-file import limit also applied to journal discovery and

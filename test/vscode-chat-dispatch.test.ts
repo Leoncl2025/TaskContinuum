@@ -86,10 +86,25 @@ describe('exact-session VS Code dispatch', () => {
     const setup = await fixture()
     const original = await readFile(setup.file, 'utf8')
     vi.mocked(setup.commands.handoff).mockResolvedValue({ success: false, error: 'No chat widget found. Provide sessionResource or focus a chat widget.' })
-    expect(await dispatchVSCodeMessage(setup)).toMatchObject({ state: 'failed', error: expect.stringContaining('no conversation was moved or created') })
+    expect(await dispatchVSCodeMessage(setup)).toMatchObject({ state: 'failed', error: expect.stringContaining('No message was sent') })
     expect(setup.commands.open).not.toHaveBeenCalled()
     expect(setup.commands.handoff).toHaveBeenCalledTimes(1)
     expect(await readFile(setup.file, 'utf8')).toBe(original)
+    expect(await readFile(setup.templatePath, 'utf8')).toBe(setup.empty)
+  })
+
+  it('checks the exact widget before preparing a send and again immediately before handoff', async () => {
+    const setup = await fixture()
+    const isOpen = vi.fn(async () => false)
+    const commands = { ...setup.commands, isOpen }
+    expect(await dispatchVSCodeMessage({ ...setup, commands })).toMatchObject({ state: 'failed', error: expect.stringContaining('not open') })
+    expect(commands.confirm).not.toHaveBeenCalled()
+    expect(commands.writeTemplate).not.toHaveBeenCalled()
+    expect(commands.handoff).not.toHaveBeenCalled()
+    expect(isOpen).toHaveBeenLastCalledWith(vsCodeChatResource('original'))
+    isOpen.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+    expect(await dispatchVSCodeMessage({ ...setup, commands })).toMatchObject({ state: 'failed', error: expect.stringContaining('not open') })
+    expect(commands.handoff).not.toHaveBeenCalled()
     expect(await readFile(setup.templatePath, 'utf8')).toBe(setup.empty)
   })
 

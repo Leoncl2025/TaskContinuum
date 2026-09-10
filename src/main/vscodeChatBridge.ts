@@ -47,11 +47,23 @@ export function registerVSCodeChatBridge(requireWindow: (event: IpcMainInvokeEve
     await openOriginalVSCode(store, vscodeIdentitySchema.parse(target))
   })
   ipcMain.handle('vscode-chat:send', async (event, value: unknown, commandId: unknown, text: unknown) => {
-    requireWindow(event)
+    const window = requireWindow(event)
+    const root = await currentRoot().catch(() => undefined)
     const target = await targetFor(value)
     const id = z.uuid().parse(commandId)
     const message = z.string().trim().min(1).max(4000).parse(text)
-    return target.remoteMachineName ? remote.send(await currentRoot(), target, id, message) : sendOriginalVSCode(store, vscodeIdentitySchema.parse(target), id, message)
+    const assertCurrent = async () => {
+      if (window.isDestroyed() || window.webContents.isDestroyed() || await currentRoot().catch(() => undefined) !== root
+        || JSON.stringify(await targetFor(value)) !== JSON.stringify(target)) throw new Error('The task workspace, owner, or window changed while preparing. No message was sent.')
+    }
+    await assertCurrent()
+    if (target.remoteMachineName) {
+      if (!root) throw new Error('Open the linked task workspace before sending. No message was sent.')
+      await remote.connectTarget(root, target)
+      await assertCurrent()
+      return remote.send(root, target, id, message)
+    }
+    return sendOriginalVSCode(store, vscodeIdentitySchema.parse(target), id, message, { openExternal: (uri) => shell.openExternal(uri), assertCurrent })
   })
   ipcMain.handle('vscode-chat:watch', async (event, value: unknown) => {
     requireWindow(event)

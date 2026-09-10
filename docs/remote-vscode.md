@@ -7,12 +7,12 @@ CLI Host, import history into another runtime, or create a fork.
 
 ## Prerequisites
 
-- Both desktops run the current Task Continuum build. B has companion 0.4.1 or
+- Both desktops run the current Task Continuum build. B has companion 0.4.3 or
   newer loaded in a trusted, local VS Code 1.136.x or 1.137.x workspace. Verification used
   Windows and VS Code 1.136.1/1.137.0. Remote SSH, WSL, container, and virtual VS Code
   windows on B are not supported; connecting an external desktop to local B is.
 - B stays running with its original VS Code workspace, Copilot sign-in, Agent
-  mode, model, and original chat widget open. With managed Dev Tunnel, B's Task
+  mode and model. Send opens the original chat widget if needed. With managed Dev Tunnel, B's Task
   Continuum desktop must also stay open to host the transport. Closing it never
   stops the Agent, but disconnects remote desktops. A needs no Copilot CLI sign-in.
 
@@ -29,34 +29,42 @@ does not clear it, but the Bridge cannot run while VS Code is closed. Unsupporte
 untrusted workspaces remain blocked. The desktop discovers the restored endpoint on
 its next refresh; it does not change task links or start a substitute Agent.
 
-Bridge connection and opening a particular chat are separate: auto-start never
-opens/moves a conversation or sends/replays a message. Use the explicit open icon
-for a saved session that is not yet open. Device policies renew grants after Bridge
+Bridge connection and opening a particular chat are separate internally: auto-start
+never opens/moves a conversation or sends/replays a message. With 0.4.3, one explicit
+Send prepares the connection and exact view. Device policies renew grants after Bridge
 restart; legacy session invitations still require re-enrollment.
 
 ## Managed Dev Tunnel + SSH (Default)
 
-### Switch the original session from A
+### Send with one action
 
-Select the Task linked to the desired B session. Once connected, use the external-link
-icon beside the execution-machine name, **Open session on B** (the actual hostname
-appears in the tooltip). Confirm the exact machine/session in A's native dialog.
-The existing saved conversation opens as a VS Code chat editor on B; this explicitly
-changes B's visible chat and may move an already-open sidebar conversation into the
-editor. No session is created or forked, no Agent mode/model is replaced, and no
-message is sent. After the view refreshes, submit your message separately.
+After initial pairing and workspace consent, select the linked task, enter the
+message and press Send. The app restores the existing connection, opens B's exact
+original chat only if it is closed, verifies readiness, and submits once. There is
+no separate Connect/Open step or Open confirmation. Existing native delivery/tool
+approval preferences remain in effect.
 
-Switching requires read/send access and Companion 0.4.0. Offline/read-only clients
-cannot open the owner's UI. Pending or uncertain target deliveries must be resolved
-first. Draft/busy/mode checks still apply when sending. Merely selecting a Task or
-retrying a failed send never opens B's UI or replays a message. If the icon remains
-disabled on an online read/write session, update and load the companion on B.
+Preparation requires read/send access, idle saved Agent state, no native draft and
+no pending/uncertain target delivery. Workspace/owner/window changes during desktop
+connection abort submission. B verifies the exact widget and rechecks authorization
+after opening; a command return alone is insufficient. A failed preparation retains
+the draft without queuing or replaying the message. B must still be running.
 
-Install the built `artifacts/taskcontinuum-vscode-bridge-0.4.1.vsix` on B using
+Opening a closed original can change B's visible chat; an already-open widget is
+not reopened or moved. Browsing a task and background recovery never open a chat or
+send a message. Manual **Open session on B** remains optional and retains its explicit
+confirmation; it opens the exact original without sending anything.
+
+Install the built `artifacts/taskcontinuum-vscode-bridge-0.4.3.vsix` on B using
 **Extensions: Install from VSIX**, finish active work, reload the VS Code window,
 and reconnect its Bridge. Both Task Continuum desktops must use the rebuilt app.
 Device policies can renew after Bridge restart; legacy single-session invitations
 still require renewal. Native approvals, code, and execution remain on B.
+
+An older running desktop does not acquire the new readiness protocol just because
+the source was rebuilt. Fully reopen both desktops after preserving drafts, and
+load the new companion after active work. Existing 0.4.1 workspace consent is
+retained. Historical failed receipts are not deleted or automatically resent.
 
 ### Device scope (2026-09-09)
 

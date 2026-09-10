@@ -28,7 +28,8 @@ for (const managed of [false, true]) test(`authorizes an original VS Code conver
   await writeFile(otherFile, JSON.stringify(source))
   let dispatched = 0
   const opened: string[] = []
-  const owner = await startVSCodeChatCompanion({ storageRoot, workspaceStorageId: identity.workspaceStorageId, discoveryDirectory: join(storageRoot, identity.workspaceStorageId, 'taskcontinuum.vscode-bridge', 'bridges'), vscodeVersion: '1.136.1', open: async (resource) => { opened.push(resource) }, dispatch: async (_identity, delivery) => {
+  let sessionOpen = false
+  const owner = await startVSCodeChatCompanion({ storageRoot, workspaceStorageId: identity.workspaceStorageId, discoveryDirectory: join(storageRoot, identity.workspaceStorageId, 'taskcontinuum.vscode-bridge', 'bridges'), vscodeVersion: '1.137.0', isOpen: async () => sessionOpen, autoOpenOnSend: true, open: async (resource) => { opened.push(resource); sessionOpen = true }, dispatch: async (_identity, delivery) => {
     dispatched++
     const requestId = `remote-${delivery.id}`
     await writeFile(sourceFile, JSON.stringify({ ...source, requests: [...source.requests, { requestId, message: deliveryPrompt(delivery), response: [{ value: 'Reply from the original execution Agent.' }], result: {} }] }))
@@ -155,14 +156,21 @@ for (const managed of [false, true]) test(`authorizes an original VS Code conver
     await expect(manager).toBeHidden()
     await expect(client.page.getByRole('log', { name: 'Original conversation for T-0001' })).toContainText('Owner answer')
     expect(opened).toEqual([])
+    await expect(client.page.getByText('Session not open', { exact: true })).toBeHidden()
+    await expect(client.page.getByRole('button', { name: 'Send to original VS Code session' })).toBeDisabled()
     await dialogs(client.app, invitationFile, participantFile)
     await client.page.getByRole('textbox', { name: 'Message original VS Code Agent' }).fill('Draft before remote switch')
+    await expect(client.page.getByRole('button', { name: 'Send to original VS Code session' })).toBeEnabled()
+    await expect(client.page.getByText('The original conversation is not ready for sending.', { exact: true })).toBeHidden()
+    await client.page.screenshot({ path: resolve(`artifacts/${artifact}-auto-prepare.png`) })
     await client.app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 0, checkboxChecked: false }) })
     await client.page.getByRole('button', { name: `Open session on ${hostname()}` }).click()
     expect(opened).toEqual([])
+    await expect(client.page.getByRole('button', { name: 'Send to original VS Code session' })).toBeEnabled()
     await dialogs(client.app, invitationFile, participantFile)
     await client.page.getByRole('button', { name: `Open session on ${hostname()}` }).click()
     await expect.poll(() => opened.length).toBe(1)
+    await expect(client.page.getByText('Session not open', { exact: true })).toBeHidden()
     expect(opened[0]).toBe(`vscode-chat-session://local/${Buffer.from(identity.nativeSessionId).toString('base64url')}`)
     expect(dispatched).toBe(0)
     await expect(client.page.getByRole('textbox', { name: 'Message original VS Code Agent' })).toHaveValue('Draft before remote switch')
@@ -171,11 +179,18 @@ for (const managed of [false, true]) test(`authorizes an original VS Code conver
     const binding = JSON.parse(await readFile(bindingFile, 'utf8'))
     expect(binding.bindings['T-0001']).toEqual({ provider: 'vscode-copilot', sessionId: identity.nativeSessionId, workspaceStorageId: identity.workspaceStorageId, remoteMachineName: hostname() })
     expect(JSON.stringify(binding)).not.toMatch(/token|port|hostAlias|clientId|devTunnel|sshPublicKey/)
+    sessionOpen = false
+    await client.page.evaluate((id) => window.remoteVSCode!.disconnect(id), summaries[0].id)
+    await expect(client.page.getByRole('button', { name: 'Connect SSH' })).toBeVisible()
+    await client.app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => { throw new Error('Automatic preparation must not request another open confirmation.') } })
     await client.page.getByRole('textbox', { name: 'Message original VS Code Agent' }).fill('Continue the original work from A')
+    await expect(client.page.getByRole('button', { name: 'Send to original VS Code session' })).toBeEnabled()
     await client.page.getByRole('button', { name: 'Send to original VS Code session' }).click()
     await expect(client.page.getByRole('log')).toContainText('Reply from the original execution Agent.')
     await expect(client.page.getByRole('textbox', { name: 'Message original VS Code Agent' })).toHaveValue('')
     expect(dispatched).toBe(1)
+    expect(opened).toEqual(Array.from({ length: 2 }, () => `vscode-chat-session://local/${Buffer.from(identity.nativeSessionId).toString('base64url')}`))
+    await dialogs(client.app, invitationFile, participantFile)
     await client.page.screenshot({ path: resolve(`artifacts/${artifact}-desktop.png`) })
     const cached = await client.page.evaluate((target) => window.vscodeChat!.read(target), summaries[0].target)
     expect(cached.messages.at(-2)).toMatchObject({ text: 'Continue the original work from A', author: { name: exported.participant.username, machineName: exported.participant.machineName } })
@@ -197,6 +212,15 @@ for (const managed of [false, true]) test(`authorizes an original VS Code conver
     const panel = client.page.getByRole('complementary', { name: 'VS Code task chat' })
     expect(await panel.evaluate((element) => element.getBoundingClientRect().right <= innerWidth)).toBe(true)
     await client.page.screenshot({ path: resolve(`artifacts/${artifact}-narrow.png`) })
+    sessionOpen = false
+    await expect.poll(async () => (await client.page.evaluate((target) => window.vscodeChat!.read(target), summaries[0].target)).sessionOpen).toBe(false)
+    await client.page.getByRole('textbox', { name: 'Message original VS Code Agent' }).fill('Retained narrow draft')
+    await expect(client.page.getByRole('button', { name: 'Send to original VS Code session' })).toBeEnabled()
+    const openAction = client.page.getByRole('button', { name: `Open session on ${hostname()}` })
+    expect(await openAction.evaluate((element) => element.scrollWidth <= element.clientWidth && element.getBoundingClientRect().right <= innerWidth)).toBe(true)
+    await client.page.screenshot({ path: resolve(`artifacts/${artifact}-auto-prepare-narrow.png`) })
+    await client.page.getByRole('textbox', { name: 'Message original VS Code Agent' }).fill('')
+    sessionOpen = true
     manager = await remoteDialog(client.page)
     const bounds = await manager.boundingBox()
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(420)

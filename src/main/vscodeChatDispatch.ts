@@ -8,10 +8,12 @@ import type { VSCodeChatDelivery, VSCodeChatIdentity } from '../shared/vscodeCha
 import { deliveryPrompt } from './vscodeChatDelivery'
 import type { VSCodeDispatchResult } from './vscodeChatDelivery'
 import type { VSCodeSessionStore } from './vscodeSessions'
+import { sessionNotOpenMessage } from './vscodeChatWidget'
 
 export interface VSCodeDeliveryMode { id: string; name: string; isBuiltin: boolean; handoffs: { label: string; prompt: string; agent: string; send?: boolean }[] }
 export interface VSCodeDeliveryCommands {
   modes(): Promise<VSCodeDeliveryMode[]>
+  isOpen?(resource: string): Promise<boolean>
   writeTemplate(content: string): Promise<void>
   confirm(identity: VSCodeChatIdentity, delivery: VSCodeChatDelivery, title: string): Promise<boolean>
   handoff(resource: string, sourceAgent: string, label: string): Promise<{ success: boolean; error?: string; targetMode?: string } | undefined>
@@ -107,13 +109,14 @@ export async function dispatchVSCodeMessage(options: {
     const original = await store.locateOriginal(identity)
     if (!original.state.mode || original.state.mode.kind !== 'agent') throw new Error('Select Agent mode in the original VS Code conversation before sending from Task Continuum. No mode was changed.')
     if (original.state.turns.at(-1)?.complete === false || original.state.hasDraft) throw new Error('The original conversation is busy or has a saved draft. Resolve it in VS Code before sending.')
+    const resource = vsCodeChatResource(identity.nativeSessionId)
+    if (commands.isOpen && !await commands.isOpen(resource)) throw new Error(sessionNotOpenMessage)
     const modes = await commands.modes()
     const target = modes.find((mode) => mode.id === original.state.mode!.id)
     if (!target) throw new Error('The original Agent mode could not be identified. No message was sent.')
     if (sameFile(target.id, templatePath) || modes.filter((mode) => mode.name.toLowerCase() === target.name.toLowerCase()).length !== 1) throw new Error('The original Agent name is ambiguous. No message was sent.')
     if (!await awaitConfirmation(() => commands.confirm(identity, delivery, original.snapshot.session.title), signal)) return { state: 'failed', error: 'Sending was cancelled or its confirmation expired in VS Code. No message was sent.' }
     signal.throwIfAborted()
-    const resource = vsCodeChatResource(identity.nativeSessionId)
     lock = await open(lockPath, 'wx', 0o600).catch((error: NodeJS.ErrnoException) => {
       if (error.code === 'EEXIST') throw new Error('Another VS Code window is delivering a message. No message was sent. Retry after it finishes.')
       throw error
@@ -129,11 +132,12 @@ export async function dispatchVSCodeMessage(options: {
     if (latest.state.mode?.id !== original.state.mode.id || latest.state.turns.length !== original.state.turns.length || latest.state.turns.at(-1)?.complete === false || latest.state.hasDraft) throw new Error('The original conversation changed while preparing delivery. No message was sent.')
     const currentModes = (await commands.modes()).filter((mode) => mode.name.toLowerCase() === target.name.toLowerCase())
     if (currentModes.length !== 1 || currentModes[0].id !== target.id) throw new Error('The original Agent changed while preparing delivery. No message was sent.')
+    if (commands.isOpen && !await commands.isOpen(resource)) throw new Error(sessionNotOpenMessage)
     signal.throwIfAborted()
     attempted = true
     const result = await commands.handoff(resource, sourceAgent.id, label)
     if (!result?.success) return { state: 'failed', error: result?.error?.startsWith('No chat widget found.')
-      ? 'The linked original conversation is not open in VS Code. Open it there and retry. No message was sent and no conversation was moved or created.'
+      ? sessionNotOpenMessage
       : result?.error ?? 'VS Code rejected the original-session delivery.' }
     if (result.targetMode !== target.name) throw new Error('VS Code reported a different Agent mode. Inspect the original conversation before retrying.')
     const acceptedDeadline = Date.now() + (options.confirmationTimeout ?? 90000)

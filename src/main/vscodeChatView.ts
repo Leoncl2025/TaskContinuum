@@ -10,6 +10,8 @@ export function originalChatView(original: Awaited<ReturnType<VSCodeSessionStore
   execution?: VSCodeExecutionIdentity
   bridgeError?: string
   readOnly?: boolean
+  sessionOpen?: boolean
+  autoOpenOnSend?: boolean
 }): VSCodeChatView {
   const byRequest = new Map<string, VSCodeChatDelivery>()
   for (const delivery of deliveries) {
@@ -32,12 +34,16 @@ export function originalChatView(original: Awaited<ReturnType<VSCodeSessionStore
   else if (connectionState === 'connected') {
     if (connection.readOnly) bridgeError = 'This remote invitation allows reading only.'
     else if (blocked) bridgeError = deliveries.some((record) => record.state === 'uncertain') ? 'A previous delivery has an unknown outcome. Check the original conversation before sending again.' : 'Delivering to the original VS Code session.'
+    else if (connection.sessionOpen === false && !connection.autoOpenOnSend) bridgeError = 'Bridge connected, but this original session is not open. Use the Open action before sending.'
     else if (responding) bridgeError = 'The original Agent is still responding. Sending becomes available after its saved state is idle.'
     else if (original.state.mode?.kind !== 'agent') bridgeError = 'Select Agent mode in the original VS Code conversation before sending.'
     else if (original.state.hasDraft) bridgeError = 'The original VS Code conversation has a saved draft. Send or clear it there first.'
   }
+  const eligible = Boolean(connection.connected && connection.supportsSending && !connection.readOnly && !responding && !blocked && !original.state.hasDraft && original.state.mode?.kind === 'agent')
   return { ...original.snapshot, ...boundedHistory(messages), deliveries, responding, connectionState,
     participant: connection.participant, execution: connection.execution,
-    canSend: Boolean(connection.connected && connection.supportsSending && !connection.readOnly && !responding && !blocked && !original.state.hasDraft && original.state.mode?.kind === 'agent'), bridgeError,
+    ...(connection.sessionOpen !== undefined ? { sessionOpen: connection.sessionOpen } : {}),
+    ...(connection.autoOpenOnSend ? { canPrepareSend: eligible && connection.sessionOpen === false } : {}),
+    canSend: eligible && connection.sessionOpen !== false, bridgeError,
   }
 }

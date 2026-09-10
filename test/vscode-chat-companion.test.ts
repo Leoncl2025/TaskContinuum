@@ -9,6 +9,137 @@ import { connectOriginalVSCode, openOriginalVSCode, readOriginalVSCode, sendOrig
 import { VSCodeSessionStore } from '../src/main/vscodeSessions'
 
 describe('original chat companion boundary', () => {
+  it('restores the source Bridge before one explicit send and stops when the captured context changes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'continuum-send-connect-'))
+    const identity = { workspaceStorageId: 'a'.repeat(32), nativeSessionId: 'original' }
+    const history = join(root, identity.workspaceStorageId, 'chatSessions')
+    await mkdir(history, { recursive: true })
+    await writeFile(join(history, 'original.json'), JSON.stringify({ inputState: { mode: { id: 'agent', kind: 'agent' } }, requests: [{ message: 'Saved original', result: {} }] }))
+    const store = new VSCodeSessionStore([root])
+    let bridge: Awaited<ReturnType<typeof startVSCodeChatCompanion>> | undefined
+    let opened = false
+    const open = vi.fn(async () => { opened = true })
+    const dispatch = vi.fn(async () => ({ state: 'submitted' as const, nativeRequestId: 'native-new' }))
+    const preparation = {
+      assertCurrent: vi.fn(async () => {}),
+      openExternal: vi.fn(async () => {
+        bridge = await startVSCodeChatCompanion({ storageRoot: root, workspaceStorageId: identity.workspaceStorageId, discoveryDirectory: join(root, identity.workspaceStorageId, 'taskcontinuum.vscode-bridge', 'bridges'), vscodeVersion: '1.137.0', open, isOpen: async () => opened, autoOpenOnSend: true, dispatch })
+      }),
+    }
+    try {
+      preparation.assertCurrent.mockRejectedValueOnce(new Error('The selected workspace changed.'))
+      await expect(sendOriginalVSCode(store, identity, crypto.randomUUID(), 'Do not send', preparation)).rejects.toThrow('workspace changed')
+      expect(preparation.openExternal).not.toHaveBeenCalled()
+      const commandId = crypto.randomUUID()
+      await sendOriginalVSCode(store, identity, commandId, 'Connect and send once', preparation)
+      expect(preparation.openExternal).toHaveBeenCalledExactlyOnceWith(vsCodeBridgeConnectUri(identity, 'vscode'))
+      expect(open).toHaveBeenCalledExactlyOnceWith(vsCodeChatResource(identity.nativeSessionId))
+      await vi.waitFor(async () => expect((await readOriginalVSCode(store, identity)).deliveries?.[0].state).toBe('submitted'))
+      expect(dispatch).toHaveBeenCalledOnce()
+      await sendOriginalVSCode(store, identity, commandId, 'Connect and send once', preparation)
+      expect(preparation.openExternal).toHaveBeenCalledOnce()
+      expect(dispatch).toHaveBeenCalledOnce()
+    } finally { await bridge?.close(); await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('prepares a closed original only for an eligible explicit send and never replays its message ID', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'continuum-auto-open-'))
+    const identity = { workspaceStorageId: 'a'.repeat(32), nativeSessionId: 'original' }
+    const history = join(root, identity.workspaceStorageId, 'chatSessions')
+    await mkdir(history, { recursive: true })
+    const file = join(history, 'original.json')
+    const source = { inputState: { mode: { id: 'agent', kind: 'agent' }, inputText: '' }, requests: [{ message: 'Saved original', result: {} }] }
+    await writeFile(file, JSON.stringify(source))
+    let opened = false
+    const open = vi.fn(async () => {})
+    const dispatch = vi.fn(async () => ({ state: 'submitted' as const, nativeRequestId: 'native-new' }))
+    const bridge = await startVSCodeChatCompanion({ storageRoot: root, workspaceStorageId: identity.workspaceStorageId, discoveryDirectory: join(root, identity.workspaceStorageId, 'taskcontinuum.vscode-bridge', 'bridges'), vscodeVersion: '1.137.0', open, isOpen: async () => opened, autoOpenOnSend: true, dispatch })
+    const store = new VSCodeSessionStore([root])
+    try {
+      expect(await readOriginalVSCode(store, identity)).toMatchObject({ canSend: false, sessionOpen: false, canPrepareSend: true })
+      expect(open).not.toHaveBeenCalled()
+      for (const blocked of [
+        { ...source, inputState: { ...source.inputState, inputText: 'Unsent owner draft' } },
+        { ...source, requests: [{ message: 'Still responding' }] },
+        { ...source, inputState: { ...source.inputState, mode: { id: 'ask', kind: 'ask' } } },
+      ]) {
+        await writeFile(file, JSON.stringify(blocked))
+        expect(await readOriginalVSCode(store, identity)).toMatchObject({ canSend: false, canPrepareSend: false })
+        await expect(sendOriginalVSCode(store, identity, crypto.randomUUID(), 'Must not disturb the owner')).rejects.toThrow()
+      }
+      expect(open).not.toHaveBeenCalled()
+      await writeFile(file, JSON.stringify(source))
+      await expect(sendOriginalVSCode(store, identity, crypto.randomUUID(), 'Unready open')).rejects.toThrow('still not open')
+      expect(dispatch).not.toHaveBeenCalled()
+      expect((await readOriginalVSCode(store, identity)).deliveries).toEqual([])
+      open.mockImplementation(async () => { opened = true })
+      const commandId = crypto.randomUUID()
+      await sendOriginalVSCode(store, identity, commandId, 'Send once after preparing')
+      await vi.waitFor(async () => expect((await readOriginalVSCode(store, identity)).deliveries?.[0].state).toBe('submitted'))
+      expect(open).toHaveBeenCalledTimes(2)
+      expect(open).toHaveBeenLastCalledWith(vsCodeChatResource(identity.nativeSessionId))
+      expect(dispatch).toHaveBeenCalledOnce()
+      opened = false
+      await sendOriginalVSCode(store, identity, commandId, 'Send once after preparing')
+      expect(open).toHaveBeenCalledTimes(2)
+      expect(dispatch).toHaveBeenCalledOnce()
+      expect(await readFile(file, 'utf8')).toBe(JSON.stringify(source))
+    } finally { await bridge.close(); await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('keeps an online unopened session unsendable and rejects a silent open acknowledgement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'continuum-widget-readiness-'))
+    const identity = { workspaceStorageId: 'a'.repeat(32), nativeSessionId: 'closed' }
+    const history = join(root, identity.workspaceStorageId, 'chatSessions')
+    await mkdir(history, { recursive: true })
+    await writeFile(join(history, 'closed.json'), JSON.stringify({ inputState: { mode: { id: 'agent', kind: 'agent' } }, requests: [{ message: 'Saved question', result: {} }] }))
+    let opened = false
+    const open = vi.fn(async () => {})
+    const isOpen = vi.fn(async () => opened)
+    const dispatch = vi.fn(async () => ({ state: 'submitted' as const, nativeRequestId: 'native-new' }))
+    const bridge = await startVSCodeChatCompanion({ storageRoot: root, workspaceStorageId: identity.workspaceStorageId, discoveryDirectory: join(root, identity.workspaceStorageId, 'taskcontinuum.vscode-bridge', 'bridges'), vscodeVersion: '1.137.0', open, isOpen, dispatch })
+    const store = new VSCodeSessionStore([root])
+    try {
+      expect(await readOriginalVSCode(store, identity)).toMatchObject({ connectionState: 'connected', sessionOpen: false, canSend: false })
+      await expect(sendOriginalVSCode(store, identity, crypto.randomUUID(), 'Not sent')).rejects.toThrow('not open')
+      expect(dispatch).not.toHaveBeenCalled()
+      expect((await readOriginalVSCode(store, identity)).deliveries).toEqual([])
+      await expect(openOriginalVSCode(store, identity)).rejects.toThrow('still not open')
+      open.mockImplementation(async () => { opened = true })
+      await openOriginalVSCode(store, identity)
+      expect(await readOriginalVSCode(store, identity)).toMatchObject({ connectionState: 'connected', sessionOpen: true, canSend: true })
+      const commandId = crypto.randomUUID()
+      await sendOriginalVSCode(store, identity, commandId, 'Explicit send')
+      await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce())
+      opened = false
+      await sendOriginalVSCode(store, identity, commandId, 'Explicit send')
+      expect(dispatch).toHaveBeenCalledOnce()
+      expect(await readOriginalVSCode(store, identity)).toMatchObject({ sessionOpen: false, canSend: false })
+      await vi.waitFor(async () => expect((await readOriginalVSCode(store, identity)).deliveries?.[0].state).toBe('submitted'))
+      const deferred = () => {
+        let resolve!: () => void
+        const promise = new Promise<void>((complete) => { resolve = complete })
+        return { promise, resolve }
+      }
+      const checkStarted = deferred()
+      const finishCheck = deferred()
+      const openStarted = deferred()
+      const finishOpen = deferred()
+      isOpen.mockImplementationOnce(async () => { checkStarted.resolve(); await finishCheck.promise; return true })
+      const rejected = expect(sendOriginalVSCode(store, identity, crypto.randomUUID(), 'Do not send during opening')).rejects.toThrow('conversation is opening')
+      await checkStarted.promise
+      open.mockImplementationOnce(async () => { openStarted.resolve(); await finishOpen.promise; opened = true })
+      const opening = openOriginalVSCode(store, identity)
+      try {
+        await openStarted.promise
+        finishCheck.resolve()
+        await rejected
+        expect(dispatch).toHaveBeenCalledOnce()
+      } finally { finishCheck.resolve(); finishOpen.resolve(); await opening }
+      expect((await readOriginalVSCode(store, identity)).deliveries).toHaveLength(1)
+    } finally { await bridge.close(); await rm(root, { recursive: true, force: true }) }
+  })
+
   it('authenticates an exact-workspace open and never exposes send, new, import, or arbitrary commands', async () => {
     const root = await mkdtemp(join(tmpdir(), 'taskcontinuum-vscode-bridge-'))
     const workspaceStorageId = 'a'.repeat(32)
