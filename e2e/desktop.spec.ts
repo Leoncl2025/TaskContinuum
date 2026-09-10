@@ -38,6 +38,7 @@ async function launch(): Promise<void> {
   page.on('request', (request) => { if (/^(https?|wss?):/.test(request.url())) externalRequests.push(request.url()) })
   await expect(page.getByRole('heading', { level: 1, name: 'UI based on Electron' })).toBeVisible()
   await expect(page.locator('.workbench')).toHaveAttribute('aria-busy', 'false')
+  await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isVisible())).toBe(true)
 }
 
 test.beforeAll(async () => {

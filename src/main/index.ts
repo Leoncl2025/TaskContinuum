@@ -96,9 +96,9 @@ async function createWindow(): Promise<void> {
       callback({ responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [policy] } })
     })
   }
-  window.once('ready-to-show', () => window.show())
   window.on('closed', () => { mainWindow = undefined })
   await window.loadURL(devUrl ?? APP_URL)
+  if (!window.isDestroyed()) window.show()
 }
 
 void app.whenReady().then(async () => {
