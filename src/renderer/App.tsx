@@ -313,7 +313,9 @@ function Workbench({ suppliedAdapter, workspaces }: { suppliedAdapter?: ChatAdap
     return taskId ? [[session.id, taskId]] : []
   }))
 
-  return <div className="workbench" data-theme={layout.theme} data-compact={compact} aria-busy={workspaces.busy} inert={workspaces.busy}>
+  return <div className="workbench" data-theme={layout.theme} data-compact={compact} aria-busy={workspaces.busy} inert={workspaces.busy} onFocusCapture={(event) => {
+    if (!compact) setCompactPanel(event.target.closest('.chat-panel') ? 'chat' : event.target.closest('.sidebar') ? 'tasks' : null)
+  }}>
     <header className="titlebar">
       <div className="app-brand"><span className="brand-mark"><Icon name="layers" /></span><span>Task Continuum</span></div>
       <button type="button" className="command-center" onClick={() => { setQuickQuery(''); setDialog('quick-open') }}><Icon name="search" /><span>Search tasks and jump back in</span><kbd>Ctrl P</kbd></button>

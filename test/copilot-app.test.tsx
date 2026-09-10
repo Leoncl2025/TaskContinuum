@@ -8,8 +8,9 @@ import { mockCopilotBridge } from './copilot-fixtures'
 afterEach(() => { delete window.copilot; delete window.vscodeChat })
 function localSessions() { return within(screen.getByRole('complementary', { name: 'Local sessions' })) }
 
-async function connectedApp() {
+async function connectedApp(sourceId?: string) {
   const host = mockCopilotBridge()
+  if (sourceId) host.source.id = sourceId
   window.copilot = host.bridge
   const user = userEvent.setup()
   const view = render(<App />)
@@ -48,13 +49,13 @@ describe('Copilot workbench integration', () => {
   })
 
   it('links and restores an original VS Code conversation without CLI resume, import, or fork', async () => {
-    const { host, user, view } = await connectedApp()
-    host.source.id = `vscode:0:${'a'.repeat(32)}:original-chat.jsonl`
+    const { host, user, view } = await connectedApp(`vscode:0:${'a'.repeat(32)}:original-chat.jsonl`)
     const read = vi.fn(async () => ({ session: host.source, messages: host.messages }))
     window.vscodeChat = { read, open: vi.fn(async () => {}), watch: vi.fn(async () => {}), onChange: () => () => {} }
     await user.click(localSessions().getByRole('button', { name: 'Preview Existing VS Code work' }))
-    expect(screen.queryByRole('button', { name: 'Continue in new session' })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Import into new session' })).toHaveAttribute('aria-expanded', 'false')
+    const preview = await screen.findByRole('dialog', { name: 'Continue VS Code conversation' })
+    expect(within(preview).queryByRole('button', { name: 'Continue in new session' })).not.toBeInTheDocument()
+    expect(within(preview).getByRole('button', { name: 'Import into new session' })).toHaveAttribute('aria-expanded', 'false')
     await user.click(await screen.findByRole('button', { name: 'Link to current task' }))
     expect(await screen.findByRole('complementary', { name: 'VS Code task chat' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Original session linked' })).toBeInTheDocument()
@@ -72,6 +73,33 @@ describe('Copilot workbench integration', () => {
     await user.click(screen.getByRole('button', { name: 'Detach conversation' }))
     await user.click(screen.getByRole('button', { name: 'Detach session' }))
     await waitFor(() => expect(screen.queryByRole('complementary', { name: 'VS Code task chat' })).not.toBeInTheDocument())
+  })
+
+  it('preserves the focused original-chat draft across zoom-driven compact layout changes', async () => {
+    let compact = false
+    vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({ matches: compact, media: query, onchange: null, addEventListener: vi.fn(), removeEventListener: vi.fn(), addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: () => true }))
+    const host = mockCopilotBridge()
+    window.copilot = host.bridge
+    const bridge = { read: vi.fn(async () => ({ session: host.source, messages: host.messages })), send: vi.fn(), open: vi.fn(async () => {}), watch: vi.fn(async () => {}), onChange: () => () => {} }
+    window.vscodeChat = bridge
+    localStorage.setItem('taskcontinuum:session-bindings:v1', JSON.stringify({ 'T-0002': { id: 'original-chat', title: 'Original', vscodeWorkspaceStorageId: 'a'.repeat(32) } }))
+    const view = render(<App />)
+    await screen.findByText('Previous local answer')
+    const input = screen.getByRole('textbox', { name: 'Message original VS Code Agent' })
+    await userEvent.type(input, 'Keep my original-session draft')
+    compact = true
+    view.rerender(<App />)
+    expect(screen.getByRole('textbox', { name: 'Message original VS Code Agent' })).toBe(input)
+    expect(input).toHaveValue('Keep my original-session draft')
+    compact = false
+    view.rerender(<App />)
+    expect(screen.getByRole('textbox', { name: 'Message original VS Code Agent' })).toBe(input)
+    expect(input).toHaveValue('Keep my original-session draft')
+    expect(bridge.watch).not.toHaveBeenCalledWith(null)
+    expect(bridge.send).not.toHaveBeenCalled()
+    expect(bridge.open).not.toHaveBeenCalled()
+    expect(host.bridge.resumeSession).not.toHaveBeenCalled()
+    expect(host.bridge.createSession).not.toHaveBeenCalled()
   })
 
   it('reopens a streaming session without resuming, rebinding, or cancelling it', async () => {

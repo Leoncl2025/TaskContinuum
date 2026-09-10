@@ -9,6 +9,7 @@ import { registerWorkspaceBridge } from './workspaceBridge'
 import { registerSharedBridge } from './sharedBridge'
 import { registerVSCodeChatBridge } from './vscodeChatBridge'
 import { registerRemoteVSCodeBridge } from './remoteVSCodeBridge'
+import { registerWindowZoom, WindowZoomPreferences } from './windowZoom'
 
 app.setName('Task Continuum')
 const dataDirectory = process.env.TASKCONTINUUM_DATA_DIR
@@ -27,6 +28,7 @@ let copilotHost: ReturnType<typeof registerCopilotBridge> | undefined
 let sharedDesktop: ReturnType<typeof registerSharedBridge> | undefined
 let vscodeChat: ReturnType<typeof registerVSCodeChatBridge> | undefined
 let remoteVSCode: ReturnType<typeof registerRemoteVSCodeBridge> | undefined
+let windowZoom: WindowZoomPreferences | undefined
 let quitting = false
 let cleanupComplete = false
 
@@ -55,6 +57,8 @@ function registerDesktopBridge(): void {
 }
 
 async function createWindow(): Promise<void> {
+  const zoom = windowZoom ??= new WindowZoomPreferences(app.getPath('userData'))
+  await zoom.load()
   const window = new BrowserWindow({
     title: 'Task Continuum',
     width: 1440,
@@ -68,9 +72,11 @@ async function createWindow(): Promise<void> {
       preload: join(__dirname, '../preload/index.cjs'),
       ...rendererSecurityPreferences,
       spellcheck: false,
+      zoomFactor: 1.2 ** zoom.getLevel(),
     },
   })
   mainWindow = window
+  registerWindowZoom(window, zoom, devUrl)
   let initialNavigation = true
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', (event) => event.preventDefault())
@@ -132,7 +138,7 @@ app.on('before-quit', (event) => {
   event.preventDefault()
   if (quitting) return
   quitting = true
-  void Promise.all([copilotHost?.disconnect(), sharedDesktop?.close(), remoteVSCode?.close()]).catch((error: unknown) => console.error(error)).finally(() => {
+  void Promise.all([copilotHost?.disconnect(), sharedDesktop?.close(), remoteVSCode?.close(), windowZoom?.flush()]).catch((error: unknown) => console.error(error)).finally(() => {
     cleanupComplete = true
     app.quit()
   })

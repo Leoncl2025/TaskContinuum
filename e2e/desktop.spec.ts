@@ -5,26 +5,53 @@ import type { ElectronApplication, Page } from '@playwright/test'
 
 let app: ElectronApplication
 let page: Page
+let environment: Record<string, string>
 const errors: string[] = []
 const externalRequests: string[] = []
 
-test.beforeAll(async () => {
-  const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined))
-  delete env.ELECTRON_RUN_AS_NODE
-  delete env.ELECTRON_RENDERER_URL
-  delete env.TASKCONTINUUM_WORKSPACE
-  env.TASKCONTINUUM_DATA_DIR = resolve('.runtime', `e2e-${Date.now()}`)
-  mkdirSync(resolve('artifacts'), { recursive: true })
-  app = await electron.launch({ args: [resolve('.')], cwd: resolve('.'), env })
+async function zoomKey(key: string, shift = false, keypad = false): Promise<void> {
+  await app.evaluate(({ BrowserWindow }, input) => {
+    const window = BrowserWindow.getAllWindows()[0]
+    window.focus()
+    window.webContents.focus()
+    const modifiers: ('meta' | 'control' | 'shift' | 'iskeypad')[] = [process.platform === 'darwin' ? 'meta' : 'control']
+    if (input.shift) modifiers.push('shift')
+    if (input.keypad) modifiers.push('iskeypad')
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: input.key, modifiers })
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: input.key, modifiers })
+  }, { key, shift, keypad })
+}
+
+async function captureZoom(file: string): Promise<void> {
+  await app.evaluate(async ({ BrowserWindow }, output) => {
+    const image = await BrowserWindow.getAllWindows()[0].webContents.capturePage()
+    const filesystem = process.getBuiltinModule('fs') as typeof import('node:fs')
+    filesystem.writeFileSync(output, image.toPNG())
+  }, resolve('artifacts', file))
+}
+
+async function launch(): Promise<void> {
+  app = await electron.launch({ args: [resolve('.')], cwd: resolve('.'), env: environment })
   page = await app.firstWindow()
   page.on('pageerror', (error) => errors.push(error.message))
   page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()) })
   page.on('request', (request) => { if (/^(https?|wss?):/.test(request.url())) externalRequests.push(request.url()) })
   await expect(page.getByRole('heading', { level: 1, name: 'UI based on Electron' })).toBeVisible()
   await expect(page.locator('.workbench')).toHaveAttribute('aria-busy', 'false')
+}
+
+test.beforeAll(async () => {
+  environment = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined))
+  delete environment.ELECTRON_RUN_AS_NODE
+  delete environment.ELECTRON_RENDERER_URL
+  delete environment.TASKCONTINUUM_WORKSPACE
+  environment.TASKCONTINUUM_DATA_DIR = resolve('.runtime', `e2e-${Date.now()}`)
+  mkdirSync(resolve('artifacts'), { recursive: true })
+  await launch()
 })
 
 test.beforeEach(async () => {
+  await zoomKey('0')
   await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].setSize(1440, 940) })
   await page.evaluate(() => localStorage.clear())
   await page.reload()
@@ -170,6 +197,77 @@ test('resizes Explorer and Chat independently and restores widths without losing
   await page.screenshot({ path: resolve('artifacts/workbench-resizable-compact.png') })
   await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].setSize(1440, 940) })
   await expect(chatSash).toHaveAttribute('aria-valuenow', '355')
+})
+
+test('zooms the whole desktop with VS Code keys and restores its level after restart', async () => {
+  const level = () => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.getZoomLevel())
+  const factor = () => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.getZoomFactor())
+  const input = page.getByRole('textbox', { name: 'Message to demo agent' })
+  const initialWidth = await page.evaluate(() => innerWidth)
+  const initialRatio = await page.evaluate(() => devicePixelRatio)
+  const contentId = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.id)
+  const preferences = await page.evaluate(() => localStorage.getItem('taskcontinuum:layout:v1'))
+  await input.fill('Keep this zoom draft + - 0')
+  await zoomKey('=')
+  await expect.poll(level).toBe(1)
+  expect(await factor()).toBeCloseTo(1.2)
+  await expect.poll(() => page.evaluate(() => innerWidth)).toBeCloseTo(initialWidth / 1.2, 0)
+  expect(await page.evaluate(() => devicePixelRatio)).toBeCloseTo(initialRatio * 1.2)
+  await expect(input).toHaveValue('Keep this zoom draft + - 0')
+  await expect(input).toBeFocused()
+  expect(await page.getByRole('complementary', { name: 'Task chat' }).evaluate((element) => element.getBoundingClientRect().right <= innerWidth + 1)).toBe(true)
+  await expect(page.getByRole('button', { name: 'Close window', exact: true })).toBeInViewport()
+  await captureZoom('workbench-zoom-120.png')
+  await zoomKey('+', true)
+  await expect.poll(level).toBe(2)
+  await expect(page.locator('.workbench')).toHaveAttribute('data-compact', 'true')
+  await expect(input).toBeVisible()
+  await expect(input).toHaveValue('Keep this zoom draft + - 0')
+  await captureZoom('workbench-zoom-144.png')
+  await zoomKey('-')
+  await expect.poll(level).toBe(1)
+  await zoomKey('0')
+  await expect.poll(level).toBe(0)
+  await expect(input).toHaveValue('Keep this zoom draft + - 0')
+  expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.id)).toBe(contentId)
+  expect(await page.evaluate(() => localStorage.getItem('taskcontinuum:layout:v1'))).toBe(preferences)
+  await page.getByRole('button', { name: 'Preferences', exact: true }).click()
+  await zoomKey('+', false, true)
+  await expect.poll(level).toBe(1)
+  await expect(page.getByRole('dialog', { name: 'Preferences' })).toBeVisible()
+  await zoomKey('-', false, true)
+  await expect.poll(level).toBe(0)
+  await page.keyboard.press('Escape')
+  for (let count = 0; count < 10; count++) await zoomKey('-')
+  await expect.poll(level).toBe(-8)
+  await zoomKey('0', false, true)
+  await expect.poll(level).toBe(0)
+  for (let count = 0; count < 10; count++) await zoomKey('=')
+  await expect.poll(level).toBe(8)
+  await zoomKey('0')
+  await expect.poll(level).toBe(0)
+  await zoomKey('-')
+  await expect.poll(level).toBe(-1)
+  await page.reload()
+  await expect.poll(level).toBe(-1)
+  await app.close()
+  await launch()
+  await expect.poll(level).toBe(-1)
+  expect(await factor()).toBeCloseTo(1 / 1.2)
+  await zoomKey('0')
+  await expect.poll(level).toBe(0)
+  await app.evaluate(({ BrowserWindow }) => { const window = BrowserWindow.getAllWindows()[0]; window.setMinimumSize(380, 600); window.setSize(420, 760) })
+  await expect(page.locator('.workbench')).toHaveAttribute('data-compact', 'true')
+  await page.getByRole('button', { name: 'Toggle chat panel' }).click()
+  await page.getByRole('textbox', { name: 'Message to demo agent' }).fill('A narrow-window draft')
+  await zoomKey('-')
+  await expect.poll(level).toBe(-1)
+  await expect(page.getByRole('button', { name: 'Send message' })).toBeInViewport()
+  await expect(page.getByRole('button', { name: 'Close window', exact: true })).toBeInViewport()
+  expect(await page.getByRole('complementary', { name: 'Task chat' }).evaluate((element) => element.getBoundingClientRect().right <= innerWidth + 1)).toBe(true)
+  await captureZoom('workbench-zoom-narrow.png')
+  await zoomKey('0')
+  await expect.poll(level).toBe(0)
 })
 
 test('keeps the compact desktop usable without horizontal document overflow', async () => {

@@ -547,6 +547,29 @@ history with accepted work is an error, never a silent replacement. The SDK does
 persist unused empty sessions, so those alone can be recreated under their reserved
 native ID when the Host journal proves no command was accepted.
 
+## Window zoom
+
+Use **Ctrl+=** or **Ctrl+Shift+=** (Ctrl++) to zoom in, **Ctrl+-** to zoom out,
+and **Ctrl+0** to return to 100%. The numeric keypad's plus, minus, and zero also
+work. On macOS, use Command instead of Ctrl. The shortcuts work while a composer
+or an in-app dialog has focus; ordinary plus/minus input and IME composition are
+not intercepted.
+
+The desktop uses Electron's native page zoom for the entire workbench, including
+Explorer, Chat, text, icons, and controls, rather than changing just a font size.
+Each press changes one level; the scale is `1.2 ** level`, with level 0 at 100%
+and limits of -8 and 8. This follows the inspected
+[VS Code window actions](https://github.com/microsoft/vscode/blob/645f29cc3176500b4b5762ba887cf2a7f0ffdf2c/src/vs/workbench/electron-browser/actions/windowActions.ts)
+and [native zoom implementation](https://github.com/microsoft/vscode/blob/645f29cc3176500b4b5762ba887cf2a7f0ffdf2c/src/vs/platform/window/electron-browser/window.ts).
+Task Continuum additionally accepts the main keyboard's Ctrl/Command+0 for reset.
+
+Zoom is saved in the local desktop profile's `window-zoom.json` and restored on
+reload or restart. It does not change the zoom or settings of a remote VS Code
+Agent, and it does not overwrite preferred panel widths. Zooming into the compact
+layout keeps the currently focused Explorer or Chat panel available. Browser-only
+preview continues to use the browser's own zoom controls. No companion update is
+needed; reopen the updated desktop to load its native shortcut handler.
+
 ## Resize panels
 
 Drag the divider on the Explorer's right edge or Chat's left edge to adjust its
@@ -568,6 +591,9 @@ The same sizing applies to local, shared, and original VS Code chat panels.
 | Ctrl/Command+P | Quick-open a task. |
 | Ctrl/Command+B | Toggle the task sidebar. |
 | Ctrl/Command+Alt+B | Toggle chat. |
+| Ctrl/Command+= or Ctrl/Command+Shift+= | Zoom in the entire desktop window. |
+| Ctrl/Command+- | Zoom out the entire desktop window. |
+| Ctrl/Command+0 | Reset window zoom to 100%. |
 | Left/Right on a tab | Switch open tasks or document views. |
 | Up/Down in the task tree | Move focus between visible tasks. |
 | Left/Right in the task tree | Collapse/expand a branch or move to its parent/first child. |
