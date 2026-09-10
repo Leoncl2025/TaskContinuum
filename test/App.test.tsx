@@ -1,10 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/renderer/App'
 import type { ChatAdapter } from '../src/shared/chat'
 
 function explorer() { return within(screen.getByRole('complementary', { name: 'Task explorer' })) }
+afterEach(() => { vi.unstubAllGlobals() })
 
 describe('workbench', () => {
   it('renders the required panes and honest demo status', () => {
@@ -61,6 +62,54 @@ describe('workbench', () => {
     expect(screen.queryByRole('complementary', { name: 'Task chat' })).not.toBeInTheDocument()
     fireEvent.keyDown(window, { key: 'b', ctrlKey: true })
     expect(screen.getByRole('complementary', { name: 'Task explorer' })).toBeInTheDocument()
+  })
+  it('resizes both panel edges with the keyboard while preserving drafts and hidden widths', () => {
+    vi.stubGlobal('innerWidth', 1440)
+    render(<App />)
+    const sidebar = screen.getByRole('separator', { name: 'Resize Explorer' })
+    const chat = screen.getByRole('separator', { name: 'Resize Chat' })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message to demo agent' }), { target: { value: 'Unsent draft' } })
+    fireEvent.keyDown(sidebar, { key: 'ArrowRight', shiftKey: true })
+    fireEvent.keyDown(chat, { key: 'ArrowLeft', shiftKey: true })
+    expect(sidebar).toHaveAttribute('aria-valuenow', '308')
+    expect(chat).toHaveAttribute('aria-valuenow', '405')
+    expect(chat).toHaveAttribute('aria-orientation', 'vertical')
+    expect(JSON.parse(localStorage.getItem('taskcontinuum:layout:v1')!)).toMatchObject({ sidebarWidth: 308, chatWidth: 405 })
+    fireEvent.keyDown(window, { key: 'b', ctrlKey: true })
+    expect(screen.queryByRole('separator', { name: 'Resize Explorer' })).not.toBeInTheDocument()
+    fireEvent.keyDown(window, { key: 'b', ctrlKey: true })
+    expect(screen.getByRole('separator', { name: 'Resize Explorer' })).toHaveAttribute('aria-valuenow', '308')
+    expect(screen.getByRole('textbox', { name: 'Message to demo agent' })).toHaveValue('Unsent draft')
+    fireEvent.keyDown(chat, { key: 'End' })
+    expect(chat).toHaveAttribute('aria-valuenow', chat.getAttribute('aria-valuemax')!)
+    fireEvent.keyDown(chat, { key: 'Home' })
+    expect(chat).toHaveAttribute('aria-valuenow', '310')
+  })
+  it('restores widths, fits a smaller window without overwriting preferences, and resets sizing', async () => {
+    vi.stubGlobal('innerWidth', 1440)
+    localStorage.setItem('taskcontinuum:layout:v1', JSON.stringify({ sidebar: true, chat: true, theme: 'light', sidebarWidth: 400, chatWidth: 500 }))
+    const view = render(<App />)
+    expect(screen.getByRole('separator', { name: 'Resize Explorer' })).toHaveAttribute('aria-valuenow', '400')
+    expect(screen.getByRole('separator', { name: 'Resize Chat' })).toHaveAttribute('aria-valuenow', '500')
+    vi.stubGlobal('innerWidth', 1001)
+    fireEvent.resize(window)
+    expect(Number(screen.getByRole('separator', { name: 'Resize Explorer' }).getAttribute('aria-valuenow'))).toBeLessThan(400)
+    expect(JSON.parse(localStorage.getItem('taskcontinuum:layout:v1')!)).toMatchObject({ sidebarWidth: 400, chatWidth: 500 })
+    vi.stubGlobal('innerWidth', 1440)
+    fireEvent.resize(window)
+    expect(screen.getByRole('separator', { name: 'Resize Chat' })).toHaveAttribute('aria-valuenow', '500')
+    view.unmount()
+    const reopened = render(<App />)
+    expect(screen.getByRole('separator', { name: 'Resize Explorer' })).toHaveAttribute('aria-valuenow', '400')
+    fireEvent.doubleClick(screen.getByRole('separator', { name: 'Resize Explorer' }))
+    fireEvent.keyDown(screen.getByRole('separator', { name: 'Resize Chat' }), { key: 'Enter' })
+    expect(screen.getByRole('separator', { name: 'Resize Explorer' })).toHaveAttribute('aria-valuenow', '258')
+    expect(screen.getByRole('separator', { name: 'Resize Chat' })).toHaveAttribute('aria-valuenow', '355')
+    fireEvent.keyDown(screen.getByRole('separator', { name: 'Resize Explorer' }), { key: 'ArrowRight' })
+    await userEvent.click(screen.getByRole('button', { name: 'Preferences' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Reset panel layout' }))
+    expect(reopened.container.querySelector('.workbench')).toHaveAttribute('data-theme', 'light')
+    expect(JSON.parse(localStorage.getItem('taskcontinuum:layout:v1')!)).toMatchObject({ sidebarWidth: 258, chatWidth: 355, theme: 'light' })
   })
   it('opens and searches the quick switcher', async () => {
     const user = userEvent.setup(); render(<App />)
@@ -153,6 +202,7 @@ describe('task-scoped chat', () => {
   it('uses a single pane on a compact viewport and returns to the task after selection', async () => {
     vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({ matches: true, media: query, onchange: null, addEventListener: vi.fn(), removeEventListener: vi.fn(), addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: () => true }))
     const user = userEvent.setup(); render(<App />)
+    expect(screen.queryByRole('separator')).not.toBeInTheDocument()
     expect(screen.queryByRole('complementary')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Tasks' }))
     await user.click(explorer().getByRole('button', { name: 'T-0003 Backend service' }))
@@ -160,5 +210,6 @@ describe('task-scoped chat', () => {
     expect(screen.queryByRole('complementary')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Toggle chat panel' }))
     expect(screen.getByRole('complementary', { name: 'Task chat' })).toBeInTheDocument()
+    expect(screen.queryByRole('separator')).not.toBeInTheDocument()
   })
 })

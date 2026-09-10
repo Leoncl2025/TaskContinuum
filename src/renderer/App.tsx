@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useEffectEvent, useState, useSyncExternalStore } from 'react'
+import type { CSSProperties } from 'react'
 import type { ChatAdapter } from '../shared/chat'
 import type { DesktopInfo } from '../shared/desktop'
 import type { ImportPreview, LocalSessionSummary, SessionOptions, SessionSnapshot } from '../shared/sessions'
@@ -18,7 +19,9 @@ import { Dialog, Icon, IconButton } from './components/Primitives'
 import { TaskSidebar } from './components/TaskSidebar'
 import { TaskViewer } from './components/TaskViewer'
 import { demoTasks } from './data/tasks'
-import { defaultLayout, isCompact, readLayout, saveLayout, subscribeCompact } from './layout'
+import { defaultLayout, isCompact, panelSizes, readLayout, resizePanel, saveLayout, subscribeCompact, subscribeViewport, viewportWidth } from './layout'
+import type { LayoutPanel } from './layout'
+import { PanelSash } from './components/PanelSash'
 import { useWorkspaces } from './useWorkspaces'
 import { WorkspacePicker } from './components/WorkspacePicker'
 import { SharedSessionPanel } from './components/SharedSessionPanel'
@@ -59,6 +62,8 @@ function Workbench({ suppliedAdapter, workspaces }: { suppliedAdapter?: ChatAdap
   const [desktop, setDesktop] = useState<DesktopInfo>()
   const [desktopError, setDesktopError] = useState(false)
   const compact = useSyncExternalStore(subscribeCompact, isCompact, () => false)
+  const desktopWidth = useSyncExternalStore(subscribeViewport, viewportWidth, () => 1440)
+  const sizes = panelSizes(layout, desktopWidth)
   const chats = useTaskChats(adapter)
   const task = tasks.find((item) => item.id === selectedId)
   const vscodeBinding = task && bindings[task.id]?.vscodeWorkspaceStorageId ? bindings[task.id] : undefined
@@ -137,6 +142,10 @@ function Workbench({ suppliedAdapter, workspaces }: { suppliedAdapter?: ChatAdap
     if (compact) setCompactPanel('chat')
     else setLayout((value) => ({ ...value, chat: true }))
     requestAnimationFrame(() => document.getElementById('chat-composer')?.focus())
+  }
+
+  function changePanelWidth(panel: LayoutPanel, width: number): void {
+    setLayout((current) => resizePanel(current, panel, width, desktopWidth))
   }
 
   function changeTask(update: (current: TaskRecord) => TaskRecord): void {
@@ -316,7 +325,7 @@ function Workbench({ suppliedAdapter, workspaces }: { suppliedAdapter?: ChatAdap
     {links.error && dialog !== 'migrate-links' && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{links.error}</span><IconButton icon="refresh" label="Reload session links" disabled={links.busy || activeResponses > 0} onClick={() => { copilot.setError(null); void links.reload() }} /></div>}
     {links.needsMigration && !links.error && <div className="copilot-banner link-migration-status"><Icon name="link" /><span>{Object.keys(links.legacy).length} local task/session links are not saved in this workspace.</span><button type="button" className="text-button" disabled={workspaceLocked} onClick={() => setDialog('migrate-links')}>Review links</button></div>}
     {copilot.error && !links.error && !sessionDialog && !interaction && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{copilot.error}</span><IconButton icon="close" label="Dismiss Copilot error" onClick={() => copilot.setError(null)} /></div>}
-    <div className="workbench-body">
+    <div className="workbench-body" style={{ '--sidebar-width': `${sizes.sidebar.width}px`, '--chat-width': `${sizes.chat.width}px` } as CSSProperties}>
       <nav className="activity-bar" aria-label="Workbench navigation">
         <button type="button" className={sidebarVisible && view === 'tasks' ? 'activity active' : 'activity'} aria-label="Tasks" title="Tasks" aria-pressed={sidebarVisible && view === 'tasks'} onClick={() => openSidebar('tasks')}><Icon name="checklist" /></button>
         <button type="button" className={sidebarVisible && view === 'sessions' ? 'activity active' : 'activity'} aria-label="Sessions" title="Local Copilot and VS Code sessions" aria-pressed={sidebarVisible && view === 'sessions'} onClick={() => openSidebar('sessions')}><Icon name="comment-discussion" />{activeResponses > 0 && <span className="activity-badge">{activeResponses}</span>}</button>
@@ -329,6 +338,8 @@ function Workbench({ suppliedAdapter, workspaces }: { suppliedAdapter?: ChatAdap
       </nav>
 
       {sidebarVisible && (view === 'sessions' && copilot.bridge ? <LocalSessions status={copilot.status} listing={copilot.listing} busy={links.busy ? 'Loading session links' : copilot.busy} selectedId={Object.entries(listedBindings).find(([, taskId]) => taskId === selectedId)?.[0]} sessionTasks={listedBindings} onConnect={connectCopilot} onDisconnect={() => { for (const id of Object.keys(chats.threads)) chats.stop(id); void copilot.disconnect() }} onRefresh={() => { void copilot.refresh() }} onNew={() => { if (!links.ready) { copilot.setError('Reload the workspace session links before creating a conversation.'); return } if (!tasks.length) { copilot.setError('This workspace has no tasks to attach a conversation to.'); return } copilot.setError(null); setSessionDialog({ kind: 'new' }) }} onOpen={(session) => { void openSession(session) }} onClose={toggleSidebar} workspaceControls={workspaceControls} /> : <TaskSidebar tasks={tasks} selectedId={selectedId} view={view} query={query} onQuery={setQuery} onSelect={(id) => { selectTask(id); if (view === 'sessions') showChat() }} onCreate={() => setDialog('new-task')} onClose={toggleSidebar} threads={chats.threads} workspace={workspace ?? undefined} workspaceControls={workspaceControls} />)}
+
+      {!compact && sidebarVisible && <PanelSash panel="sidebar" {...sizes.sidebar} onResize={(width) => changePanelWidth('sidebar', width)} onReset={() => changePanelWidth('sidebar', defaultLayout.sidebarWidth)} />}
 
       {(!compact || compactPanel === null) && <main className="main-panel" aria-label="Task workspace">
         <div className="editor-tabs" role="tablist" aria-label="Open tasks">
@@ -352,6 +363,8 @@ function Workbench({ suppliedAdapter, workspaces }: { suppliedAdapter?: ChatAdap
           {task ? <TaskViewer task={task} readOnly={Boolean(workspace)} workspaceName={workspace?.name} onCheck={(id) => changeTask((current) => ({ ...current, checklist: current.checklist.map((item) => item.id === id ? { ...item, done: !item.done } : item) }))} onStatus={(status: TaskStatus) => changeTask((current) => ({ ...current, status }))} onChat={showChat} /> : <div className="empty-workbench workspace-empty"><Icon name="layers" /><h1>{workspace && !tasks.length ? 'No tasks in this workspace' : 'Make room for meaningful work.'}</h1><p>{workspace ? workspace.name : 'Open a task to pick up where you left off.'}</p>{tasks.length > 0 && <button type="button" className="primary-button" onClick={() => { setQuickQuery(''); setDialog('quick-open') }}>Open a task <kbd>Ctrl P</kbd></button>}{workspace && !tasks.length && <button type="button" className="secondary-button" onClick={openWorkspace}><Icon name="folder-opened" />Open workspace folder</button>}</div>}
         </div>
       </main>}
+
+      {!compact && chatVisible && <PanelSash panel="chat" {...sizes.chat} onResize={(width) => changePanelWidth('chat', width)} onReset={() => changePanelWidth('chat', defaultLayout.chatWidth)} />}
 
       {chatVisible && sharedChat && workspace ? <SharedSessionPanel task={task} root={workspace.root} onStatus={setSharedStatus} onClose={() => setSharedChat(false)} /> : chatVisible && task && vscodeBinding ? <VSCodeChatPanel key={`${task.id}:${sessionBindingKey(vscodeBinding)}`} task={task} identity={{ nativeSessionId: vscodeBinding.id, workspaceStorageId: vscodeBinding.vscodeWorkspaceStorageId!, ...(vscodeBinding.remoteMachineName ? { remoteMachineName: vscodeBinding.remoteMachineName } : {}) }} onDetach={() => setDialog('clear-chat')} onClose={toggleChat} onRemoteAccess={workspace && window.remoteVSCode ? () => setDialog('remote-access') : undefined} onRemoteConnections={workspace && window.remoteVSCode ? () => setDialog('remote-sessions') : undefined} /> : chatVisible && (task ? foreignCliBinding ? <aside className="chat-panel empty-chat" aria-label="Remote CLI session"><IconButton icon="close" label="Hide chat panel" onClick={toggleChat} /><p>CLI session owned by {bindings[task.id]?.owner?.machineName}. Remote native CLI routing is unavailable; no local session was started.</p></aside> : <ChatPanel task={task} thread={chats.getThread(task.id)} adapter={adapter} connected={copilot.status.state === 'ready'} boundSessionId={bindings[task.id]?.id} disabled={!links.ready || Boolean(copilot.busy)} sessionName={copilot.listing?.sessions.find((session) => session.id === bindings[task.id]?.id)?.title ?? bindings[task.id]?.title} onSessions={copilot.bridge ? () => openSidebar('sessions') : undefined} onConnect={connectCopilot} onDraft={(value) => chats.setDraft(task.id, value)} onSend={(value) => { if (links.ready && (!live || chats.getThread(task.id).sessionId === bindings[task.id]?.id)) void chats.send(task, value) }} onStop={() => chats.stop(task.id)} onClear={() => setDialog('clear-chat')} onClose={toggleChat} /> : <aside className="chat-panel empty-chat" aria-label="Task chat"><IconButton icon="close" label="Hide chat panel" onClick={toggleChat} /><p>Select a task to start a conversation.</p></aside>)}
     </div>

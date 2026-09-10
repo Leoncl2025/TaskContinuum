@@ -547,6 +547,20 @@ history with accepted work is an error, never a silent replacement. The SDK does
 persist unused empty sessions, so those alone can be recreated under their reserved
 native ID when the Host journal proves no command was accepted.
 
+## Resize panels
+
+Drag the divider on the Explorer's right edge or Chat's left edge to adjust its
+width. The divider highlights on hover or keyboard focus. Double-click it to
+restore that panel's default width, or press Escape during a drag to cancel it.
+
+Widths are saved in the local desktop profile across restarts and workspace
+switches. Hiding a panel retains its size. Explorer stays at least 220 pixels wide,
+Chat at least 310, and the central task area keeps at least 400. Smaller windows
+temporarily fit the panels without overwriting their preferred sizes; at 1000
+pixels or less, the existing compact single-panel layout takes over without dividers.
+**Preferences > Reset panel layout** restores both widths while retaining the theme.
+The same sizing applies to local, shared, and original VS Code chat panels.
+
 ## Keyboard
 
 | Shortcut | Action |
@@ -559,9 +573,12 @@ native ID when the Host journal proves no command was accepted.
 | Left/Right in the task tree | Collapse/expand a branch or move to its parent/first child. |
 | Home/End in the task tree | Focus the first/last visible task. |
 | Enter/Space in the task tree | Open the focused task. |
+| Left/Right on a panel divider | Move the divider 10 pixels, or 50 with Shift. |
+| Home/End on a panel divider | Set the controlled panel to its minimum/maximum available width. |
+| Enter on a panel divider | Restore the controlled panel's default width. |
 | Enter in chat | Send a message (except during IME composition). |
 | Shift+Enter in chat | Insert a new line. |
-| Escape | Close a dialog or leave a compact panel. |
+| Escape | Cancel an active panel resize, close a dialog, or leave a compact panel. |
 
 ## Source boundaries
 
