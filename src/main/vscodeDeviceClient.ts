@@ -215,34 +215,38 @@ export class VSCodeDeviceClient {
   async read(root: string, target: VSCodeChatTarget): Promise<VSCodeChatView> {
     const { peer, known } = await this.selected(root, target)
     const file = join(this.directory, 'remote-vscode-device-cache', `${known.id}.json`)
-    let requested = false
+    let requested: Active | undefined
     try {
       if (!this.active.has(peer.id)) await this.ensure(peer)
       const active = this.active.get(peer.id)!
       if (!active.available.has(known.id)) throw new Error('Session is unavailable or no longer shared.')
-      requested = true
+      requested = active
       const payload = remoteHistorySchema.parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/session/read', { identity: targetIdentity(target) }, active.abort.signal))
       if (!sameRemoteTarget(payload.identity, known.invitation.identity) || payload.view.session.id !== target.nativeSessionId || payload.view.deliveries.some((item) => item.nativeSessionId !== target.nativeSessionId) || JSON.stringify(payload.view.participant) !== JSON.stringify(peer.invitation.participant) || JSON.stringify(payload.view.execution) !== JSON.stringify(known.invitation.execution)) throw new Error('Session history identity changed.')
       await this.update(async () => {
-        if (this.active.get(peer.id) !== active || !peer.enabled || !this.peers.includes(peer)) throw new Error('Device disconnected while reading.')
+        if (this.active.get(peer.id) !== active || !peer.enabled || !this.peers.includes(peer)) return
         await writeJsonAtomic(file, payload)
       })
       if (this.active.get(peer.id) !== active || !peer.enabled) throw new Error('Device disconnected while reading.')
       return payload.view
     } catch (error) {
-      if (requested && !(error instanceof DeviceRequestError)) {
-        this.drop(peer.id)
-        this.retry.set(peer.id, { count: 1, at: Date.now() + 2000 })
+      const message = error instanceof Error ? error.message : 'Device is offline.'
+      const current = requested ? this.active.get(peer.id) === requested : !this.active.has(peer.id)
+      if (current) {
+        if (requested && !(error instanceof DeviceRequestError)) {
+          this.drop(peer.id)
+          this.retry.set(peer.id, { count: 1, at: Date.now() + 2000 })
+        }
+        this.errors.set(peer.id, message)
       }
-      this.errors.set(peer.id, error instanceof Error ? error.message : 'Device is offline.')
       try {
         const cached = remoteHistorySchema.parse(await readJsonBounded(file, 4 * 1024 * 1024))
         if (!sameRemoteTarget(cached.identity, targetIdentity(target)) || cached.view.session.id !== target.nativeSessionId || cached.view.deliveries.some((item) => item.nativeSessionId !== target.nativeSessionId) || JSON.stringify(cached.view.participant) !== JSON.stringify(peer.invitation.participant) || JSON.stringify(cached.view.execution) !== JSON.stringify(known.invitation.execution)) throw new Error('Cached identity changed.')
-        return { ...cached.view, connectionState: 'offline', canSend: false, responding: false, bridgeError: this.errors.get(peer.id),
+        return { ...cached.view, connectionState: 'offline', canSend: false, responding: false, bridgeError: message,
           deliveries: cached.view.deliveries.map((delivery) => delivery.state === 'pending' ? { ...delivery, state: 'uncertain', error: 'Disconnected before confirmation. No automatic replay.' } : delivery) }
       } catch {
         return { session: { id: target.nativeSessionId, source: 'vscode', title: known.invitation.title, updatedAt: new Date().toISOString() }, messages: [], deliveries: [], participant: peer.invitation.participant,
-          execution: known.invitation.execution, connectionState: 'offline', canSend: false, responding: false, bridgeError: `${this.errors.get(peer.id)} No verified cached history is available.` }
+          execution: known.invitation.execution, connectionState: 'offline', canSend: false, responding: false, bridgeError: `${message} No verified cached history is available.` }
       }
     }
   }
@@ -256,7 +260,7 @@ export class VSCodeDeviceClient {
       if (result.id !== command.id || result.text !== command.text || result.nativeSessionId !== target.nativeSessionId || JSON.stringify(result.participant) !== JSON.stringify(peer.invitation.participant) || JSON.stringify(result.execution) !== JSON.stringify(known.invitation.execution)) throw new Error('Delivery identity mismatch. Inspect the original session before retrying.')
       return result
     } catch (error) {
-      if (!(error instanceof DeviceRequestError)) { this.drop(peer.id); this.retry.set(peer.id, { count: 1, at: Date.now() + 2000 }) }
+      if (this.active.get(peer.id) === active && !(error instanceof DeviceRequestError)) { this.drop(peer.id); this.retry.set(peer.id, { count: 1, at: Date.now() + 2000 }) }
       throw error
     }
   }

@@ -321,6 +321,24 @@ than saving plaintext or silently replacing identity. Unsupported sharing policy
 network denial, expired grant, busy Agent, or changed Bridge instance must be resolved
 explicitly; none triggers an alternate Agent or weaker SSH verification.
 
+### Interrupted device recovery
+
+An older desktop could close a newly recovered SSH connection when a history or
+send request from its previous connection completed late. A delayed history success
+could also trigger the enrollment rollback path. This produced an aborted/offline
+loop even though the owner publication was online.
+
+The repaired client ties cleanup to the exact connection that issued the request.
+Old results cannot close a replacement, overwrite its error state, or publish stale
+history. Discovery and session-request errors distinguish timeout from cancellation;
+an interrupted send is unconfirmed and is never replayed automatically.
+
+Load the rebuilt desktop on the receiving machine after preserving drafts. Existing
+enabled device connections recover normally; do not reset pairings, keys, or the
+owner publication for this race. The owner companion remains 0.4.3 and requires no
+extension update for this fix. Local SSH race tests and all 260 tests pass; a specific
+physical client's successful reconnection must still be observed separately.
+
 ## Storage and Trust
 
 The task repository stores only `provider: vscode-copilot`, `sessionId`,

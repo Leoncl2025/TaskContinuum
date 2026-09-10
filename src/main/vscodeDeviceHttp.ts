@@ -8,11 +8,20 @@ export class DeviceRequestError extends Error {
 
 export async function deviceRequest(port: number, remotePort: number, token: string, path: string, value: unknown, signal: AbortSignal): Promise<unknown> {
   return new Promise((resolve, reject) => {
+    const deadline = AbortSignal.timeout(15000)
+    const cancellation = AbortSignal.any([signal, deadline])
+    const stage = path === '/device/sessions' ? 'Owner session discovery' : path.endsWith('/read') ? 'Original-session history read' : path.endsWith('/send') ? 'Original-session submission' : 'Original-session opening'
+    const failed = (error: Error) => {
+      if (!cancellation.aborted) { reject(error); return }
+      const timedOut = cancellation.reason?.name === 'TimeoutError'
+      const outcome = path.endsWith('/send') ? 'The message outcome is not confirmed; it will not be resent automatically.' : 'No message was sent by this operation.'
+      reject(new Error(`${stage} ${timedOut ? 'timed out waiting for the owner' : 'was cancelled'}. ${outcome}`, { cause: error }))
+    }
     const operation = request({ hostname: '127.0.0.1', port, path, method: 'POST',
       headers: { Host: `127.0.0.1:${remotePort}`, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]),
+      signal: cancellation,
     }, (response) => {
-      response.on('error', reject)
+      response.on('error', failed)
       if (response.statusCode !== 200) {
         response.destroy()
         reject(new DeviceRequestError(response.statusCode ?? 500))
@@ -27,7 +36,7 @@ export async function deviceRequest(port: number, remotePort: number, token: str
       })
       response.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))) } catch { reject(new Error('Invalid device response.')) } })
     })
-    operation.on('error', reject)
+    operation.on('error', failed)
     operation.end(JSON.stringify(value))
   })
 }

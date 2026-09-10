@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir, hostname } from 'node:os'
 import { join } from 'node:path'
 import { createConnection } from 'node:net'
+import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { VSCodeDeviceHost } from '../src/main/vscodeDeviceHost'
@@ -12,9 +13,32 @@ import { newSshKeyPair, openSessionSshBridge, startSessionSshHost } from '../src
 import { startVSCodeChatCompanion } from '../src/main/vscodeChatCompanion'
 import { remoteInvitationSchema } from '../src/main/vscodeRemoteProtocol'
 import { deviceInvitationSchema } from '../src/main/vscodeDeviceProtocol'
+import * as deviceHttp from '../src/main/vscodeDeviceHttp'
 
 describe('client-scoped SSH sessions', () => {
-  it('uses one SSH connection for two originals, reconnects reads and never replays a send', async () => {
+  it.each(['timeout', 'cancellation'])('identifies session discovery %s without a generic abort error', async (reason) => {
+    const abort = new AbortController()
+    const server = createServer((request) => {
+      request.resume()
+      if (reason === 'cancellation') abort.abort()
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Test listener unavailable.')
+    const timeout = AbortSignal.timeout.bind(AbortSignal)
+    const deadline = reason === 'timeout' ? vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => timeout(30)) : undefined
+    try {
+      await expect(deviceHttp.deviceRequest(address.port, address.port, 'test-only', '/device/sessions', {}, abort.signal))
+        .rejects.toThrow(reason === 'timeout' ? 'Owner session discovery timed out waiting for the owner' : 'Owner session discovery was cancelled')
+      if (deadline) expect(deadline).toHaveBeenCalledWith(15000)
+    } finally {
+      deadline?.mockRestore()
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it.each(['read cancellation', 'read response', 'send cancellation'])('reuses one SSH connection and preserves recovery after a late %s without replay', async (lateResult) => {
     const root = await mkdtemp(join(tmpdir(), 'continuum-device-client-'))
     const workspaceStorageId = 'c'.repeat(32)
     const storage = join(root, 'storage')
@@ -88,6 +112,43 @@ describe('client-scoped SSH sessions', () => {
       expect(transport).toHaveBeenCalledTimes(2)
       await client.connect(tasks, device.id)
       expect(await manager.read(tasks, first.target)).toMatchObject({ connectionState: 'connected' })
+      const originalRequest = deviceHttp.deviceRequest
+      let finishOldRequest!: () => void
+      let started!: () => void
+      const requestStarted = new Promise<void>((resolve) => { started = resolve })
+      let delayed = false
+      const sending = lateResult === 'send cancellation'
+      const requests = vi.spyOn(deviceHttp, 'deviceRequest').mockImplementation((...args) => {
+        if (args[3] === (sending ? '/device/session/send' : '/device/session/read') && !delayed) {
+          delayed = true
+          const response = lateResult === 'read response' ? originalRequest(...args) : Promise.resolve(undefined)
+          return response.then((payload) => new Promise((resolve, reject) => {
+            finishOldRequest = () => lateResult === 'read response' ? resolve(payload) : reject(new DOMException('The operation was aborted', 'AbortError'))
+            started()
+          }))
+        }
+        return originalRequest(...args)
+      })
+      const oldRequest = sending
+        ? manager.send(tasks, first.target, randomUUID(), 'Never replay this interrupted request').catch((error: unknown) => error)
+        : manager.read(tasks, first.target)
+      try {
+        await requestStarted
+        await client.disconnect(tasks, device.id)
+        await client.connect(tasks, device.id)
+        const connections = transport.mock.calls.length
+        expect((await client.list(tasks))[0]).toMatchObject({ state: 'connected', error: undefined })
+        finishOldRequest()
+        expect(await oldRequest).toMatchObject(sending ? { name: 'AbortError' } : { connectionState: 'offline', canSend: false })
+        expect((await client.list(tasks))[0]).toMatchObject({ state: 'connected', error: undefined })
+        expect(await manager.read(tasks, first.target)).toMatchObject({ connectionState: 'connected' })
+        expect(transport).toHaveBeenCalledTimes(connections)
+        expect(dispatch).toHaveBeenCalledTimes(1)
+      } finally {
+        finishOldRequest?.()
+        await oldRequest.catch(() => undefined)
+        requests.mockRestore()
+      }
       await host.revoke(pair.id)
       await expect(manager.send(tasks, first.target, randomUUID(), 'Revoked')).rejects.toThrow('revoked')
       expect(dispatch).toHaveBeenCalledTimes(1)
