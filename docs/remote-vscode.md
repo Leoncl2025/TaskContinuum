@@ -28,6 +28,35 @@ links; they are not a prerequisite for AHP.
   VS Code journal saves. Stop targets the exact active turn, with read/send access.
   Provider sign-in, tool confirmations and agent questions still use the owner UI.
 
+### Native VS Code Controls
+
+In B's VS Code, **Local -> Continue In -> Copilot** is an explicit handoff to the
+Copilot harness, not the Cloud target or a live subscription to the old Local
+runtime. It carries conversation history and context but can change capabilities.
+Task Continuum does not perform that handoff. Link the resulting verified Host/chat
+explicitly; do not reuse the old Local identity as an AHP identity.
+
+| Control on B | Copilot / Agent Host behavior |
+|---|---|
+| Agent / Plan | Native role selection remains available. Task Continuum does not change the Host's role or customizations. |
+| Model | The native picker remains available for models supported by that harness and account. Sending retains the Host-advertised model/config and custom-agent selection; explicitly cleared draft selections use provider defaults. |
+| Configure Chat | Native customization and permission controls remain on B. Legacy profile-only instructions are not guaranteed to be discovered by the Host. |
+| Configure Tools | Copilot uses **Configure Chat -> Tools**, or **Chat: Open Customizations -> Tools**, rather than Local's request tool picker. Client tools can be enabled or disabled; Copilot's built-in tool entries are read-only in that configuration page. |
+
+Client-provided tools require the contributing VS Code client to remain connected.
+Closing B's editor does not guarantee those tools remain usable through Task
+Continuum. The current [Copilot limitations](https://code.visualstudio.com/docs/agents/run/agent-harnesses#_copilot)
+also restrict MCP transport/authentication support; verify required servers rather
+than assuming that the entire Local tool list transfers unchanged. Tool availability
+does not bypass native approvals. This release does not duplicate these settings
+or proxy tool approvals in Task Continuum.
+
+References: [session controls](https://code.visualstudio.com/docs/agents/run/agent-harnesses#_understand-the-session-controls),
+[Copilot tool configuration](https://code.visualstudio.com/docs/agents/run/tools#_select-tools-for-a-request),
+and [Host/client tool ownership](https://code.visualstudio.com/docs/agents/concepts/agent-host#_self-contained-with-optional-client-tools).
+
+### Access and Recovery
+
 The gateway accepts only initialize, snapshot recovery, ping, allowed subscriptions,
 and guarded send/cancel for the pinned chat. It rejects root/other-chat subscriptions,
 filesystem access, arbitrary tools, Host configuration and session creation.
@@ -52,11 +81,22 @@ Native VS Code Copilot session resources use `copilotcli:/<id>` and a default
 `ahp-session:/<id>`. Both session formats are accepted with exact verified chat
 membership. This build lists only the verified `copilotcli` provider.
 
-Verified: real installed Editor Host handshake/ping; production client with a real
-isolated Host-local command and pre-completion terminal output; actual local SSH
-with no Companion, role/isolation/revocation tests; sandboxed Electron discovery,
-link, live text, draft retention, restart and 420px layouts. Real Copilot-generated
-text, model/tool authentication and physical A/B cloud latency remain separate gates.
+### Verification
+
+Verified: installed Editor Host handshake/ping; an actual isolated Host reached
+through the production paired SSH gateway; fixed Host-local commands initiated by
+both Task Continuum and an independent owner-side AHP client, with output before
+completion, one reused device connection and revocation without stopping the Host.
+Deterministic text-stream checks cover passive owner-originated turns, snapshot
+recovery without sending, native model/custom-agent preservation and reset, and
+owner-draft protection. Actual sandboxed Electron checks cover discovery/link,
+both turn origins, retained drafts, reconnect/restart and 420px layouts.
+
+The native test uses two fixed local commands, not model generation or a native
+VS Code UI tool invocation. Real Copilot-generated text, required extension/MCP
+tools, model/tool authentication and physical A/B cloud latency remain separate
+gates. No user Local chat, current window, native configuration or binding is
+automatically changed by these checks.
 
 ## Prerequisites
 

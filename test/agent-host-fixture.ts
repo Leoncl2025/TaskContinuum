@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { WebSocketServer } from 'ws'
 import { chatReducer, MessageKind } from '@microsoft/agent-host-protocol'
-import type { ActionEnvelope, ChatState, SessionState, Snapshot } from '@microsoft/agent-host-protocol'
+import type { ActionEnvelope, ChatState, Message, SessionState, Snapshot } from '@microsoft/agent-host-protocol'
 import type { AgentHostEndpoint } from '../src/main/agentHostProtocol'
 
 export async function startAgentHostFixture() {
@@ -44,5 +44,5 @@ export async function startAgentHostFixture() {
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   const endpoint: AgentHostEndpoint = { schemaVersion: 2, type: 'standalone', pid: process.pid, instanceId: hostId, connectionToken: randomUUID(), protocolVersion: '0.9.0', endpoint: { type: 'tcp', host: '127.0.0.1', port: (server.address() as { port: number }).port } }
-  return { endpoint, hostId, sessionId, chatId, dispatches, action, snapshot, drop: () => { for (const socket of sockets.clients) socket.terminate() }, loseNextSend: () => { loseNextSend = true }, draft: (text: string) => { chat = { ...chat, draft: { text, origin: { kind: MessageKind.User } } } }, close: async () => { for (const socket of sockets.clients) socket.terminate(); sockets.close(); await new Promise<void>((resolve) => server.close(() => resolve())) } }
+  return { endpoint, hostId, sessionId, chatId, dispatches, action, snapshot, drop: () => { for (const socket of sockets.clients) socket.terminate() }, loseNextSend: () => { loseNextSend = true }, draft: (text: string, selection: Pick<Message, 'model' | 'agent'> = {}) => { chat = { ...chat, draft: { ...selection, text, origin: { kind: MessageKind.User } } } }, close: async () => { for (const socket of sockets.clients) socket.terminate(); sockets.close(); await new Promise<void>((resolve) => server.close(() => resolve())) } }
 }

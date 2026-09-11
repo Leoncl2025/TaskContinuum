@@ -1,8 +1,8 @@
 import { execFile, spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { cp, mkdir, mkdtemp, rm } from 'node:fs/promises'
-import { createServer } from 'node:net'
-import { tmpdir } from 'node:os'
+import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createConnection, createServer } from 'node:net'
+import { hostname, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -10,12 +10,19 @@ import { promisify } from 'node:util'
 import { AhpClient } from '@microsoft/agent-host-protocol/client'
 import type { Subscription } from '@microsoft/agent-host-protocol/client'
 import { WebSocketTransport } from '@microsoft/agent-host-protocol/ws'
-import type { ActionEnvelope, ChatState, RootState, SessionState, TerminalState } from '@microsoft/agent-host-protocol'
+import type { ActionEnvelope, ChatState, ChatTurnStartedAction, RootState, SessionState, TerminalState } from '@microsoft/agent-host-protocol'
 import { expect, test } from '@playwright/test'
 import { startSshFixture } from '../test/ssh-fixture'
 import { openSshTunnel } from '../src/main/shared/ssh'
 import { AgentHostConnection } from '../src/main/agentHostConnection'
-import { connectAgentHostWebSocket } from '../src/main/agentHostTransport'
+import { AgentHostRegistry } from '../src/main/agentHostRegistry'
+import type { AgentHostEndpoint } from '../src/main/agentHostProtocol'
+import { VSCodeDeviceHost } from '../src/main/vscodeDeviceHost'
+import { VSCodeDeviceClient } from '../src/main/vscodeDeviceClient'
+import { deviceInvitationSchema } from '../src/main/vscodeDeviceProtocol'
+import { newSshKeyPair, openSessionSshBridge, startSessionSshHost } from '../src/main/devTunnel/sessionSsh'
+import { canonicalPolicyRoot, locallyLinkedAgentHostSessions, recordLocalLink } from '../src/main/linkedSessionPolicy'
+import { updateRepositoryAgentHostLink } from '../src/main/repositorySessionLinks'
 
 test('subscribes two clients to an isolated actual VS Code Agent Host', async () => {
   test.skip(!process.env.TASKCONTINUUM_VERIFY_AHP_CLI, 'Set the installed code-tunnel executable to verify AHP without user sessions.')
@@ -45,6 +52,12 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
   host.stderr.on('data', capture)
   const clients: AhpClient[] = []
   let production: AgentHostConnection | undefined
+  let registry: AgentHostRegistry | undefined
+  let deviceHost: VSCodeDeviceHost | undefined
+  let deviceClient: VSCodeDeviceClient | undefined
+  let managedSsh: Awaited<ReturnType<typeof startSessionSshHost>> | undefined
+  let pairedConnections = 0
+  let legacyCalls = 0
   const clientIds = [randomUUID(), randomUUID()]
   let ssh: Awaited<ReturnType<typeof startSshFixture>> | undefined
   let tunnel: Awaited<ReturnType<typeof openSshTunnel>> | undefined
@@ -105,13 +118,42 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
     const unrelated = await clients[1].subscribe(unrelatedChat)
     const unrelatedEvents = observe(unrelated.subscription)
     console.log(JSON.stringify({ sameSession: true, sameChat: true, modelPrompts: 0, lifecycle: firstState.lifecycle }))
-    phase = 'Host-local streaming command'
+    phase = 'Production paired SSH gateway setup'
     const chat = firstState.defaultChat!
     const firstChatEvents = observe(firstChat.subscription)
     const secondChatEvents = observe(secondChat.subscription)
     const turnId = randomUUID()
-    production = new AgentHostConnection({ hostId: randomUUID(), sessionId: session, chatId: chat, owner: { clientId: randomUUID(), machineName: 'Isolated-Host' } }, join(root, 'production-client'), (signal) => connectAgentHostWebSocket(`ws://127.0.0.1:${port}/?tkn=${token}`, {}, signal))
+    const discovery = join(root, 'discovery'), tasksB = join(root, 'tasks-b'), tasksA = join(root, 'tasks-a')
+    const profileB = join(root, 'gateway-b'), profileA = join(root, 'gateway-a')
+    await Promise.all([mkdir(discovery), mkdir(tasksB), mkdir(join(tasksA, '.taskcontinuum'), { recursive: true })])
+    const owner = { clientId: randomUUID(), machineName: hostname() }
+    const participant = { clientId: randomUUID(), username: 'Observer', machineName: 'Viewer-A' }
+    const endpoint: AgentHostEndpoint = { schemaVersion: 2, type: 'standalone', pid: host.pid!, instanceId: randomUUID(), connectionToken: token, protocolVersion: '0.9.0', endpoint: { type: 'tcp', host: '127.0.0.1', port } }
+    await writeFile(join(discovery, 'host.json'), JSON.stringify(endpoint))
+    const target = { hostId: endpoint.instanceId, sessionId: session, chatId: chat, owner }
+    const protector = { available: () => true, encrypt: (value: string) => Buffer.from(value), decrypt: (value: Buffer) => value.toString() }
+    registry = new AgentHostRegistry(profileB, [discovery], async () => owner)
+    deviceHost = new VSCodeDeviceHost(profileB, protector, async () => { legacyCalls++; throw new Error('No Companion is available in this test.') })
+    deviceHost.setAgentHostAccess(registry, (folder) => locallyLinkedAgentHostSessions(profileB, folder, owner))
+    managedSsh = await startSessionSshHost(newSshKeyPair())
+    const key = newSshKeyPair()
+    deviceClient = new VSCodeDeviceClient(profileA, protector, (invitation, signal) => {
+      pairedConnections++
+      return openSessionSshBridge(createConnection(managedSsh!.port, '127.0.0.1'), { key, hostPublicKey: managedSsh!.publicKey, grantId: invitation.id, targetPort: invitation.port, signal })
+    }, async () => {})
+    const pair = await deviceHost.pair(participant, key.publicKey)
+    await deviceHost.setWorkspace(pair.id, await canonicalPolicyRoot(tasksB), true)
+    const gatewayPort = await deviceHost.start()
+    managedSsh.allow(pair.id, key.publicKey, gatewayPort, pair.expiresAt, true)
+    await deviceClient.import(tasksA, deviceInvitationSchema.parse({ schemaVersion: 2, provider: 'vscode-copilot-device', id: pair.id, ownerId: await deviceHost.ownerId(), ownerClientId: owner.clientId, machineName: hostname(), participant, token: pair.token, expiresAt: pair.expiresAt, port: gatewayPort,
+      devTunnel: { kind: 'dev-tunnel', tunnelId: `taskcontinuum-${'f'.repeat(32)}.jpe1`, sshPort: managedSsh.port, hostPublicKey: managedSsh.publicKey, clientPublicKey: key.publicKey } }), true)
+    const linked = await updateRepositoryAgentHostLink(tasksB, 'T-0001', target, null)
+    await recordLocalLink(profileB, tasksB, 'T-0001', linked.document.bindings['T-0001'], owner)
+    await writeFile(join(tasksA, '.taskcontinuum/session-bindings.json'), JSON.stringify(linked.document))
+    expect((await deviceClient.agentHostSessions(tasksA)).sessions).toMatchObject([{ ...target, canSend: true }])
+    production = new AgentHostConnection(target, profileA, (signal) => deviceClient!.agentHostTransport(tasksA, target, signal))
     await production.open()
+    phase = 'Host-local streaming command through the paired SSH gateway'
     await production.send(turnId, '!node output.mjs', undefined, async () => {})
     const terminalResource = () => {
       for (const { envelope } of firstChatEvents) {
@@ -175,6 +217,24 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
     expect(firstChatEvents.filter(({ envelope }) => envelope.action.type === 'chat/turnStarted')).toHaveLength(1)
     expect(unrelatedEvents.filter(({ envelope }) => envelope.action.type === 'chat/turnStarted')).toHaveLength(0)
     expect(((await resumed.subscribe(unrelatedChat)).result.snapshot?.state as ChatState).turns).toHaveLength(0)
+    phase = 'Owner-originated output through the paired SSH gateway'
+    const ownerTurnId = randomUUID()
+    const alphaBefore = productionOutput().match(/AHP_ALPHA:/g)?.length ?? 0
+    clients[0].dispatch(chat, { type: 'chat/turnStarted' as ChatTurnStartedAction['type'], turnId: ownerTurnId, startedAt: new Date().toISOString(), message: { text: '!node output.mjs', origin: { kind: 'user' as ChatTurnStartedAction['message']['origin']['kind'] } } })
+    await expect.poll(() => production!.view.chat?.activeTurn?.id).toBe(ownerTurnId)
+    await expect.poll(() => productionOutput().match(/AHP_ALPHA:/g)?.length ?? 0, { intervals: [10, 20, 50] }).toBe(alphaBefore + 1)
+    expect(production.view.chat?.activeTurn?.id).toBe(ownerTurnId)
+    expect(production.view.pendingTurn).toBeUndefined()
+    await expect.poll(() => production!.view.chat?.activeTurn).toBeUndefined()
+    expect(production.view.chat?.turns.map((turn) => turn.id)).toEqual([turnId, ownerTurnId])
+    expect(firstChatEvents.filter(({ envelope }) => envelope.action.type === 'chat/turnStarted')).toHaveLength(2)
+    expect(((await resumed.subscribe(unrelatedChat)).result.snapshot?.state as ChatState).turns).toHaveLength(0)
+    expect(pairedConnections).toBe(1)
+    expect(legacyCalls).toBe(0)
+    phase = 'Production access revocation without stopping the owner Host'
+    await deviceHost.setWorkspace(pair.id, await canonicalPolicyRoot(tasksB), null)
+    await expect.poll(() => production!.view.state).toBe('offline')
+    await clients[0].ping()
     expect(ssh.forwardedConnections()).toBeGreaterThanOrEqual(2)
     const timings = firstTerminalEvents.flatMap(({ envelope, receivedAt }) => envelope.action.type === 'terminal/data'
       ? [...envelope.action.data.matchAll(/AHP_\w+:(\d+)/g)].map((match) => receivedAt - Number(match[1])) : [])
@@ -184,13 +244,17 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
       ? [...envelope.action.data.matchAll(/AHP_\w+:(\d+)/g)].map((match) => receivedAt - Number(match[1])) : [])
     expect(sshTimings.length).toBeGreaterThan(0)
     expect(Math.max(...sshTimings)).toBeLessThan(2000)
-    const report = { protocolVersion: '0.9.0', provider, productionClientVerified: true, sameSession: true, sameChat: true, otherSessionUnchanged: true, observedBeforeCompletion: true, reconnect: recovered.type, executionCount: 1, modelGenerationRequested: false, maximumLoopbackOutputLatencyMs: Math.max(...timings), maximumSshFirstOutputLatencyMs: Math.max(...sshTimings), sshConnections: ssh.forwardedConnections(), chatActions: [...new Set(firstChatEvents.map(({ envelope }) => envelope.action.type))], limitation: 'Host-local command and terminal stream on one machine; no real Copilot model delta or physical-network latency verified.' }
+    const report = { protocolVersion: '0.9.0', provider, productionClientVerified: true, productionPairedSshVerified: true, ownerInitiatedBeforeCompletion: true, revocationVerified: true, sameSession: true, sameChat: true, otherSessionUnchanged: true, observedBeforeCompletion: true, reconnect: recovered.type, executionCount: 2, pairedConnections, modelGenerationRequested: false, maximumLoopbackOutputLatencyMs: Math.max(...timings), maximumSshFirstOutputLatencyMs: Math.max(...sshTimings), sshConnections: ssh.forwardedConnections(), chatActions: [...new Set(firstChatEvents.map(({ envelope }) => envelope.action.type))], limitation: 'Two Host-local commands and terminal streams through the production paired SSH gateway on one machine; no real Copilot model delta, native tool integration or physical-network latency verified.' }
     console.log(JSON.stringify(report))
     await test.info().attach('ahp-proof-of-concept', { body: Buffer.from(JSON.stringify(report, null, 2)), contentType: 'application/json' })
   } catch (error) {
     throw new Error(`${phase}: ${error instanceof Error ? error.message : String(error)}\n${output}`.replaceAll(token, '[redacted]'), { cause: error })
   } finally {
     await production?.close()
+    deviceClient?.close()
+    await deviceHost?.close()
+    await registry?.close()
+    await managedSsh?.close()
     for (const client of clients) await client.shutdown()
     await Promise.all(pumps)
     tunnel?.close()

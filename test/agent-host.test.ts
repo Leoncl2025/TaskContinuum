@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { once } from 'node:events'
 import { WebSocketServer } from 'ws'
 import { AhpClient } from '@microsoft/agent-host-protocol/client'
+import type { ChatTurnStartedAction } from '@microsoft/agent-host-protocol'
 import { describe, expect, it } from 'vitest'
 import { connectLocalAgentHost, discoverAgentHosts } from '../src/main/agentHostTransport'
 import type { AgentHostEndpoint } from '../src/main/agentHostProtocol'
@@ -14,6 +15,34 @@ import { AgentHostConnection } from '../src/main/agentHostConnection'
 import { startAgentHostFixture } from './agent-host-fixture'
 
 describe('AHP original chat connection', () => {
+  it('retains and clears native model and agent selections without overwriting an owner draft', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-selection-'))
+    const host = await startAgentHostFixture()
+    const target = { hostId: host.hostId, sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+    const connection = new AgentHostConnection(target, root, (signal) => connectLocalAgentHost(host.endpoint, signal))
+    const selection = { model: { id: 'owner-model', config: { reasoningEffort: 'high', contextSize: 128000 } }, agent: { uri: 'file:///fixture/plan.agent.md' } }
+    try {
+      host.draft('Unsaved owner prompt', selection)
+      const original = host.snapshot(host.chatId)
+      await connection.open()
+      await expect(connection.send(randomUUID(), 'Do not replace the draft', undefined, async () => {})).rejects.toThrow('draft')
+      expect(host.snapshot(host.chatId)).toEqual(original)
+      expect(host.dispatches).toHaveLength(0)
+      host.draft('', selection)
+      const id = randomUUID()
+      await connection.send(id, 'Use the owner selections', undefined, async () => {})
+      expect(host.dispatches).toEqual([expect.objectContaining({ type: 'chat/turnStarted', turnId: id, message: expect.objectContaining({ text: 'Use the owner selections', ...selection }) })])
+      host.action({ type: 'chat/turnComplete', turnId: id, duration: 1 })
+      await expect.poll(() => connection.view.chat?.activeTurn).toBeUndefined()
+      host.draft('')
+      await connection.send(randomUUID(), 'Use the owner defaults', undefined, async () => {})
+      const reset = host.dispatches[1] as ChatTurnStartedAction
+      expect(reset.message.agent).toBeUndefined()
+      expect(reset.message.model).toBeUndefined()
+      expect(host.dispatches).toHaveLength(2)
+    } finally { await connection.close(); await host.close(); await rm(root, { recursive: true, force: true }) }
+  })
+
   it('rechecks live state after authorization awaits and does not overwrite a newly started turn', async () => {
     const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-race-'))
     const host = await startAgentHostFixture()

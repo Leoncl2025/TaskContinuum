@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { _electron as electron, expect, test } from '@playwright/test'
@@ -65,6 +66,20 @@ test('links and streams original AHP chats in the sandboxed desktop without a Co
     expect(security.require).toBe('undefined')
     expect(await page!.evaluate(async (value) => { try { await window.agentHost!.watch({ ...value, chatId: 'ahp-chat:/not-linked' }); return false } catch { return true } }, target)).toBe(true)
     expect(fixture.dispatches).toHaveLength(0)
+    await panel.getByRole('textbox', { name: 'Message Agent Host' }).fill('A draft while B is responding')
+    const ownerTurnId = randomUUID()
+    fixture.action({ type: 'chat/turnStarted', turnId: ownerTurnId, startedAt: new Date().toISOString(), message: { text: 'Started in the owner editor', origin: { kind: 'user' } } })
+    fixture.action({ type: 'chat/responsePart', turnId: ownerTurnId, part: { id: 'owner-answer', kind: 'markdown', content: '' } })
+    fixture.action({ type: 'chat/delta', turnId: ownerTurnId, partId: 'owner-answer', content: '## Owner live reply\n\nVisible without a Task Continuum message.' })
+    await expect(panel.getByRole('heading', { name: 'Owner live reply' })).toBeVisible()
+    await expect(panel.getByRole('button', { name: 'Stop Agent Host response' })).toBeEnabled()
+    fixture.action({ type: 'chat/delta', turnId: ownerTurnId, partId: 'owner-answer', content: '\n\nOwner second update.' })
+    await expect(panel.getByText('Owner second update.')).toBeVisible()
+    await expect(panel.getByRole('textbox')).toHaveValue('A draft while B is responding')
+    expect(fixture.dispatches).toHaveLength(0)
+    await page!.screenshot({ path: resolve('artifacts/agent-host-owner-stream.png') })
+    fixture.action({ type: 'chat/turnComplete', turnId: ownerTurnId, duration: 1 })
+    await expect(panel.getByRole('button', { name: 'Stop Agent Host response' })).toHaveCount(0)
     await panel.getByRole('textbox', { name: 'Message Agent Host' }).fill('Continue this exact original chat')
     await panel.getByRole('button', { name: 'Send to Agent Host' }).click()
     await expect.poll(() => fixture.dispatches.length).toBe(1)
@@ -98,6 +113,7 @@ test('links and streams original AHP chats in the sandboxed desktop without a Co
     await launch()
     const restored = page!.getByRole('complementary', { name: 'Agent Host task chat' })
     await expect(restored).toBeVisible()
+    await expect(restored.getByRole('heading', { name: 'Owner live reply' })).toBeVisible()
     await expect(restored.getByText('Streaming before completion')).toBeVisible()
     expect(fixture.dispatches).toHaveLength(1)
     await restored.getByRole('button', { name: 'Detach conversation' }).click()
