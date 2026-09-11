@@ -199,10 +199,15 @@ Remove-Item Env:TASKCONTINUUM_WORKSPACE
 VS Code import is a text-history handoff, not control of an active VS Code Chat process.
 It does not transfer attachments, tool results/state, pending edits, or hidden reasoning.
 Import itself makes no model request and never changes the source file. Legacy JSON
-files are limited to 32 MiB. JSONL histories are replayed one record at a time, with
-a 64 MiB per-record limit and a 256 MiB total journal limit. The most recent
+and JSONL history files have no application-imposed file or record byte limit.
+JSONL is read in chunks and replayed one record at a time. The most recent
 60,000 text characters/500 messages are previewed,
 with truncation and unreadable-source warnings shown explicitly.
+
+Removing history byte limits does not guarantee unlimited memory: each JSONL record
+and legacy JSON file is still assembled and parsed in memory, subject to runtime
+string and memory capacity. Workspace metadata, display/transport payloads, and
+attachments retain their separate validation; source history is never truncated.
 
 To opt into three small authenticated model requests that verify creation, restart
 continuity, and imported context:
@@ -229,7 +234,7 @@ approving tools still happen in VS Code.**
     No CLI sign-in is needed to link or view saved history. If the task already has a
     different link, detach it first; this does not delete the underlying conversation.
 2. Build the companion with `npm run build:vscode-bridge`. Install the resulting
-    `artifacts/taskcontinuum-vscode-bridge-0.5.0.vsix` through VS Code's
+    `artifacts/taskcontinuum-vscode-bridge-0.5.1.vsix` through VS Code's
     **Extensions: Install from VSIX** command. Component details are in
     [vscode-bridge/README.md](vscode-bridge/README.md).
 3. In VS Code, open the conversation's original workspace, which may differ from
@@ -255,17 +260,25 @@ approving tools still happen in VS Code.**
     Bridge**, reloading, or closing the VS Code window ends its delivery service;
     closing the desktop does not cancel the VS Code Agent.
 
+Failed delivery rows offer **Remove failed message from this device**; the panel
+toolbar offers **Clear failed messages from this device**. Removal is a local view
+preference, saved per original session and owner machine across desktop restarts,
+including offline remote views. Only failed receipts are hidden: pending/uncertain
+deliveries still block sending, and native messages and later confirmed outcomes
+remain visible. Draft text/images, B's delivery journal, and deduplication records
+are not deleted or replayed. Other desktops keep their own view preferences.
+This feature needs the rebuilt viewing desktop, not another companion upgrade.
+
 After upgrading the companion, finish active work and reload its VS Code window
 if the old extension is still loaded, then start the bridge again. The desktop
 never reloads VS Code or silently starts a new Agent for you.
 
-Companion 0.4.4 separates the JSONL record bound from the legacy JSON file bound.
-A valid initial conversation snapshot can exceed 32 MiB even when the whole journal
-is well below 256 MiB. A reported failure was a 43.1 MiB first record in a 44.2 MiB
-journal; the repaired reader accepts it without changing the original file or IDs.
-Individual JSONL records are now capped at 64 MiB; total journals remain capped at
-256 MiB and legacy JSON files at 32 MiB. Record streaming, partial-tail handling,
-path validation, saved-history display bounds, and no-replay behavior are unchanged.
+Companion 0.5.1 removes the history byte limits at the user's request, rather than
+replacing them with a larger fixed threshold. Version 0.4.4 had raised the JSONL
+record cap to 64 MiB after a 43.1 MiB initial snapshot failed in a 44.2 MiB journal.
+There is now no application-imposed record, total-journal, or legacy-history file
+size cap. Record streaming, partial-tail handling, path validation, display bounds,
+and no-replay behavior are unchanged. Runtime memory constraints still apply.
 Load the rebuilt source-machine desktop and the updated companion after active work
 ends, then refresh/reconnect the receiving desktop. A failed history can appear as
 an offline cached session even while other sessions on the same device are connected;
@@ -278,13 +291,14 @@ available. Preparation failures retain the desktop draft without a send queue or
 automatic replay. First workspace consent, pairing, and native tool approvals are
 unchanged. Both desktops and B's companion must load the updated build.
 
-The 0.2.6 reader fixes long JSONL conversations disappearing from the session list.
+The 0.2.6 reader fixed long JSONL conversations disappearing from the session list.
 Previously the 32 MiB whole-file import limit also applied to journal discovery and
-original-session reads. It now streams bounded records rather than loading the whole
-journal into a string. List, preview, original history, and the companion use the same
+original-session reads. That release introduced chunked record replay rather than
+loading the whole journal into a string; 0.5.1 also removes its record/file byte caps.
+List, preview, original history, and the companion use the same
 reader. The most recently parsed file revision is reused until its identity, size, or
 timestamps change; caller mutations do not alter the cache. Skipped files include the
-specific limit or format reason. Existing session IDs, bindings, and source files are
+specific read or format error. Existing session IDs, bindings, and source files are
 unchanged. Reopen an older desktop to load the reader; load the updated companion
 after active work ends for the same long-history support in the sending path.
 

@@ -11,9 +11,7 @@ import type { VSCodeChatIdentity } from '../shared/vscodeChat'
 
 type JsonObject = Record<string, unknown>
 const forbiddenKeys = new Set(['__proto__', 'constructor', 'prototype'])
-const maximumFileBytes = 32 * 1024 * 1024
-const maximumJournalRecordBytes = 64 * 1024 * 1024
-const maximumJournalBytes = 256 * 1024 * 1024
+const maximumMetadataBytes = 32 * 1024 * 1024
 
 function object(value: unknown): JsonObject {
   return value !== null && typeof value === 'object' ? value as JsonObject : {}
@@ -126,9 +124,9 @@ export function defaultVSCodeRoots(): string[] {
   return ['Code', 'Code - Insiders'].map((name) => join(config, name, 'User', 'workspaceStorage'))
 }
 
-async function readBounded(file: string): Promise<string> {
+async function readWorkspaceMetadata(file: string): Promise<string> {
   const details = await stat(file)
-  if (!details.isFile() || details.size > maximumFileBytes) throw new Error('Conversation exceeds the 32 MB import limit.')
+  if (!details.isFile() || details.size > maximumMetadataBytes) throw new Error('VS Code workspace metadata exceeds its size limit.')
   return readFile(file, 'utf8')
 }
 
@@ -157,7 +155,6 @@ async function readJournal(file: string, size: number): Promise<VSCodeOriginalSt
         const newline = bytes.indexOf(10, offset)
         const end = newline < 0 ? bytes.length : newline
         recordBytes += end - offset
-        if (recordBytes > maximumJournalRecordBytes) throw new Error('A VS Code journal record exceeds the 64 MiB limit.')
         fragments.push(bytes.subarray(offset, end))
         if (newline < 0) break
         replayRecord(false)
@@ -180,10 +177,9 @@ export class VSCodeSessionStore {
     const info = details ?? await stat(file)
     const journal = file.endsWith('.jsonl')
     if (!info.isFile()) throw new Error('The VS Code history path is not a regular file.')
-    if (info.size > (journal ? maximumJournalBytes : maximumFileBytes)) throw new Error(journal ? 'The VS Code journal exceeds the 256 MiB limit.' : 'Conversation exceeds the 32 MB import limit.')
     const fingerprint = `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`
     if (this.cachedState?.file !== file || this.cachedState.fingerprint !== fingerprint) {
-      const entry = { file, fingerprint, value: journal ? readJournal(file, info.size) : readBounded(file).then((text) => parseVSCodeSession(text, false)) }
+      const entry = { file, fingerprint, value: journal ? readJournal(file, info.size) : readFile(file, 'utf8').then((text) => parseVSCodeSession(text, false)) }
       this.cachedState = entry
       void entry.value.catch(() => { if (this.cachedState === entry) this.cachedState = undefined })
     }
@@ -204,7 +200,7 @@ export class VSCodeSessionStore {
         const base = join(root, workspace.name)
         let workingDirectory: string | undefined
         try {
-          const metadata = object(JSON.parse(await readBounded(join(base, 'workspace.json'))))
+          const metadata = object(JSON.parse(await readWorkspaceMetadata(join(base, 'workspace.json'))))
           if (typeof metadata.folder === 'string' && metadata.folder.startsWith('file:')) workingDirectory = fileURLToPath(metadata.folder)
           else if (typeof metadata.workspace === 'string' && metadata.workspace.startsWith('file:')) workingDirectory = dirname(fileURLToPath(metadata.workspace))
         } catch { workingDirectory = undefined }
@@ -261,7 +257,7 @@ export class VSCodeSessionStore {
     identityFromVSCodeHistory(id)
     let workingDirectory: string | undefined
     try {
-      const metadata = object(JSON.parse(await readBounded(join(entry.root, identity.workspaceStorageId, 'workspace.json'))))
+      const metadata = object(JSON.parse(await readWorkspaceMetadata(join(entry.root, identity.workspaceStorageId, 'workspace.json'))))
       if (typeof metadata.folder === 'string' && metadata.folder.startsWith('file:')) workingDirectory = fileURLToPath(metadata.folder)
       else if (typeof metadata.workspace === 'string' && metadata.workspace.startsWith('file:')) workingDirectory = dirname(fileURLToPath(metadata.workspace))
     } catch { workingDirectory = undefined }

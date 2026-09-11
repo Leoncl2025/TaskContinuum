@@ -7,7 +7,7 @@ CLI Host, import history into another runtime, or create a fork.
 
 ## Prerequisites
 
-- Both desktops run the current Task Continuum build. B has companion 0.5.0 or
+- Both desktops run the current Task Continuum build. B has companion 0.5.1 or
   newer loaded in a trusted, local VS Code 1.136.x or 1.137.x workspace. Verification used
   Windows and VS Code 1.136.1/1.137.0. Remote SSH, WSL, container, and virtual VS Code
   windows on B are not supported; connecting an external desktop to local B is.
@@ -55,7 +55,7 @@ not reopened or moved. Browsing a task and background recovery never open a chat
 send a message. Manual **Open session on B** remains optional and retains its explicit
 confirmation; it opens the exact original without sending anything.
 
-Install the built `artifacts/taskcontinuum-vscode-bridge-0.5.0.vsix` on B using
+Install the built `artifacts/taskcontinuum-vscode-bridge-0.5.1.vsix` on B using
 **Extensions: Install from VSIX**, finish active work, reload the VS Code window,
 and reconnect its Bridge. Both Task Continuum desktops must use the rebuilt app.
 Device policies can renew after Bridge restart; legacy single-session invitations
@@ -89,12 +89,13 @@ sessions even when B omits one from its current authorized/available catalog. Su
 an entry is shown as offline, and its disabled-send state is also labeled read-only;
 that label alone does not prove the owner changed the invitation's access role.
 
-For `A VS Code journal record exceeds the 32 MiB limit`, load the rebuilt Task
-Continuum desktop on B and companion 0.4.4 after active work. It supports single
-JSONL snapshots up to 64 MiB while retaining a 256 MiB total-journal limit. Legacy
-JSON files remain limited to 32 MiB. Refresh/reconnect A so its device catalog is
-updated. The fix does not need a new session, fork, task association, device pairing,
-or permission change. Source history and cached user messages are not deleted.
+For a history error reporting the former 32/64 MiB record or 256 MiB journal limit,
+load the rebuilt Task Continuum desktop on B and companion 0.5.1 after active work.
+This version removes fixed byte limits for source JSONL records/journals and legacy
+JSON histories, without truncating or rewriting them. Parsing still consumes memory
+and remains subject to the runtime's capacity. Display/transport and image limits
+are separate and unchanged. Refresh/reconnect A to update its catalog. No new
+session, fork, task association, device pairing, or permission change is required.
 
 ### Device scope (2026-09-09)
 

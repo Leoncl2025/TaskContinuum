@@ -27,11 +27,27 @@ Replies identify the execution machine; user messages identify their sender.
    also disables automatic restoration for this workspace and cancels unconfirmed
    delivery work, not an already-running Copilot response.
 
-Upgrade earlier versions by installing the 0.5.0 VSIX. An already-loaded extension may
+Upgrade earlier versions by installing the 0.5.1 VSIX. An already-loaded extension may
 need **Developer: Reload Window** before starting the new bridge. Finish active
 work first; the desktop does not reload the VS Code window automatically. Both
 Task Continuum desktops must load the rebuilt app for the readiness protocol. Connection attempts
 retain the current draft and show send-blocking reasons next to the input area.
+
+## History Size (0.5.1)
+
+At the user's request, JSONL records, whole JSONL journals, and legacy JSON history
+files no longer have fixed application byte limits. The former 64 MiB, 256 MiB,
+and 32 MiB gates are removed, not replaced with larger numbers. The reader still
+requires a valid original identity, regular files, supported journal operations,
+safe paths, and valid complete JSON records; only an unfinished final record is
+ignored during an active write. Source histories are never rewritten or truncated.
+
+JSONL reading remains chunked, but each record is assembled and parsed in memory;
+legacy JSON is parsed as one value. Runtime memory and string capacity still apply.
+This is not a streaming JSON-token parser. Display history, workspace metadata,
+network requests, image uploads/storage, and access policies keep their independent
+validation. Load both the source desktop and this companion after active work ends.
+Existing session IDs, device pairing, images, and workspace consent are retained.
 
 ## Image Sending (0.5.0)
 
@@ -58,8 +74,9 @@ load the new build; existing workspace enablement and device grants are retained
 The earlier JSONL reader shared its 32 MiB record limit with legacy JSON files.
 Large native initial snapshots can exceed that bound without exceeding the journal
 limit, causing `A VS Code journal record exceeds the 32 MiB limit` and an omitted
-remote catalog entry. Version 0.4.4 permits individual JSONL records up to 64 MiB;
-the complete journal limit stays 256 MiB and legacy JSON stays 32 MiB.
+remote catalog entry. Version 0.4.4 permitted individual JSONL records up to 64 MiB,
+with 256 MiB journals and 32 MiB legacy JSON. These history byte limits were later
+removed in 0.5.1; this section records the earlier repair.
 
 The reader remains read-only and preserves native identity, incremental updates,
 draft/busy checks, bounded display history, and partial-tail handling. No history
@@ -199,9 +216,10 @@ unchanged layout, and no unintended messages in the other conversation.
 
 ## Previous Updates
 
-Version 0.2.6 reads long JSONL histories record by record instead of rejecting the
-whole file above 32 MiB. The limits are 32 MiB per record and 256 MiB per journal;
-legacy JSON retains its 32 MiB file limit. The reader shares the latest unchanged
+Version 0.2.6 began reading long JSONL histories record by record instead of rejecting
+the whole file above 32 MiB. It retained 32 MiB records, 256 MiB journals, and 32 MiB
+legacy JSON files at that time; 0.5.1 removes these history byte limits.
+The reader shares the latest unchanged
 file revision between repeated requests, and invalidates it on file identity, size,
 or timestamp changes. Source histories remain read-only. Both the desktop and the
 companion must load the updated reader to use a long original conversation. This

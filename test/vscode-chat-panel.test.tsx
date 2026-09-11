@@ -8,7 +8,7 @@ import type { SessionSnapshot } from '../src/shared/sessions'
 import type { VSCodeChatTarget } from '../src/shared/remoteVSCode'
 import type { ChatImageAttachment } from '../src/shared/chatAttachments'
 
-afterEach(() => { delete window.vscodeChat; delete window.desktop })
+afterEach(() => { delete window.vscodeChat; delete window.desktop; localStorage.clear() })
 const identity = { nativeSessionId: 'original', workspaceStorageId: 'a'.repeat(32) }
 
 function fixture() {
@@ -23,6 +23,124 @@ function fixture() {
 }
 
 describe('original VS Code conversation panel', () => {
+  it('removes only failed receipts from this device and remembers them across refresh and remount', async () => {
+    const { bridge, changed } = fixture()
+    const target = { ...identity, remoteMachineName: 'Machine-B' }
+    const failed: VSCodeChatDelivery = { id: crypto.randomUUID(), nativeSessionId: identity.nativeSessionId, text: 'Old failed message', createdAt: '2026-09-07T00:00:00Z', state: 'failed', error: 'No message was sent.', participant: { username: 'Alice', machineName: 'Machine-A' }, execution: { agentName: 'GitHub Copilot', machineName: 'Machine-B' } }
+    const other = { ...failed, id: crypto.randomUUID(), text: 'Another failed message', error: 'Canceled' }
+    const uncertain = { ...failed, id: crypto.randomUUID(), text: 'Uncertain message', state: 'uncertain' as const }
+    const pending = { ...failed, id: crypto.randomUUID(), text: 'Pending message', state: 'pending' as const }
+    const submitted = { ...failed, id: crypto.randomUUID(), text: 'Submitted message', state: 'submitted' as const }
+    const snapshot: VSCodeChatView = { session: { id: 'original', source: 'vscode', title: 'Failures', updatedAt: '' }, messages: [{ id: 'answer', role: 'assistant', text: 'Native answer', status: 'complete' }], connectionState: 'offline', deliveries: [failed, other, uncertain, pending, submitted] }
+    vi.mocked(bridge.read).mockResolvedValue(snapshot)
+    bridge.send = vi.fn()
+    const props = { task: demoTasks[1], identity: target, onDetach: vi.fn(), onClose: vi.fn() }
+    const user = userEvent.setup()
+    const view = render(<VSCodeChatPanel {...props} />)
+    const row = (await screen.findByText(failed.text)).closest('article')!
+    expect(screen.getAllByRole('button', { name: 'Remove failed message from this device' })).toHaveLength(2)
+    await user.type(screen.getByRole('textbox'), 'Keep my current draft')
+    await user.click(within(row).getByRole('button', { name: 'Remove failed message from this device' }))
+    expect(screen.queryByText(failed.text)).not.toBeInTheDocument()
+    expect(screen.getByText(other.text)).toBeInTheDocument()
+    act(() => changed(target))
+    await waitFor(() => expect(bridge.read).toHaveBeenCalledTimes(2))
+    expect(screen.queryByText(failed.text)).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Clear failed messages from this device' }))
+    expect(screen.queryByRole('button', { name: 'Remove failed message from this device' })).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox')).toHaveValue('Keep my current draft')
+    expect(screen.getByRole('button', { name: 'Send to original VS Code session' })).toBeDisabled()
+    expect(snapshot.deliveries).toEqual([failed, other, uncertain, pending, submitted])
+    const key = Object.keys(localStorage).find((key) => key.startsWith('taskcontinuum:vscode-hidden-failures:'))!
+    expect(JSON.parse(localStorage.getItem(key)!)).toEqual([failed.id, other.id])
+    view.unmount()
+    render(<VSCodeChatPanel {...props} />)
+    await screen.findByText('Native answer')
+    expect(screen.queryByText(failed.text)).not.toBeInTheDocument()
+    expect(screen.queryByText(other.text)).not.toBeInTheDocument()
+    for (const receipt of [uncertain, pending, submitted]) expect(screen.getByText(receipt.text)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Clear failed messages from this device' })).not.toBeInTheDocument()
+    expect(bridge.send).not.toHaveBeenCalled()
+    expect(bridge.open).not.toHaveBeenCalled()
+    expect(props.onDetach).not.toHaveBeenCalled()
+  })
+
+  it('removes a current failed receipt and its alert without deleting or replaying the draft', async () => {
+    const { bridge } = fixture()
+    vi.mocked(bridge.read).mockResolvedValue({ session: { id: 'original', source: 'vscode', title: 'Failures', updatedAt: '' }, messages: [], connectionState: 'connected', canSend: true })
+    bridge.send = vi.fn(async (_target, id, text): Promise<VSCodeChatDelivery> => ({ id, text, nativeSessionId: identity.nativeSessionId, state: 'failed', createdAt: new Date().toISOString(), error: 'The original conversation is not open. No message was sent.', participant: { username: 'Alice', machineName: 'Machine-A' }, execution: { agentName: 'GitHub Copilot', machineName: 'Machine-B' } }))
+    const user = userEvent.setup()
+    render(<VSCodeChatPanel task={demoTasks[1]} identity={identity} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByText('Failures')
+    await user.type(screen.getByRole('textbox'), 'Keep this unsent message')
+    await user.click(screen.getByRole('button', { name: 'Send to original VS Code session' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('No message was sent.')
+    await user.click(screen.getByRole('button', { name: 'Remove failed message from this device' }))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox')).toHaveValue('Keep this unsent message')
+    expect(bridge.send).toHaveBeenCalledOnce()
+    expect(bridge.open).not.toHaveBeenCalled()
+  })
+
+  it('scopes removals to the original owner and session and never hides later accepted history', async () => {
+    const { bridge, changed } = fixture()
+    const target = { ...identity, remoteMachineName: 'Machine-B' }
+    const failed: VSCodeChatDelivery = { id: crypto.randomUUID(), nativeSessionId: identity.nativeSessionId, text: 'Same receipt', createdAt: '2026-09-07T00:00:00Z', state: 'failed', error: 'Canceled', participant: { username: 'Alice', machineName: 'Machine-A' }, execution: { agentName: 'GitHub Copilot', machineName: 'Machine-B' } }
+    const snapshot: VSCodeChatView = { session: { id: 'original', source: 'vscode', title: 'Failures', updatedAt: '' }, messages: [], deliveries: [failed] }
+    vi.mocked(bridge.read).mockResolvedValue(snapshot)
+    bridge.send = vi.fn()
+    const props = { task: demoTasks[1], onDetach: vi.fn(), onClose: vi.fn() }
+    const user = userEvent.setup()
+    const view = render(<VSCodeChatPanel {...props} identity={target} />)
+    await user.click(await screen.findByRole('button', { name: 'Remove failed message from this device' }))
+    for (const other of [{ ...target, nativeSessionId: 'other' }, { ...target, workspaceStorageId: 'b'.repeat(32) }, { ...target, remoteMachineName: 'Machine-C' }, identity]) {
+      view.rerender(<VSCodeChatPanel {...props} identity={other} />)
+      await screen.findByText(failed.text)
+      expect(screen.getByRole('button', { name: 'Remove failed message from this device' })).toBeEnabled()
+    }
+    view.rerender(<VSCodeChatPanel {...props} identity={{ ...target, remoteMachineName: 'machine-b' }} />)
+    await waitFor(() => expect(screen.queryByText(failed.text)).not.toBeInTheDocument())
+    vi.mocked(bridge.read).mockResolvedValue({ ...snapshot, deliveries: [{ ...failed, state: 'submitted' }] })
+    act(() => changed(target))
+    await screen.findByText(failed.text)
+    expect(screen.queryByRole('button', { name: 'Remove failed message from this device' })).not.toBeInTheDocument()
+    vi.mocked(bridge.read).mockResolvedValue({ ...snapshot, deliveries: [{ ...failed, state: 'submitted', nativeRequestId: 'saved-request' }, { ...failed, id: crypto.randomUUID(), text: 'New failure' }], messages: [{ id: 'saved', nativeRequestId: 'saved-request', role: 'user', text: 'Accepted native message', status: 'complete' }] })
+    act(() => changed(target))
+    await screen.findByText('Accepted native message')
+    expect(screen.getByText('New failure')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Remove failed message from this device' })).toHaveLength(1)
+    expect(bridge.send).not.toHaveBeenCalled()
+    expect(bridge.open).not.toHaveBeenCalled()
+  })
+
+  it('handles invalid preferences and reports when removal cannot persist without hiding read errors', async () => {
+    const { bridge, changed } = fixture()
+    const failed: VSCodeChatDelivery = { id: crypto.randomUUID(), nativeSessionId: identity.nativeSessionId, text: 'Old failure', createdAt: '2026-09-07T00:00:00Z', state: 'failed', participant: { username: 'Alice', machineName: 'A' }, execution: { agentName: 'GitHub Copilot', machineName: 'B' } }
+    localStorage.setItem(`taskcontinuum:vscode-hidden-failures:v1:${JSON.stringify(['', identity.workspaceStorageId, identity.nativeSessionId])}`, '{invalid')
+    vi.mocked(bridge.read).mockResolvedValue({ session: { id: 'original', source: 'vscode', title: 'Failures', updatedAt: '' }, messages: [], deliveries: [failed] })
+    bridge.send = vi.fn()
+    const props = { task: demoTasks[1], identity, onDetach: vi.fn(), onClose: vi.fn() }
+    const user = userEvent.setup()
+    const view = render(<VSCodeChatPanel {...props} />)
+    await screen.findByText(failed.text)
+    vi.mocked(bridge.read).mockRejectedValueOnce(new Error('History is temporarily unavailable.'))
+    act(() => changed())
+    const readError = await screen.findByRole('alert')
+    expect(readError).toHaveTextContent('History is temporarily unavailable.')
+    const save = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('Storage unavailable') })
+    try {
+      await user.click(screen.getByRole('button', { name: 'Clear failed messages from this device' }))
+      expect(screen.queryByText(failed.text)).not.toBeInTheDocument()
+      expect(readError).toHaveTextContent('History is temporarily unavailable.')
+      expect(screen.getByText('Failed messages were removed from this view, but the change could not be saved on this device.')).toBeInTheDocument()
+    } finally { save.mockRestore() }
+    view.unmount()
+    render(<VSCodeChatPanel {...props} />)
+    await screen.findByText(failed.text)
+    expect(bridge.send).not.toHaveBeenCalled()
+    expect(bridge.open).not.toHaveBeenCalled()
+  })
+
   it('pastes, previews, removes and retries image-only drafts without losing their bytes', async () => {
     const { bridge, changed } = fixture()
     vi.mocked(bridge.read).mockResolvedValue({ session: { id: 'original', source: 'vscode', title: 'Images', updatedAt: '' }, messages: [], connectionState: 'connected', canSend: true })
@@ -58,6 +176,9 @@ describe('original VS Code conversation panel', () => {
     act(() => changed())
     await screen.findByRole('button', { name: `Remove ${file.name}` })
     expect(screen.getByRole('alert')).toHaveTextContent('Native draft blocked delivery')
+    await user.click(screen.getByRole('button', { name: 'Remove failed message from this device' }))
+    expect(screen.getByRole('button', { name: `Remove ${file.name}` })).toBeEnabled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(bridge.send).toHaveBeenCalledTimes(2)
   })
 

@@ -9,12 +9,20 @@ import { useChatImageInput } from '../chat/useChatImageInput'
 import type { ChatImageAttachment } from '../../shared/chatAttachments'
 import { sameChatImages } from '../../shared/chatAttachments'
 
+function readHiddenFailures(key: string): Set<string> {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(key) ?? '[]')
+    return new Set(Array.isArray(saved) ? saved.filter((id): id is string => typeof id === 'string') : [])
+  } catch { return new Set() }
+}
+
 export function VSCodeChatPanel({ task, identity, onDetach, onClose, onRemoteAccess, onRemoteConnections }: { task: TaskRecord; identity: VSCodeChatTarget; onDetach(): void; onClose(): void; onRemoteAccess?(): void; onRemoteConnections?(): void }) {
   const bridge = window.vscodeChat
   const sendStatusId = useId()
   const [snapshot, setSnapshot] = useState<VSCodeChatView>()
-  const [error, setError] = useState<string>()
+  const [error, setError] = useState<{ message: string; deliveryId?: string }>()
   const [readError, setReadError] = useState<string>()
+  const [removalError, setRemovalError] = useState<string>()
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState('')
   const [images, setImages] = useState<ChatImageAttachment[]>([])
@@ -28,6 +36,9 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose, onRemoteAcc
   const followBottom = useRef(true)
   const log = useRef<HTMLDivElement>(null)
   const { nativeSessionId, workspaceStorageId, remoteMachineName } = identity
+  const failureKey = `taskcontinuum:vscode-hidden-failures:v1:${JSON.stringify([remoteMachineName?.toLowerCase() ?? '', workspaceStorageId, nativeSessionId])}`
+  const [hiddenFailures, setHiddenFailures] = useState(() => ({ key: failureKey, ids: readHiddenFailures(failureKey) }))
+  const hiddenFailureIds = hiddenFailures.key === failureKey ? hiddenFailures.ids : readHiddenFailures(failureKey)
   const imageInput = useChatImageInput(`${remoteMachineName ?? ''}:${workspaceStorageId}:${nativeSessionId}`, images, setImages, busy)
   useEffect(() => {
     let active = true
@@ -60,7 +71,7 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose, onRemoteAcc
       await bridge.connect(identity)
       setRevision((current) => current + 1)
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : 'The VS Code connection could not be started.')
+      setError({ message: failure instanceof Error ? failure.message : 'The VS Code connection could not be started.' })
     } finally { operating.current = false; setBusy(false) }
   }
 
@@ -70,7 +81,7 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose, onRemoteAcc
     setBusy(true)
     setError(undefined)
     try { await bridge.open(identity); setRevision((current) => current + 1) } catch (failure) {
-      setError(failure instanceof Error ? failure.message : 'The original VS Code conversation could not be opened.')
+      setError({ message: failure instanceof Error ? failure.message : 'The original VS Code conversation could not be opened.' })
     } finally { operating.current = false; setBusy(false) }
   }
 
@@ -87,7 +98,9 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose, onRemoteAcc
         : !snapshot.canSend ? 'The original conversation is not ready for sending.' : undefined)
   const messages = snapshot?.messages ?? []
   const recordedRequests = new Set(messages.flatMap((message) => message.nativeRequestId ? [message.nativeRequestId] : []))
-  const outstanding = deliveries.filter((delivery) => !delivery.nativeRequestId || !recordedRequests.has(delivery.nativeRequestId))
+  const outstanding = deliveries.filter((delivery) => (!delivery.nativeRequestId || !recordedRequests.has(delivery.nativeRequestId))
+    && (delivery.state !== 'failed' || !hiddenFailureIds.has(delivery.id)))
+  const failedDeliveries = outstanding.filter((delivery) => delivery.state === 'failed')
   const lastDelivery = deliveries.at(-1)
   const execution = snapshot?.execution ?? lastDelivery?.execution
   const participant = snapshot?.participant ?? lastDelivery?.participant
@@ -96,17 +109,29 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose, onRemoteAcc
     if (followBottom.current && log.current) log.current.scrollTop = log.current.scrollHeight
   }, [snapshot, receipt])
 
+  function removeFailed(candidates: VSCodeChatDelivery[]): void {
+    const removed = new Set(candidates.filter((delivery) => delivery.state === 'failed').map((delivery) => delivery.id))
+    if (!removed.size) return
+    const ids = new Set([...readHiddenFailures(failureKey), ...hiddenFailureIds, ...removed])
+    setHiddenFailures({ key: failureKey, ids })
+    setError((current) => current?.deliveryId && removed.has(current.deliveryId) ? undefined : current)
+    setRemovalError(undefined)
+    try { localStorage.setItem(failureKey, JSON.stringify([...ids])) } catch {
+      setRemovalError('Failed messages were removed from this view, but the change could not be saved on this device.')
+    }
+  }
+
   const recoverDraft = useEffectEvent((command: { text: string; images: ChatImageAttachment[] }, failure: VSCodeChatDelivery) => {
     if (!draft && !images.length) { setDraft(command.text); setImages(command.images) }
-    setError(failure.error ?? 'The original session rejected the message. Your unsent message remains in the conversation.')
+    setError({ message: failure.error ?? 'The original session rejected the message. Your unsent message remains in the conversation.', deliveryId: failure.id })
   })
   useEffect(() => {
     const command = lastAccepted.current
     const failure = snapshot?.deliveries?.find((delivery) => delivery.id === command?.id && delivery.state === 'failed')
-    if (!command || !failure || recovered.current === command.id) return
+    if (!command || !failure || recovered.current === command.id || hiddenFailureIds.has(command.id)) return
     recovered.current = command.id
     recoverDraft(command, failure)
-  }, [snapshot])
+  }, [snapshot, hiddenFailureIds])
 
   async function send(): Promise<void> {
     const text = draft.trim()
@@ -120,7 +145,7 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose, onRemoteAcc
       const result = await (command.images.length ? bridge.send(identity, command.id, command.text, command.images) : bridge.send(identity, command.id, command.text))
       setReceipt(result)
       pending.current = undefined
-      if (result.state === 'failed' || result.state === 'uncertain') { setError(result.error ?? 'The message was not confirmed. Your draft has been retained.'); setRevision((current) => current + 1); return }
+      if (result.state === 'failed' || result.state === 'uncertain') { setError({ message: result.error ?? 'The message was not confirmed. Your draft has been retained.', deliveryId: result.id }); setRevision((current) => current + 1); return }
       lastAccepted.current = command
       setDraft((current) => current.trim() === text ? '' : current)
       setImages((current) => current.filter((image) => !command.images.some((sent) => sent.id === image.id)))
@@ -128,21 +153,22 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose, onRemoteAcc
       followBottom.current = true
       setRevision((current) => current + 1)
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : 'The message could not be submitted. Retry uses the same message ID.')
+      setError({ message: failure instanceof Error ? failure.message : 'The message could not be submitted. Retry uses the same message ID.', deliveryId: command.id })
     } finally { operating.current = false; setBusy(false) }
   }
 
   return <aside className="chat-panel" aria-label="VS Code task chat">
-    <header className="panel-header"><span>{remoteMachineName ? 'REMOTE VS CODE' : 'VS CODE CHAT'}</span><div className="header-actions">{onRemoteAccess && !remoteMachineName && <IconButton icon="broadcast" label="Share original conversation remotely" disabled={busy || snapshot?.connectionState !== 'connected'} onClick={onRemoteAccess} />}{onRemoteConnections && remoteMachineName && <IconButton icon="remote" label="Manage remote VS Code connection" disabled={busy} onClick={onRemoteConnections} />}<IconButton icon="refresh" label="Refresh original conversation" disabled={busy} onClick={() => setRevision((value) => value + 1)} /><IconButton icon="debug-disconnect" label="Detach conversation" disabled={busy} onClick={onDetach} /><IconButton icon="layout-sidebar-right-off" label="Hide chat panel" onClick={onClose} /></div></header>
+    <header className="panel-header"><span>{remoteMachineName ? 'REMOTE VS CODE' : 'VS CODE CHAT'}</span><div className="header-actions">{failedDeliveries.length > 0 && <IconButton icon="clear-all" label="Clear failed messages from this device" onClick={() => removeFailed(failedDeliveries)} />}{onRemoteAccess && !remoteMachineName && <IconButton icon="broadcast" label="Share original conversation remotely" disabled={busy || snapshot?.connectionState !== 'connected'} onClick={onRemoteAccess} />}{onRemoteConnections && remoteMachineName && <IconButton icon="remote" label="Manage remote VS Code connection" disabled={busy} onClick={onRemoteConnections} />}<IconButton icon="refresh" label="Refresh original conversation" disabled={busy} onClick={() => setRevision((value) => value + 1)} /><IconButton icon="debug-disconnect" label="Detach conversation" disabled={busy} onClick={onDetach} /><IconButton icon="layout-sidebar-right-off" label="Hide chat panel" onClick={onClose} /></div></header>
     <div className="chat-context"><Icon name="vscode" /><div><strong>{snapshot?.session.title ?? 'GitHub Copilot in VS Code'}</strong><span title={nativeSessionId}>{nativeSessionId}</span></div><span className="context-badge">{task.id}</span></div>
     <div className="session-toolbar"><span className="session-connection-state">{busy ? 'Preparing session...' : snapshot?.connectionState === 'offline' || remoteMachineName && !snapshot ? 'Not connected' : snapshot?.connectionState === 'unsupported' ? 'Bridge update required' : snapshot?.responding ? 'Agent responding' : waiting ? 'Delivery pending' : needsOpen && !canPrepare ? 'Session not open' : 'Original session'}</span><div className="header-actions">{bridge?.connect && snapshot?.connectionState !== 'connected' && !snapshot?.canSend && <button type="button" className="text-button" disabled={busy || !snapshot && !remoteMachineName} onClick={() => { void connect() }}><Icon name="plug" />{remoteMachineName ? 'Connect SSH' : 'Connect VS Code'}</button>}{!remoteMachineName && <IconButton icon="link-external" label="Open in VS Code" disabled={busy || !bridge} onClick={() => { void open() }} />}</div></div>
     <div className="vscode-execution-identity"><Icon name="server" /><span>{executionName}</span>{remoteMachineName && <IconButton icon="link-external" label={`Open session on ${remoteMachineName}`} disabled={busy || waiting || snapshot?.connectionState !== 'connected' || snapshot?.canOpenRemote !== true} onClick={() => { void open() }} />}</div>
-    {(error || readError) && <p className="copilot-error vscode-chat-notice" role="alert">{error ?? readError}</p>}
+    {(error || readError) && <p className="copilot-error vscode-chat-notice" role="alert">{error?.message ?? readError}</p>}
+    {removalError && <p className="copilot-error vscode-chat-notice" role="alert">{removalError}</p>}
     {snapshot?.bridgeError && !readError && !bridge?.send && <p className="vscode-chat-notice muted" role="status">{snapshot.bridgeError}</p>}
     <div className="chat-log" ref={log} role="log" aria-label={`Original conversation for ${task.id}`} aria-live="polite" onScroll={() => { if (log.current) followBottom.current = log.current.scrollHeight - log.current.scrollTop - log.current.clientHeight < 60 }}>
       {!snapshot && !readError && <p className="muted">Loading saved history...</p>}
       {messages.map((message) => <article key={message.id} className={`message message-${message.role}`} data-request-id={message.nativeRequestId}><header><Icon name={message.role === 'user' ? 'account' : 'copilot'} /><strong>{message.author?.name ?? (message.role === 'user' ? 'Unknown user' : 'GitHub Copilot')}{message.role === 'assistant' ? ` @ ${message.author?.machineName ?? 'unknown machine'}` : ''}</strong>{message.role === 'user' && message.author?.machineName && <span className="message-model">{message.author.machineName}</span>}</header>{message.role === 'assistant' ? <ChatMarkdown source={message.text} /> : <div className="message-text">{message.text}</div>}<ChatImages images={message.images?.map((image) => sentImages.find((sent) => sent.id === image.id) ?? image)} />{message.status === 'streaming' && <p className="message-notice">Responding in VS Code</p>}{message.status === 'cancelled' && <p className="message-notice">Stopped in VS Code</p>}{message.status === 'error' && <p className="message-notice error">VS Code reported a response error</p>}</article>)}
-      {outstanding.map((delivery) => <article key={delivery.id} className="message message-user" data-delivery-id={delivery.id}><header><Icon name="account" /><strong>{delivery.participant.username}</strong><span className="message-model">{delivery.participant.machineName}</span></header><div className="message-text">{delivery.text}</div><ChatImages images={delivery.images?.map((image) => sentImages.find((sent) => sent.id === image.id) ?? image)} /><p className={`message-notice ${delivery.state === 'failed' ? 'error' : ''}`}>{delivery.state === 'pending' ? 'Delivering to the original VS Code session' : delivery.state === 'submitted' ? `Submitted to ${delivery.execution.agentName} @ ${delivery.execution.machineName}` : delivery.error ?? 'Delivery has not been confirmed'}</p></article>)}
+      {outstanding.map((delivery) => <article key={delivery.id} className="message message-user" data-delivery-id={delivery.id}><header><Icon name="account" /><strong>{delivery.participant.username}</strong><span className="message-model">{delivery.participant.machineName}</span>{delivery.state === 'failed' && <IconButton icon="trash" label="Remove failed message from this device" onClick={() => removeFailed([delivery])} />}</header><div className="message-text">{delivery.text}</div><ChatImages images={delivery.images?.map((image) => sentImages.find((sent) => sent.id === image.id) ?? image)} /><p className={`message-notice ${delivery.state === 'failed' ? 'error' : ''}`}>{delivery.state === 'pending' ? 'Delivering to the original VS Code session' : delivery.state === 'submitted' ? `Submitted to ${delivery.execution.agentName} @ ${delivery.execution.machineName}` : delivery.error ?? 'Delivery has not been confirmed'}</p></article>)}
     </div>
     {bridge?.send && <form className="composer-area" onSubmit={(event) => { event.preventDefault(); void send() }}>
       {sendBlockedReason && <p id={sendStatusId} className="vscode-chat-notice muted" role="status">{sendBlockedReason}</p>}

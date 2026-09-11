@@ -1,4 +1,4 @@
-import { appendFile, mkdtemp, mkdir, readFile, rm, truncate, utimes, writeFile } from 'node:fs/promises'
+import { appendFile, mkdtemp, mkdir, open, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -126,7 +126,7 @@ describe('VS Code conversation import', () => {
     expect(await readFile(file, 'utf8')).toBe(source)
   })
 
-  it('reads a large initial snapshot and subsequent updates without changing the original identity', async () => {
+  it('reads a snapshot beyond the former 64 MiB record cap without changing its identity', async () => {
     const root = await mkdtemp(join(tmpdir(), 'taskcontinuum-large-snapshot-'))
     directories.push(root)
     const identity = { nativeSessionId: 'large-snapshot', workspaceStorageId: 'a'.repeat(32) }
@@ -137,12 +137,11 @@ describe('VS Code conversation import', () => {
       customTitle: 'Forked large snapshot', requesterUsername: 'Alice', responderUsername: 'GitHub Copilot',
       inputState: { mode: { id: 'agent', kind: 'agent' }, inputText: '' },
       requests: [{ requestId: 'snapshot-request', message: { text: 'Original question' }, result: {}, response: [
-        { kind: 'toolInvocation', value: 'x'.repeat(44 * 1024 * 1024) },
+        { kind: 'toolInvocation', value: 'x'.repeat(66 * 1024 * 1024) },
         { kind: 'markdownContent', content: { value: 'Saved answer' } },
       ] }],
     } }])
-    expect(Buffer.byteLength(initial)).toBeGreaterThan(32 * 1024 * 1024)
-    expect(Buffer.byteLength(initial)).toBeLessThan(64 * 1024 * 1024)
+    expect(Buffer.byteLength(initial)).toBeGreaterThan(64 * 1024 * 1024)
     const source = initial + journal([
       { kind: 2, k: ['requests', 0, 'response', 1, 'content', 'value'], v: ' with a later update' },
       { kind: 1, k: ['inputState', 'inputText'], v: 'An unsent draft' },
@@ -211,24 +210,53 @@ describe('VS Code conversation import', () => {
     expect((await store.list()).sessions).toEqual([])
   })
 
-  it('keeps explicit bounds for individual records, total journals, and legacy JSON files', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'taskcontinuum-bounded-original-'))
+  it('reads a journal beyond the former 256 MiB total cap and preserves the final state', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'taskcontinuum-unlimited-journal-'))
     directories.push(root)
     const identity = { nativeSessionId: 'original', workspaceStorageId: 'a'.repeat(32) }
     const directory = join(root, identity.workspaceStorageId, 'chatSessions')
     await mkdir(directory, { recursive: true })
-    const journalFile = join(directory, 'original.jsonl')
-    await writeFile(journalFile, Buffer.alloc(64 * 1024 * 1024 + 1, 32))
+    const file = join(directory, 'original.jsonl')
+    const initial = journal([{ kind: 0, v: { requests: [{ requestId: 'kept-request', message: 'Keep the whole history', response: [] }] } }])
+    const progress = journal([{ kind: 1, k: ['requests', 0, 'response'], v: [{ kind: 'toolInvocation', value: 'x'.repeat(1024 * 1024) }] }])
+    const latest = journal([
+      { kind: 1, k: ['requests', 0, 'response'], v: [{ value: 'Final answer after all updates' }] },
+      { kind: 1, k: ['requests', 0, 'result'], v: {} },
+    ])
+    const writer = await open(file, 'w')
+    try {
+      await writer.writeFile(initial)
+      for (let count = 0; count < 257; count++) await writer.writeFile(progress)
+      await writer.writeFile(latest)
+    } finally { await writer.close() }
+    const before = await stat(file)
+    expect(before.size).toBeGreaterThan(256 * 1024 * 1024)
     const store = new VSCodeSessionStore([root])
-    await expect(store.locateOriginal(identity)).rejects.toThrow('journal record exceeds the 64 MiB limit')
-    expect((await store.list()).warnings[0]).toContain('journal record exceeds the 64 MiB limit')
-    await truncate(journalFile, 256 * 1024 * 1024 + 1)
-    await expect(store.locateOriginal(identity)).rejects.toThrow('journal exceeds the 256 MiB limit')
-    expect((await store.list()).warnings[0]).toContain('journal exceeds the 256 MiB limit')
-    await rm(journalFile)
-    const jsonFile = join(directory, 'original.json')
-    await writeFile(jsonFile, '{}')
-    await truncate(jsonFile, 32 * 1024 * 1024 + 1)
-    await expect(store.locateOriginal(identity)).rejects.toThrow('32 MB import limit')
+    const original = await store.locateOriginal(identity)
+    expect(original.snapshot.messages.map((message) => message.text)).toEqual(['Keep the whole history', 'Final answer after all updates'])
+    expect(original.state.turns).toEqual([{ id: 'kept-request', prompt: 'Keep the whole history', complete: true, cancelled: false }])
+    expect((await store.list()).warnings).toEqual([])
+    expect(await stat(file)).toMatchObject({ size: before.size, mtimeMs: before.mtimeMs })
+  }, 15000)
+
+  it('reads legacy JSON beyond the former 32 MiB file cap without hiding valid history', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'taskcontinuum-unlimited-legacy-'))
+    directories.push(root)
+    const identity = { nativeSessionId: 'original', workspaceStorageId: 'a'.repeat(32) }
+    const directory = join(root, identity.workspaceStorageId, 'chatSessions')
+    await mkdir(directory, { recursive: true })
+    const file = join(directory, 'original.json')
+    const source = JSON.stringify({ customTitle: 'Large legacy history', padding: 'x'.repeat(34 * 1024 * 1024),
+      requests: [{ requestId: 'legacy-request', message: 'Legacy question', response: [{ value: 'Legacy answer' }], result: {} }],
+    })
+    await writeFile(file, source)
+    expect(Buffer.byteLength(source)).toBeGreaterThan(32 * 1024 * 1024)
+    const store = new VSCodeSessionStore([root])
+    const listing = await store.list()
+    expect(listing.warnings).toEqual([])
+    expect(listing.sessions).toHaveLength(1)
+    expect((await store.read(listing.sessions[0].id)).messages.map((message) => message.text)).toEqual(['Legacy question', 'Legacy answer'])
+    expect((await store.locateOriginal(identity)).state.turns[0]).toMatchObject({ id: 'legacy-request', complete: true })
+    expect(await readFile(file, 'utf8')).toBe(source)
   })
 })

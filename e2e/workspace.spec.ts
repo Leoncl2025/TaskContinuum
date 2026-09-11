@@ -7,6 +7,7 @@ import { _electron as electron, expect, test } from '@playwright/test'
 import type { ElectronApplication, Page } from '@playwright/test'
 import { startVSCodeChatCompanion } from '../src/main/vscodeChatCompanion'
 import { vsCodeBridgeConnectUri, vsCodeChatResource } from '../src/shared/vscodeChat'
+import type { VSCodeChatDelivery } from '../src/shared/vscodeChat'
 import { deliveryPrompt } from '../src/main/vscodeChatDelivery'
 
 let app: ElectronApplication
@@ -251,10 +252,10 @@ test('links an original VS Code conversation with long history without import an
     '| Session | Agent | Machine | Participant | State | Workspace | Source | Result |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| Original | Copilot | Machine-B | Alice | Idle | Tasks | VS Code | Ready |',
     `\`\`\`ts\n${code}\`\`\``, '[Documentation](https://example.invalid/docs)', '![Blocked image](https://example.invalid/tracking.png)', 'Existing original answer',
   ].join('\n\n')
-  const initial = JSON.stringify({ kind: 0, v: { customTitle: 'Original VS Code link fixture', requests: [{ message: { text: 'Existing original question' }, response: [{ kind: 'toolInvocation', value: 'x'.repeat(44 * 1024 * 1024) }] }] } }) + '\n'
-  expect(Buffer.byteLength(initial)).toBeGreaterThan(32 * 1024 * 1024)
+  const initial = JSON.stringify({ kind: 0, v: { customTitle: 'Original VS Code link fixture', requests: [{ message: { text: 'Existing original question' }, response: [{ kind: 'toolInvocation', value: 'x'.repeat(66 * 1024 * 1024) }] }] } }) + '\n'
+  expect(Buffer.byteLength(initial)).toBeGreaterThan(64 * 1024 * 1024)
   const source = initial + progress.repeat(4) + JSON.stringify({ kind: 1, k: ['requests', 0, 'response'], v: [{ value: markdown }] }) + '\n'
-  expect(Buffer.byteLength(source)).toBeGreaterThan(32 * 1024 * 1024)
+  expect(Buffer.byteLength(source)).toBeGreaterThan(64 * 1024 * 1024)
   await writeFile(sourceFile, source)
   let opened: string | undefined
   const companion = await startVSCodeChatCompanion({
@@ -266,6 +267,7 @@ test('links an original VS Code conversation with long history without import an
   const linkFile = join(firstRoot, '.taskcontinuum', 'session-bindings.json')
   try {
     await selectFolder(firstRoot)
+    await expect(page.getByRole('heading', { level: 1, name: 'Real workspace task' })).toBeVisible()
     const surface = await page.evaluate(() => Object.keys(window.vscodeChat!).sort())
     expect(surface).toEqual(['connect', 'onChange', 'open', 'read', 'send', 'watch'])
     await page.getByRole('button', { name: 'Sessions', exact: true }).click()
@@ -338,6 +340,86 @@ test('links an original VS Code conversation with long history without import an
     expect(await readFile(taskFile, 'utf8')).toBe(originalTask)
     expect(await readFile(sourceFile, 'utf8')).toBe(source + appended)
     expect((await readdir(directory)).filter((file) => /\.jsonl?$/.test(file))).toEqual([`${nativeSessionId}.jsonl`])
+  } finally { await companion.close(); await rm(sourceFile, { force: true }) }
+})
+
+test('removes failed VS Code messages on this device without altering native history or delivery receipts', async () => {
+  const nativeSessionId = randomUUID()
+  const workspaceStorageId = 'c'.repeat(32)
+  const storageRoot = join(environment.TASKCONTINUUM_VSCODE_USER_DATA_DIR, 'User', 'workspaceStorage')
+  const directory = join(storageRoot, workspaceStorageId, 'chatSessions')
+  const bridgeDirectory = join(storageRoot, workspaceStorageId, 'taskcontinuum.vscode-bridge')
+  await mkdir(directory, { recursive: true })
+  await mkdir(bridgeDirectory, { recursive: true })
+  const sourceFile = join(directory, `${nativeSessionId}.jsonl`)
+  const source = JSON.stringify({ kind: 0, v: { customTitle: 'Failed message removal fixture', requests: [{ requestId: 'saved', message: 'Saved original question', response: [{ value: 'Saved original answer' }], result: {} }] } }) + '\n'
+  await writeFile(sourceFile, source)
+  const first: VSCodeChatDelivery = { id: randomUUID(), nativeSessionId, text: 'Earlier message that was not sent', createdAt: '2026-09-07T00:00:00Z', state: 'failed', error: 'The linked original conversation is not open in VS Code. No message was sent.', participant: { username: 'Alice', machineName: 'CLIENT-WORKSTATION-WITH-A-LONG-NAME' }, execution: { agentName: 'GitHub Copilot', machineName: 'Machine-B' } }
+  const second: VSCodeChatDelivery = { ...first, id: randomUUID(), text: 'Canceled delivery', error: 'Canceled' }
+  const uncertain: VSCodeChatDelivery = { ...first, id: randomUUID(), text: 'Unconfirmed message', state: 'uncertain', error: 'Delivery outcome is unknown. No automatic replay.' }
+  const receipts = JSON.stringify([first, second, uncertain])
+  const receiptFile = join(bridgeDirectory, 'deliveries.json')
+  await writeFile(receiptFile, receipts)
+  let opened = 0
+  let sent = 0
+  const companion = await startVSCodeChatCompanion({
+    storageRoot, workspaceStorageId, discoveryDirectory: join(bridgeDirectory, 'bridges'), vscodeVersion: '1.136.1',
+    open: async () => { opened++ }, dispatch: async () => { sent++; return { state: 'failed', error: 'No test message should be sent.' } },
+  })
+  try {
+    await selectFolder(firstRoot)
+    await expect(page.getByRole('heading', { level: 1, name: 'Real workspace task' })).toBeVisible()
+    await page.getByRole('button', { name: 'Sessions', exact: true }).click()
+    await page.getByRole('button', { name: 'Preview Failed message removal fixture' }).click()
+    await page.getByRole('button', { name: 'Link to current task' }).click()
+    const panel = page.getByRole('complementary', { name: 'VS Code task chat' })
+    await expect(panel.getByRole('button', { name: 'Remove failed message from this device' })).toHaveCount(2)
+    await page.getByRole('separator', { name: 'Resize Chat' }).press('Home')
+    const firstRow = panel.locator(`[data-delivery-id="${first.id}"]`)
+    const remove = firstRow.getByRole('button', { name: 'Remove failed message from this device' })
+    await remove.scrollIntoViewIfNeeded()
+    await expect(remove).toBeInViewport()
+    expect(await remove.evaluate((element) => element.getBoundingClientRect().width)).toBe(26)
+    expect(await firstRow.locator('header strong').evaluate((element) => { const range = document.createRange(); range.selectNodeContents(element); return range.getClientRects().length })).toBe(1)
+    expect(await panel.evaluate((element) => element.scrollWidth - element.clientWidth)).toBe(0)
+    await page.screenshot({ path: resolve('artifacts/vscode-failed-messages-desktop.png') })
+    await panel.getByRole('textbox').fill('Preserve this unsent draft')
+    await remove.click()
+    await expect(firstRow).toHaveCount(0)
+    await expect(panel.getByRole('textbox')).toHaveValue('Preserve this unsent draft')
+    await panel.getByRole('button', { name: 'Refresh original conversation' }).click()
+    await expect(firstRow).toHaveCount(0)
+    await expect(panel.locator(`[data-delivery-id="${second.id}"]`)).toBeVisible()
+    await app.close()
+    await launch()
+    const restored = page.getByRole('complementary', { name: 'VS Code task chat' })
+    await expect(restored.getByText(second.text, { exact: true })).toBeVisible()
+    await expect(restored.locator(`[data-delivery-id="${first.id}"]`)).toHaveCount(0)
+    await app.evaluate(({ BrowserWindow }) => { const window = BrowserWindow.getAllWindows()[0]; window.setMinimumSize(380, 600); window.setSize(420, 760) })
+    await expect(page.locator('.workbench')).toHaveAttribute('data-compact', 'true')
+    if (!await restored.isVisible()) await page.getByRole('button', { name: 'Toggle chat panel' }).click()
+    const clear = restored.getByRole('button', { name: 'Clear failed messages from this device' })
+    await expect(clear).toBeInViewport()
+    await expect(restored.getByRole('button', { name: 'Remove failed message from this device' })).toBeInViewport()
+    expect(await restored.evaluate((element) => element.scrollWidth - element.clientWidth)).toBe(0)
+    await page.screenshot({ path: resolve('artifacts/vscode-failed-messages-narrow.png') })
+    await clear.focus()
+    await page.keyboard.press('Enter')
+    await expect(restored.getByRole('button', { name: 'Remove failed message from this device' })).toHaveCount(0)
+    await expect(restored.getByText(uncertain.text, { exact: true })).toBeVisible()
+    await expect(restored.getByRole('button', { name: 'Send to original VS Code session' })).toBeDisabled()
+    await page.reload()
+    if (!await restored.isVisible()) await page.getByRole('button', { name: 'Toggle chat panel' }).click()
+    await expect(restored.getByText('Saved original answer', { exact: true })).toBeVisible()
+    await expect(restored.getByRole('button', { name: 'Clear failed messages from this device' })).toHaveCount(0)
+    const snapshot = await page.evaluate((identity) => window.vscodeChat!.read(identity), { nativeSessionId, workspaceStorageId })
+    expect(snapshot.deliveries?.map((delivery) => delivery.id)).toEqual([first.id, second.id, uncertain.id])
+    expect(await readFile(receiptFile, 'utf8')).toBe(receipts)
+    expect(await readFile(sourceFile, 'utf8')).toBe(source)
+    expect(opened).toBe(0)
+    expect(sent).toBe(0)
+    await restored.getByRole('button', { name: 'Detach conversation' }).click()
+    await page.getByRole('button', { name: 'Detach session', exact: true }).click()
   } finally { await companion.close(); await rm(sourceFile, { force: true }) }
 })
 

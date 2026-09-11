@@ -225,16 +225,16 @@ test('connects from the desktop and sends to the original sidebar conversation w
       const switchId = randomUUID()
       const switchFile = join(directory, `${switchId}.jsonl`)
       const switchData = { ...sourceData, sessionId: switchId, customTitle: 'Remote switch fixture' }
-      const initialResponse = [{ kind: 'markdownContent', content: { value: 'x'.repeat(44 * 1024 * 1024) } }]
+      const initialResponse = [{ kind: 'markdownContent', content: { value: 'x'.repeat(66 * 1024 * 1024) } }]
       const journalUpdate = JSON.stringify({ kind: 1, k: ['requests', 0, 'response'], v: [{ kind: 'markdownContent', content: { value: 'x'.repeat(1024 * 1024) } }] })
       const initialRecord = JSON.stringify({ kind: 0, v: { ...switchData, requests: [{ ...sourceData.requests[0], response: initialResponse }] } })
-      expect(Buffer.byteLength(initialRecord)).toBeGreaterThan(32 * 1024 * 1024)
+      expect(Buffer.byteLength(initialRecord)).toBeGreaterThan(64 * 1024 * 1024)
       const switchSource = [
         initialRecord,
         ...Array.from({ length: 12 }, () => journalUpdate),
         JSON.stringify({ kind: 1, k: ['requests', 0, 'response'], v: sourceData.requests[0].response }),
       ].join('\n') + '\n'
-      expect(Buffer.byteLength(switchSource)).toBeGreaterThan(56 * 1024 * 1024)
+      expect(Buffer.byteLength(switchSource)).toBeGreaterThan(78 * 1024 * 1024)
       await writeFile(switchFile, switchSource)
       const switchIdentity = { nativeSessionId: switchId, workspaceStorageId }
       const participant = { clientId: randomUUID(), username: 'Switch user', machineName: 'Machine-C' }
