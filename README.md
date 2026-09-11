@@ -76,7 +76,7 @@ Run commands from this repository's root. Dependencies are pinned in
 
 | Command | Purpose |
 | --- | --- |
-| `npm ci` | Reproduce the locked dependency installation. |
+| `npm ci` | Install locked dependencies and the Electron runtime. |
 | `npm run dev` | Start the Electron application with renderer hot reload. |
 | `npm run dev:web` | Preview the demo browser UI at http://127.0.0.1:5178; native session operations require Electron. |
 | `npm run typecheck` | Check main/preload, browser, and test environments separately. |
@@ -87,6 +87,12 @@ Run commands from this repository's root. Dependencies are pinned in
 | `npm start` | Open the already-built Electron application. |
 | `npm run check` | Run lint, unit tests, and production build. |
 | `npm run test:e2e` | Build and run real Electron tests; live model calls are skipped unless explicitly enabled. |
+
+Electron 44 exposes an explicit `install-electron` command instead of a package
+`postinstall` script. This project's `postinstall` runs that installer automatically.
+If install scripts were disabled, or an older checkout reports `Error: Electron
+uninstall`, run `npx --no-install install-electron`, then retry `npm start`.
+`npm rebuild electron` alone does not invoke the installer in this version.
 
 The Electron development renderer uses port 5177; browser-only preview uses 5178.
 Both bind to loopback and fail rather than silently changing ports. Stop an existing

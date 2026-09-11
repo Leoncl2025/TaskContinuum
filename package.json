@@ -11,6 +11,7 @@
     "node": "^24.0.0"
   },
   "scripts": {
+    "postinstall": "install-electron",
     "dev": "electron-vite dev",
     "dev:web": "vite --config vite.config.ts",
     "start": "electron-vite preview",
