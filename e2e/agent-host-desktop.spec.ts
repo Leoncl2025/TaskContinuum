@@ -97,7 +97,7 @@ test('links and streams original AHP chats in the sandboxed desktop without a Co
     app = undefined
     await launch()
     const restored = page!.getByRole('complementary', { name: 'Agent Host task chat' })
-    if (!await restored.isVisible()) await page!.getByRole('button', { name: 'Toggle chat panel' }).click()
+    await expect(restored).toBeVisible()
     await expect(restored.getByText('Streaming before completion')).toBeVisible()
     expect(fixture.dispatches).toHaveLength(1)
     await restored.getByRole('button', { name: 'Detach conversation' }).click()
