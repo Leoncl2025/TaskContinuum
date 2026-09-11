@@ -20,6 +20,9 @@ import { hostname } from 'node:os'
 import { readClientIdentity } from './clientIdentity'
 import { canonicalPolicyRoot, locallyLinkedSessions, recordLocalLink, unregisteredLocalLinks } from './linkedSessionPolicy'
 import { readRepositorySessionLinks, updateRepositorySessionLink } from './repositorySessionLinks'
+import { AgentHostRegistry } from './agentHostRegistry'
+import { AgentHostManager } from './agentHostManager'
+import { locallyLinkedAgentHostSessions } from './linkedSessionPolicy'
 
 async function requirePrivateDestination(file: string): Promise<void> {
   let directory = await realpath(dirname(file))
@@ -54,6 +57,17 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     devTunnel: (route, grantId, port, signal) => tunnels.connect(route, grantId, port, signal),
     devTunnelPublicKey: async () => (await keys.get('client')).publicKey,
   })
+  const discovery = !app.isPackaged && process.env.TASKCONTINUUM_AGENT_HOST_DISCOVERY ? [process.env.TASKCONTINUUM_AGENT_HOST_DISCOVERY]
+    : ['Code', 'Code - Insiders'].map((name) => join(app.getPath('appData'), name, 'agent-host', 'local-endpoint', 'entries'))
+  const registry = new AgentHostRegistry(app.getPath('userData'), discovery, async () => {
+    const { clientId, machineName } = await readClientIdentity(app.getPath('userData'))
+    return { clientId, machineName }
+  })
+  const agentHosts = new AgentHostManager(app.getPath('userData'), registry, devices, async () => {
+    const { clientId, machineName } = await manager.identity()
+    return { clientId, machineName }
+  })
+  host.setAgentHostAccess(registry, async (root) => locallyLinkedAgentHostSessions(app.getPath('userData'), root, await readClientIdentity(app.getPath('userData'))))
   void tunnels.startRecovery(async () => {
     const pairs = (await host.list()).filter((pair) => Date.parse(pair.expiresAt) > Date.now())
     if (!pairs.length) return
@@ -266,5 +280,5 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     const confirmation = await dialog.showMessageBox(window, { type: 'warning', title: 'Revoke remote access', message: 'Revoke this remote invitation?', detail: 'Future reads and submissions will be rejected. An already-running Agent response is not stopped.', buttons: ['Cancel', 'Revoke'], defaultId: 0, cancelId: 0 })
     if (confirmation.response === 1) { await unchanged(root); await revokeRemoteVSCode(store, identity, selected); tunnels.revoke(selected) }
   })
-  return { manager, close: async () => { manager.close(); await tunnels.close(); await host.close() } }
+  return { manager, agentHosts, close: async () => { manager.close(); await tunnels.close(); await host.close(); await agentHosts.close() } }
 }

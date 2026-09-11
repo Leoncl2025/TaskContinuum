@@ -10,6 +10,7 @@ import { registerSharedBridge } from './sharedBridge'
 import { registerVSCodeChatBridge } from './vscodeChatBridge'
 import { registerRemoteVSCodeBridge } from './remoteVSCodeBridge'
 import { registerWindowZoom, WindowZoomPreferences } from './windowZoom'
+import { registerAgentHostBridge } from './agentHostBridge'
 
 app.setName('Task Continuum')
 const dataDirectory = process.env.TASKCONTINUUM_DATA_DIR
@@ -27,6 +28,7 @@ let mainWindow: BrowserWindow | undefined
 let copilotHost: ReturnType<typeof registerCopilotBridge> | undefined
 let sharedDesktop: ReturnType<typeof registerSharedBridge> | undefined
 let vscodeChat: ReturnType<typeof registerVSCodeChatBridge> | undefined
+let agentHost: ReturnType<typeof registerAgentHostBridge> | undefined
 let remoteVSCode: ReturnType<typeof registerRemoteVSCodeBridge> | undefined
 let windowZoom: WindowZoomPreferences | undefined
 let quitting = false
@@ -87,9 +89,9 @@ async function createWindow(): Promise<void> {
   window.webContents.on('will-navigate', (event) => event.preventDefault())
   window.webContents.on('will-frame-navigate', (event) => event.preventDefault())
   window.webContents.on('will-redirect', (event) => event.preventDefault())
-  window.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { if (initialNavigation) { initialNavigation = false; return }; copilotHost?.cancelAll(); vscodeChat?.close() } })
+  window.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { if (initialNavigation) { initialNavigation = false; return }; copilotHost?.cancelAll(); vscodeChat?.close(); agentHost?.close() } })
   window.webContents.on('render-process-gone', () => { copilotHost?.cancelAll(); void remoteVSCode?.close().catch(() => undefined) })
-  window.webContents.on('destroyed', () => { copilotHost?.cancelAll(); vscodeChat?.close(); void remoteVSCode?.close().catch(() => undefined) })
+  window.webContents.on('destroyed', () => { copilotHost?.cancelAll(); vscodeChat?.close(); agentHost?.close(); void remoteVSCode?.close().catch(() => undefined) })
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
   window.webContents.session.setPermissionCheckHandler(() => false)
   if (devUrl) {
@@ -125,9 +127,13 @@ void app.whenReady().then(async () => {
   })
   registerDesktopBridge()
   copilotHost = registerCopilotBridge(requireTrustedWindow, () => mainWindow)
-  const workspaces = registerWorkspaceBridge(requireTrustedWindow, copilotHost.allowDirectory, async (root, target) => remoteVSCode?.manager.remoteOwner(root, target))
+  const workspaces = registerWorkspaceBridge(requireTrustedWindow, copilotHost.allowDirectory, async (root, target) => remoteVSCode?.manager.remoteOwner(root, target), async (root, target) => {
+    if (!remoteVSCode) throw new Error('Agent Host access is not ready.')
+    return remoteVSCode.agentHosts.verifyLink(root, target)
+  })
   remoteVSCode = registerRemoteVSCodeBridge(requireTrustedWindow, workspaces.currentRoot)
   vscodeChat = registerVSCodeChatBridge(requireTrustedWindow, () => mainWindow, remoteVSCode.manager, workspaces.currentRoot)
+  agentHost = registerAgentHostBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.agentHosts)
   sharedDesktop = registerSharedBridge(requireTrustedWindow, () => mainWindow, workspaces.currentRoot, copilotHost.requireDirectory)
   await createWindow()
   app.on('activate', () => {

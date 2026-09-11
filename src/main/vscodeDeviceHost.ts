@@ -12,6 +12,11 @@ import { vscodeIdentitySchema } from './vscodeChatSchemas'
 import type { VSCodeChatIdentity } from '../shared/vscodeChat'
 import { sshPublicKeySchema } from './devTunnel/protocol'
 import { deviceRequest, DeviceRequestError } from './vscodeDeviceHttp'
+import { attachAgentHostGateway } from './agentHostGateway'
+import type { AgentHostAccess } from './agentHostGateway'
+import type { AgentHostSession, AgentHostTarget } from '../shared/agentHost'
+import type { AgentHostRegistry } from './agentHostRegistry'
+import { agentHostKey } from './agentHostProtocol'
 
 const policySchema = z.object({ identity: vscodeIdentitySchema, canSend: z.boolean(), revision: z.uuid(), invitation: remoteInvitationSchema.optional(), linkedRoot: z.string().optional() }).strict()
 const workspacePolicySchema = z.object({ root: z.string().min(1), canSend: z.boolean() }).strict()
@@ -33,11 +38,47 @@ export class VSCodeDeviceHost {
   private loading?: Promise<void>
   private closed = false
   private abort = new AbortController()
+  private agentHosts?: { registry: AgentHostRegistry; linked(root: string): Promise<AgentHostTarget[]> }
+  private agentHostGateway?: ReturnType<typeof attachAgentHostGateway>
 
   constructor(private readonly directory: string, private readonly protector: DeviceProtector,
     private readonly resolve: (identity: VSCodeChatIdentity, participant: Pairing['participant'], canSend: boolean, prior?: RemoteVSCodeInvitation) => Promise<RemoteVSCodeInvitation>,
     private readonly revokeGrant: (invitation: RemoteVSCodeInvitation) => Promise<void> = async () => {},
     private readonly linkedSessions?: (root: string) => Promise<VSCodeChatIdentity[]>) {}
+
+  setAgentHostAccess(registry: AgentHostRegistry, linked: (root: string) => Promise<AgentHostTarget[]>): void {
+    if (this.server) throw new Error('Agent Host access must be configured before device publication.')
+    this.agentHosts = { registry, linked }
+  }
+
+  private async authorizedAgentHost(token: string, target: AgentHostTarget, send: boolean): Promise<AgentHostAccess> {
+    await this.load()
+    const pair = this.state!.pairs.find((item) => Buffer.byteLength(token) === Buffer.byteLength(item.token) && timingSafeEqual(Buffer.from(token), Buffer.from(item.token)))
+    if (!pair || !this.permitted(pair.id) || !this.agentHosts) throw new Error('Device access is unavailable.')
+    const policy = JSON.stringify(pair.workspaces)
+    for (const workspace of pair.workspaces) {
+      if (send && !workspace.canSend) continue
+      const linked = await this.agentHosts.linked(workspace.root)
+      if (!linked.some((item) => agentHostKey(item) === agentHostKey(target))) continue
+      const current = this.state!.pairs.find((item) => item.id === pair.id)
+      if (!current || !this.permitted(pair.id) || JSON.stringify(current.workspaces) !== policy) throw new Error('Device policy changed.')
+      return { canSend: workspace.canSend, actor: pair.participant }
+    }
+    throw new Error('The exact Agent Host chat has not been locally confirmed for this workspace.')
+  }
+
+  private async agentHostCatalog(pair: Pairing) {
+    const sessions: AgentHostSession[] = []
+    if (this.agentHosts) for (const workspace of pair.workspaces) for (const target of await this.agentHosts.linked(workspace.root)) {
+      try {
+        await this.authorizedAgentHost(pair.token, target, false)
+        const description = await this.agentHosts.registry.describe(target)
+        const access = await this.authorizedAgentHost(pair.token, target, false)
+        if (!sessions.some((item) => agentHostKey(item) === agentHostKey(description))) sessions.push({ ...description, canSend: access.canSend && description.canSend })
+      } catch { continue }
+    }
+    return { ownerId: this.state!.ownerId, deviceId: pair.id, sessions }
+  }
 
   private async load(): Promise<void> {
     this.loading ??= (async () => {
@@ -103,6 +144,7 @@ export class VSCodeDeviceHost {
       })
     })
     for (const invitation of revoke) await this.revokeGrant(invitation).catch(() => undefined)
+    this.agentHostGateway?.revalidate()
   }
   private async refreshLinked(id: string): Promise<void> {
     const pair = this.state!.pairs.find((item) => item.id === id)
@@ -154,6 +196,7 @@ export class VSCodeDeviceHost {
   async revoke(id: string): Promise<void> {
     const pair = (await this.list()).find((item) => item.id === id)
     await this.update((state) => { state.pairs = state.pairs.filter((pair) => pair.id !== id) })
+    this.agentHostGateway?.revalidate()
     for (const policy of pair?.sessions ?? []) {
       const key = this.key(id, policy.identity)
       const prior = this.invitations.get(key) ?? policy.invitation
@@ -207,7 +250,10 @@ export class VSCodeDeviceHost {
           if (!pair) { response.writeHead(403).end(); return }
           if (!this.permitted(pair.id)) { response.writeHead(403).end(); return }
           let result: unknown
-          if (request.url === '/device/sessions') {
+          if (request.url === '/device/agent-host/sessions') {
+            z.object({}).strict().parse(body)
+            result = await this.agentHostCatalog(pair)
+          } else if (request.url === '/device/sessions') {
             z.object({}).strict().parse(body)
             const sessions: RemoteVSCodeInvitation[] = []
             for (const policy of pair.sessions) {
@@ -240,6 +286,8 @@ export class VSCodeDeviceHost {
       server.headersTimeout = 10000
       server.maxConnections = 64
       this.server = server
+      if (this.agentHosts) this.agentHostGateway = attachAgentHostGateway(server, { port: () => this.state?.port,
+        authorize: (token, target, send) => this.authorizedAgentHost(token, target, send), connection: (target) => this.agentHosts!.registry.connection(target) })
       await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(this.state!.port ?? 0, '127.0.0.1', resolve) })
       const address = server.address()
       if (!address || typeof address === 'string') throw new Error('Device gateway could not listen.')
@@ -258,6 +306,7 @@ export class VSCodeDeviceHost {
   async close(): Promise<void> {
     this.closed = true
     this.abort.abort()
+    this.agentHostGateway?.close()
     await this.starting?.catch(() => undefined)
     this.server?.closeAllConnections()
     if (this.server?.listening) await new Promise<void>((resolve) => this.server!.close(() => resolve()))

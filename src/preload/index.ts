@@ -5,6 +5,7 @@ import type { WorkspaceBridge } from '../shared/workspace'
 import type { SharedDesktopBridge, SharedDesktopUpdate } from '../shared/sharedSessions'
 import type { VSCodeChatBridge } from '../shared/vscodeChat'
 import type { RemoteVSCodeBridge, VSCodeChatTarget } from '../shared/remoteVSCode'
+import type { AgentHostBridge, AgentHostView } from '../shared/agentHost'
 
 const bridge: DesktopBridge = {
   getInfo: async () => {
@@ -55,6 +56,20 @@ const vscodeChat: VSCodeChatBridge = {
   },
 }
 contextBridge.exposeInMainWorld('vscodeChat', vscodeChat)
+
+const agentHost: AgentHostBridge = {
+  list: () => ipcRenderer.invoke('agent-host:list'),
+  watch: (target) => ipcRenderer.invoke('agent-host:watch', target),
+  unwatch: (id) => ipcRenderer.invoke('agent-host:unwatch', id),
+  send: (target, id, text, images) => ipcRenderer.invoke('agent-host:send', target, id, text, images),
+  cancel: (target, turnId) => ipcRenderer.invoke('agent-host:cancel', target, turnId),
+  onView: (listener) => {
+    const receive = (_event: Electron.IpcRendererEvent, value: { id: string; view: AgentHostView }) => listener(value)
+    ipcRenderer.on('agent-host:view', receive)
+    return () => ipcRenderer.removeListener('agent-host:view', receive)
+  },
+}
+contextBridge.exposeInMainWorld('agentHost', agentHost)
 
 const remoteVSCode: RemoteVSCodeBridge = {
   devices: {

@@ -4,9 +4,10 @@ import type { WorkspaceState } from '../shared/workspace'
 import { WorkspaceStore } from './workspaceStore'
 import type { SessionOwner } from '../shared/sessionBindings'
 import type { VSCodeChatTarget } from '../shared/remoteVSCode'
+import type { AgentHostTarget } from '../shared/agentHost'
 
-export function registerWorkspaceBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, allowDirectory: (root: string) => void, remoteOwner?: (root: string, target: VSCodeChatTarget) => Promise<SessionOwner | undefined>) {
-  const store = new WorkspaceStore(app.getPath('userData'), process.env.TASKCONTINUUM_WORKSPACE, remoteOwner)
+export function registerWorkspaceBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, allowDirectory: (root: string) => void, remoteOwner?: (root: string, target: VSCodeChatTarget) => Promise<SessionOwner | undefined>, verifyAgentHost?: (root: string, target: AgentHostTarget) => Promise<AgentHostTarget>) {
+  const store = new WorkspaceStore(app.getPath('userData'), process.env.TASKCONTINUUM_WORKSPACE, remoteOwner, undefined, verifyAgentHost)
   function authorize(state: WorkspaceState): WorkspaceState {
     if (state.current) allowDirectory(state.current.root)
     return state

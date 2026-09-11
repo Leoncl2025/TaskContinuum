@@ -207,9 +207,10 @@ for (const managed of [false, true]) test(`authorizes an original VS Code conver
     await client.page.getByRole('button', { name: 'Connect SSH' }).click()
     await expect(client.page.getByRole('button', { name: 'Connect SSH' })).toBeHidden({ timeout: 60000 })
     await client.app.evaluate(({ BrowserWindow }) => { const window = BrowserWindow.getAllWindows()[0]; window.setMinimumSize(380, 600); window.setSize(420, 760) })
-    await client.page.getByRole('button', { name: 'Toggle chat panel' }).click()
-    await expect(client.page.getByRole('complementary', { name: 'VS Code task chat' })).toBeVisible()
+    await expect(client.page.locator('.workbench')).toHaveAttribute('data-compact', 'true')
     const panel = client.page.getByRole('complementary', { name: 'VS Code task chat' })
+    if (!await panel.isVisible()) await client.page.getByRole('button', { name: 'Toggle chat panel' }).click()
+    await expect(panel).toBeVisible()
     expect(await panel.evaluate((element) => element.getBoundingClientRect().right <= innerWidth)).toBe(true)
     await client.page.screenshot({ path: resolve(`artifacts/${artifact}-narrow.png`) })
     sessionOpen = false

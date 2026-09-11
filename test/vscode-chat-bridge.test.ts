@@ -4,14 +4,59 @@ import type { BrowserWindow } from 'electron'
 import type { RemoteVSCodeManager } from '../src/main/vscodeRemoteClient'
 import type { VSCodeChatTarget } from '../src/shared/remoteVSCode'
 import { registerVSCodeChatBridge } from '../src/main/vscodeChatBridge'
+import { registerAgentHostBridge } from '../src/main/agentHostBridge'
+import type { AgentHostManager } from '../src/main/agentHostManager'
 
 const native = vi.hoisted(() => ({ handlers: new Map<string, (...args: unknown[]) => Promise<unknown>>(), confirm: vi.fn() }))
 vi.mock('electron', () => ({
   ipcMain: { handle: (name: string, handler: (...args: unknown[]) => Promise<unknown>) => native.handlers.set(name, handler) },
   dialog: { showMessageBox: native.confirm }, shell: { openExternal: vi.fn() },
+  app: { getPath: () => 'isolated-profile' },
 }))
+vi.mock('../src/main/clientIdentity', () => ({ readClientIdentity: async () => ({ clientId: '00000000-0000-4000-8000-000000000001', machineName: 'Client-A', username: 'Alice' }) }))
 let close: (() => void) | undefined
 afterEach(() => { close?.(); native.handlers.clear(); vi.clearAllMocks() })
+
+describe('trusted AHP desktop operations', () => {
+  function ahpFixture() {
+    const target = { hostId: 'host-instance-123', sessionId: 'ahp-session:/original', chatId: 'ahp-chat:/original/main', owner: { clientId: crypto.randomUUID(), machineName: 'Owner-B' } }
+    let root = 'workspace-a'
+    let trusted = true
+    let authorized = true
+    let preparing = async () => {}
+    const window = { isDestroyed: () => !trusted, webContents: { isDestroyed: () => !trusted, send: vi.fn() } } as unknown as BrowserWindow
+    const executed = vi.fn()
+    const connection = { send: vi.fn(async (_id: string, _text: string, _images: unknown, authorize: () => Promise<void>) => { await preparing(); await authorize(); executed() }) }
+    const manager = { authorize: vi.fn(async () => { if (!authorized) throw new Error('Session authorization changed.') }), connection: vi.fn(async () => connection), hasConsent: vi.fn(async () => true) }
+    close = registerAgentHostBridge(() => { if (!trusted) throw new Error('Untrusted IPC request.'); return window }, async () => root, manager as unknown as AgentHostManager).close
+    return { target, manager, executed, connection, prepare: (action: () => Promise<void>) => { preparing = action }, move: () => { root = 'workspace-b' }, revoke: () => { authorized = false }, destroy: () => { trusted = false }, send: (value: unknown = target) => native.handlers.get('agent-host:send')!({}, value, crypto.randomUUID(), 'One explicit request') }
+  }
+
+  it('checks renderer identity and rejects malformed targets before connection', async () => {
+    const setup = ahpFixture()
+    await expect(setup.send({ ...setup.target, endpoint: 'ws://untrusted' })).rejects.toThrow()
+    expect(setup.manager.connection).not.toHaveBeenCalled()
+    setup.destroy()
+    await expect(setup.send()).rejects.toThrow('Untrusted')
+    expect(setup.manager.connection).not.toHaveBeenCalled()
+  })
+
+  it.each(['workspace', 'authorization', 'window'])('fences a changed %s before dispatch without replay', async (change) => {
+    const setup = ahpFixture()
+    setup.prepare(async () => { if (change === 'workspace') setup.move(); else if (change === 'authorization') setup.revoke(); else setup.destroy() })
+    await expect(setup.send()).rejects.toThrow('changed')
+    expect(setup.executed).not.toHaveBeenCalled()
+    expect(setup.connection.send).toHaveBeenCalledOnce()
+  })
+
+  it('submits once and carries the local participant without a second confirmation', async () => {
+    const setup = ahpFixture()
+    await setup.send()
+    expect(setup.executed).toHaveBeenCalledOnce()
+    expect(setup.connection.send).toHaveBeenCalledWith(expect.any(String), 'One explicit request', undefined, expect.any(Function), { clientId: '00000000-0000-4000-8000-000000000001', machineName: 'Client-A', username: 'Alice' })
+    expect(native.confirm).not.toHaveBeenCalled()
+  })
+})
 
 function fixture() {
   const target: VSCodeChatTarget = { nativeSessionId: 'original', workspaceStorageId: 'a'.repeat(32), remoteMachineName: 'Machine-B' }

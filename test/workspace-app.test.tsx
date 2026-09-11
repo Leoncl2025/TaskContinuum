@@ -9,7 +9,7 @@ import type { SendMessageRequest } from '../src/shared/sessions'
 import type { SessionLinksSnapshot } from '../src/shared/sessionBindings'
 import { mockCopilotBridge } from './copilot-fixtures'
 
-afterEach(() => { delete window.workspace; delete window.copilot })
+afterEach(() => { delete window.workspace; delete window.copilot; delete window.agentHost })
 
 function fixtures() {
   const first: WorkspaceSnapshot = { id: 'workspace-one', name: 'TaskContinuum-ad', title: 'Task Continuum', root: 'Q:\\src\\Projects\\TaskContinuum-ad', tasks: [{ ...demoTasks[1], title: 'Actual UI task', status: 'done', documents: { requirements: '# Actual requirements\n\nSaved in the first workspace.', plan: '# Actual plan\n\nA persisted plan.', checklist: null } }], warnings: [], loadedAt: '2026-09-06T00:00:00Z' }
@@ -36,6 +36,27 @@ function fixtures() {
 }
 
 describe('workspace switching in the desktop workbench', () => {
+  it('opens an AHP Git link without resuming or creating a CLI session', async () => {
+    const { first, repository } = fixtures()
+    const host = mockCopilotBridge()
+    await host.bridge.connect()
+    window.copilot = host.bridge
+    const owner = { clientId: crypto.randomUUID(), machineName: 'Owner-B' }
+    const target = { hostId: 'host-instance-123', sessionId: 'ahp-session:/original', chatId: 'ahp-chat:/original/main', owner }
+    repository[first.id] = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64), localOwner: owner }
+    window.agentHost = { list: vi.fn(async () => ({ sessions: [], warnings: [] })), watch: vi.fn(async () => crypto.randomUUID()), unwatch: vi.fn(async () => {}), send: vi.fn(async () => {}), cancel: vi.fn(async () => {}), onView: () => () => {} }
+    const user = userEvent.setup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    expect(await screen.findByRole('complementary', { name: 'Agent Host task chat' })).toBeInTheDocument()
+    await waitFor(() => expect(window.agentHost!.watch).toHaveBeenCalledWith(target))
+    expect(host.bridge.resumeSession).not.toHaveBeenCalled()
+    expect(host.bridge.createSession).not.toHaveBeenCalled()
+    expect(host.bridge.importSession).not.toHaveBeenCalled()
+    expect(screen.queryByRole('complementary', { name: 'VS Code task chat' })).not.toBeInTheDocument()
+  })
+
   it('opens real tasks and documents, then switches back to the demo', async () => {
     const { first } = fixtures()
     const user = userEvent.setup()

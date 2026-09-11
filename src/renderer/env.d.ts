@@ -4,6 +4,7 @@ import type { WorkspaceBridge } from '../shared/workspace'
 import type { SharedDesktopBridge } from '../shared/sharedSessions'
 import type { VSCodeChatBridge } from '../shared/vscodeChat'
 import type { RemoteVSCodeBridge } from '../shared/remoteVSCode'
+import type { AgentHostBridge } from '../shared/agentHost'
 
 declare global {
   interface Window {
@@ -13,5 +14,6 @@ declare global {
     sharedSessions?: SharedDesktopBridge
     vscodeChat?: VSCodeChatBridge
     remoteVSCode?: RemoteVSCodeBridge
+    agentHost?: AgentHostBridge
   }
 }

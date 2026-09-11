@@ -6,12 +6,14 @@ import type { SessionBinding, SessionBindings } from './sessionBindings'
 
 function uiBindings(snapshot: SessionLinksSnapshot): SessionBindings {
   return Object.fromEntries(Object.entries(snapshot.document.bindings).map(([taskId, link]) => {
+    if (link.provider === 'agent-host') return [taskId, { id: link.sessionId, title: 'Agent Host', owner: link.owner, ownerIsRemote: link.owner.clientId !== snapshot.localOwner?.clientId, agentHost: { hostId: link.hostId, sessionId: link.sessionId, chatId: link.chatId, owner: link.owner } }]
     const machine = link.owner ? link.owner.clientId !== snapshot.localOwner?.clientId ? link.owner.machineName : undefined : link.provider === 'vscode-copilot' ? link.remoteMachineName : undefined
     return [taskId, { id: link.sessionId, title: 'GitHub Copilot', ...(link.owner ? { owner: link.owner, ownerIsRemote: link.owner.clientId !== snapshot.localOwner?.clientId } : {}), ...(link.provider === 'vscode-copilot' ? { vscodeWorkspaceStorageId: link.workspaceStorageId, ...(machine ? { remoteMachineName: machine } : {}) } : {}) }]
   }))
 }
 
 function repositoryLink(binding: SessionBinding): SessionLink {
+  if (binding.agentHost) return { provider: 'agent-host', ...binding.agentHost }
   return binding.vscodeWorkspaceStorageId
     ? { provider: 'vscode-copilot', sessionId: binding.id, workspaceStorageId: binding.vscodeWorkspaceStorageId, ...(binding.remoteMachineName ? { remoteMachineName: binding.remoteMachineName } : {}) }
     : { provider: 'github-copilot', sessionId: binding.id }
@@ -88,7 +90,7 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
       setBindings((current) => ({ ...Object.fromEntries(Object.entries(current).filter(([id, link]) => id === taskId || sessionBindingKey(link) !== sessionBindingKey(binding))), [taskId]: binding }))
       return
     }
-    await run(() => bridge!.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: binding.id, expectedRevision: snapshot!.revision, ...(binding.owner ? { owner: binding.owner } : {}), ...(binding.vscodeWorkspaceStorageId ? { vscodeWorkspaceStorageId: binding.vscodeWorkspaceStorageId, ...(binding.remoteMachineName ? { vscodeRemoteMachineName: binding.remoteMachineName } : {}) } : {}) }))
+    await run(() => bridge!.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: binding.id, expectedRevision: snapshot!.revision, ...(binding.owner ? { owner: binding.owner } : {}), ...(binding.agentHost ? { agentHost: { hostId: binding.agentHost.hostId, chatId: binding.agentHost.chatId }, owner: binding.agentHost.owner } : {}), ...(binding.vscodeWorkspaceStorageId ? { vscodeWorkspaceStorageId: binding.vscodeWorkspaceStorageId, ...(binding.remoteMachineName ? { vscodeRemoteMachineName: binding.remoteMachineName } : {}) } : {}) }))
   }
 
   async function detach(taskId: string): Promise<void> {

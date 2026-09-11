@@ -16,6 +16,76 @@ import { deviceInvitationSchema } from '../src/main/vscodeDeviceProtocol'
 import { updateRepositorySessionLink, readRepositorySessionLinks } from '../src/main/repositorySessionLinks'
 import { canonicalPolicyRoot, locallyLinkedSessions, recordLocalLink } from '../src/main/linkedSessionPolicy'
 import { vsCodeChatResource } from '../src/shared/vscodeChat'
+import { AgentHostRegistry } from '../src/main/agentHostRegistry'
+import { AgentHostConnection } from '../src/main/agentHostConnection'
+import { startAgentHostFixture } from './agent-host-fixture'
+import { updateRepositoryAgentHostLink } from '../src/main/repositorySessionLinks'
+import { locallyLinkedAgentHostSessions } from '../src/main/linkedSessionPolicy'
+import { AhpClient } from '@microsoft/agent-host-protocol/client'
+
+it('streams the exact AHP chat through existing paired SSH and revokes access without a Companion', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-device-'))
+  const tasksB = join(root, 'tasks-b'), tasksA = join(root, 'tasks-a'), profileB = join(root, 'profile-b'), discovery = join(root, 'discovery')
+  await Promise.all([mkdir(tasksB), mkdir(join(tasksA, '.taskcontinuum'), { recursive: true }), mkdir(discovery)])
+  const fixture = await startAgentHostFixture()
+  await writeFile(join(discovery, 'host.json'), JSON.stringify(fixture.endpoint))
+  const owner = { clientId: randomUUID(), machineName: hostname() }
+  const participant = { clientId: randomUUID(), username: 'Alice', machineName: 'A' }
+  const protector = { available: () => true, encrypt: (value: string) => Buffer.from(value), decrypt: (value: Buffer) => value.toString() }
+  const registry = new AgentHostRegistry(profileB, [discovery], async () => owner)
+  const legacyResolve = vi.fn(async () => { throw new Error('No legacy Companion is running.') })
+  const host = new VSCodeDeviceHost(profileB, protector, legacyResolve)
+  host.setAgentHostAccess(registry, (folder) => locallyLinkedAgentHostSessions(profileB, folder, owner))
+  const ssh = await startSessionSshHost(newSshKeyPair())
+  const key = newSshKeyPair()
+  const transport = vi.fn(async (invitation, signal) => openSessionSshBridge(createConnection(ssh.port, '127.0.0.1'), { key, hostPublicKey: ssh.publicKey, grantId: invitation.id, targetPort: invitation.port, signal }))
+  const client = new VSCodeDeviceClient(join(root, 'profile-a'), protector, transport, async () => {})
+  const target = { hostId: fixture.hostId, sessionId: fixture.sessionId, chatId: fixture.chatId, owner }
+  const connection = new AgentHostConnection(target, join(root, 'profile-a'), (signal) => client.agentHostTransport(tasksA, target, signal))
+  let raw: AhpClient | undefined
+  try {
+    const pair = await host.pair(participant, key.publicKey)
+    await host.setWorkspace(pair.id, await canonicalPolicyRoot(tasksB), true)
+    const port = await host.start()
+    ssh.allow(pair.id, key.publicKey, port, pair.expiresAt, true)
+    await client.import(tasksA, deviceInvitationSchema.parse({ schemaVersion: 2, provider: 'vscode-copilot-device', id: pair.id, ownerId: await host.ownerId(), ownerClientId: owner.clientId, machineName: hostname(), participant, token: pair.token, expiresAt: pair.expiresAt, port,
+      devTunnel: { kind: 'dev-tunnel', tunnelId: `taskcontinuum-${'f'.repeat(32)}.jpe1`, sshPort: ssh.port, hostPublicKey: ssh.publicKey, clientPublicKey: key.publicKey } }), true)
+    const linked = await updateRepositoryAgentHostLink(tasksB, 'T-0001', target, null)
+    await writeFile(join(tasksA, '.taskcontinuum/session-bindings.json'), JSON.stringify(linked.document))
+    expect((await client.agentHostSessions(tasksA)).sessions).toEqual([])
+    await recordLocalLink(profileB, tasksB, 'T-0001', linked.document.bindings['T-0001'], owner)
+    expect((await client.agentHostSessions(tasksA)).sessions).toMatchObject([{ ...target, canSend: true }])
+    await connection.open()
+    const id = randomUUID()
+    await connection.send(id, 'Original over SSH', undefined, async () => {})
+    fixture.action({ type: 'chat/responsePart', turnId: id, part: { id: 'answer', kind: 'markdown', content: '' } })
+    fixture.action({ type: 'chat/delta', turnId: id, partId: 'answer', content: 'Incremental remote answer' })
+    await expect.poll(() => connection.view.chat?.activeTurn?.responseParts).toContainEqual({ id: 'answer', kind: 'markdown', content: 'Incremental remote answer' })
+    expect(fixture.dispatches).toHaveLength(1)
+    expect(transport).toHaveBeenCalledOnce()
+    expect(legacyResolve).not.toHaveBeenCalled()
+    raw = new AhpClient(await client.agentHostTransport(tasksA, target, new AbortController().signal))
+    raw.connect()
+    await raw.initialize({ clientId: randomUUID(), protocolVersions: ['0.9.0'] })
+    const scoped = (await raw.subscribe(target.sessionId)).result.snapshot
+    expect(JSON.stringify(scoped)).not.toContain('Unshared sibling title')
+    expect(JSON.stringify(scoped)).not.toContain('private-other')
+    await expect(raw.subscribe('ahp-root://')).rejects.toThrow('not authorized')
+    await expect(raw.subscribe('ahp-chat:/private-other')).rejects.toThrow('not authorized')
+    await expect(raw.resourceRead({ uri: 'file:///private.txt' })).rejects.toThrow('not authorized')
+    await raw.shutdown()
+    await host.setWorkspace(pair.id, await canonicalPolicyRoot(tasksB), false)
+    await expect.poll(() => connection.view.state).toBe('offline')
+    await connection.open()
+    expect(connection.view.canSend).toBe(false)
+    await expect(connection.send(randomUUID(), 'Read-only must not send', undefined, async () => {})).rejects.toThrow('read-only')
+    await updateRepositorySessionLink(tasksB, 'T-0001', null, linked.revision)
+    fixture.action({ type: 'chat/delta', turnId: id, partId: 'answer', content: 'Not shared anymore' })
+    await expect.poll(() => connection.view.state).toBe('offline')
+    expect(JSON.stringify(connection.view.chat)).not.toContain('Not shared anymore')
+    expect(fixture.dispatches).toHaveLength(1)
+  } finally { await raw?.shutdown(); await connection.close(); client.close(); await host.close(); await registry.close(); await ssh.close(); await fixture.close(); await rm(root, { recursive: true, force: true }) }
+}, 20000)
 
 it('opens Git-pulled owner links over one SSH device without manual session share or relinking', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuum-git-device-'))

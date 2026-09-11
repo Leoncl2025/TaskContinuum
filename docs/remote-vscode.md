@@ -5,6 +5,59 @@ Copilot Agent in VS Code on B. It retains the original native session and source
 workspace IDs, account, tools, and execution environment. It does not publish a
 CLI Host, import history into another runtime, or create a fork.
 
+## Agent Host (AHP)
+
+For **Host-owned Copilot sessions**, the new AHP route replaces the Companion
+adapter. Both Task Continuum desktops need this build. B also needs a running
+VS Code 1.137 Agent Host supporting AHP 0.9.0 and its normal provider sign-in.
+The legacy Local instructions below remain applicable only to `vscode-copilot`
+links; they are not a prerequisite for AHP.
+
+1. On B, open the task workspace and **Agent Host sessions**. Approve access once,
+  choose an existing Host chat, and link it to the selected task. A task already
+  linked to another conversation must be explicitly detached first; this does not
+  delete its history. No Host or chat is created automatically.
+2. Reuse existing client-level Devices pairing and linked-session workspace policy.
+  B's current Git link **and** private local confirmation receipt authorize access.
+  A Git-only edit, a different owner Client ID, or a sibling chat is not authority.
+3. Synchronize the Git link normally and select the task on A. The enabled device
+  route reconnects through the same private Dev Tunnel and SSH gateway port.
+  The session endpoint token never leaves B. No new cloud resource or public port
+  is required; the app does not modify OS SSH/firewall configuration.
+4. Send explicitly in **AGENT HOST**. Live text and terminal output do not wait for
+  VS Code journal saves. Stop targets the exact active turn, with read/send access.
+  Provider sign-in, tool confirmations and agent questions still use the owner UI.
+
+The gateway accepts only initialize, snapshot recovery, ping, allowed subscriptions,
+and guarded send/cancel for the pinned chat. It rejects root/other-chat subscriptions,
+filesystem access, arbitrary tools, Host configuration and session creation.
+Its session summary excludes sibling chats. Terminals must be referenced by the
+selected chat and retain its session/chat ownership. Changes to workspace policy
+revalidate active sockets immediately; each outgoing batch and control also checks
+the current policy and Git receipt. Disconnect/Stop in Devices stays authoritative.
+
+Reconnection refreshes **state**, not execution. Delivery UUID/hash records are
+persisted before dispatch; uncertain outcomes survive desktop restart and are never
+resent automatically. Busy/queued/owner-draft states block sends. Offline history
+comes from a bounded private cache, not Git, and never grants control.
+
+The Git identity pins a running Host instance. Desktop or network restart can
+reconnect to that same Host. A replaced Host instance requires explicit re-verification
+of its existing session rather than a hostname-based substitute. Legacy Local chats
+are not Agent Host chats: starting a Host does not make their original runtime
+available through AHP. No Local migration or automatic relinking is performed.
+
+Native VS Code Copilot session resources use `copilotcli:/<id>` and a default
+`ahp-chat://default/<encoded-session>` chat, not the PoC's manually chosen
+`ahp-session:/<id>`. Both session formats are accepted with exact verified chat
+membership. This build lists only the verified `copilotcli` provider.
+
+Verified: real installed Editor Host handshake/ping; production client with a real
+isolated Host-local command and pre-completion terminal output; actual local SSH
+with no Companion, role/isolation/revocation tests; sandboxed Electron discovery,
+link, live text, draft retention, restart and 420px layouts. Real Copilot-generated
+text, model/tool authentication and physical A/B cloud latency remain separate gates.
+
 ## Prerequisites
 
 - Both desktops run the current Task Continuum build. B has companion 0.5.1 or

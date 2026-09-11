@@ -4,20 +4,23 @@ import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import type { WorkspaceDescriptor, WorkspaceSnapshot, WorkspaceState } from '../shared/workspace'
 import { readTaskWorkspace } from './workspaceReader'
-import { migrateRepositorySessionLinks, readRepositorySessionLinks, sessionLinkSchema, sessionOwnerSchema, updateRepositorySessionLink } from './repositorySessionLinks'
+import { migrateRepositorySessionLinks, readRepositorySessionLinks, sessionLinkSchema, sessionOwnerSchema, updateRepositorySessionLink, updateRepositoryAgentHostLink } from './repositorySessionLinks'
 import type { SessionLinksSnapshot, SessionOwner } from '../shared/sessionBindings'
 import { readClientIdentity } from './clientIdentity'
 import { recordLocalLink } from './linkedSessionPolicy'
 import { VSCodeSessionStore } from './vscodeSessions'
 import { remoteMachineSchema } from './vscodeRemoteProtocol'
+import type { AgentHostTarget } from '../shared/agentHost'
+import { agentHostChatIdSchema, agentHostIdSchema, agentHostKey, agentHostSessionIdSchema, agentHostTargetSchema } from './agentHostProtocol'
 
 const descriptorSchema = z.object({ id: z.string().regex(/^[a-f\d]{64}$/), name: z.string().max(300), title: z.string().max(200), root: z.string().min(1).max(4096) })
 const stateSchema = z.object({ currentId: z.string().nullable(), recent: z.array(descriptorSchema).max(10) })
 const linkChangeSchema = z.object({
   workspaceId: z.string().regex(/^[a-f\d]{64}$/), taskId: z.string().regex(/^T-\d{4,}$/),
-  sessionId: z.string().min(1).max(240).regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/).nullable(),
+  sessionId: z.union([z.string().min(1).max(240).regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/), agentHostSessionIdSchema]).nullable(),
   vscodeWorkspaceStorageId: z.string().regex(/^[a-f0-9]{32}$/).optional(),
   vscodeRemoteMachineName: remoteMachineSchema.optional(),
+  agentHost: z.object({ hostId: agentHostIdSchema, chatId: agentHostChatIdSchema }).strict().optional(),
   owner: sessionOwnerSchema.optional(),
   expectedRevision: z.string().regex(/^[a-f\d]{64}$/).nullable(),
 }).strict()
@@ -37,7 +40,7 @@ export class WorkspaceStore {
   private loading?: Promise<void>
   private pending: Promise<unknown> = Promise.resolve()
 
-  constructor(private readonly stateDirectory: string, startupFolder?: string, private readonly resolveRemoteOwner?: (root: string, identity: { nativeSessionId: string; workspaceStorageId: string; remoteMachineName: string }) => Promise<SessionOwner | undefined>, private readonly originals = new VSCodeSessionStore()) {
+  constructor(private readonly stateDirectory: string, startupFolder?: string, private readonly resolveRemoteOwner?: (root: string, identity: { nativeSessionId: string; workspaceStorageId: string; remoteMachineName: string }) => Promise<SessionOwner | undefined>, private readonly originals = new VSCodeSessionStore(), private readonly verifyAgentHost?: (root: string, target: AgentHostTarget) => Promise<AgentHostTarget>) {
     this.stateFile = join(stateDirectory, 'workspaces.json')
     this.startupFolder = startupFolder
   }
@@ -142,6 +145,15 @@ export class WorkspaceStore {
         throw new Error('This task no longer exists in the selected workspace.')
       }
       const localOwner = await this.localOwner()
+      if (request.agentHost) {
+        if (!request.sessionId || request.vscodeWorkspaceStorageId || request.vscodeRemoteMachineName || !this.verifyAgentHost) throw new Error('Agent Host links require their own verified identity, not a Local chat.')
+        const target = agentHostTargetSchema.parse({ ...request.agentHost, sessionId: request.sessionId, owner: request.owner })
+        const verified = await this.verifyAgentHost(workspace.root, target)
+        if (agentHostKey(verified) !== agentHostKey(target)) throw new Error('The verified Agent Host identity changed.')
+        const saved = await updateRepositoryAgentHostLink(workspace.root, request.taskId, verified, request.expectedRevision)
+        await recordLocalLink(this.stateDirectory, workspace.root, request.taskId, saved.document.bindings[request.taskId], localOwner)
+        return { ...saved, localOwner }
+      }
       let owner = request.sessionId === null ? undefined : localOwner
       if (request.vscodeRemoteMachineName && request.vscodeWorkspaceStorageId) {
         owner = await this.resolveRemoteOwner?.(workspace.root, { nativeSessionId: request.sessionId!, workspaceStorageId: request.vscodeWorkspaceStorageId, remoteMachineName: request.vscodeRemoteMachineName })

@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { WorkspaceStore } from '../src/main/workspaceStore'
 import { sessionLinksPath } from '../src/shared/sessionBindings'
 import { VSCodeSessionStore } from '../src/main/vscodeSessions'
-import { locallyLinkedSessions } from '../src/main/linkedSessionPolicy'
+import { locallyLinkedSessions, locallyLinkedAgentHostSessions } from '../src/main/linkedSessionPolicy'
+import { readClientIdentity } from '../src/main/clientIdentity'
 
 const directories: string[] = []
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))) })
@@ -29,6 +30,25 @@ async function fixture() {
 }
 
 describe('workspace-scoped repository link writes', () => {
+  it('confirms AHP identity before writing portable links and local receipts', async () => {
+    const { root, workspace } = await fixture()
+    const profile = join(root, 'profile')
+    const { clientId, machineName } = await readClientIdentity(profile)
+    const target = { hostId: 'host-instance-123', sessionId: 'ahp-session:/original', chatId: 'ahp-chat:/original/main', owner: { clientId, machineName } }
+    let valid = false
+    const store = new WorkspaceStore(profile, undefined, undefined, undefined, async (_root, value) => { if (!valid) throw new Error('Host unavailable.'); return value })
+    await store.openFolder(root)
+    const request = { workspaceId: workspace.id, taskId: 'T-0002', sessionId: target.sessionId, agentHost: { hostId: target.hostId, chatId: target.chatId }, owner: target.owner, expectedRevision: null }
+    await expect(store.updateSessionLink(request)).rejects.toThrow('unavailable')
+    expect((await store.getSessionLinks(workspace.id)).revision).toBeNull()
+    valid = true
+    const saved = await store.updateSessionLink(request)
+    expect(saved.document.bindings['T-0002']).toEqual({ provider: 'agent-host', ...target })
+    expect(await locallyLinkedAgentHostSessions(profile, root, target.owner)).toEqual([target])
+    await store.updateSessionLink({ workspaceId: workspace.id, taskId: 'T-0002', sessionId: null, expectedRevision: saved.revision })
+    expect(await locallyLinkedAgentHostSessions(profile, root, target.owner)).toEqual([])
+  })
+
   it('writes only link metadata for a known task in the selected workspace', async () => {
     const { root, taskFile, original, store, workspace } = await fixture()
     const saved = await store.updateSessionLink({ workspaceId: workspace.id, taskId: 'T-0002', sessionId: 'native-session', expectedRevision: null })

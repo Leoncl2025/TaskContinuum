@@ -96,6 +96,73 @@ Desktop tests use the installed Electron executable, not a downloaded Playwright
 browser. Their isolated profiles, screenshots, and reports are ignored by Git.
 Screenshots cover dark, light, contextual chat, and compact layouts.
 
+## Agent Host Sessions
+
+Existing **Agent Host-owned** Copilot chats now use the official AHP 0.9.0 client
+instead of the VS Code Companion. Open **Agent Host sessions** in the activity
+bar, allow local Host access for the selected task workspace once, and link the
+existing chat. No session is created, imported, forked, or resumed through the CLI.
+The Host and its signed-in provider must already be running.
+
+For another desktop, reuse **Remote VS Code sessions > Devices** and its existing
+private Dev Tunnel + restricted SSH pairing. B links the chat once; after Git
+synchronizes the link, A selects the task. No new tunnel port, per-session invitation,
+Host-wide credential, or Companion extension is required for this AHP route.
+Workspace read/send policy and B's local confirmation receipt remain mandatory.
+
+The chat panel shows live Markdown, reasoning/tool status and terminal output,
+supports pasted images and exact-turn cancellation, and retains drafts during
+updates/reconnection. Native tool approvals, questions and provider authentication
+remain on B. Recovery obtains authoritative snapshots; it never replays a send.
+An unknown delivery blocks further sends until its original turn is observed.
+Read-only participants cannot send or cancel.
+
+Git stores a distinct `agent-host` provider with owner Client ID, Host instance ID,
+session URI and chat URI. Native Copilot sessions use `copilotcli:/...` and
+`ahp-chat://default/...`; the prototype's `ahp-session:/...` form is also accepted.
+Only the verified `copilotcli` provider is currently listed. The link contains no
+endpoint token, route or history. Host
+instance identity is pinned: replacing/restarting that Host does not silently select
+a different process; explicitly verify and relink its existing session if needed.
+Existing extension-host **Local** links continue through the legacy Companion,
+unchanged. AHP cannot subscribe to those Local conversations or preserve their
+runtime by starting a new Host. See [the remote runbook](docs/remote-vscode.md#agent-host-ahp).
+
+### Isolated AHP proof of concept
+
+The opt-in [AHP test](e2e/ahp.spec.ts) uses the official
+`@microsoft/agent-host-protocol` runtime client and an actual standalone VS Code
+Agent Host. On Windows with VS Code 1.137 installed, run:
+
+```powershell
+$env:TASKCONTINUUM_VERIFY_AHP_CLI = 'C:/Program Files/Microsoft VS Code/bin/code-tunnel.exe'
+try { npx playwright test e2e/ahp.spec.ts }
+finally { Remove-Item Env:TASKCONTINUUM_VERIFY_AHP_CLI -ErrorAction SilentlyContinue }
+```
+
+The test starts a new loopback-only, token-protected Host with temporary data
+directories, downloads its matching server runtime if needed, and closes only its
+own processes afterward. Two observers and the production `AgentHostConnection`
+share one session/chat; one observer connects through real local SSH. A fixed
+`!node output.mjs` command sent once by production code generates Host-local chat/tool
+events and incremental terminal output, followed by subscriber disconnection and
+sequence-based replay. It checks unchanged unrelated chat state and one execution.
+The CLI may write its normal supervisor log outside the temporary directories.
+
+Verified protocol: **0.9.0**, advertised provider: **copilotcli**. No model generation
+is requested. This proves the AHP subscription/recovery path, not Copilot-generated
+`chat/delta`, physical A/B latency, or access to existing extension-host Local
+sessions. The production AHP route is covered separately by
+[the desktop test](e2e/agent-host-desktop.spec.ts) and paired-device SSH regressions.
+No live Copilot model or physical A/B cloud result is inferred from these tests.
+
+On an already running VS Code 1.137 Editor Host, the opt-in
+`TASKCONTINUUM_VERIFY_AHP_LOCAL=1 npm test -- test/agent-host.test.ts` verifies
+read-only discovery, authenticated named-pipe/TCP handshake and ping. It sends no
+model prompt and reads no conversation content. The actual runtime exposes
+`agenthost-terminal:` resources as well as the documented `ahp-terminal:` scheme;
+both remain restricted to terminal references owned by the linked chat.
+
 ## Chat Markdown
 
 Assistant replies use the existing `react-markdown` and `remark-gfm` stack instead

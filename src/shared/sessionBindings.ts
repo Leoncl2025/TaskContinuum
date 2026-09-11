@@ -1,3 +1,5 @@
+import type { AgentHostTarget } from './agentHost'
+
 export interface SessionOwner { clientId: string; machineName: string }
 
 export type SessionLink = ({
@@ -8,7 +10,7 @@ export type SessionLink = ({
   sessionId: string
   workspaceStorageId: string
   remoteMachineName?: string
-}) & { owner?: SessionOwner }
+} | (AgentHostTarget & { provider: 'agent-host' })) & { owner?: SessionOwner }
 
 export interface SessionLinksDocument {
   schemaVersion: 1
@@ -27,6 +29,7 @@ export interface UpdateSessionLink {
   sessionId: string | null
   vscodeWorkspaceStorageId?: string
   vscodeRemoteMachineName?: string
+  agentHost?: { hostId: string; chatId: string }
   owner?: SessionOwner
   expectedRevision: string | null
 }

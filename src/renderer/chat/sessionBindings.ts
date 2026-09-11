@@ -1,9 +1,12 @@
 import type { SessionOwner } from '../../shared/sessionBindings'
-export interface SessionBinding { id: string; title: string; vscodeWorkspaceStorageId?: string; remoteMachineName?: string; owner?: SessionOwner; ownerIsRemote?: boolean }
+import { agentHostKey } from '../../shared/agentHost'
+import type { AgentHostTarget } from '../../shared/agentHost'
+export interface SessionBinding { id: string; title: string; vscodeWorkspaceStorageId?: string; remoteMachineName?: string; owner?: SessionOwner; ownerIsRemote?: boolean; agentHost?: AgentHostTarget }
 export type SessionBindings = Record<string, SessionBinding>
 const key = 'taskcontinuum:session-bindings:v1'
 
-export function sessionBindingKey(binding: Pick<SessionBinding, 'id' | 'vscodeWorkspaceStorageId' | 'remoteMachineName'>): string {
+export function sessionBindingKey(binding: Pick<SessionBinding, 'id' | 'vscodeWorkspaceStorageId' | 'remoteMachineName' | 'agentHost'>): string {
+  if (binding.agentHost) return `ahp:${agentHostKey(binding.agentHost)}`
   return binding.vscodeWorkspaceStorageId ? `${binding.remoteMachineName ? `vscode-remote:${binding.remoteMachineName.toLowerCase()}` : 'vscode'}:${binding.vscodeWorkspaceStorageId}:${binding.id}` : `copilot:${binding.id}`
 }
 
@@ -18,6 +21,7 @@ export function readSessionBindings(workspaceId?: string): SessionBindings {
     return Object.fromEntries(Object.entries(value).filter(([taskId, binding]: [string, unknown]) => {
       if (taskId.length > 100 || !binding || typeof binding !== 'object') return false
       const entry = binding as Partial<SessionBinding>
+      if (entry.agentHost !== undefined) return false
       if (entry.vscodeWorkspaceStorageId !== undefined && (typeof entry.vscodeWorkspaceStorageId !== 'string' || !/^[a-f0-9]{32}$/.test(entry.vscodeWorkspaceStorageId))) return false
       if (entry.remoteMachineName !== undefined && (!entry.vscodeWorkspaceStorageId || typeof entry.remoteMachineName !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,252}$/.test(entry.remoteMachineName))) return false
       return typeof entry.id === 'string' && entry.id.length <= 240 && typeof entry.title === 'string' && entry.title.length <= 500

@@ -5,6 +5,8 @@ import { z } from 'zod'
 import type { SessionLink, SessionLinksDocument, SessionLinksSnapshot, SessionOwner } from '../shared/sessionBindings'
 import { sessionLinksPath } from '../shared/sessionBindings'
 import { remoteMachineSchema } from './vscodeRemoteProtocol'
+import { agentHostTargetSchema } from './agentHostProtocol'
+import type { AgentHostTarget } from '../shared/agentHost'
 
 const taskIdSchema = z.string().regex(/^T-\d{4,}$/)
 const sessionIdSchema = z.string().min(1).max(240).regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/)
@@ -12,8 +14,10 @@ export const sessionOwnerSchema = z.object({ clientId: z.uuid(), machineName: re
 export const sessionLinkSchema = z.discriminatedUnion('provider', [
   z.object({ provider: z.literal('github-copilot'), sessionId: sessionIdSchema, owner: sessionOwnerSchema.optional() }).strict(),
   z.object({ provider: z.literal('vscode-copilot'), sessionId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,199}$/), workspaceStorageId: z.string().regex(/^[a-f0-9]{32}$/), remoteMachineName: remoteMachineSchema.optional(), owner: sessionOwnerSchema.optional() }).strict(),
+  agentHostTargetSchema.extend({ provider: z.literal('agent-host') }).strict(),
 ])
 function linkKey(link: SessionLink): string {
+  if (link.provider === 'agent-host') return `${link.provider}:${link.owner.clientId}:${link.hostId}:${link.sessionId}`
   return `${link.provider}:${link.owner?.clientId ?? (link.provider === 'vscode-copilot' ? link.remoteMachineName?.toLowerCase() ?? '' : '')}:${link.provider === 'vscode-copilot' ? `${link.workspaceStorageId}:` : ''}${link.sessionId}`
 }
 const documentSchema = z.object({
@@ -79,6 +83,15 @@ export async function updateRepositorySessionLink(root: string, taskId: string, 
   const selected: SessionLink | null = sessionId === null ? null : sessionLinkSchema.parse(vscodeWorkspaceStorageId === undefined
     ? { provider: 'github-copilot', sessionId, ...(owner ? { owner } : {}) }
     : { provider: 'vscode-copilot', sessionId, workspaceStorageId: vscodeWorkspaceStorageId, ...(owner ? { owner } : vscodeRemoteMachineName ? { remoteMachineName: vscodeRemoteMachineName } : {}) })
+  return updateLink(root, taskId, selected, expectedRevision)
+}
+
+export function updateRepositoryAgentHostLink(root: string, taskId: string, target: AgentHostTarget, expectedRevision: string | null): Promise<SessionLinksSnapshot> {
+  taskIdSchema.parse(taskId)
+  return updateLink(root, taskId, sessionLinkSchema.parse({ ...agentHostTargetSchema.parse(target), provider: 'agent-host' }), expectedRevision)
+}
+
+function updateLink(root: string, taskId: string, selected: SessionLink | null, expectedRevision: string | null): Promise<SessionLinksSnapshot> {
   return writeRepositorySessionLinks(root, expectedRevision, (before) => {
     const prior = before.bindings[taskId]
     if (prior?.owner && selected && prior.sessionId === selected.sessionId && prior.provider === selected.provider && prior.owner.clientId !== selected.owner?.clientId) throw new Error('Session ownership cannot be changed by linking. Ownership transfer is not supported.')

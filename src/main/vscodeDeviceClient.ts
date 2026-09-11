@@ -16,6 +16,9 @@ import { deliverySchema } from './vscodeChatDelivery'
 import type { DeviceProtector } from './vscodeDeviceHost'
 import { readRepositorySessionLinks } from './repositorySessionLinks'
 import type { SessionOwner } from '../shared/sessionBindings'
+import type { AgentHostSession, AgentHostTarget } from '../shared/agentHost'
+import { agentHostCatalogSchema, agentHostTargetSchema } from './agentHostProtocol'
+import { connectAgentHostWebSocket } from './agentHostTransport'
 
 const knownSchema = z.object({ id: z.uuid(), invitation: remoteInvitationSchema }).strict()
 const peerSchema = z.object({ id: z.uuid(), root: z.string().min(1), invitation: deviceInvitationSchema,
@@ -146,7 +149,7 @@ export class VSCodeDeviceClient {
     active?.abort.abort()
     active?.tunnel.close()
   }
-  private async ensure(peer: Peer): Promise<void> {
+  private async ensure(peer: Peer, includeNativeCatalog = true): Promise<void> {
     if (this.closed || !peer.enabled) throw new Error('Device connection is disabled.')
     if (this.connecting.has(peer.id)) return this.connecting.get(peer.id)
     if ((this.retry.get(peer.id)?.at ?? 0) > Date.now()) throw new Error(this.errors.get(peer.id) ?? 'Waiting to reconnect to the owner.')
@@ -163,6 +166,7 @@ export class VSCodeDeviceClient {
           if (this.closed || !peer.enabled || abort.signal.aborted) { tunnel.close(); throw new Error('Connection cancelled.') }
           this.active.set(peer.id, active)
         }
+        if (!includeNativeCatalog) return
         const catalog = deviceCatalogSchema.parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/sessions', {}, active.abort.signal))
         if (catalog.ownerId !== peer.invitation.ownerId || catalog.deviceId !== peer.invitation.id) throw new Error('Device identity changed.')
         const available = new Set<string>()
@@ -275,6 +279,38 @@ export class VSCodeDeviceClient {
     const result = z.object({ opened: z.literal(true), nativeSessionId: z.string(), workspaceStorageId: z.string() }).strict().parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/session/open', { identity: targetIdentity(target) }, active.abort.signal))
     if (!sameRemoteTarget(result, targetIdentity(target))) throw new Error('The owner returned a different opened session. No message was sent.')
   }
+  async agentHostSessions(root: string): Promise<{ sessions: AgentHostSession[]; warnings: string[] }> {
+    await this.load()
+    const canonical = await this.root(root)
+    const sessions: AgentHostSession[] = []
+    const warnings: string[] = []
+    for (const peer of this.peers.filter((item) => item.root === canonical && item.enabled && item.invitation.ownerClientId)) {
+      try {
+        if (!this.active.has(peer.id)) await this.ensure(peer, false)
+        const active = this.active.get(peer.id)!
+        const catalog = agentHostCatalogSchema.parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/agent-host/sessions', {}, active.abort.signal))
+        if (this.active.get(peer.id) !== active || !peer.enabled || catalog.ownerId !== peer.invitation.ownerId || catalog.deviceId !== peer.invitation.id || catalog.sessions.some((item) => item.owner.clientId !== peer.invitation.ownerClientId || item.owner.machineName.toLowerCase() !== peer.invitation.machineName.toLowerCase())) throw new Error('Device identity changed.')
+        sessions.push(...catalog.sessions)
+      } catch { warnings.push(`Agent Host sessions on ${peer.invitation.machineName} are unavailable or not shared.`) }
+    }
+    return { sessions, warnings }
+  }
+
+  async agentHostTransport(root: string, value: AgentHostTarget, signal: AbortSignal) {
+    const target = agentHostTargetSchema.parse(value)
+    await this.load()
+    const canonical = await this.root(root)
+    const peers = this.peers.filter((item) => item.root === canonical && item.invitation.ownerClientId === target.owner.clientId)
+    if (peers.length !== 1) throw new Error('Pair with the exact Agent Host owner in Devices. Git does not grant access.')
+    const peer = peers[0]
+    if (!peer.enabled || Date.parse(peer.invitation.expiresAt) <= Date.now()) throw new Error('The owner connection is disabled or expired.')
+    if (!this.active.has(peer.id)) await this.ensure(peer, false)
+    const active = this.active.get(peer.id)!
+    const combined = AbortSignal.any([signal, active.abort.signal])
+    const encoded = Buffer.from(JSON.stringify(target)).toString('base64url')
+    return connectAgentHostWebSocket(`ws://127.0.0.1:${active.tunnel.port}/device/agent-host?target=${encoded}`, { headers: { Host: `127.0.0.1:${peer.invitation.port}`, Authorization: `Bearer ${peer.invitation.token}` } }, combined)
+  }
+
   close(): void { this.closed = true; for (const peer of this.peers) this.drop(peer.id) }
 }
 
