@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir, hostname } from 'node:os'
 import { join } from 'node:path'
 import { createConnection } from 'node:net'
@@ -14,6 +14,7 @@ import { startVSCodeChatCompanion } from '../src/main/vscodeChatCompanion'
 import { remoteInvitationSchema } from '../src/main/vscodeRemoteProtocol'
 import { deviceInvitationSchema } from '../src/main/vscodeDeviceProtocol'
 import * as deviceHttp from '../src/main/vscodeDeviceHttp'
+import type { VSCodeDispatch } from '../src/main/vscodeChatDelivery'
 
 describe('client-scoped SSH sessions', () => {
   it.each(['timeout', 'cancellation'])('identifies session discovery %s without a generic abort error', async (reason) => {
@@ -47,7 +48,14 @@ describe('client-scoped SSH sessions', () => {
     const otherTasks = join(root, 'other-tasks')
     await Promise.all([mkdir(history, { recursive: true }), mkdir(tasks), mkdir(otherTasks)])
     for (const name of ['first', 'second']) await writeFile(join(history, `${name}.json`), JSON.stringify({ customTitle: name, inputState: { mode: { id: 'agent', kind: 'agent' } }, requests: [{ requestId: 'old', message: `History ${name}`, response: [{ value: 'Answer' }], result: {} }] }))
-    const dispatch = vi.fn(async () => ({ state: 'submitted' as const, nativeRequestId: 'new' }))
+    const imageBytes = Buffer.alloc(40 * 1024)
+    Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64').copy(imageBytes)
+    const image = { id: randomUUID(), name: 'Remote screenshot.png', mimeType: 'image/png' as const, data: imageBytes.toString('base64') }
+    const dispatch = vi.fn<VSCodeDispatch>(async (_identity, delivery, _signal, files) => {
+      expect(delivery.images).toMatchObject([{ id: image.id, byteLength: imageBytes.length }])
+      expect(await readFile(files![0].path)).toEqual(imageBytes)
+      return { state: 'submitted', nativeRequestId: 'new' }
+    })
     const bridge = await startVSCodeChatCompanion({ storageRoot: storage, workspaceStorageId, discoveryDirectory: join(root, 'bridges'), vscodeVersion: '1.136.1', open: async () => {}, dispatch })
     const headers = { Authorization: `Bearer ${bridge.descriptor.token}`, 'Content-Type': 'application/json' }
     const resolve = vi.fn(async (identity, participant, canSend, prior) => prior ?? remoteInvitationSchema.parse(await (await fetch(`http://127.0.0.1:${bridge.descriptor.port}/remote/grant`, { method: 'POST', headers, body: JSON.stringify({ ...identity, participant, canSend }) })).json()))
@@ -88,8 +96,8 @@ describe('client-scoped SSH sessions', () => {
       await manager.connect(tasks, second.id)
       expect(transport).toHaveBeenCalledTimes(1)
       expect(JSON.stringify(await manager.read(tasks, second.target))).toContain('History second')
-      await expect(manager.send(tasks, second.target, randomUUID(), 'Denied')).rejects.toThrow('send access')
-      await manager.send(tasks, first.target, randomUUID(), 'One explicit send')
+      await expect(manager.send(tasks, second.target, randomUUID(), '', [image])).rejects.toThrow('send access')
+      expect(await manager.send(tasks, first.target, randomUUID(), '', [image])).toMatchObject({ text: '', images: [{ id: image.id, byteLength: imageBytes.length }] })
       await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(1))
       opened[0].close()
       expect(await manager.read(tasks, first.target)).toMatchObject({ connectionState: 'offline', canSend: false })

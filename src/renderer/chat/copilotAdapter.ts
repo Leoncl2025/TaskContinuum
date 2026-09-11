@@ -34,7 +34,7 @@ export function createCopilotAdapter(bridge: CopilotBridge): ChatAdapter {
       request.signal.addEventListener('abort', abort, { once: true })
       try {
         request.signal.throwIfAborted()
-        void bridge.send({ requestId, sessionId: request.sessionId, message: request.message }).then(() => {
+        void bridge.send({ requestId, sessionId: request.sessionId, message: request.message, ...(request.images?.length ? { images: request.images } : {}) }).then(() => {
           if (!finished) fail(new Error('The local response ended without a completion event.'))
         }, fail)
         while (!finished || queue.length) {

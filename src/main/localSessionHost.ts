@@ -114,7 +114,7 @@ export class LocalSessionHost {
   async send(request: SendMessageRequest): Promise<void> {
     const id = checkedString(request?.sessionId, 'session ID')
     const requestId = checkedString(request?.requestId, 'request ID')
-    checkedString(request?.message, 'message', 4000)
+    if (!request?.images?.length) checkedString(request?.message, 'message', 4000)
     if (this.sending.has(id) || this.requests.has(requestId)) throw new Error('This conversation already has an active request.')
     const controller = new AbortController()
     this.sending.add(id)

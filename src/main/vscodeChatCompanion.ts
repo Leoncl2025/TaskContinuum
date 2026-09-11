@@ -9,7 +9,8 @@ import { writeJsonAtomic } from './shared/storage'
 import { vsCodeChatResource } from '../shared/vscodeChat'
 import { VSCodeChatDeliveryService } from './vscodeChatDelivery'
 import type { VSCodeDispatch } from './vscodeChatDelivery'
-import { companionSchema, vscodeIdentitySchema } from './vscodeChatSchemas'
+import { companionSchema, vscodeIdentitySchema, vscodeSubmissionSchema } from './vscodeChatSchemas'
+import { MAX_CHAT_IMAGE_REQUEST_BYTES } from '../shared/chatAttachments'
 import { remoteClientSchema, remoteInvitationSchema, remoteGrantSchema } from './vscodeRemoteProtocol'
 import type { RemoteVSCodeInvitation } from './vscodeRemoteProtocol'
 import { originalChatView } from './vscodeChatView'
@@ -57,7 +58,7 @@ export async function startVSCodeChatCompanion(options: {
       const authorized = () => local || Boolean(invitation && remoteGrants.get(invitation.grant.id) === invitation && Date.parse(invitation.grant.expiresAt) > Date.now())
       const assertAuthorized = () => { if (!authorized()) throw new Error('Remote access was revoked or expired before this operation completed.') }
       if (local && request.method === 'GET' && request.url === '/identity') {
-        response.end(JSON.stringify({ protocol: 1, instanceId, workspaceStorageId, vscodeVersion: options.vscodeVersion, participant, execution, capabilities: { open: true, send: Boolean(deliveries), remote: true, sessionState: Boolean(options.isOpen), prepareSend: Boolean(options.autoOpenOnSend && options.isOpen && deliveries) } })); return
+        response.end(JSON.stringify({ protocol: 1, instanceId, workspaceStorageId, vscodeVersion: options.vscodeVersion, participant, execution, capabilities: { open: true, send: Boolean(deliveries), images: Boolean(deliveries), remote: true, sessionState: Boolean(options.isOpen), prepareSend: Boolean(options.autoOpenOnSend && options.isOpen && deliveries) } })); return
       }
       if (invitation && request.method === 'GET' && request.url === '/remote/identity') {
         response.end(JSON.stringify({ instanceId, identity: invitation.identity, grant: invitation.grant, execution, vscodeVersion: options.vscodeVersion })); return
@@ -66,12 +67,14 @@ export async function startVSCodeChatCompanion(options: {
       if (request.method !== 'POST' || !routes.includes(request.url ?? '')) { response.writeHead(404).end('{}'); return }
       if (['/send', '/deliveries', '/remote/send'].includes(request.url!) && !deliveries) { response.writeHead(404).end('{}'); return }
       if (!request.headers['content-type']?.startsWith('application/json')) { response.writeHead(415).end('{}'); return }
+      const sending = request.url === '/send' || request.url === '/remote/send'
+      if (sending && invitation && !invitation.grant.canSend) { response.writeHead(403).end(JSON.stringify({ error: 'This invitation is read-only.' })); return }
       let bytes = 0
       const chunks: Buffer[] = []
       for await (const chunk of request) {
         const value = Buffer.from(chunk)
         bytes += value.byteLength
-        if (bytes > 32768) { response.writeHead(413).end('{}'); return }
+        if (bytes > (sending ? MAX_CHAT_IMAGE_REQUEST_BYTES : 32768)) { response.writeHead(413).end('{}'); return }
         chunks.push(value)
       }
       if (!authorized()) { response.writeHead(401).end('{}'); return }
@@ -100,7 +103,7 @@ export async function startVSCodeChatCompanion(options: {
         if (value) deliveries?.revokeParticipant(value.grant.participant.clientId, value.identity.nativeSessionId)
         response.end(JSON.stringify({ revoked: true })); return
       }
-      const submission = request.url === '/send' || request.url === '/remote/send' ? vscodeIdentitySchema.extend({ id: z.uuid(), text: z.string().trim().min(1).max(4000) }).strict().parse(input) : undefined
+      const submission = sending ? vscodeSubmissionSchema.parse(input) : undefined
       const identity = submission ? { nativeSessionId: submission.nativeSessionId, workspaceStorageId: submission.workspaceStorageId } : vscodeIdentitySchema.parse(input)
       if (identity.workspaceStorageId !== workspaceStorageId) { response.writeHead(403).end(JSON.stringify({ error: 'This is a different VS Code workspace.' })); return }
       if (invitation && invitation.identity.nativeSessionId !== identity.nativeSessionId) { response.writeHead(403).end(JSON.stringify({ error: 'This invitation does not authorize that conversation.' })); return }
@@ -132,7 +135,7 @@ export async function startVSCodeChatCompanion(options: {
           }
           if (opening && !preparing) { response.writeHead(409).end(JSON.stringify({ error: 'An original conversation is opening. Wait before sending.' })); return }
           assertAuthorized()
-          response.end(JSON.stringify(await deliveries!.submit(identity, { id: submission.id, text: submission.text }, invitation?.grant.participant ?? participant, assertAuthorized))); return
+          response.end(JSON.stringify(await deliveries!.submit(identity, { id: submission.id, text: submission.text, ...(submission.images?.length ? { images: submission.images } : {}) }, invitation?.grant.participant ?? participant, assertAuthorized))); return
         } finally { if (preparing) opening = false }
       }
       if (local && request.url === '/session-state') {

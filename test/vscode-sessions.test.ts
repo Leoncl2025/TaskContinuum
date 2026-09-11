@@ -126,6 +126,44 @@ describe('VS Code conversation import', () => {
     expect(await readFile(file, 'utf8')).toBe(source)
   })
 
+  it('reads a large initial snapshot and subsequent updates without changing the original identity', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'taskcontinuum-large-snapshot-'))
+    directories.push(root)
+    const identity = { nativeSessionId: 'large-snapshot', workspaceStorageId: 'a'.repeat(32) }
+    const directory = join(root, identity.workspaceStorageId, 'chatSessions')
+    await mkdir(directory, { recursive: true })
+    const file = join(directory, 'large-snapshot.jsonl')
+    const initial = journal([{ kind: 0, v: {
+      customTitle: 'Forked large snapshot', requesterUsername: 'Alice', responderUsername: 'GitHub Copilot',
+      inputState: { mode: { id: 'agent', kind: 'agent' }, inputText: '' },
+      requests: [{ requestId: 'snapshot-request', message: { text: 'Original question' }, result: {}, response: [
+        { kind: 'toolInvocation', value: 'x'.repeat(44 * 1024 * 1024) },
+        { kind: 'markdownContent', content: { value: 'Saved answer' } },
+      ] }],
+    } }])
+    expect(Buffer.byteLength(initial)).toBeGreaterThan(32 * 1024 * 1024)
+    expect(Buffer.byteLength(initial)).toBeLessThan(64 * 1024 * 1024)
+    const source = initial + journal([
+      { kind: 2, k: ['requests', 0, 'response', 1, 'content', 'value'], v: ' with a later update' },
+      { kind: 1, k: ['inputState', 'inputText'], v: 'An unsent draft' },
+    ])
+    await writeFile(file, source)
+    const store = new VSCodeSessionStore([root])
+    const listing = await store.list()
+    expect(listing.warnings).toEqual([])
+    expect(listing.sessions).toHaveLength(1)
+    expect(listing.sessions[0]).toMatchObject({ title: 'Forked large snapshot', messageCount: 2 })
+    expect((await store.read(listing.sessions[0].id)).messages.map((message) => message.text)).toEqual(['Original question', 'Saved answer with a later update'])
+    const original = await store.locateOriginal(identity)
+    expect(original.file).toBe(file)
+    expect(original.state).toMatchObject({ mode: { id: 'agent', kind: 'agent' }, hasDraft: true,
+      turns: [{ id: 'snapshot-request', prompt: 'Original question', complete: true, cancelled: false }],
+    })
+    expect(original.snapshot.messages.every((message) => message.nativeRequestId === 'snapshot-request')).toBe(true)
+    expect(original.snapshot.messages[0].author?.name).toBe('Alice')
+    expect(await readFile(file, 'utf8')).toBe(source)
+  })
+
   it('preserves UTF-8 across stream chunks and ignores only an unfinished final record', async () => {
     const root = await mkdtemp(join(tmpdir(), 'taskcontinuum-stream-original-'))
     directories.push(root)
@@ -180,9 +218,10 @@ describe('VS Code conversation import', () => {
     const directory = join(root, identity.workspaceStorageId, 'chatSessions')
     await mkdir(directory, { recursive: true })
     const journalFile = join(directory, 'original.jsonl')
-    await writeFile(journalFile, Buffer.alloc(32 * 1024 * 1024 + 1, 32))
+    await writeFile(journalFile, Buffer.alloc(64 * 1024 * 1024 + 1, 32))
     const store = new VSCodeSessionStore([root])
-    await expect(store.locateOriginal(identity)).rejects.toThrow('journal record exceeds the 32 MiB limit')
+    await expect(store.locateOriginal(identity)).rejects.toThrow('journal record exceeds the 64 MiB limit')
+    expect((await store.list()).warnings[0]).toContain('journal record exceeds the 64 MiB limit')
     await truncate(journalFile, 256 * 1024 * 1024 + 1)
     await expect(store.locateOriginal(identity)).rejects.toThrow('journal exceeds the 256 MiB limit')
     expect((await store.list()).warnings[0]).toContain('journal exceeds the 256 MiB limit')

@@ -27,11 +27,49 @@ Replies identify the execution machine; user messages identify their sender.
    also disables automatic restoration for this workspace and cancels unconfirmed
    delivery work, not an already-running Copilot response.
 
-Upgrade earlier versions by installing the 0.4.3 VSIX. An already-loaded extension may
+Upgrade earlier versions by installing the 0.5.0 VSIX. An already-loaded extension may
 need **Developer: Reload Window** before starting the new bridge. Finish active
 work first; the desktop does not reload the VS Code window automatically. Both
 Task Continuum desktops must load the rebuilt app for the readiness protocol. Connection attempts
 retain the current draft and show send-blocking reasons next to the input area.
+
+## Image Sending (0.5.0)
+
+The updated desktop accepts pasted screenshots and selected PNG/JPEG/GIF/WebP
+files, including image-only messages. Each request permits four images, 5 MiB
+per image and 10 MiB total. Only authenticated send routes accept the larger
+image payload; non-send request limits and existing grants remain unchanged.
+
+The execution machine stores validated bytes in its private bridge `images`
+directory using content-hash filenames. The original Agent receives file URLs
+and is asked to inspect them with its image-reading tool. This is not native
+VS Code image-variable injection: the Agent needs the appropriate tool, and
+its existing approvals still apply. No focus-dependent attachment command,
+new Agent, mode switch, or replacement conversation is introduced.
+
+Receipts store image metadata only. Retry identity includes image hashes and
+metadata; a different image cannot reuse the same message ID. The image store
+is bounded to 256 MiB and is never placed in task Git metadata. Saved history
+sync sends metadata, not image bytes. Both desktops and this Companion must
+load the new build; existing workspace enablement and device grants are retained.
+
+## Large Initial Snapshots (0.4.4)
+
+The earlier JSONL reader shared its 32 MiB record limit with legacy JSON files.
+Large native initial snapshots can exceed that bound without exceeding the journal
+limit, causing `A VS Code journal record exceeds the 32 MiB limit` and an omitted
+remote catalog entry. Version 0.4.4 permits individual JSONL records up to 64 MiB;
+the complete journal limit stays 256 MiB and legacy JSON stays 32 MiB.
+
+The reader remains read-only and preserves native identity, incremental updates,
+draft/busy checks, bounded display history, and partial-tail handling. No history
+is deleted, imported, or replayed. Both the source Task Continuum desktop and this
+companion must load the updated reader. Finish active work before reloading VS Code;
+existing device pairings and workspace consent are retained.
+
+Verification includes a 44 MiB initial-record regression, oversize rejection, actual
+read-only recovery of the failing original, Electron history/update/restart checks,
+and an isolated installed-VS-Code SSH read/open test without model requests.
 
 ## Single-action Sending
 

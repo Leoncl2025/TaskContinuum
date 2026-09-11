@@ -1,9 +1,13 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useId, useRef, useState } from 'react'
 import type { TaskRecord } from '../../shared/tasks'
 import type { VSCodeChatDelivery, VSCodeChatView } from '../../shared/vscodeChat'
 import type { VSCodeChatTarget } from '../../shared/remoteVSCode'
 import { Icon, IconButton } from './Primitives'
 import { ChatMarkdown } from './ChatMarkdown'
+import { ChatImagePicker, ChatImages, ChatImageStatus } from './ChatImages'
+import { useChatImageInput } from '../chat/useChatImageInput'
+import type { ChatImageAttachment } from '../../shared/chatAttachments'
+import { sameChatImages } from '../../shared/chatAttachments'
 
 export function VSCodeChatPanel({ task, identity, onDetach, onClose, onRemoteAccess, onRemoteConnections }: { task: TaskRecord; identity: VSCodeChatTarget; onDetach(): void; onClose(): void; onRemoteAccess?(): void; onRemoteConnections?(): void }) {
   const bridge = window.vscodeChat
@@ -13,13 +17,18 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose, onRemoteAcc
   const [readError, setReadError] = useState<string>()
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState('')
+  const [images, setImages] = useState<ChatImageAttachment[]>([])
+  const [sentImages, setSentImages] = useState<ChatImageAttachment[]>([])
   const [receipt, setReceipt] = useState<VSCodeChatDelivery>()
   const [revision, setRevision] = useState(0)
-  const pending = useRef<{ id: string; text: string } | undefined>(undefined)
+  const pending = useRef<{ id: string; text: string; images: ChatImageAttachment[] } | undefined>(undefined)
+  const lastAccepted = useRef<{ id: string; text: string; images: ChatImageAttachment[] } | undefined>(undefined)
+  const recovered = useRef<string | undefined>(undefined)
   const operating = useRef(false)
   const followBottom = useRef(true)
   const log = useRef<HTMLDivElement>(null)
   const { nativeSessionId, workspaceStorageId, remoteMachineName } = identity
+  const imageInput = useChatImageInput(`${remoteMachineName ?? ''}:${workspaceStorageId}:${nativeSessionId}`, images, setImages, busy)
   useEffect(() => {
     let active = true
     let request = 0
@@ -87,19 +96,35 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose, onRemoteAcc
     if (followBottom.current && log.current) log.current.scrollTop = log.current.scrollHeight
   }, [snapshot, receipt])
 
+  const recoverDraft = useEffectEvent((command: { text: string; images: ChatImageAttachment[] }, failure: VSCodeChatDelivery) => {
+    if (!draft && !images.length) { setDraft(command.text); setImages(command.images) }
+    setError(failure.error ?? 'The original session rejected the message. Your unsent message remains in the conversation.')
+  })
+  useEffect(() => {
+    const command = lastAccepted.current
+    const failure = snapshot?.deliveries?.find((delivery) => delivery.id === command?.id && delivery.state === 'failed')
+    if (!command || !failure || recovered.current === command.id) return
+    recovered.current = command.id
+    recoverDraft(command, failure)
+  }, [snapshot])
+
   async function send(): Promise<void> {
     const text = draft.trim()
-    if (!bridge?.send || !canSend || !text || operating.current) return
+    if (!bridge?.send || !canSend || !text && !images.length || operating.current || imageInput.isReading()) return
     operating.current = true
-    const command = pending.current?.text === text ? pending.current : { id: crypto.randomUUID(), text }
+    const command = pending.current?.text === text && sameChatImages(pending.current.images, images) ? pending.current : { id: crypto.randomUUID(), text, images }
     pending.current = command
     setBusy(true)
     setError(undefined)
     try {
-      const result = await bridge.send(identity, command.id, command.text)
+      const result = await (command.images.length ? bridge.send(identity, command.id, command.text, command.images) : bridge.send(identity, command.id, command.text))
       setReceipt(result)
       pending.current = undefined
+      if (result.state === 'failed' || result.state === 'uncertain') { setError(result.error ?? 'The message was not confirmed. Your draft has been retained.'); setRevision((current) => current + 1); return }
+      lastAccepted.current = command
       setDraft((current) => current.trim() === text ? '' : current)
+      setImages((current) => current.filter((image) => !command.images.some((sent) => sent.id === image.id)))
+      setSentImages(command.images)
       followBottom.current = true
       setRevision((current) => current + 1)
     } catch (failure) {
@@ -116,12 +141,13 @@ export function VSCodeChatPanel({ task, identity, onDetach, onClose, onRemoteAcc
     {snapshot?.bridgeError && !readError && !bridge?.send && <p className="vscode-chat-notice muted" role="status">{snapshot.bridgeError}</p>}
     <div className="chat-log" ref={log} role="log" aria-label={`Original conversation for ${task.id}`} aria-live="polite" onScroll={() => { if (log.current) followBottom.current = log.current.scrollHeight - log.current.scrollTop - log.current.clientHeight < 60 }}>
       {!snapshot && !readError && <p className="muted">Loading saved history...</p>}
-      {messages.map((message) => <article key={message.id} className={`message message-${message.role}`} data-request-id={message.nativeRequestId}><header><Icon name={message.role === 'user' ? 'account' : 'copilot'} /><strong>{message.author?.name ?? (message.role === 'user' ? 'Unknown user' : 'GitHub Copilot')}{message.role === 'assistant' ? ` @ ${message.author?.machineName ?? 'unknown machine'}` : ''}</strong>{message.role === 'user' && message.author?.machineName && <span className="message-model">{message.author.machineName}</span>}</header>{message.role === 'assistant' ? <ChatMarkdown source={message.text} /> : <div className="message-text">{message.text}</div>}{message.status === 'streaming' && <p className="message-notice">Responding in VS Code</p>}{message.status === 'cancelled' && <p className="message-notice">Stopped in VS Code</p>}{message.status === 'error' && <p className="message-notice error">VS Code reported a response error</p>}</article>)}
-      {outstanding.map((delivery) => <article key={delivery.id} className="message message-user" data-delivery-id={delivery.id}><header><Icon name="account" /><strong>{delivery.participant.username}</strong><span className="message-model">{delivery.participant.machineName}</span></header><div className="message-text">{delivery.text}</div><p className={`message-notice ${delivery.state === 'failed' ? 'error' : ''}`}>{delivery.state === 'pending' ? 'Delivering to the original VS Code session' : delivery.state === 'submitted' ? `Submitted to ${delivery.execution.agentName} @ ${delivery.execution.machineName}` : delivery.error ?? 'Delivery has not been confirmed'}</p></article>)}
+      {messages.map((message) => <article key={message.id} className={`message message-${message.role}`} data-request-id={message.nativeRequestId}><header><Icon name={message.role === 'user' ? 'account' : 'copilot'} /><strong>{message.author?.name ?? (message.role === 'user' ? 'Unknown user' : 'GitHub Copilot')}{message.role === 'assistant' ? ` @ ${message.author?.machineName ?? 'unknown machine'}` : ''}</strong>{message.role === 'user' && message.author?.machineName && <span className="message-model">{message.author.machineName}</span>}</header>{message.role === 'assistant' ? <ChatMarkdown source={message.text} /> : <div className="message-text">{message.text}</div>}<ChatImages images={message.images?.map((image) => sentImages.find((sent) => sent.id === image.id) ?? image)} />{message.status === 'streaming' && <p className="message-notice">Responding in VS Code</p>}{message.status === 'cancelled' && <p className="message-notice">Stopped in VS Code</p>}{message.status === 'error' && <p className="message-notice error">VS Code reported a response error</p>}</article>)}
+      {outstanding.map((delivery) => <article key={delivery.id} className="message message-user" data-delivery-id={delivery.id}><header><Icon name="account" /><strong>{delivery.participant.username}</strong><span className="message-model">{delivery.participant.machineName}</span></header><div className="message-text">{delivery.text}</div><ChatImages images={delivery.images?.map((image) => sentImages.find((sent) => sent.id === image.id) ?? image)} /><p className={`message-notice ${delivery.state === 'failed' ? 'error' : ''}`}>{delivery.state === 'pending' ? 'Delivering to the original VS Code session' : delivery.state === 'submitted' ? `Submitted to ${delivery.execution.agentName} @ ${delivery.execution.machineName}` : delivery.error ?? 'Delivery has not been confirmed'}</p></article>)}
     </div>
     {bridge?.send && <form className="composer-area" onSubmit={(event) => { event.preventDefault(); void send() }}>
       {sendBlockedReason && <p id={sendStatusId} className="vscode-chat-notice muted" role="status">{sendBlockedReason}</p>}
-      <div className="composer"><textarea aria-label="Message original VS Code Agent" aria-describedby={sendBlockedReason ? sendStatusId : undefined} placeholder="Message original Agent" value={draft} maxLength={4000} rows={3} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} /><div className="composer-toolbar"><span className="vscode-composer-identity"><Icon name="account" />{participant?.username ?? 'Unknown user'}{snapshot?.participant ? '' : ' (offline)'}</span><button type="submit" className="send-button" aria-label="Send to original VS Code session" aria-describedby={sendBlockedReason ? sendStatusId : undefined} title={sendBlockedReason ?? 'Send to original VS Code session'} disabled={!canSend || !draft.trim()}><Icon name="arrow-up" /></button></div></div>
+      <ChatImageStatus input={imageInput} />
+      <div className="composer"><ChatImages images={images} onRemove={imageInput.remove} disabled={busy} /><textarea aria-label="Message original VS Code Agent" aria-describedby={sendBlockedReason ? sendStatusId : undefined} placeholder="Message original Agent" value={draft} maxLength={4000} rows={3} onChange={(event) => setDraft(event.target.value)} onPaste={imageInput.paste} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} /><div className="composer-toolbar"><ChatImagePicker onFiles={imageInput.add} disabled={busy || imageInput.reading} /><span className="vscode-composer-identity"><Icon name="account" />{participant?.username ?? 'Unknown user'}{snapshot?.participant ? '' : ' (offline)'}</span><button type="submit" className="send-button" aria-label="Send to original VS Code session" aria-describedby={sendBlockedReason ? sendStatusId : undefined} title={sendBlockedReason ?? 'Send to original VS Code session'} disabled={!canSend || imageInput.reading || !draft.trim() && !images.length}><Icon name="arrow-up" /></button></div></div>
     </form>}
     <div className="session-footer"><Icon name="vscode" /><span>Tool approvals remain in VS Code.{snapshot?.omittedMessages ? ` ${snapshot.omittedMessages} earlier messages omitted.` : ''}</span></div>
   </aside>

@@ -12,8 +12,11 @@ import { originalChatView } from './vscodeChatView'
 import { remoteClientSchema, remoteGrantSchema, remoteInvitationSchema } from './vscodeRemoteProtocol'
 import type { RemoteVSCodeClientIdentity, RemoteVSCodeGrant } from '../shared/remoteVSCode'
 import type { RemoteVSCodeInvitation } from './vscodeRemoteProtocol'
+import { chatSubmissionSchema } from '../shared/chatAttachments'
+import type { ChatImageAttachment } from '../shared/chatAttachments'
+import { describeChatImages } from './chatImageStore'
 
-const identityResponse = z.object({ protocol: z.literal(1), instanceId: z.uuid(), workspaceStorageId: z.string(), vscodeVersion: z.string(), participant: participantSchema.optional(), execution: executionIdentitySchema.optional(), capabilities: z.object({ open: z.literal(true), send: z.boolean(), remote: z.boolean().optional(), sessionState: z.boolean().optional(), prepareSend: z.boolean().optional() }).strict() }).strict()
+const identityResponse = z.object({ protocol: z.literal(1), instanceId: z.uuid(), workspaceStorageId: z.string(), vscodeVersion: z.string(), participant: participantSchema.optional(), execution: executionIdentitySchema.optional(), capabilities: z.object({ open: z.literal(true), send: z.boolean(), images: z.boolean().optional(), remote: z.boolean().optional(), sessionState: z.boolean().optional(), prepareSend: z.boolean().optional() }).strict() }).strict()
 interface CompanionConnection { descriptor: z.infer<typeof companionSchema>; actual: z.infer<typeof identityResponse> }
 class OfflineVSCodeBridgeError extends Error {}
 
@@ -116,9 +119,9 @@ export async function openOriginalVSCode(store: VSCodeSessionStore, value: VSCod
 export async function sendOriginalVSCode(store: VSCodeSessionStore, value: VSCodeChatIdentity, commandId: string, text: string, preparation?: {
   openExternal(uri: string): Promise<void>
   assertCurrent(): Promise<void>
-}): Promise<VSCodeChatDelivery> {
+}, images?: ChatImageAttachment[]): Promise<VSCodeChatDelivery> {
   const identity = vscodeIdentitySchema.parse(value)
-  const request = z.object({ id: z.uuid(), text: z.string().trim().min(1).max(4000) }).strict().parse({ id: commandId, text })
+  const request = chatSubmissionSchema.parse({ id: commandId, text, ...(images?.length ? { images } : {}) })
   const original = await store.locateOriginal(identity)
   let connection: CompanionConnection
   try { connection = await discoverCompanion(original.bridgeDirectory, identity) } catch (error) {
@@ -142,8 +145,10 @@ export async function sendOriginalVSCode(store: VSCodeSessionStore, value: VSCod
   }
   await preparation?.assertCurrent()
   if (!connection.actual.capabilities.send || !connection.actual.participant || !connection.actual.execution) throw new Error('This VS Code bridge does not support attributed sending. Update the companion and restart its bridge.')
+  if (request.images?.length && !connection.actual.capabilities.images) throw new Error('Update the execution machine\'s VS Code Companion to send images. Your draft was not sent.')
   const result = deliverySchema.parse(await post(connection, '/send', { ...identity, ...request }))
   if (result.id !== request.id || result.text !== request.text || result.nativeSessionId !== identity.nativeSessionId
+    || JSON.stringify(result.images ?? []) !== JSON.stringify(describeChatImages(request.images ?? []))
     || result.participant.username !== connection.actual.participant.username || result.participant.machineName !== connection.actual.participant.machineName
     || result.execution.machineName !== connection.actual.execution.machineName) throw new Error('VS Code returned a different submission identity. Inspect the original conversation before retrying.')
   return result

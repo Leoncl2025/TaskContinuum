@@ -7,7 +7,7 @@ CLI Host, import history into another runtime, or create a fork.
 
 ## Prerequisites
 
-- Both desktops run the current Task Continuum build. B has companion 0.4.3 or
+- Both desktops run the current Task Continuum build. B has companion 0.5.0 or
   newer loaded in a trusted, local VS Code 1.136.x or 1.137.x workspace. Verification used
   Windows and VS Code 1.136.1/1.137.0. Remote SSH, WSL, container, and virtual VS Code
   windows on B are not supported; connecting an external desktop to local B is.
@@ -55,7 +55,7 @@ not reopened or moved. Browsing a task and background recovery never open a chat
 send a message. Manual **Open session on B** remains optional and retains its explicit
 confirmation; it opens the exact original without sending anything.
 
-Install the built `artifacts/taskcontinuum-vscode-bridge-0.4.3.vsix` on B using
+Install the built `artifacts/taskcontinuum-vscode-bridge-0.5.0.vsix` on B using
 **Extensions: Install from VSIX**, finish active work, reload the VS Code window,
 and reconnect its Bridge. Both Task Continuum desktops must use the rebuilt app.
 Device policies can renew after Bridge restart; legacy single-session invitations
@@ -65,6 +65,36 @@ An older running desktop does not acquire the new readiness protocol just becaus
 the source was rebuilt. Fully reopen both desktops after preserving drafts, and
 load the new companion after active work. Existing 0.4.1 workspace consent is
 retained. Historical failed receipts are not deleted or automatically resent.
+
+### Screenshots and Images
+
+Paste screenshots into the chat composer or choose **Attach images**. Up to four
+PNG/JPEG/GIF/WebP images can accompany a message, including a message without
+text (5 MiB per image, 10 MiB total). A sends bytes, never an A-side file path.
+B validates and stores them privately, then passes their file URLs to the same
+original Agent for its image-reading tool. Native tool approvals remain on B;
+this does not create native VS Code image-variable bubbles or a new conversation.
+
+Failed or interrupted delivery is not replayed automatically. Retrying unchanged
+text and images uses the same command ID. Receipts and offline caches contain
+image names and hashes only, not image bytes; checkpoint export and Git do not
+transport these private files. Load Companion 0.5.0 and rebuilt desktops to use
+this route, preserving existing pairing and workspace consent.
+
+### A Single Session Shows Offline
+
+If other sessions on B are connected, check the unavailable session's history
+error before changing network settings. Device-mode lists retain previously seen
+sessions even when B omits one from its current authorized/available catalog. Such
+an entry is shown as offline, and its disabled-send state is also labeled read-only;
+that label alone does not prove the owner changed the invitation's access role.
+
+For `A VS Code journal record exceeds the 32 MiB limit`, load the rebuilt Task
+Continuum desktop on B and companion 0.4.4 after active work. It supports single
+JSONL snapshots up to 64 MiB while retaining a 256 MiB total-journal limit. Legacy
+JSON files remain limited to 32 MiB. Refresh/reconnect A so its device catalog is
+updated. The fix does not need a new session, fork, task association, device pairing,
+or permission change. Source history and cached user messages are not deleted.
 
 ### Device scope (2026-09-09)
 

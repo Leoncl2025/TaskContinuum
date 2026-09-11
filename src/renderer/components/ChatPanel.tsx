@@ -4,6 +4,9 @@ import type { TaskRecord } from '../../shared/tasks'
 import type { TaskChat } from '../chat/useTaskChats'
 import { Icon, IconButton } from './Primitives'
 import { ChatMarkdown } from './ChatMarkdown'
+import { ChatImagePicker, ChatImages, ChatImageStatus } from './ChatImages'
+import { useChatImageInput } from '../chat/useChatImageInput'
+import type { ChatImageAttachment } from '../../shared/chatAttachments'
 
 interface Props {
   task: TaskRecord
@@ -16,16 +19,18 @@ interface Props {
   onSessions?(): void
   onConnect?(): void
   onDraft(value: string): void
+  onImages?(images: ChatImageAttachment[]): void
   onSend(value: string): void
   onStop(): void
   onClear(): void
   onClose(): void
 }
 
-export function ChatPanel({ task, thread, adapter, connected = false, boundSessionId, disabled = false, sessionName, onSessions, onConnect, onDraft, onSend, onStop, onClear, onClose }: Props) {
+export function ChatPanel({ task, thread, adapter, connected = false, boundSessionId, disabled = false, sessionName, onSessions, onConnect, onDraft, onImages, onSend, onStop, onClear, onClose }: Props) {
   const logRef = useRef<HTMLDivElement>(null)
   const followBottom = useRef(true)
   const busy = thread.messages.some((message) => message.status === 'streaming')
+  const imageInput = useChatImageInput(`${task.id}:${thread.sessionId ?? ''}`, thread.images ?? [], (images) => onImages?.(images), disabled || busy || !onImages)
   const live = adapter.kind === 'live'
   const canSend = !disabled && (!live || connected && Boolean(thread.sessionId) && thread.sessionId === boundSessionId)
   useEffect(() => {
@@ -33,7 +38,7 @@ export function ChatPanel({ task, thread, adapter, connected = false, boundSessi
   }, [thread.messages])
   useEffect(() => { followBottom.current = true }, [task.id])
 
-  function send(value: string) { if (!canSend || busy) return; followBottom.current = true; onSend(value) }
+  function send(value: string) { if (!canSend || busy || imageInput.isReading()) return; followBottom.current = true; onSend(value) }
 
   return <aside className="chat-panel" aria-label="Task chat">
     <header className="panel-header"><span>CHAT</span><div className="header-actions"><IconButton icon={live ? 'debug-disconnect' : 'clear-all'} label={live ? 'Detach conversation' : 'Clear conversation'} disabled={disabled || busy || !thread.messages.length && !thread.sessionId && !boundSessionId} onClick={onClear} /><IconButton icon="layout-sidebar-right-off" label="Hide chat panel" onClick={onClose} /></div></header>
@@ -44,6 +49,7 @@ export function ChatPanel({ task, thread, adapter, connected = false, boundSessi
       {thread.messages.map((message) => <article key={message.id} className={`message message-${message.role}`} aria-label={message.role === 'user' ? 'Your message' : live ? 'Copilot response' : 'Demo agent response'}>
         <header><span className={`avatar ${message.role === 'assistant' ? 'agent-avatar' : ''}`}>{message.role === 'user' ? 'Y' : <Icon name={live ? 'copilot' : 'sparkle'} />}</span><strong>{message.role === 'user' ? 'You' : live ? 'GitHub Copilot' : 'Demo agent'}</strong>{message.role === 'assistant' && <span className="message-model">{live ? 'Local session' : 'Local'}</span>}</header>
         {message.role === 'assistant' && message.text ? <ChatMarkdown source={message.text} /> : <div className="message-text">{message.text || (message.status === 'streaming' ? live ? 'Waiting for Copilot...' : 'Preparing a local response…' : '')}</div>}
+        <ChatImages images={message.images} />
         {message.status === 'streaming' && <span className="stream-marker" aria-label="Responding" />}
         {message.status === 'cancelled' && <p className="message-notice"><Icon name="debug-stop" />Response stopped</p>}
         {message.status === 'error' && <p className="message-notice error" role="alert"><Icon name="error" />Response failed. You can send another message.</p>}
@@ -51,11 +57,13 @@ export function ChatPanel({ task, thread, adapter, connected = false, boundSessi
     </div>
     {busy && thread.activity && <div className="session-activity" role="status">{thread.activity}</div>}
     <form className="composer-area" onSubmit={(event) => { event.preventDefault(); send(thread.draft) }}>
+      <ChatImageStatus input={imageInput} />
       <div className="composer">
-        <textarea id="chat-composer" aria-label={live ? 'Message to Copilot' : 'Message to demo agent'} placeholder={live ? 'Message Copilot' : `Ask about ${task.id}…`} disabled={!canSend} value={thread.draft} maxLength={4000} rows={3} onChange={(event) => onDraft(event.target.value)} onKeyDown={(event) => {
+        <ChatImages images={thread.images} onRemove={imageInput.remove} disabled={busy || disabled} />
+        <textarea id="chat-composer" aria-label={live ? 'Message to Copilot' : 'Message to demo agent'} placeholder={live ? 'Message Copilot' : `Ask about ${task.id}…`} disabled={!canSend} value={thread.draft} maxLength={4000} rows={3} onChange={(event) => onDraft(event.target.value)} onPaste={imageInput.paste} onKeyDown={(event) => {
           if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (!busy) send(thread.draft) }
         }} />
-        <div className="composer-toolbar"><span><Icon name={live ? 'copilot' : 'beaker'} />{adapter.label}</span>{busy ? <IconButton icon="debug-stop" label="Stop response" onClick={onStop} /> : <button type="submit" className="send-button" aria-label="Send message" title="Send message (Enter)" disabled={!canSend || !thread.draft.trim()}><Icon name="arrow-up" /></button>}</div>
+        <div className="composer-toolbar"><ChatImagePicker onFiles={imageInput.add} disabled={disabled || busy || imageInput.reading || !onImages} /><span><Icon name={live ? 'copilot' : 'beaker'} />{adapter.label}</span>{busy ? <IconButton icon="debug-stop" label="Stop response" onClick={onStop} /> : <button type="submit" className="send-button" aria-label="Send message" title="Send message (Enter)" disabled={!canSend || imageInput.reading || !thread.draft.trim() && !thread.images?.length}><Icon name="arrow-up" /></button>}</div>
       </div>
       <div className="composer-hint"><span>Enter to send · Shift+Enter for a new line</span><span>{thread.draft.length}/4000</span></div>
     </form>

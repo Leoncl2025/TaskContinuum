@@ -9,6 +9,7 @@ import { deliveryPrompt } from './vscodeChatDelivery'
 import type { VSCodeDispatchResult } from './vscodeChatDelivery'
 import type { VSCodeSessionStore } from './vscodeSessions'
 import { sessionNotOpenMessage } from './vscodeChatWidget'
+import type { ChatImageFile } from './chatImageStore'
 
 export interface VSCodeDeliveryMode { id: string; name: string; isBuiltin: boolean; handoffs: { label: string; prompt: string; agent: string; send?: boolean }[] }
 export interface VSCodeDeliveryCommands {
@@ -98,6 +99,7 @@ export async function dispatchVSCodeMessage(options: {
   store: VSCodeSessionStore
   commands: VSCodeDeliveryCommands
   confirmationTimeout?: number
+  imageFiles?: ChatImageFile[]
 }): Promise<VSCodeDispatchResult> {
   const { identity, delivery, signal, templatePath, store, commands } = options
   let attempted = false
@@ -124,7 +126,8 @@ export async function dispatchVSCodeMessage(options: {
     await lock.writeFile(JSON.stringify({ pid: process.pid, commandId: delivery.id }))
     emptyTemplate = await readFile(templatePath, 'utf8')
     const label = `Task Continuum ${delivery.id}`
-    const prompt = deliveryPrompt(delivery)
+    if ((delivery.images?.length ?? 0) !== (options.imageFiles?.length ?? 0)) throw new Error('The image attachments are unavailable. No message was sent.')
+    const prompt = deliveryPrompt(delivery, options.imageFiles)
     const expected = { label, agent: target.name, prompt, send: true }
     await commands.writeTemplate(templateContent(expected))
     const sourceAgent = await waitForTemplate(commands, templatePath, expected, signal, options.confirmationTimeout ?? 12000)

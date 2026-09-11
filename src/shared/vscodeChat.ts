@@ -1,5 +1,6 @@
 import type { SessionSnapshot } from './sessions'
 import type { VSCodeChatTarget } from './remoteVSCode'
+import type { ChatImageAttachment, ChatImageReference } from './chatAttachments'
 
 export interface VSCodeChatIdentity {
   nativeSessionId: string
@@ -21,6 +22,7 @@ export interface VSCodeChatDelivery {
   id: string
   nativeSessionId: string
   text: string
+  images?: ChatImageReference[]
   participant: VSCodeChatParticipant
   execution: VSCodeExecutionIdentity
   createdAt: string
@@ -86,7 +88,7 @@ export interface VSCodeChatBridge {
   read(identity: VSCodeChatTarget): Promise<VSCodeChatView>
   connect?(identity: VSCodeChatTarget): Promise<void>
   open(identity: VSCodeChatTarget): Promise<void>
-  send?(identity: VSCodeChatTarget, commandId: string, text: string): Promise<VSCodeChatDelivery>
+  send?(identity: VSCodeChatTarget, commandId: string, text: string, images?: ChatImageAttachment[]): Promise<VSCodeChatDelivery>
   watch(identity: VSCodeChatTarget | null): Promise<void>
   onChange(listener: (identity: VSCodeChatTarget) => void): () => void
 }

@@ -2,6 +2,9 @@ import { randomUUID } from 'node:crypto'
 import { realpath, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
+import { chatSubmissionSchema } from '../shared/chatAttachments'
+import type { ChatImageAttachment } from '../shared/chatAttachments'
+import { describeChatImages } from './chatImageStore'
 import type { RemoteVSCodeConnection, VSCodeChatTarget } from '../shared/remoteVSCode'
 import type { VSCodeChatView } from '../shared/vscodeChat'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
@@ -250,14 +253,14 @@ export class VSCodeDeviceClient {
       }
     }
   }
-  async send(root: string, target: VSCodeChatTarget, id: string, text: string) {
+  async send(root: string, target: VSCodeChatTarget, id: string, text: string, images?: ChatImageAttachment[]) {
     const { peer, known } = await this.selected(root, target)
     const active = this.active.get(peer.id)
     if (!active || !peer.enabled || !active.available.has(known.id) || !known.invitation.grant.canSend) throw new Error('Session is not connected with send access. No message was queued or sent.')
     try {
-      const command = z.object({ id: z.uuid(), text: z.string().trim().min(1).max(4000) }).parse({ id, text })
+      const command = chatSubmissionSchema.parse({ id, text, ...(images?.length ? { images } : {}) })
       const result = deliverySchema.parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/session/send', { identity: targetIdentity(target), ...command }, active.abort.signal))
-      if (result.id !== command.id || result.text !== command.text || result.nativeSessionId !== target.nativeSessionId || JSON.stringify(result.participant) !== JSON.stringify(peer.invitation.participant) || JSON.stringify(result.execution) !== JSON.stringify(known.invitation.execution)) throw new Error('Delivery identity mismatch. Inspect the original session before retrying.')
+      if (result.id !== command.id || result.text !== command.text || result.nativeSessionId !== target.nativeSessionId || JSON.stringify(result.images ?? []) !== JSON.stringify(describeChatImages(command.images ?? [])) || JSON.stringify(result.participant) !== JSON.stringify(peer.invitation.participant) || JSON.stringify(result.execution) !== JSON.stringify(known.invitation.execution)) throw new Error('Delivery identity mismatch. Inspect the original session before retrying.')
       return result
     } catch (error) {
       if (this.active.get(peer.id) === active && !(error instanceof DeviceRequestError)) { this.drop(peer.id); this.retry.set(peer.id, { count: 1, at: Date.now() + 2000 }) }

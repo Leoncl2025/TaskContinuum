@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { deliveryPrompt, VSCodeChatDeliveryService } from '../src/main/vscodeChatDelivery'
 import type { VSCodeDispatchResult } from '../src/main/vscodeChatDelivery'
 import { VSCodeSessionStore } from '../src/main/vscodeSessions'
+import { ChatImageStore } from '../src/main/chatImageStore'
+import type { VSCodeDispatch } from '../src/main/vscodeChatDelivery'
 
 const directories: string[] = []
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))) })
@@ -25,6 +27,33 @@ async function fixture() {
 }
 
 describe('original VS Code message delivery', () => {
+  it('stores image-only submissions privately, deduplicates exact bytes and never journals base64', async () => {
+    const setup = await fixture()
+    const image = { id: randomUUID(), name: 'Screenshot.png', mimeType: 'image/png' as const, data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=' }
+    const dispatch = vi.fn<VSCodeDispatch>(async (_identity, delivery, _signal, files) => {
+      expect(await readFile(files![0].path)).toEqual(Buffer.from(image.data, 'base64'))
+      expect(deliveryPrompt(delivery, files)).toContain('file:///')
+      expect(deliveryPrompt(delivery, files)).not.toContain(image.data)
+      return { state: 'submitted', nativeRequestId: 'image-request' }
+    })
+    const service = new VSCodeChatDeliveryService(setup.root, setup.store, setup.participant, setup.execution, dispatch)
+    try {
+      const request = { id: randomUUID(), text: '', images: [image] }
+      const record = await service.submit(setup.identity, request)
+      expect(record.images).toEqual([expect.objectContaining({ id: image.id, name: image.name, byteLength: Buffer.from(image.data, 'base64').length })])
+      await vi.waitFor(async () => expect((await service.list(setup.identity))[0].state).toBe('submitted'))
+      expect(await service.submit(setup.identity, request)).toMatchObject({ state: 'submitted' })
+      await expect(service.submit(setup.identity, { ...request, text: 'Different screenshot', images: [{ ...image, id: randomUUID() }] })).rejects.toThrow('different submission')
+      expect(dispatch).toHaveBeenCalledOnce()
+      expect(await readFile(join(setup.root, 'deliveries.json'), 'utf8')).not.toContain(image.data)
+      const images = new ChatImageStore(join(setup.root, 'images'))
+      expect(await images.read(record.images!)).toEqual([image])
+      await writeFile(images.files(record.images!)[0].path, 'tampered')
+      await expect(images.read(record.images!)).rejects.toThrow('unavailable')
+      await expect(images.store([image])).rejects.toThrow('integrity')
+    } finally { await service.close() }
+  })
+
   it('persists authenticated attribution before dispatch and deduplicates retries', async () => {
     const fixtureData = await fixture()
     let finish!: (value: VSCodeDispatchResult) => void

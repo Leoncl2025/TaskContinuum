@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -33,6 +33,25 @@ async function fixture() {
 }
 
 describe('single-owner shared session host', () => {
+  it('executes image-only commands from private bytes and deduplicates their metadata after restart', async () => {
+    const { host, executor, journal, descriptor, directory } = await fixture()
+    const image = { id: randomUUID(), name: 'Screenshot.png', mimeType: 'image/png' as const, data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=' }
+    const request = { id: 'image-command', text: '', images: [image] }
+    await host.submit(participant('A'), request)
+    await host.idle()
+    expect(executor.send).toHaveBeenCalledWith({ sessionId: 'native-B', requestId: request.id, message: '', images: [image] }, expect.any(String))
+    expect(journal.snapshot()[0]).toMatchObject({ type: 'message', text: '', images: [{ id: image.id, name: image.name }] })
+    expect(await readFile(join(directory, 'events.jsonl'), 'utf8')).not.toContain(image.data)
+    await host.close()
+    const restored = new SharedSessionHost(descriptor, new SharedJournal(join(directory, 'events.jsonl'), descriptor), executor)
+    await restored.start()
+    await restored.submit(participant('A'), request)
+    await expect(restored.submit(participant('A'), { ...request, images: [{ ...image, id: randomUUID() }] })).rejects.toThrow('different message')
+    await restored.idle()
+    expect(executor.send).toHaveBeenCalledOnce()
+    await restored.close()
+  })
+
   it('serializes A and C messages through B and preserves authenticated identities', async () => {
     const { host, executor, journal } = await fixture()
     await Promise.all([host.submit(participant('A'), { id: 'command-A', text: 'From A' }), host.submit(participant('C'), { id: 'command-C', text: 'From C' })])

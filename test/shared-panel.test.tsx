@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SharedSessionPanel } from '../src/renderer/components/SharedSessionPanel'
@@ -26,6 +26,28 @@ function fixture(online = true) {
 }
 
 describe('shared session desktop panel', () => {
+  it('retains pasted image-only drafts after failure and retries the same command', async () => {
+    const host = fixture()
+    vi.mocked(host.bridge.send).mockRejectedValueOnce(new Error('Connection interrupted')).mockResolvedValueOnce(undefined)
+    const user = userEvent.setup()
+    render(<SharedSessionPanel root="Q:\\workspace" task={demoTasks[0]} onClose={vi.fn()} />)
+    await user.click(await screen.findByRole('button', { name: 'Connect shared session' }))
+    await screen.findByText('Live on Machine B')
+    const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='
+    const file = new File([Uint8Array.from(atob(data), (character) => character.charCodeAt(0))], 'Screenshot.png', { type: 'image/png' })
+    fireEvent.paste(screen.getByRole('textbox'), { clipboardData: { files: [file], getData: () => '' } })
+    await screen.findByRole('img', { name: file.name })
+    await user.click(screen.getByRole('button', { name: 'Send shared message' }))
+    await screen.findByText('Connection interrupted')
+    expect(screen.getByRole('button', { name: `Remove ${file.name}` })).toBeEnabled()
+    await user.click(screen.getByRole('button', { name: 'Send shared message' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: `Remove ${file.name}` })).not.toBeInTheDocument())
+    const calls = vi.mocked(host.bridge.send).mock.calls
+    expect(calls).toHaveLength(2)
+    expect(calls[0]).toEqual(calls[1])
+    expect(calls[0]).toEqual([host.view.session.id, expect.any(String), '', [{ id: expect.any(String), name: file.name, mimeType: file.type, data }]])
+  })
+
   it('shows participant and execution machine identities and routes messages to the logical session', async () => {
     const host = fixture()
     const user = userEvent.setup()

@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { VSCodeChatPanel } from '../src/renderer/components/VSCodeChatPanel'
@@ -6,6 +6,7 @@ import { demoTasks } from '../src/renderer/data/tasks'
 import type { VSCodeChatBridge, VSCodeChatDelivery, VSCodeChatView } from '../src/shared/vscodeChat'
 import type { SessionSnapshot } from '../src/shared/sessions'
 import type { VSCodeChatTarget } from '../src/shared/remoteVSCode'
+import type { ChatImageAttachment } from '../src/shared/chatAttachments'
 
 afterEach(() => { delete window.vscodeChat; delete window.desktop })
 const identity = { nativeSessionId: 'original', workspaceStorageId: 'a'.repeat(32) }
@@ -22,6 +23,44 @@ function fixture() {
 }
 
 describe('original VS Code conversation panel', () => {
+  it('pastes, previews, removes and retries image-only drafts without losing their bytes', async () => {
+    const { bridge, changed } = fixture()
+    vi.mocked(bridge.read).mockResolvedValue({ session: { id: 'original', source: 'vscode', title: 'Images', updatedAt: '' }, messages: [], connectionState: 'connected', canSend: true })
+    bridge.send = vi.fn().mockRejectedValueOnce(new Error('Connection interrupted')).mockImplementation(async (_target, id, text, images) => ({ id, text, images: images.map((image: ChatImageAttachment) => ({ id: image.id, name: image.name, mimeType: image.mimeType, sha256: 'a'.repeat(64), byteLength: 68 })), nativeSessionId: 'original', state: 'pending', createdAt: new Date().toISOString(), participant: { username: 'Alice', machineName: 'A' }, execution: { agentName: 'Copilot', machineName: 'B' } }))
+    const user = userEvent.setup()
+    render(<VSCodeChatPanel task={demoTasks[1]} identity={identity} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByText('Images')
+    const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='
+    const file = new File([Uint8Array.from(atob(data), (character) => character.charCodeAt(0))], 'Screenshot.png', { type: 'image/png' })
+    const paste = () => fireEvent.paste(screen.getByRole('textbox'), { clipboardData: { items: [{ kind: 'file', type: file.type, getAsFile: () => file }], getData: () => '' } })
+    paste()
+    await screen.findByRole('img', { name: file.name })
+    await user.click(screen.getByRole('button', { name: `Preview ${file.name}` }))
+    expect(within(screen.getByRole('dialog')).getByRole('img', { name: file.name })).toHaveAttribute('src', `data:image/png;base64,${data}`)
+    await user.keyboard('{Escape}')
+    await user.click(screen.getByRole('button', { name: `Remove ${file.name}` }))
+    expect(screen.queryByRole('img')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Send to original VS Code session' })).toBeDisabled()
+    paste()
+    await screen.findByRole('img', { name: file.name })
+    await user.click(screen.getByRole('button', { name: 'Send to original VS Code session' }))
+    await screen.findByText('Connection interrupted')
+    expect(screen.getByRole('button', { name: `Remove ${file.name}` })).toBeEnabled()
+    const first = vi.mocked(bridge.send).mock.calls[0]
+    expect(first).toEqual([identity, expect.any(String), '', [{ id: expect.any(String), name: file.name, mimeType: file.type, data }]])
+    await user.click(screen.getByRole('button', { name: 'Send to original VS Code session' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: `Remove ${file.name}` })).not.toBeInTheDocument())
+    expect(vi.mocked(bridge.send).mock.calls[1]).toEqual(first)
+    expect(screen.getByRole('img', { name: file.name })).toBeInTheDocument()
+    expect(bridge.open).not.toHaveBeenCalled()
+    const receipt = await vi.mocked(bridge.send).mock.results[1].value as VSCodeChatDelivery
+    vi.mocked(bridge.read).mockResolvedValue({ session: { id: 'original', source: 'vscode', title: 'Images', updatedAt: '' }, messages: [], connectionState: 'connected', canSend: true, deliveries: [{ ...receipt, state: 'failed', error: 'Native draft blocked delivery' }] })
+    act(() => changed())
+    await screen.findByRole('button', { name: `Remove ${file.name}` })
+    expect(screen.getByRole('alert')).toHaveTextContent('Native draft blocked delivery')
+    expect(bridge.send).toHaveBeenCalledTimes(2)
+  })
+
   it('renders assistant Markdown while retaining literal user text and updated history', async () => {
     const { bridge, changed } = fixture()
     const source = '## Results\n\n**Verified** with *care* and `npm test`.\n\n1. First step\n2. Next step\n\n- [x] Complete\n- [ ] Pending\n\n> Review note\n\n| Check | Result |\n| --- | --- |\n| Build | Pass |\n\n```ts\nconst value = "<safe>";\n```'

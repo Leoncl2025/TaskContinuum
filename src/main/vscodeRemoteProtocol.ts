@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { chatImageReferencesSchema } from '../shared/chatAttachments'
 import { vscodeIdentitySchema } from './vscodeChatSchemas'
 import { deliverySchema, executionIdentitySchema, participantSchema } from './vscodeChatDelivery'
 import { devTunnelRouteSchema, sshPublicKeySchema } from './devTunnel/protocol'
@@ -21,6 +22,7 @@ export const remoteInvitationFileSchema = remoteInvitationSchema.extend({ devTun
 export const remoteHandshakeSchema = remoteInvitationSchema.omit({ schemaVersion: true, provider: true, title: true, port: true, token: true }).strict()
 const remoteMessageSchema = z.object({
   id: z.string().min(1).max(240), role: z.enum(['user', 'assistant']), text: z.string().max(60000),
+  images: chatImageReferencesSchema.optional(),
   status: z.enum(['complete', 'streaming', 'cancelled', 'error']), nativeRequestId: z.string().min(1).max(240).optional(),
   author: z.object({ name: z.string().min(1).max(300), machineName: z.string().min(1).max(300).optional() }).strict().optional(),
 }).strict()

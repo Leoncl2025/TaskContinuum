@@ -251,8 +251,9 @@ test('links an original VS Code conversation with long history without import an
     '| Session | Agent | Machine | Participant | State | Workspace | Source | Result |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| Original | Copilot | Machine-B | Alice | Idle | Tasks | VS Code | Ready |',
     `\`\`\`ts\n${code}\`\`\``, '[Documentation](https://example.invalid/docs)', '![Blocked image](https://example.invalid/tracking.png)', 'Existing original answer',
   ].join('\n\n')
-  const source = JSON.stringify({ kind: 0, v: { customTitle: 'Original VS Code link fixture', requests: [{ message: { text: 'Existing original question' }, response: [] }] } }) + '\n'
-    + progress.repeat(132) + JSON.stringify({ kind: 1, k: ['requests', 0, 'response'], v: [{ value: markdown }] }) + '\n'
+  const initial = JSON.stringify({ kind: 0, v: { customTitle: 'Original VS Code link fixture', requests: [{ message: { text: 'Existing original question' }, response: [{ kind: 'toolInvocation', value: 'x'.repeat(44 * 1024 * 1024) }] }] } }) + '\n'
+  expect(Buffer.byteLength(initial)).toBeGreaterThan(32 * 1024 * 1024)
+  const source = initial + progress.repeat(4) + JSON.stringify({ kind: 1, k: ['requests', 0, 'response'], v: [{ value: markdown }] }) + '\n'
   expect(Buffer.byteLength(source)).toBeGreaterThan(32 * 1024 * 1024)
   await writeFile(sourceFile, source)
   let opened: string | undefined
@@ -324,7 +325,10 @@ test('links an original VS Code conversation with long history without import an
     await expect(narrowPanel.getByRole('button', { name: 'Copy code' })).toBeInViewport()
     expect(await narrowPanel.getByLabel('Code block').evaluate((element) => element.getBoundingClientRect().right <= innerWidth)).toBe(true)
     expect(await narrowPanel.getByRole('region', { name: 'Message table' }).evaluate((element) => element.getBoundingClientRect().right <= innerWidth)).toBe(true)
-    expect(await narrowPanel.evaluate((element) => element.scrollWidth <= element.clientWidth && element.getBoundingClientRect().right <= innerWidth)).toBe(true)
+    await expect.poll(() => narrowPanel.evaluate((element) => element.scrollWidth - element.clientWidth)).toBe(0)
+    await expect.poll(() => narrowPanel.evaluate((element) => Math.max(0,
+      element.getBoundingClientRect().right - document.documentElement.getBoundingClientRect().right,
+    ))).toBeLessThan(0.01)
     await page.screenshot({ path: resolve('artifacts/chat-markdown-narrow.png') })
     await page.screenshot({ path: resolve('artifacts/vscode-linked-narrow.png') })
     await narrowPanel.getByRole('button', { name: 'Detach conversation' }).click()
@@ -352,16 +356,20 @@ test('sends from the desktop with original-session identity and preserves user a
   } }) + '\n')
   let requests = 0
   let acceptedRequestId = ''
+  let expectedImage: Buffer | undefined
   const startCompanion = () => startVSCodeChatCompanion({
     storageRoot, workspaceStorageId, discoveryDirectory: join(storageRoot, workspaceStorageId, 'taskcontinuum.vscode-bridge', 'bridges'),
     vscodeVersion: '1.136.1', open: async () => {},
-    dispatch: async (identity, delivery) => {
+    dispatch: async (identity, delivery, _signal, imageFiles) => {
       expect(identity).toEqual({ nativeSessionId, workspaceStorageId })
       expect(delivery.participant.username).toBe(userInfo().username)
+      expect(delivery.images).toMatchObject([{ name: 'Desktop screenshot.png', mimeType: 'image/png' }])
+      expect(imageFiles).toHaveLength(1)
+      expect(await readFile(imageFiles![0].path)).toEqual(expectedImage)
       requests++
       acceptedRequestId = randomUUID()
       await appendFile(sourceFile, JSON.stringify({ kind: 2, k: ['requests'], v: [{
-        requestId: acceptedRequestId, message: { text: deliveryPrompt(delivery) },
+        requestId: acceptedRequestId, message: { text: deliveryPrompt(delivery, imageFiles) },
         agent: { name: 'copilot', fullName: 'GitHub Copilot' },
         response: [{ value: 'Desktop delivery confirmed in the original conversation.' }], result: {},
       }] }) + '\n')
@@ -379,8 +387,14 @@ test('sends from the desktop with original-session identity and preserves user a
     await expect(panel.getByText('Not connected', { exact: true })).toBeVisible()
     await expect(panel.getByRole('log')).toContainText('Previous user')
     await panel.getByRole('textbox', { name: 'Message original VS Code Agent' }).fill('Continue the original session from the desktop')
-    await expect(panel.getByRole('button', { name: 'Send to original VS Code session' })).toBeDisabled()
-    await expect(panel.getByRole('button', { name: 'Send to original VS Code session' })).toHaveAccessibleDescription('The original VS Code workspace is not connected.')
+    expectedImage = await page.screenshot({ clip: { x: 0, y: 0, width: 320, height: 180 } })
+    await panel.getByRole('textbox').evaluate((element, encoded) => {
+      const clipboard = new DataTransfer()
+      clipboard.items.add(new File([Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0))], 'Desktop screenshot.png', { type: 'image/png' }))
+      element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }))
+    }, expectedImage.toString('base64'))
+    await expect(panel.locator('.composer').getByRole('img', { name: 'Desktop screenshot.png' })).toBeVisible()
+    await expect(panel.getByRole('button', { name: 'Send to original VS Code session' })).toBeEnabled()
     const connection = await app.evaluateHandle(({ shell }) => {
       const original = shell.openExternal
       const addresses: string[] = []
@@ -399,6 +413,8 @@ test('sends from the desktop with original-session identity and preserves user a
     await expect(panel.getByText(`GitHub Copilot @ ${hostname()}`, { exact: true })).toBeVisible()
     await expect(panel.getByRole('button', { name: 'Send to original VS Code session' })).toBeEnabled()
     await expect(panel.getByRole('textbox', { name: 'Message original VS Code Agent' })).toHaveValue('Continue the original session from the desktop')
+    await expect(page.evaluate(async (identity) => window.vscodeChat!.send!(identity, crypto.randomUUID(), '', [{ id: crypto.randomUUID(), name: 'Invalid.png', mimeType: 'image/png', data: 'invalid' }]), { nativeSessionId, workspaceStorageId })).rejects.toThrow()
+    expect(requests).toBe(0)
     await panel.getByRole('button', { name: 'Send to original VS Code session' }).click()
     await expect(panel.getByRole('log')).toContainText('Desktop delivery confirmed in the original conversation.')
     const userMessage = panel.locator(`.message-user[data-request-id="${acceptedRequestId}"]`)
@@ -406,6 +422,9 @@ test('sends from the desktop with original-session identity and preserves user a
     await expect(userMessage.locator('header')).toContainText(userInfo().username)
     await expect(userMessage).toContainText('Continue the original session from the desktop')
     await expect(userMessage).not.toContainText('Task Continuum message ID:')
+    await expect(userMessage.getByRole('img', { name: 'Desktop screenshot.png' })).toBeVisible()
+    expect(await userMessage.getByRole('img').evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth > 0)).toBe(true)
+    await expect(panel.locator('.composer').getByRole('img')).toHaveCount(0)
     await expect(answer.locator('header')).toContainText(`GitHub Copilot @ ${hostname()}`)
     expect(requests).toBe(1)
     expect((await page.evaluate(() => window.copilot!.getStatus())).state).toBe('disconnected')
@@ -415,6 +434,7 @@ test('sends from the desktop with original-session identity and preserves user a
     await launch()
     const restoredPanel = page.getByRole('complementary', { name: 'VS Code task chat' })
     await expect(restoredPanel.locator(`.message-assistant[data-request-id="${acceptedRequestId}"] header`)).toContainText(`GitHub Copilot @ ${hostname()}`)
+    await expect(restoredPanel.locator(`.message-user[data-request-id="${acceptedRequestId}"]`)).toContainText('Desktop screenshot.png')
     await companion.close()
     companion = undefined
     await restoredPanel.getByRole('button', { name: 'Refresh original conversation' }).click()
@@ -422,7 +442,8 @@ test('sends from the desktop with original-session identity and preserves user a
     await expect(restoredPanel.getByRole('log')).toContainText(userInfo().username)
     await expect(restoredPanel.getByRole('log')).toContainText(`GitHub Copilot @ ${hostname()}`)
     await app.evaluate(({ BrowserWindow }) => { const window = BrowserWindow.getAllWindows()[0]; window.setMinimumSize(380, 600); window.setSize(420, 760) })
-    await page.getByRole('button', { name: 'Toggle chat panel' }).click()
+    await expect(page.locator('.workbench')).toHaveAttribute('data-compact', 'true')
+    if (!await restoredPanel.isVisible()) await page.getByRole('button', { name: 'Toggle chat panel' }).click()
     const compactPanel = page.getByRole('complementary', { name: 'VS Code task chat' })
     await expect(compactPanel.getByRole('button', { name: 'Connect VS Code' })).toBeInViewport()
     await expect(compactPanel.getByRole('button', { name: 'Open in VS Code' })).toBeInViewport()

@@ -6,7 +6,7 @@ import { basename, dirname } from 'node:path'
 import { VSCodeSessionStore } from './vscodeSessions'
 import { vscodeIdentitySchema } from './vscodeChatCompanion'
 import { connectOriginalVSCode, openOriginalVSCode, readOriginalVSCode, sendOriginalVSCode } from './vscodeChatClient'
-import { z } from 'zod'
+import { chatSubmissionSchema } from '../shared/chatAttachments'
 import type { RemoteVSCodeManager } from './vscodeRemoteClient'
 import { vscodeTargetSchema } from './vscodeRemoteProtocol'
 
@@ -46,12 +46,12 @@ export function registerVSCodeChatBridge(requireWindow: (event: IpcMainInvokeEve
     }
     await openOriginalVSCode(store, vscodeIdentitySchema.parse(target))
   })
-  ipcMain.handle('vscode-chat:send', async (event, value: unknown, commandId: unknown, text: unknown) => {
+  ipcMain.handle('vscode-chat:send', async (event, value: unknown, commandId: unknown, text: unknown, images: unknown) => {
     const window = requireWindow(event)
     const root = await currentRoot().catch(() => undefined)
     const target = await targetFor(value)
-    const id = z.uuid().parse(commandId)
-    const message = z.string().trim().min(1).max(4000).parse(text)
+    const request = chatSubmissionSchema.parse({ id: commandId, text, images })
+    const { id, text: message } = request
     const assertCurrent = async () => {
       if (window.isDestroyed() || window.webContents.isDestroyed() || await currentRoot().catch(() => undefined) !== root
         || JSON.stringify(await targetFor(value)) !== JSON.stringify(target)) throw new Error('The task workspace, owner, or window changed while preparing. No message was sent.')
@@ -61,9 +61,10 @@ export function registerVSCodeChatBridge(requireWindow: (event: IpcMainInvokeEve
       if (!root) throw new Error('Open the linked task workspace before sending. No message was sent.')
       await remote.connectTarget(root, target)
       await assertCurrent()
-      return remote.send(root, target, id, message)
+      return request.images?.length ? remote.send(root, target, id, message, request.images) : remote.send(root, target, id, message)
     }
-    return sendOriginalVSCode(store, vscodeIdentitySchema.parse(target), id, message, { openExternal: (uri) => shell.openExternal(uri), assertCurrent })
+    const preparation = { openExternal: (uri: string) => shell.openExternal(uri), assertCurrent }
+    return request.images?.length ? sendOriginalVSCode(store, vscodeIdentitySchema.parse(target), id, message, preparation, request.images) : sendOriginalVSCode(store, vscodeIdentitySchema.parse(target), id, message, preparation)
   })
   ipcMain.handle('vscode-chat:watch', async (event, value: unknown) => {
     requireWindow(event)

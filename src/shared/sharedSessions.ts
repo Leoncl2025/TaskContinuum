@@ -1,3 +1,5 @@
+import type { ChatImageAttachment, ChatImageReference } from './chatAttachments'
+
 export interface SharedActor {
   kind: 'user' | 'agent' | 'host'
   id: string
@@ -28,6 +30,7 @@ export interface SharedEvent {
   type: 'history' | 'message' | 'started' | 'delta' | 'activity' | 'completed' | 'failed' | 'interrupted' | 'permission' | 'question' | 'resolved'
   commandId?: string
   text?: string
+  images?: ChatImageReference[]
   role?: 'user' | 'assistant'
   interactionId?: string
   permissionKind?: string
@@ -107,7 +110,7 @@ export interface SharedDesktopBridge {
   open(id: string): Promise<SharedView>
   cached(id: string): Promise<SharedView>
   disconnect(id: string): Promise<void>
-  send(id: string, commandId: string, text: string): Promise<void>
+  send(id: string, commandId: string, text: string, images?: ChatImageAttachment[]): Promise<void>
   stop(id: string, commandId: string): Promise<void>
   respond(id: string, interactionId: string, answer: boolean | string): Promise<void>
   invite(id: string, host: string, role: 'reader' | 'contributor' | 'operator'): Promise<boolean>

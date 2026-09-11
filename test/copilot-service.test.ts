@@ -36,6 +36,20 @@ function fixture(requestTimeout?: number) {
 }
 
 describe('local Copilot session host', () => {
+  it('sends image-only messages as native SDK blobs and rejects invalid image bytes', async () => {
+    const host = fixture()
+    await host.service.connect()
+    await host.service.resumeSession('existing-session')
+    const image = { id: crypto.randomUUID(), name: 'Screenshot.png', mimeType: 'image/png' as const, data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=' }
+    expect(() => host.service.send({ sessionId: 'existing-session', requestId: 'invalid-image', message: '', images: [{ ...image, data: 'invalid' }] })).toThrow()
+    expect(host.handle.send).not.toHaveBeenCalled()
+    const run = host.service.send({ sessionId: 'existing-session', requestId: 'image-request', message: '', images: [image] })
+    expect(host.handle.send).toHaveBeenCalledExactlyOnceWith({ prompt: 'Please inspect the attached images.', displayPrompt: '', attachments: [{ type: 'blob', data: image.data, mimeType: image.mimeType, displayName: image.name }] })
+    host.emit(event('session.idle'))
+    await run
+    await host.service.disconnect()
+  })
+
   it('connects once and reports actual authentication', async () => {
     const host = fixture()
     await Promise.all([host.service.connect(), host.service.connect()])

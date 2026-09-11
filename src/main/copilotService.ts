@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { chatContentSchema } from '../shared/chatAttachments'
 import { realpath, stat } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import { CopilotClient, RuntimeConnection } from '@github/copilot-sdk'
@@ -245,8 +246,9 @@ export class CopilotService {
     this.runtime()
     const sessionId = checkedString(request?.sessionId, 'session ID')
     const requestId = checkedString(request?.requestId, 'request ID')
-    checkedString(request?.message, 'message', 4000)
-    checkedString(prompt, 'prompt', 100000)
+    const content = chatContentSchema.parse({ text: request?.message, images: request?.images })
+    const outgoingPrompt = prompt || 'Please inspect the attached images.'
+    checkedString(outgoingPrompt, 'prompt', 100000)
     const session = this.sessions.get(sessionId)
     if (!session) throw new Error('Open a local Copilot conversation before sending.')
     if (this.active.has(requestId) || [...this.active.values()].some((entry) => entry.session.sessionId === sessionId)) {
@@ -296,7 +298,9 @@ export class CopilotService {
         else if (event.type === 'session.idle') finish()
       })
       refreshTimeout()
-      void session.send({ prompt, displayPrompt: request.message }).catch((error: unknown) => finish(new Error(messageOf(error))))
+      void session.send({ prompt: outgoingPrompt, displayPrompt: request.message,
+        ...(content.images?.length ? { attachments: content.images.map((image) => ({ type: 'blob' as const, data: image.data, mimeType: image.mimeType, displayName: image.name })) } : {}),
+      }).catch((error: unknown) => finish(new Error(messageOf(error))))
     })
   }
 

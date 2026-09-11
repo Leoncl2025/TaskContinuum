@@ -206,6 +206,13 @@ describe('original chat companion boundary', () => {
       const receipt = await sendOriginalVSCode(store, identity, crypto.randomUUID(), 'Another attributed message')
       expect(receipt).toMatchObject({ state: 'pending', participant: { username: userInfo().username } })
       await vi.waitFor(async () => expect((await readOriginalVSCode(store, identity)).deliveries?.at(-1)?.state).toBe('submitted'))
+      const bytes = Buffer.alloc(40 * 1024)
+      Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64').copy(bytes)
+      const image = { id: crypto.randomUUID(), name: 'Pasted screenshot.png', mimeType: 'image/png' as const, data: bytes.toString('base64') }
+      const imageReceipt = await sendOriginalVSCode(store, identity, crypto.randomUUID(), '', undefined, [image])
+      expect(imageReceipt).toMatchObject({ text: '', images: [{ id: image.id, name: image.name, byteLength: bytes.length }] })
+      await vi.waitFor(async () => expect((await readOriginalVSCode(store, identity)).deliveries?.at(-1)?.state).toBe('submitted'))
+      expect((await invoke('/send', { ...message, id: crypto.randomUUID(), text: '', images: [{ ...image, data: 'invalid' }] })).status).toBe(400)
     } finally { await bridge.close(); await rm(root, { recursive: true, force: true }) }
   })
 

@@ -23,6 +23,8 @@ semantic fork. Git and OneDrive synchronization remain user-managed.
   failure states, suggestion buttons, and scoped conversation clearing.
 - Markdown assistant replies in local, shared, and original VS Code chats, with
     GFM tables/task lists, readable code blocks, and explicit code-text copying.
+- Clipboard screenshots and image files in all chat composers, with previews,
+    removal, image-only messages, and authenticated local/remote delivery.
 - Independent desktop sidebar/chat toggles, compact single-pane navigation,
   keyboard quick-open, and dark/light appearance.
 - Sandboxed Electron renderer with a minimal typed preload bridge.
@@ -109,9 +111,9 @@ unfinished code fence; unchanged replies avoid repeated parsing while composing.
 It does not change source history, native session IDs, or synchronization latency.
 
 Messages are untrusted content. Raw HTML is omitted, links remain inert text,
-and images show their alternative text without making external requests. Copying
+and Markdown images show their alternative text without making external requests. Copying
 writes only the code text through a trusted-window, 1 MiB-limited desktop API;
-clipboard reading and general browser permissions remain unavailable. Browser
+background clipboard reading and general browser permissions remain unavailable. Browser
 preview uses the browser's clipboard permission and reports a failed copy.
 Math, Mermaid diagrams, syntax highlighting, and VS Code editor/diff actions are
 not part of this renderer. The inspected
@@ -119,6 +121,31 @@ not part of this renderer. The inspected
 uses a separate Markdown pipeline with GFM, line breaks, code-block rendering,
 sanitization, and scrollable tables. No VS Code installation changes are needed;
 load the updated Task Continuum desktop and preload to use this display fix.
+
+## Image Attachments
+
+Paste a screenshot with Ctrl+V (Cmd+V on macOS), or choose **Attach images** in
+the composer. Preview or remove thumbnails before sending. Text is optional.
+PNG, JPEG, GIF and WebP are accepted: up to four images, 5 MiB each and 10 MiB
+per message. Invalid or oversized images leave the existing draft unchanged.
+Reading finishes before Send becomes available; failed submissions retain the draft.
+Ordinary text paste is unchanged. No background clipboard access is requested.
+
+Local Copilot and shared CLI sessions send native SDK blob attachments. Original
+VS Code sessions require Companion 0.5.0 on the execution machine: image bytes
+travel over the existing authenticated connection, are stored privately there,
+and their file references are included in the exact original Agent's prompt.
+This route requires an image-reading tool in that Agent; it does not inject
+VS Code's native image-variable UI or bypass tool approval. Session, Agent and
+model identities are retained, including when the sender is on another machine.
+
+Original/shared image stores use content hashes, integrity checks and a 256 MiB
+limit per store. Delivery and shared event journals contain metadata, not base64.
+Original/shared synced history and checkpoints carry attachment metadata only;
+full-size previews use images retained in the current desktop view. Image files
+are not copied into Git or checkpoint forks. Drafts remain in memory and follow
+the existing composer lifetime; restarting the desktop discards unsent drafts.
+Reload both desktops and the updated Companion after preserving active work.
 
 ## Open a task workspace
 
@@ -173,7 +200,7 @@ VS Code import is a text-history handoff, not control of an active VS Code Chat 
 It does not transfer attachments, tool results/state, pending edits, or hidden reasoning.
 Import itself makes no model request and never changes the source file. Legacy JSON
 files are limited to 32 MiB. JSONL histories are replayed one record at a time, with
-a 32 MiB per-record limit and a 256 MiB total journal limit. The most recent
+a 64 MiB per-record limit and a 256 MiB total journal limit. The most recent
 60,000 text characters/500 messages are previewed,
 with truncation and unreadable-source warnings shown explicitly.
 
@@ -202,7 +229,7 @@ approving tools still happen in VS Code.**
     No CLI sign-in is needed to link or view saved history. If the task already has a
     different link, detach it first; this does not delete the underlying conversation.
 2. Build the companion with `npm run build:vscode-bridge`. Install the resulting
-    `artifacts/taskcontinuum-vscode-bridge-0.4.3.vsix` through VS Code's
+    `artifacts/taskcontinuum-vscode-bridge-0.5.0.vsix` through VS Code's
     **Extensions: Install from VSIX** command. Component details are in
     [vscode-bridge/README.md](vscode-bridge/README.md).
 3. In VS Code, open the conversation's original workspace, which may differ from
@@ -231,6 +258,18 @@ approving tools still happen in VS Code.**
 After upgrading the companion, finish active work and reload its VS Code window
 if the old extension is still loaded, then start the bridge again. The desktop
 never reloads VS Code or silently starts a new Agent for you.
+
+Companion 0.4.4 separates the JSONL record bound from the legacy JSON file bound.
+A valid initial conversation snapshot can exceed 32 MiB even when the whole journal
+is well below 256 MiB. A reported failure was a 43.1 MiB first record in a 44.2 MiB
+journal; the repaired reader accepts it without changing the original file or IDs.
+Individual JSONL records are now capped at 64 MiB; total journals remain capped at
+256 MiB and legacy JSON files at 32 MiB. Record streaming, partial-tail handling,
+path validation, saved-history display bounds, and no-replay behavior are unchanged.
+Load the rebuilt source-machine desktop and the updated companion after active work
+ends, then refresh/reconnect the receiving desktop. A failed history can appear as
+an offline cached session even while other sessions on the same device are connected;
+it does not require a new fork or new device pairing.
 
 Companion 0.4.3 combines connection, exact-view preparation, and one explicit Send.
 Existing open views are left in place; preparing a closed original can change B's

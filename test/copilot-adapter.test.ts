@@ -23,6 +23,16 @@ describe('desktop Copilot chat adapter', () => {
     expect(host.listeners.size).toBe(0)
   })
 
+  it('forwards image-only input through the typed bridge without dropping attachment bytes', async () => {
+    const host = mockCopilotBridge()
+    const image = { id: crypto.randomUUID(), name: 'Screenshot.png', mimeType: 'image/png' as const, data: 'image bytes' }
+    vi.mocked(host.bridge.send).mockImplementation(async (request) => { host.emit({ type: 'complete', ...request }) })
+    const events: ChatEvent[] = []
+    for await (const event of createCopilotAdapter(host.bridge).stream({ ...request(), message: '', images: [image] })) events.push(event)
+    expect(host.bridge.send).toHaveBeenCalledExactlyOnceWith({ sessionId: 'native-session', requestId: expect.any(String), message: '', images: [image] })
+    expect(events).toEqual([{ type: 'complete' }])
+  })
+
   it('stops the matching backend request and releases the event subscription', async () => {
     const host = mockCopilotBridge()
     const controller = new AbortController()

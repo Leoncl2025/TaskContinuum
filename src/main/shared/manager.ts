@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { lstat, mkdir, rm } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { z } from 'zod'
+import type { ChatImageAttachment } from '../../shared/chatAttachments'
 import type { SharedActor, SharedConnectionSummary, SharedEnrollment, SharedEvent, SharedGrant, SharedSessionDescriptor, SharedView } from '../../shared/sharedSessions'
 import { readTaskWorkspace } from '../workspaceReader'
 import { SharedSessionClient } from './client'
@@ -77,7 +78,7 @@ export class SharedSessionManager {
   async open(id: string): Promise<SharedView> { return await this.checkpointView(id) ?? (await this.client(id)).connect() }
   async cached(id: string): Promise<SharedView> { return await this.checkpointView(id) ?? (await this.client(id)).view }
   async disconnect(id: string): Promise<void> { await this.clients.get(id)?.disconnect() }
-  async send(id: string, commandId: string, text: string): Promise<void> { await (await this.client(id)).command(commandId, text) }
+  async send(id: string, commandId: string, text: string, images?: ChatImageAttachment[]): Promise<void> { await (await this.client(id)).command(commandId, text, images) }
   async stop(id: string, commandId: string): Promise<void> { await (await this.client(id)).stop(commandId) }
   async respond(id: string, interactionId: string, answer: boolean | string): Promise<void> { await (await this.client(id)).respond(interactionId, answer) }
 

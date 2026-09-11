@@ -2,6 +2,8 @@ import type { CopilotEvent, SendMessageRequest } from '../../shared/sessions'
 import type { SharedActor, SharedEvent, SharedGrant, SharedPermission, SharedSessionDescriptor } from '../../shared/sharedSessions'
 import { SharedJournal } from './journal'
 import { commandSchema, responseSchema } from './schemas'
+import type { ChatImageReference } from '../../shared/chatAttachments'
+import { describeChatImages } from '../chatImageStore'
 
 export interface SharedExecutor {
   send(request: SendMessageRequest, prompt?: string): Promise<void>
@@ -10,7 +12,7 @@ export interface SharedExecutor {
   onEvent(listener: (event: CopilotEvent) => void): () => void
 }
 
-interface QueuedCommand { id: string; text: string; actor: SharedActor }
+interface QueuedCommand { id: string; text: string; actor: SharedActor; images?: ChatImageReference[] }
 interface PendingInteraction { commandId: string; type: 'permission' | 'question'; choices?: string[]; allowFreeform?: boolean }
 
 export class SharedSessionHost {
@@ -39,7 +41,7 @@ export class SharedSessionHost {
     const pending = new Map<string, string>()
     for (const event of this.journal.snapshot()) {
       if (event.type === 'message' && event.commandId) {
-        const command = { id: event.commandId, text: event.text ?? '', actor: event.actor }
+        const command = { id: event.commandId, text: event.text ?? '', actor: event.actor, ...(event.images?.length ? { images: event.images } : {}) }
         this.commands.set(command.id, command)
         unfinished.set(command.id, command)
       }
@@ -81,17 +83,19 @@ export class SharedSessionHost {
   submit(grant: SharedGrant, input: unknown): Promise<string> {
     this.require(grant, 'send')
     const request = commandSchema.parse(input)
+    const images = describeChatImages(request.images ?? [])
     const submit = async () => {
       if (this.closed || this.fault) throw new Error(this.fault ?? 'Session Host is closed.')
       if (this.checkpointing) throw new Error('A checkpoint is being frozen. Retry after export completes.')
       const prior = this.commands.get(request.id)
       if (prior) {
-        if (prior.text !== request.text || prior.actor.id !== grant.actor.id || prior.actor.machineId !== grant.actor.machineId) throw new Error('Command ID is already used by a different message or participant.')
+        if (prior.text !== request.text || JSON.stringify(prior.images ?? []) !== JSON.stringify(images) || prior.actor.id !== grant.actor.id || prior.actor.machineId !== grant.actor.machineId) throw new Error('Command ID is already used by a different message or participant.')
         return prior.id
       }
       if (this.queue.length >= 32) throw new Error('The session queue is full.')
-      const command = { ...request, actor: grant.actor }
-      await this.journal.append({ type: 'message', commandId: command.id, actor: command.actor, text: command.text })
+      if (images.length) await this.journal.images.store(request.images!)
+      const command: QueuedCommand = { id: request.id, text: request.text, actor: grant.actor, ...(images.length ? { images } : {}) }
+      await this.journal.append({ type: 'message', commandId: command.id, actor: command.actor, text: command.text, ...(images.length ? { images } : {}) })
       this.commands.set(command.id, command)
       this.queue.push(command)
       this.schedule()
@@ -116,7 +120,8 @@ export class SharedSessionHost {
       try {
         const priorTurns = this.journal.snapshot().filter((event) => event.type === 'started').length
         const prompt = `${this.initialContext && priorTurns === 1 ? this.initialContext + '\n\n' : ''}Message from authenticated participant ${JSON.stringify({ user: command.actor.name, machine: command.actor.machineName })}:\n${command.text}`
-        await this.executor.send({ sessionId: this.session.owner.nativeSessionId, requestId: command.id, message: command.text }, prompt)
+        const images = command.images?.length ? await this.journal.images.read(command.images) : undefined
+        await this.executor.send({ sessionId: this.session.owner.nativeSessionId, requestId: command.id, message: command.text, ...(images ? { images } : {}) }, prompt)
         await this.events
         if (this.fault) throw new Error(this.fault)
         await this.journal.append(this.interruptedBy ? { type: 'interrupted', actor: this.interruptedBy, commandId: command.id, text: 'The response was stopped.' } : { type: 'completed', actor: this.agent, commandId: command.id })

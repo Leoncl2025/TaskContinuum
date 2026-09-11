@@ -109,6 +109,67 @@ test('streams a task-scoped response and preserves a different draft', async () 
   await expect(page.getByRole('textbox', { name: 'Message to demo agent' })).toHaveValue('A backend draft')
 })
 
+test('pastes screenshot images, preserves task drafts and fits desktop and compact chat', async () => {
+  const name = 'Screenshot with a long filename from the task workbench.png'
+  const dataUrl = await page.evaluate((filename) => {
+    const canvas = document.createElement('canvas')
+    canvas.width = 240
+    canvas.height = 144
+    const context = canvas.getContext('2d')!
+    context.fillStyle = '#f2f5f4'
+    context.fillRect(0, 0, 240, 144)
+    context.fillStyle = '#246951'
+    context.fillRect(0, 0, 240, 28)
+    context.fillStyle = '#d55949'
+    context.fillRect(16, 48, 52, 72)
+    context.fillStyle = '#2f687f'
+    context.fillRect(80, 48, 144, 22)
+    context.fillStyle = '#202722'
+    context.font = '14px sans-serif'
+    context.fillText('Screenshot fixture', 80, 104)
+    const data = canvas.toDataURL('image/png')
+    const file = new File([Uint8Array.from(atob(data.split(',')[1]), (character) => character.charCodeAt(0))], filename, { type: 'image/png' })
+    const clipboard = new DataTransfer()
+    clipboard.items.add(file)
+    const composer = document.querySelector<HTMLTextAreaElement>('#chat-composer')!
+    composer.focus()
+    composer.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }))
+    return data
+  }, name)
+  const composer = page.locator('.composer')
+  await expect(composer.getByRole('img', { name, exact: true })).toBeVisible()
+  await expect.poll(() => composer.getByRole('img', { name, exact: true }).evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth === 240 && image.naturalHeight === 144)).toBe(true)
+  await page.getByRole('button', { name: `Preview ${name}`, exact: true }).click()
+  const dialog = page.getByRole('dialog', { name, exact: true })
+  await expect(dialog.getByRole('img')).toHaveAttribute('src', dataUrl)
+  await expect(dialog.getByRole('img')).toBeInViewport()
+  await page.screenshot({ path: resolve('artifacts/chat-image-preview.png') })
+  await page.keyboard.press('Escape')
+  await page.getByLabel('Image files', { exact: true }).setInputFiles([1, 2, 3].map((index) => ({ name: `Additional ${index}.png`, mimeType: 'image/png', buffer: Buffer.from(dataUrl.split(',')[1], 'base64') })))
+  await expect(composer.getByRole('img')).toHaveCount(4)
+  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: 'T-0003 Backend service', exact: true }).click()
+  await expect(composer.getByRole('img')).toHaveCount(0)
+  await page.getByRole('button', { name: 'T-0002 UI based on Electron', exact: true }).click()
+  await expect(composer.getByRole('img')).toHaveCount(4)
+  await page.getByRole('separator', { name: 'Resize Chat' }).press('Home')
+  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeInViewport()
+  await page.screenshot({ path: resolve('artifacts/chat-images-desktop.png') })
+  await app.evaluate(({ BrowserWindow }) => { const window = BrowserWindow.getAllWindows()[0]; window.setMinimumSize(380, 600); window.setSize(420, 760) })
+  await expect(page.locator('.workbench')).toHaveAttribute('data-compact', 'true')
+  if (!await page.getByRole('complementary', { name: 'Task chat' }).isVisible()) await page.getByRole('button', { name: 'Toggle chat panel' }).click()
+  await expect(page.getByRole('button', { name: 'Attach images' })).toBeInViewport()
+  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeInViewport()
+  expect(await composer.evaluate((element) => element.scrollWidth <= element.clientWidth && element.getBoundingClientRect().right <= innerWidth)).toBe(true)
+  await page.screenshot({ path: resolve('artifacts/chat-images-compact.png') })
+  await page.getByRole('button', { name: 'Remove Additional 3.png', exact: true }).click()
+  await page.getByRole('button', { name: 'Send message', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Stop response' })).toBeHidden()
+  await expect(composer.getByRole('img')).toHaveCount(0)
+  await expect(page.locator('.message-user').getByRole('img')).toHaveCount(3)
+  expect(await page.locator('.message-user img').first().evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth > 0)).toBe(true)
+})
+
 test('supports native dialogs, keyboard shortcuts, and light appearance', async () => {
   await page.keyboard.press('Control+b')
   await expect(page.getByRole('complementary', { name: 'Task explorer' })).toBeHidden()

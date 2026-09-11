@@ -32,6 +32,16 @@ function fixture() {
 }
 
 describe('single-action original-session submission', () => {
+  it('validates image-only payloads before connecting and forwards bytes to the captured target', async () => {
+    const setup = fixture()
+    const image = { id: crypto.randomUUID(), name: 'Screenshot.png', mimeType: 'image/png' as const, data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=' }
+    const send = native.handlers.get('vscode-chat:send')!
+    await expect(send({}, setup.target, setup.commandId, '', [{ ...image, data: 'invalid' }])).rejects.toThrow()
+    expect(setup.remote.connectTarget).not.toHaveBeenCalled()
+    await send({}, setup.target, setup.commandId, '', [image])
+    expect(setup.remote.send).toHaveBeenCalledExactlyOnceWith('workspace-a', setup.target, setup.commandId, '', [image])
+  })
+
   it('connects the captured remote before one send without an extra open confirmation', async () => {
     const setup = fixture()
     expect(await setup.send()).toEqual({ state: 'pending' })

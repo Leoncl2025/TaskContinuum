@@ -21,7 +21,7 @@ export function originalChatView(original: Awaited<ReturnType<VSCodeSessionStore
   const messages = original.snapshot.messages.map((message) => {
     const delivery = message.nativeRequestId ? byRequest.get(message.nativeRequestId) : undefined
     if (!delivery) return message
-    if (message.role === 'user') return { ...message, text: delivery.text, author: { name: delivery.participant.username, machineName: delivery.participant.machineName } }
+    if (message.role === 'user') return { ...message, text: delivery.text, ...(delivery.images?.length ? { images: delivery.images } : {}), author: { name: delivery.participant.username, machineName: delivery.participant.machineName } }
     const turn = original.state.turns.find((item) => item.id === message.nativeRequestId)
     return { ...message, author: { name: message.author?.name ?? delivery.execution.agentName, machineName: delivery.execution.machineName },
       status: turn?.cancelled ? 'cancelled' as const : turn?.error ? 'error' as const : turn?.complete ? 'complete' as const : 'streaming' as const }

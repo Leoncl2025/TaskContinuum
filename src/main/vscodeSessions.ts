@@ -12,6 +12,7 @@ import type { VSCodeChatIdentity } from '../shared/vscodeChat'
 type JsonObject = Record<string, unknown>
 const forbiddenKeys = new Set(['__proto__', 'constructor', 'prototype'])
 const maximumFileBytes = 32 * 1024 * 1024
+const maximumJournalRecordBytes = 64 * 1024 * 1024
 const maximumJournalBytes = 256 * 1024 * 1024
 
 function object(value: unknown): JsonObject {
@@ -156,7 +157,7 @@ async function readJournal(file: string, size: number): Promise<VSCodeOriginalSt
         const newline = bytes.indexOf(10, offset)
         const end = newline < 0 ? bytes.length : newline
         recordBytes += end - offset
-        if (recordBytes > maximumFileBytes) throw new Error('A VS Code journal record exceeds the 32 MiB limit.')
+        if (recordBytes > maximumJournalRecordBytes) throw new Error('A VS Code journal record exceeds the 64 MiB limit.')
         fragments.push(bytes.subarray(offset, end))
         if (newline < 0) break
         replayRecord(false)

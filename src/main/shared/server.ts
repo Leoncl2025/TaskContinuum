@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { SharedEnrollment, SharedGrant } from '../../shared/sharedSessions'
 import { SharedSessionHost } from './host'
 import { grantSchema, identifier } from './schemas'
+import { MAX_CHAT_IMAGE_REQUEST_BYTES } from '../../shared/chatAttachments'
 
 export interface SharedServerOptions {
   host: SharedSessionHost
@@ -13,14 +14,14 @@ export interface SharedServerOptions {
   shutdown?: () => Promise<void>
 }
 
-async function body(request: IncomingMessage): Promise<unknown> {
+async function body(request: IncomingMessage, maximum = 65536): Promise<unknown> {
   if (!request.headers['content-type']?.startsWith('application/json')) throw new Error('JSON content is required.')
   let bytes = 0
   const chunks: Buffer[] = []
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string)
     bytes += buffer.byteLength
-    if (bytes > 65536) throw new Error('Request body exceeds 64 KB.')
+    if (bytes > maximum) throw new Error(maximum === 65536 ? 'Request body exceeds 64 KB.' : 'Image request body exceeds its size limit.')
     chunks.push(buffer)
   }
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
@@ -86,7 +87,11 @@ export async function startSharedServer(options: SharedServerOptions, port = 0) 
         }, 5000)
         response.once('close', () => { clearInterval(heartbeat); unsubscribe(); streams.delete(response) })
       } else if (request.method === 'POST' && url.pathname === '/commands') {
-        json(response, 202, { commandId: await options.host.submit(grant, await body(request)) })
+        options.host.require(grant, 'send')
+        const input = await body(request, MAX_CHAT_IMAGE_REQUEST_BYTES)
+        const current = await authenticate(request)
+        if (!current) { json(response, 401, { error: 'The participant grant was revoked.' }); return }
+        json(response, 202, { commandId: await options.host.submit(current, input) })
       } else if (request.method === 'POST' && url.pathname === '/responses') {
         await options.host.respond(grant, await body(request))
         json(response, 200, { ok: true })

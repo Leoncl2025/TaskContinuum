@@ -86,7 +86,7 @@ export function activate(context: vscode.ExtensionContext): void {
         isOpen: canDispatch ? isOpen : undefined,
         autoOpenOnSend: canDispatch,
         dispatch: canDispatch
-          ? (identity, delivery, signal) => dispatchVSCodeMessage({ identity, delivery, signal, store, templatePath, commands: {
+          ? (identity, delivery, signal, imageFiles) => dispatchVSCodeMessage({ identity, delivery, signal, imageFiles, store, templatePath, commands: {
             ...templateCommands,
             isOpen,
             confirm: async (target, message, title) => {
@@ -94,7 +94,7 @@ export function activate(context: vscode.ExtensionContext): void {
               if (vscode.workspace.getConfiguration('taskcontinuum').get<boolean>('confirmOriginalSessionSend', true) === false) return true
               const chosen = await vscode.window.showWarningMessage(`Send to original Copilot conversation "${title}"?`, {
                 modal: true,
-                detail: `From: ${message.participant.username} @ ${message.participant.machineName}\nAgent machine: ${message.execution.machineName}\nSession: ${target.nativeSessionId}\n\n${message.text}\n\nThe original Agent mode is retained. Existing tool approvals still apply. An unsaved draft in this chat must be sent or cleared first.`,
+                detail: `From: ${message.participant.username} @ ${message.participant.machineName}\nAgent machine: ${message.execution.machineName}\nSession: ${target.nativeSessionId}\n\n${message.text}${message.images?.length ? `\n\nImages: ${message.images.map((image) => image.name).join(', ')}` : ''}\n\nThe original Agent mode is retained. Existing tool approvals still apply. An unsaved draft in this chat must be sent or cleared first.`,
               }, 'Send to original session')
               return chosen === 'Send to original session'
             },

@@ -3,6 +3,9 @@ import { realpath, rm } from 'node:fs/promises'
 import { request as httpRequest } from 'node:http'
 import { join } from 'node:path'
 import { z } from 'zod'
+import { chatSubmissionSchema } from '../shared/chatAttachments'
+import type { ChatImageAttachment } from '../shared/chatAttachments'
+import { describeChatImages } from './chatImageStore'
 import type { RemoteVSCodeClientIdentity, RemoteVSCodeConnection, VSCodeChatTarget } from '../shared/remoteVSCode'
 import type { VSCodeChatDelivery, VSCodeChatView } from '../shared/vscodeChat'
 import { openSshTunnel } from './shared/ssh'
@@ -286,17 +289,18 @@ export class RemoteVSCodeManager {
     try { return structuredClone(await operation) } finally { if (this.reads.get(entry.id) === operation) this.reads.delete(entry.id) }
   }
 
-  async send(root: string, target: VSCodeChatTarget, commandId: string, text: string): Promise<VSCodeChatDelivery> {
-    if (await this.options.devices?.find(root, target)) return this.options.devices!.send(root, target, commandId, text)
+  async send(root: string, target: VSCodeChatTarget, commandId: string, text: string, images?: ChatImageAttachment[]): Promise<VSCodeChatDelivery> {
+    if (await this.options.devices?.find(root, target)) return this.options.devices!.send(root, target, commandId, text, images)
     const entry = await this.forTarget(root, target)
     await this.authorized(entry)
     if (!entry.invitation.grant.canSend) throw new Error('This invitation allows reading only.')
     const active = this.active.get(entry.id)
     if (!active) throw new Error('Remote VS Code is disconnected. No message was queued or sent.')
-    const command = z.object({ id: z.uuid(), text: z.string().trim().min(1).max(4000) }).strict().parse({ id: commandId, text })
+    const command = chatSubmissionSchema.parse({ id: commandId, text, ...(images?.length ? { images } : {}) })
     try {
       const receipt = deliverySchema.parse(await this.request(entry, active, '/remote/send', { ...entry.invitation.identity, ...command }))
       if (receipt.id !== command.id || receipt.text !== command.text || receipt.nativeSessionId !== entry.invitation.identity.nativeSessionId
+        || JSON.stringify(receipt.images ?? []) !== JSON.stringify(describeChatImages(command.images ?? []))
         || !sameParticipant(remoteClientSchema.parse(receipt.participant), entry.invitation.grant.participant) || JSON.stringify(receipt.execution) !== JSON.stringify(entry.invitation.execution)) throw new Error('Remote delivery identity did not match. Inspect the original conversation before retrying.')
       return receipt
     } catch (error) {

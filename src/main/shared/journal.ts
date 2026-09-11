@@ -1,16 +1,20 @@
 import { mkdir, open, readFile, stat } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { SharedEvent, SharedSessionDescriptor } from '../../shared/sharedSessions'
 import { eventSchema } from './schemas'
+import { ChatImageStore } from '../chatImageStore'
 
 export class SharedJournal {
+  readonly images: ChatImageStore
   private events: SharedEvent[] = []
   private tail = Promise.resolve()
   private bytes = 0
   private failure?: Error
   private readonly listeners = new Set<(event: SharedEvent) => void>()
 
-  constructor(private readonly file: string, private readonly session: SharedSessionDescriptor) {}
+  constructor(private readonly file: string, private readonly session: SharedSessionDescriptor) {
+    this.images = new ChatImageStore(join(dirname(file), 'images'))
+  }
 
   async load(): Promise<void> {
     let content: string

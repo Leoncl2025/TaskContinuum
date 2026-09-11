@@ -1,8 +1,20 @@
 const vscode = require('vscode')
+const { readFile } = require('node:fs/promises')
+const { createHash } = require('node:crypto')
+const { fileURLToPath } = require('node:url')
 
 exports.activate = (context) => {
   const participant = vscode.chat.createChatParticipant('taskcontinuum.delivery-test', async (request, _history, stream) => {
     const matched = request.prompt.includes('Task Continuum message ID:') && request.prompt.includes('TASKCONTINUUM_ORIGINAL_SEND_OK')
+    const expectedImage = /TASKCONTINUUM_IMAGE_SHA256: ([a-f0-9]{64})/.exec(request.prompt)
+    if (expectedImage) {
+      const files = [...request.prompt.matchAll(/^- Image \d+: (file:\/\/[^\r\n]+)$/gm)]
+      if (files.length !== 1) { stream.markdown('TASKCONTINUUM_IMAGE_MISSING'); return }
+      try {
+        const image = await readFile(fileURLToPath(files[0][1]))
+        if (createHash('sha256').update(image).digest('hex') !== expectedImage[1]) { stream.markdown('TASKCONTINUUM_IMAGE_MISMATCH'); return }
+      } catch { stream.markdown('TASKCONTINUUM_IMAGE_UNREADABLE'); return }
+    }
     stream.markdown(matched ? 'TASKCONTINUUM_ORIGINAL_SEND_OK' : 'TASKCONTINUUM_TEST_PARTICIPANT_READY')
   })
   context.subscriptions.push(participant)

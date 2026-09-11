@@ -2,7 +2,8 @@ import { z } from 'zod'
 import { isDeepStrictEqual } from 'node:util'
 import type { SharedEnrollment, SharedEvent, SharedView } from '../../shared/sharedSessions'
 import { SharedJournal } from './journal'
-import { actorSchema, descriptorSchema, eventSchema, permissionsSchema } from './schemas'
+import { actorSchema, commandSchema, descriptorSchema, eventSchema, permissionsSchema } from './schemas'
+import type { ChatImageAttachment } from '../../shared/chatAttachments'
 import { openSshTunnel } from './ssh'
 
 export type SharedClientUpdate = { event?: SharedEvent; online?: boolean; error?: string; lastSyncedAt?: string }
@@ -130,9 +131,9 @@ export class SharedSessionClient {
     return this.view
   }
 
-  async command(id: string, text: string): Promise<void> {
+  async command(id: string, text: string, images?: ChatImageAttachment[]): Promise<void> {
     if (!this.online) throw new Error('The session is offline. The message was not sent.')
-    await this.request('/commands', { id, text })
+    await this.request('/commands', commandSchema.parse({ id, text, ...(images?.length ? { images } : {}) }))
   }
   async respond(id: string, answer: boolean | string): Promise<void> { if (!this.online) throw new Error('The session is offline.'); await this.request('/responses', { id, answer }) }
   async stop(commandId: string): Promise<void> { if (!this.online) throw new Error('The session is offline.'); await this.request('/stop', { commandId }) }

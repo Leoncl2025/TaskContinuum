@@ -1,4 +1,5 @@
 import type { ChatMessage } from './chat'
+import type { ChatImageAttachment } from './chatAttachments'
 
 export interface LocalSessionSummary {
   id: string
@@ -38,6 +39,7 @@ export interface SendMessageRequest {
   sessionId: string
   requestId: string
   message: string
+  images?: ChatImageAttachment[]
 }
 
 export type CopilotEvent =

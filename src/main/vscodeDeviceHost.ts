@@ -4,6 +4,7 @@ import type { IncomingMessage } from 'node:http'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
+import { chatImageAttachmentsSchema, MAX_CHAT_IMAGE_REQUEST_BYTES } from '../shared/chatAttachments'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 import { remoteClientSchema, remoteInvitationSchema, sameRemoteTarget } from './vscodeRemoteProtocol'
 import type { RemoteVSCodeInvitation } from './vscodeRemoteProtocol'
@@ -217,16 +218,16 @@ export class VSCodeDeviceHost {
           } else {
             const route = /^\/device\/session\/(read|send|open)$/.exec(request.url ?? '')
             if (!route) { response.writeHead(404).end(); return }
-            const command = z.object({ identity: vscodeIdentitySchema, id: z.uuid().optional(), text: z.string().trim().min(1).max(4000).optional() }).strict().parse(body)
+            const command = z.object({ identity: vscodeIdentitySchema, id: z.uuid().optional(), text: z.string().trim().max(4000).optional(), images: chatImageAttachmentsSchema.optional() }).strict().parse(body)
             const sending = route[1] === 'send'
             const controlling = sending || route[1] === 'open'
-            if (sending && (!command.id || !command.text)) { response.writeHead(400).end(); return }
+            if (sending && (!command.id || command.text === undefined || !command.text && !command.images?.length)) { response.writeHead(400).end(); return }
             if (!this.permitted(pair.id, command.identity, controlling)) { response.writeHead(403).end(); return }
             const policy = pair.sessions.find((item) => sameRemoteTarget(item.identity, command.identity))!
             const invitation = await this.invitation(pair, policy)
             await this.refreshLinked(pair.id)
             if (!this.currentPolicy(pair.id, policy)) { response.writeHead(403).end(); return }
-            result = await deviceRequest(invitation.port, invitation.port, invitation.token, `/remote/${route[1]}`, { ...command.identity, ...(sending ? { id: command.id, text: command.text } : {}) }, this.abort.signal)
+            result = await deviceRequest(invitation.port, invitation.port, invitation.token, `/remote/${route[1]}`, { ...command.identity, ...(sending ? { id: command.id, text: command.text, ...(command.images?.length ? { images: command.images } : {}) } : {}) }, this.abort.signal)
             await this.refreshLinked(pair.id)
             if (!this.currentPolicy(pair.id, policy)) { response.writeHead(403).end(); return }
           }
@@ -250,7 +251,8 @@ export class VSCodeDeviceHost {
   private async body(request: IncomingMessage): Promise<unknown> {
     const chunks: Buffer[] = []
     let size = 0
-    for await (const chunk of request) { size += chunk.length; if (size > 32768) throw new Error('Request too large.'); chunks.push(chunk) }
+    const maximum = request.url === '/device/session/send' ? MAX_CHAT_IMAGE_REQUEST_BYTES : 32768
+    for await (const chunk of request) { size += chunk.length; if (size > maximum) throw new Error('Request too large.'); chunks.push(chunk) }
     return JSON.parse(Buffer.concat(chunks).toString('utf8'))
   }
   async close(): Promise<void> {

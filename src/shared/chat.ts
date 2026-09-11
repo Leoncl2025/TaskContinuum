@@ -1,9 +1,11 @@
 import type { TaskRecord } from './tasks'
+import type { ChatImageAttachment, ChatImageReference } from './chatAttachments'
 
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
   text: string
+  images?: (ChatImageAttachment | ChatImageReference)[]
   status: 'complete' | 'streaming' | 'cancelled' | 'error'
   nativeRequestId?: string
   author?: { name: string; machineName?: string }
@@ -13,6 +15,7 @@ export interface ChatRequest {
   sessionId: string
   task: TaskRecord
   message: string
+  images?: ChatImageAttachment[]
   history: ReadonlyArray<ChatMessage>
   signal: AbortSignal
 }

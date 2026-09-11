@@ -1,6 +1,6 @@
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { hostname, tmpdir, userInfo } from 'node:os'
 import { execFile } from 'node:child_process'
@@ -178,7 +178,10 @@ test('connects from the desktop and sends to the original sidebar conversation w
       await page.getByRole('button', { name: 'Test model ready', exact: true }).click()
       await expect(page.getByRole('button', { name: 'Delivery confirmation disabled', exact: true })).toBeVisible()
       const secondCommandId = randomUUID()
-      const secondPrompt = '@continuum_test Second distinct message. Reply with exactly TASKCONTINUUM_ORIGINAL_SEND_OK. Do not call tools or change files.'
+      const imageBytes = await page.screenshot({ clip: { x: 0, y: 0, width: 320, height: 180 } })
+      const image = { id: randomUUID(), name: 'Remote screenshot.png', mimeType: 'image/png' as const, data: imageBytes.toString('base64') }
+      const imageHash = createHash('sha256').update(imageBytes).digest('hex')
+      const secondPrompt = `@continuum_test Verify the attached screenshot. TASKCONTINUUM_IMAGE_SHA256: ${imageHash}\nReply with exactly TASKCONTINUUM_ORIGINAL_SEND_OK. Do not change files.`
       const remoteParticipant = { clientId: randomUUID(), username: 'Remote test user', machineName: 'Machine-A' }
       const invitation = await grantRemoteVSCode(store, identity, remoteParticipant, true)
       const forwarding = await startSshFixture(join(root, 'ssh'), invitation.port)
@@ -190,7 +193,7 @@ test('connects from the desktop and sends to the original sidebar conversation w
         const view = await readOriginalVSCode(store, identity)
         return { canSend: view.canSend, reason: view.bridgeError }
       }).toEqual({ canSend: true, reason: undefined })
-      expect(await remote.send(workspace, enrollment.target, secondCommandId, secondPrompt)).toMatchObject({ state: 'pending', id: secondCommandId, participant: remoteParticipant, execution: { machineName: hostname() } })
+      expect(await remote.send(workspace, enrollment.target, secondCommandId, secondPrompt, [image])).toMatchObject({ state: 'pending', id: secondCommandId, images: [{ id: image.id, sha256: imageHash }], participant: remoteParticipant, execution: { machineName: hostname() } })
       await expect(confirmation).toBeHidden()
       await expect(originalSidebar).toContainText(secondCommandId, { timeout: 20000 })
       await expect(confirmation).toBeHidden()
@@ -206,7 +209,7 @@ test('connects from the desktop and sends to the original sidebar conversation w
       const secondDelivery = finalView.deliveries!.find((entry) => entry.id === secondCommandId)!
       expect(secondDelivery.nativeRequestId).not.toBe(record.nativeRequestId)
       const remoteView = await remote.read(workspace, enrollment.target)
-      expect(remoteView.messages.find((message) => message.role === 'user' && message.nativeRequestId === secondDelivery.nativeRequestId)).toMatchObject({ author: { name: remoteParticipant.username, machineName: remoteParticipant.machineName } })
+      expect(remoteView.messages.find((message) => message.role === 'user' && message.nativeRequestId === secondDelivery.nativeRequestId)).toMatchObject({ images: [{ id: image.id, sha256: imageHash, name: image.name }], author: { name: remoteParticipant.username, machineName: remoteParticipant.machineName } })
       expect(forwarding.forwardedConnections()).toBeGreaterThan(0)
       expect(finalView.messages.find((message) => message.role === 'user' && message.nativeRequestId === secondDelivery.nativeRequestId)?.text).toBe(secondPrompt)
       expect((await store.locateOriginal(identity)).state.turns).toHaveLength(3)
@@ -222,14 +225,16 @@ test('connects from the desktop and sends to the original sidebar conversation w
       const switchId = randomUUID()
       const switchFile = join(directory, `${switchId}.jsonl`)
       const switchData = { ...sourceData, sessionId: switchId, customTitle: 'Remote switch fixture' }
-      const initialResponse = [{ kind: 'markdownContent', content: { value: 'x'.repeat(28 * 1024 * 1024) } }]
+      const initialResponse = [{ kind: 'markdownContent', content: { value: 'x'.repeat(44 * 1024 * 1024) } }]
       const journalUpdate = JSON.stringify({ kind: 1, k: ['requests', 0, 'response'], v: [{ kind: 'markdownContent', content: { value: 'x'.repeat(1024 * 1024) } }] })
+      const initialRecord = JSON.stringify({ kind: 0, v: { ...switchData, requests: [{ ...sourceData.requests[0], response: initialResponse }] } })
+      expect(Buffer.byteLength(initialRecord)).toBeGreaterThan(32 * 1024 * 1024)
       const switchSource = [
-        JSON.stringify({ kind: 0, v: { ...switchData, requests: [{ ...sourceData.requests[0], response: initialResponse }] } }),
+        initialRecord,
         ...Array.from({ length: 12 }, () => journalUpdate),
         JSON.stringify({ kind: 1, k: ['requests', 0, 'response'], v: sourceData.requests[0].response }),
       ].join('\n') + '\n'
-      expect(Buffer.byteLength(switchSource)).toBeGreaterThan(40 * 1024 * 1024)
+      expect(Buffer.byteLength(switchSource)).toBeGreaterThan(56 * 1024 * 1024)
       await writeFile(switchFile, switchSource)
       const switchIdentity = { nativeSessionId: switchId, workspaceStorageId }
       const participant = { clientId: randomUUID(), username: 'Switch user', machineName: 'Machine-C' }

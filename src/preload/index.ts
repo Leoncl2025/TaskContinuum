@@ -46,7 +46,7 @@ const vscodeChat: VSCodeChatBridge = {
   read: (identity) => ipcRenderer.invoke('vscode-chat:read', identity),
   connect: (identity) => ipcRenderer.invoke('vscode-chat:connect', identity),
   open: (identity) => ipcRenderer.invoke('vscode-chat:open', identity),
-  send: (identity, commandId, text) => ipcRenderer.invoke('vscode-chat:send', identity, commandId, text),
+  send: (identity, commandId, text, images) => ipcRenderer.invoke('vscode-chat:send', identity, commandId, text, images),
   watch: (identity) => ipcRenderer.invoke('vscode-chat:watch', identity),
   onChange: (listener) => {
     const receive = (_event: Electron.IpcRendererEvent, identity: VSCodeChatTarget) => listener(identity)
@@ -114,7 +114,7 @@ const sharedSessions: SharedDesktopBridge = {
   open: (id) => ipcRenderer.invoke('shared:open', id),
   cached: (id) => ipcRenderer.invoke('shared:cached', id),
   disconnect: (id) => ipcRenderer.invoke('shared:disconnect', id),
-  send: (id, commandId, text) => ipcRenderer.invoke('shared:send', id, commandId, text),
+  send: (id, commandId, text, images) => ipcRenderer.invoke('shared:send', id, commandId, text, images),
   stop: (id, commandId) => ipcRenderer.invoke('shared:stop', id, commandId),
   respond: (id, interactionId, answer) => ipcRenderer.invoke('shared:respond', id, interactionId, answer),
   invite: (id, host, role) => ipcRenderer.invoke('shared:invite', id, host, role),

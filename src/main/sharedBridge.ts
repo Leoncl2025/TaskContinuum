@@ -3,7 +3,7 @@ import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import { SharedSessionManager } from './shared/manager'
-import { actorSchema } from './shared/schemas'
+import { actorSchema, commandSchema } from './shared/schemas'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 import type { SharedPermission } from '../shared/sharedSessions'
 
@@ -45,7 +45,10 @@ export function registerSharedBridge(requireWindow: (event: IpcMainInvokeEvent) 
   handle('open', async (_window, value) => manager.open(await sessionId(value)))
   handle('cached', async (_window, value) => manager.cached(await sessionId(value)))
   handle('disconnect', async (_window, value) => manager.disconnect(await sessionId(value)))
-  handle('send', async (_window, value, commandId, text) => manager.send(await sessionId(value), z.string().min(1).max(240).parse(commandId), z.string().min(1).max(4000).parse(text)))
+  handle('send', async (_window, value, commandId, text, images) => {
+    const command = commandSchema.parse({ id: commandId, text, images })
+    return manager.send(await sessionId(value), command.id, command.text, command.images)
+  })
   handle('stop', async (_window, value, commandId) => manager.stop(await sessionId(value), z.string().min(1).max(240).parse(commandId)))
   handle('respond', async (_window, value, interactionId, answer) => manager.respond(await sessionId(value), z.string().min(1).max(240).parse(interactionId), z.union([z.boolean(), z.string().min(1).max(8000)]).parse(answer)))
   handle('invite', async (window, value, host, role) => {

@@ -1,25 +1,31 @@
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { z } from 'zod'
 import type { VSCodeChatDelivery, VSCodeChatIdentity, VSCodeChatParticipant, VSCodeExecutionIdentity } from '../shared/vscodeChat'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 import type { VSCodeSessionStore } from './vscodeSessions'
+import { chatImageReferencesSchema, chatSubmissionSchema } from '../shared/chatAttachments'
+import { ChatImageStore, describeChatImages } from './chatImageStore'
+import type { ChatImageFile } from './chatImageStore'
 
 export const participantSchema = z.object({ clientId: z.uuid().optional(), username: z.string().trim().min(1).max(300), machineName: z.string().trim().min(1).max(300) }).strict()
 export const executionIdentitySchema = z.object({ agentName: z.string().trim().min(1).max(300), machineName: z.string().trim().min(1).max(300) }).strict()
 export const deliverySchema = z.object({
-  id: z.uuid(), nativeSessionId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,199}$/), text: z.string().trim().min(1).max(4000),
+  id: z.uuid(), nativeSessionId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,199}$/), text: z.string().trim().max(4000), images: chatImageReferencesSchema.optional(),
   participant: participantSchema, execution: executionIdentitySchema, createdAt: z.iso.datetime(),
   state: z.enum(['pending', 'submitted', 'failed', 'uncertain']), nativeRequestId: z.string().min(1).max(240).optional(), error: z.string().max(1500).optional(),
-}).strict()
+}).strict().refine((delivery) => Boolean(delivery.text || delivery.images?.length), 'A delivery needs text or images.')
 export type VSCodeDispatchResult = Pick<VSCodeChatDelivery, 'state' | 'nativeRequestId' | 'error'>
-export type VSCodeDispatch = (identity: VSCodeChatIdentity, delivery: VSCodeChatDelivery, signal: AbortSignal) => Promise<VSCodeDispatchResult>
+export type VSCodeDispatch = (identity: VSCodeChatIdentity, delivery: VSCodeChatDelivery, signal: AbortSignal, imageFiles?: ChatImageFile[]) => Promise<VSCodeDispatchResult>
 
-export function deliveryPrompt(delivery: VSCodeChatDelivery): string {
-  return `${delivery.text}\n\nMessage from ${JSON.stringify(delivery.participant.username)} on ${JSON.stringify(delivery.participant.machineName)}.\nTask Continuum message ID: ${delivery.id}`
+export function deliveryPrompt(delivery: VSCodeChatDelivery, imageFiles: ChatImageFile[] = []): string {
+  const images = imageFiles.length ? `\n\nAttached images (use an image-reading tool to inspect these files on the execution machine):\n${imageFiles.map((file, index) => `- Image ${index + 1}: ${pathToFileURL(file.path).href}`).join('\n')}` : ''
+  return `${delivery.text || 'Please inspect the attached images.'}${images}\n\nMessage from ${JSON.stringify(delivery.participant.username)} on ${JSON.stringify(delivery.participant.machineName)}.\nTask Continuum message ID: ${delivery.id}`
 }
 
 export class VSCodeChatDeliveryService {
   private readonly file: string
+  private readonly images: ChatImageStore
   private readonly records = new Map<string, VSCodeChatDelivery>()
   private loading?: Promise<void>
   private writing: Promise<unknown> = Promise.resolve()
@@ -29,6 +35,7 @@ export class VSCodeChatDeliveryService {
 
   constructor(directory: string, private readonly store: VSCodeSessionStore, private readonly participant: VSCodeChatParticipant, private readonly execution: VSCodeExecutionIdentity, private readonly dispatch: VSCodeDispatch) {
     this.file = join(directory, 'deliveries.json')
+    this.images = new ChatImageStore(join(directory, 'images'))
   }
 
   private load(): Promise<void> {
@@ -64,7 +71,7 @@ export class VSCodeChatDeliveryService {
       const original = await this.store.locateOriginal(identity)
       for (const record of this.records.values()) {
         if (record.nativeSessionId !== identity.nativeSessionId || record.state !== 'uncertain') continue
-        const found = original.state.turns.find((turn) => turn.prompt === deliveryPrompt(record) && turn.id)
+        const found = original.state.turns.find((turn) => turn.prompt === deliveryPrompt(record, this.images.files(record.images ?? [])) && turn.id)
         if (found) await this.save({ ...record, state: 'submitted', nativeRequestId: found.id, error: undefined })
       }
       return structuredClone([...this.records.values()].filter((record) => record.nativeSessionId === identity.nativeSessionId))
@@ -72,14 +79,15 @@ export class VSCodeChatDeliveryService {
   }
 
   submit(identity: VSCodeChatIdentity, value: unknown, authorizedParticipant: VSCodeChatParticipant = this.participant, assertAuthorized: () => void = () => {}): Promise<VSCodeChatDelivery> {
-    const request = z.object({ id: z.uuid(), text: z.string().trim().min(1).max(4000) }).strict().parse(value)
+    const request = chatSubmissionSchema.parse(value)
+    const images = describeChatImages(request.images ?? [])
     const participant = participantSchema.parse(authorizedParticipant)
     return this.update(async () => {
       assertAuthorized()
       if (this.closed) throw new Error('The VS Code bridge is stopping.')
       const prior = this.records.get(request.id)
       if (prior) {
-        if (prior.nativeSessionId !== identity.nativeSessionId || prior.text !== request.text || prior.participant.clientId !== participant.clientId || prior.participant.username !== participant.username || prior.participant.machineName !== participant.machineName) throw new Error('This message ID belongs to a different submission.')
+        if (prior.nativeSessionId !== identity.nativeSessionId || prior.text !== request.text || JSON.stringify(prior.images ?? []) !== JSON.stringify(images) || prior.participant.clientId !== participant.clientId || prior.participant.username !== participant.username || prior.participant.machineName !== participant.machineName) throw new Error('This message ID belongs to a different submission.')
         return structuredClone(prior)
       }
       if (this.running.size) throw new Error('Another message is being delivered. Wait for its confirmation before sending again.')
@@ -89,7 +97,9 @@ export class VSCodeChatDeliveryService {
       if (original.state.turns.at(-1)?.complete === false) throw new Error('The original VS Code conversation is still responding. Wait or stop it in VS Code first.')
       if (original.state.hasDraft) throw new Error('The original VS Code conversation has an unsent draft. Send or clear it in VS Code first.')
       if ([...this.records.values()].some((record) => record.nativeSessionId === identity.nativeSessionId && (record.state === 'pending' || record.state === 'uncertain'))) throw new Error('An earlier delivery is unconfirmed. Inspect the original conversation before sending another message.')
-      const delivery: VSCodeChatDelivery = { ...request, nativeSessionId: identity.nativeSessionId, participant, execution: this.execution, createdAt: new Date().toISOString(), state: 'pending' }
+      if (images.length) await this.images.store(request.images!)
+      assertAuthorized()
+      const delivery: VSCodeChatDelivery = { id: request.id, text: request.text, ...(images.length ? { images } : {}), nativeSessionId: identity.nativeSessionId, participant, execution: this.execution, createdAt: new Date().toISOString(), state: 'pending' }
       await this.save(delivery)
       try { assertAuthorized() } catch {
         const rejected: VSCodeChatDelivery = { ...delivery, state: 'failed', error: 'Remote access ended before dispatch. The message was not sent.' }
@@ -98,7 +108,8 @@ export class VSCodeChatDeliveryService {
       }
       const controller = new AbortController()
       this.running.set(request.id, controller)
-      const operation = this.dispatch(identity, structuredClone(delivery), controller.signal).then(async (result) => {
+      const imageFiles = images.length ? this.images.files(images) : undefined
+      const operation = this.dispatch(identity, structuredClone(delivery), controller.signal, imageFiles).then(async (result) => {
         await this.update(() => this.save({ ...delivery, ...result }))
       }).catch(async (error: unknown) => {
         await this.update(() => this.save({ ...delivery, state: 'uncertain', error: error instanceof Error ? error.message.slice(0, 1500) : 'Delivery could not be confirmed. Inspect the original conversation.' })).catch(() => undefined)
