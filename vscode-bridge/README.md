@@ -19,9 +19,12 @@ Replies identify the execution machine; user messages identify their sender.
    mode/model. Finish existing work and clear any unsent native draft. Sending from
    the updated desktop restores the approved connection and opens this original
    chat only if needed; no separate Connect or Open action is required.
-5. Enter a message in Task Continuum. With delivery confirmation enabled, review the
+5. Enter a message in Task Continuum. Messages send directly to the original session
+   by default. Enable `taskcontinuum.confirmOriginalSessionSend` in VS Code User
+   settings on the execution machine to require an extra confirmation. An explicit
+   `true` setting remains enabled after upgrades. With confirmation enabled, review the
    target session, sender, execution machine, and text in VS Code, then choose
-   **Send to original session**. With it disabled, desktop submission sends directly. Tool
+   **Send to original session**. Tool
    approvals, agent questions, and stopping an executing response remain in VS Code.
 6. Run **Task Continuum: Stop VS Code Bridge** to stop accepting deliveries. This
    also disables automatic restoration for this workspace and cancels unconfirmed
@@ -201,16 +204,17 @@ Treat private invitations, delivery journals, and caches as sensitive data.
 
 ## Optional Send Confirmation
 
-Version 0.2.5 adds `taskcontinuum.confirmOriginalSessionSend` (default `true`). Set
-it to `false` in this machine's VS Code User settings to omit the extra **Send to
+`taskcontinuum.confirmOriginalSessionSend` defaults to `false`. Set it to `true`
+in the execution machine's VS Code User settings to enable the extra **Send to
 original session** popup. The desktop's Send action remains the explicit submission.
 This is a machine-scoped preference, not a setting a task repository can disable.
 It is read for each message; changing it does not require restarting the bridge
-once 0.2.5 is loaded. Re-enable it with `true` at any time.
+once a supporting version is loaded. The preference was introduced in 0.2.5 with
+an original default of `true`; explicit user settings are preserved after upgrades.
 
 Connection consent, workspace trust, original-session/Agent identity, busy/draft
 checks, cache readiness, no-replay rules, and Copilot's tool approvals are unchanged.
-The installed-VS-Code regression verifies a default-confirmed first message and a
+The installed-VS-Code regression verifies an explicitly confirmed first message and a
 second distinct message with the setting disabled, no popup, native persistence,
 unchanged layout, and no unintended messages in the other conversation.
 

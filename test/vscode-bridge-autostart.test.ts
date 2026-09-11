@@ -1,23 +1,27 @@
 // @vitest-environment node
+import { readFile } from 'node:fs/promises'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type * as vscode from 'vscode'
+import type { startVSCodeChatCompanion } from '../src/main/vscodeChatCompanion'
+import type { dispatchVSCodeMessage } from '../src/main/vscodeChatDispatch'
 
 const fixture = vi.hoisted(() => ({
   commands: new Map<string, (...args: unknown[]) => unknown>(),
+  settings: new Map<string, boolean>(),
   handler: undefined as { handleUri(uri: unknown): Promise<void> } | undefined,
   trusted: true, remote: undefined as string | undefined, version: '1.136.1',
-  start: vi.fn(), close: vi.fn(), probe: vi.fn(), confirm: vi.fn(), error: vi.fn(), execute: vi.fn(),
+  start: vi.fn(), close: vi.fn(), probe: vi.fn(), confirm: vi.fn(), error: vi.fn(), execute: vi.fn(), warning: vi.fn(), dispatch: vi.fn(),
 }))
 vi.mock('vscode', () => ({
   get version() { return fixture.version }, StatusBarAlignment: { Right: 2 },
   Uri: { parse: (value: string) => value, joinPath: () => ({ fsPath: 'template' }) },
   env: { get remoteName() { return fixture.remote }, uriScheme: 'vscode' },
-  workspace: { get isTrusted() { return fixture.trusted }, workspaceFolders: [{ uri: { scheme: 'file' } }], fs: { writeFile: vi.fn() } },
-  window: { createStatusBarItem: () => ({ show: vi.fn(), hide: vi.fn(), dispose: vi.fn() }), showInformationMessage: fixture.confirm, showErrorMessage: fixture.error, registerUriHandler: (handler: typeof fixture.handler) => { fixture.handler = handler; return { dispose() {} } } },
+  workspace: { get isTrusted() { return fixture.trusted }, workspaceFolders: [{ uri: { scheme: 'file' } }], fs: { writeFile: vi.fn() }, getConfiguration: () => ({ get: (key: string, fallback: boolean) => fixture.settings.get(key) ?? fallback }) },
+  window: { createStatusBarItem: () => ({ show: vi.fn(), hide: vi.fn(), dispose: vi.fn() }), showInformationMessage: fixture.confirm, showWarningMessage: fixture.warning, showErrorMessage: fixture.error, registerUriHandler: (handler: typeof fixture.handler) => { fixture.handler = handler; return { dispose() {} } } },
   commands: { registerCommand: (id: string, action: (...args: unknown[]) => unknown) => { fixture.commands.set(id, action); return { dispose() {} } }, getCommands: async () => ['workbench.action.chat.openSessionInEditorGroup', 'workbench.action.chat.executeHandoff', 'workbench.action.chat.getHandoffs'], executeCommand: fixture.execute },
 }))
 vi.mock('../src/main/vscodeChatCompanion', () => ({ startVSCodeChatCompanion: fixture.start }))
-vi.mock('../src/main/vscodeChatDispatch', () => ({ verifyVSCodeDeliveryTemplate: fixture.probe, dispatchVSCodeMessage: vi.fn() }))
+vi.mock('../src/main/vscodeChatDispatch', () => ({ verifyVSCodeDeliveryTemplate: fixture.probe, dispatchVSCodeMessage: fixture.dispatch }))
 vi.mock('../src/main/vscodeSessions', () => ({ VSCodeSessionStore: class { async locateOriginal() { return { snapshot: { session: { title: 'Original' } } } } } }))
 import { activate, deactivate } from '../src/main/vscodeChatExtension'
 
@@ -27,13 +31,49 @@ function context(enabled = false) {
   return { subscriptions: [], storageUri: { scheme: 'file', fsPath: '/storage/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bridge' }, extensionUri: { fsPath: '/extension' }, extension: { id: 'taskcontinuum.vscode-bridge' }, workspaceState } as unknown as vscode.ExtensionContext
 }
 beforeEach(() => {
-  fixture.commands.clear(); fixture.trusted = true; fixture.remote = undefined; fixture.version = '1.136.1'
+  fixture.commands.clear(); fixture.settings.clear(); fixture.trusted = true; fixture.remote = undefined; fixture.version = '1.136.1'
   vi.clearAllMocks()
   fixture.start.mockResolvedValue({ close: fixture.close })
   fixture.close.mockResolvedValue(undefined); fixture.probe.mockResolvedValue(undefined)
   fixture.confirm.mockResolvedValue('Connect')
+  fixture.warning.mockResolvedValue('Send to original session')
 })
 afterEach(async () => { await deactivate(); vi.useRealTimers() })
+
+it('declares direct sending as the machine default', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../vscode-bridge/package.json', import.meta.url), 'utf8'))
+  expect(manifest.contributes.configuration.properties['taskcontinuum.confirmOriginalSessionSend']).toMatchObject({ default: false, scope: 'machine' })
+})
+
+it('sends directly by default while honoring confirmation changes and workspace trust', async () => {
+  activate(context())
+  await fixture.commands.get('taskcontinuum.startBridge')!()
+  const options = fixture.start.mock.calls[0][0] as Parameters<typeof startVSCodeChatCompanion>[0]
+  const identity = { workspaceStorageId: 'a'.repeat(32), nativeSessionId: 'original' }
+  const delivery = { id: crypto.randomUUID(), nativeSessionId: identity.nativeSessionId, text: 'Continue once',
+    participant: { username: 'Alice', machineName: 'A' }, execution: { agentName: 'GitHub Copilot', machineName: 'B' },
+    createdAt: new Date().toISOString(), state: 'pending' as const }
+  await options.dispatch!(identity, delivery, new AbortController().signal)
+  const { commands } = fixture.dispatch.mock.calls[0][0] as Parameters<typeof dispatchVSCodeMessage>[0]
+
+  await expect(commands.confirm(identity, delivery, 'Original')).resolves.toBe(true)
+  expect(fixture.warning).not.toHaveBeenCalled()
+  fixture.settings.set('confirmOriginalSessionSend', false)
+  await expect(commands.confirm(identity, delivery, 'Original')).resolves.toBe(true)
+  expect(fixture.warning).not.toHaveBeenCalled()
+
+  fixture.settings.set('confirmOriginalSessionSend', true)
+  await expect(commands.confirm(identity, delivery, 'Original')).resolves.toBe(true)
+  expect(fixture.warning).toHaveBeenCalledWith('Send to original Copilot conversation "Original"?', expect.objectContaining({ modal: true }), 'Send to original session')
+  fixture.warning.mockResolvedValueOnce(undefined)
+  await expect(commands.confirm(identity, delivery, 'Original')).resolves.toBe(false)
+
+  fixture.settings.set('confirmOriginalSessionSend', false)
+  fixture.trusted = false
+  fixture.warning.mockClear()
+  await expect(commands.confirm(identity, delivery, 'Original')).resolves.toBe(false)
+  expect(fixture.warning).not.toHaveBeenCalled()
+})
 
 it('does not start an unapproved workspace; explicit start persists and restores after restart', async () => {
   const state = context()

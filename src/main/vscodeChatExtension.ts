@@ -91,7 +91,7 @@ export function activate(context: vscode.ExtensionContext): void {
             isOpen,
             confirm: async (target, message, title) => {
               if (!vscode.workspace.isTrusted) return false
-              if (vscode.workspace.getConfiguration('taskcontinuum').get<boolean>('confirmOriginalSessionSend', true) === false) return true
+              if (vscode.workspace.getConfiguration('taskcontinuum').get<boolean>('confirmOriginalSessionSend', false) === false) return true
               const chosen = await vscode.window.showWarningMessage(`Send to original Copilot conversation "${title}"?`, {
                 modal: true,
                 detail: `From: ${message.participant.username} @ ${message.participant.machineName}\nAgent machine: ${message.execution.machineName}\nSession: ${target.nativeSessionId}\n\n${message.text}${message.images?.length ? `\n\nImages: ${message.images.map((image) => image.name).join(', ')}` : ''}\n\nThe original Agent mode is retained. Existing tool approvals still apply. An unsaved draft in this chat must be sent or cleared first.`,

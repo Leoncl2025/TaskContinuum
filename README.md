@@ -302,13 +302,14 @@ specific read or format error. Existing session IDs, bindings, and source files 
 unchanged. Reopen an older desktop to load the reader; load the updated companion
 after active work ends for the same long-history support in the sending path.
 
-Bridge 0.2.5 supports disabling only the extra send popup. In this machine's VS Code
-User settings, set `taskcontinuum.confirmOriginalSessionSend` to `false` (default
-`true`). Once the updated companion is loaded, the setting takes effect on the next
-message without a bridge restart. It is machine-scoped, so task repositories cannot
-opt users out of confirmation. Connection consent and Copilot tool approvals are
+Bridge 0.2.5 introduced optional extra-send confirmation. The current default for
+`taskcontinuum.confirmOriginalSessionSend` is `false`, so messages send directly.
+Set it to `true` in the execution machine's VS Code User settings to require the
+popup; an explicit `true` remains enabled after upgrades. The setting takes effect
+on the next message without a bridge restart. It is machine-scoped, so task
+repositories cannot override it. Connection consent and Copilot tool approvals are
 unchanged, as are original-session identity, trust, busy/draft checks, and no-replay
-protections. The real installed-VS-Code test verifies default-confirmed delivery
+protections. The real installed-VS-Code test verifies explicitly confirmed delivery
 followed by a distinct no-popup delivery, both targeting the same original session
 without moving the sidebar or changing the other editor conversation.
 

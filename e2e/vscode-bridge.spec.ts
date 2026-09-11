@@ -26,7 +26,7 @@ test('connects from the desktop and sends to the original sidebar conversation w
   const installedExtension = join(extensions, `taskcontinuum.vscode-bridge-${manifest.version}`)
   await mkdir(workspace, { recursive: true })
   await mkdir(join(profile, 'User'), { recursive: true })
-  await writeFile(join(profile, 'User', 'settings.json'), JSON.stringify({ 'window.dialogStyle': 'custom', 'telemetry.telemetryLevel': 'off', 'files.watcherExclude': { '**': true } }))
+  await writeFile(join(profile, 'User', 'settings.json'), JSON.stringify({ 'window.dialogStyle': 'custom', 'telemetry.telemetryLevel': 'off', 'files.watcherExclude': { '**': true }, 'taskcontinuum.confirmOriginalSessionSend': true }))
   await cp(resolve('vscode-bridge'), installedExtension, { recursive: true })
   await mkdir(resolve('artifacts'), { recursive: true })
   await writeFile(join(workspace, 'fixture.txt'), 'Task Continuum original conversation fixture.\n')

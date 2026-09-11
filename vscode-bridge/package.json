@@ -22,9 +22,9 @@
       "properties": {
         "taskcontinuum.confirmOriginalSessionSend": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "scope": "machine",
-          "description": "Show an extra VS Code confirmation for messages submitted from Task Continuum to the original session. Disable to send directly from the desktop. Copilot tool approvals, connection consent, and session safety checks are unchanged."
+          "description": "Show an extra VS Code confirmation for messages submitted from Task Continuum to the original session. Off by default so messages send directly from the desktop. Copilot tool approvals, connection consent, and session safety checks are unchanged."
         }
       }
     },
