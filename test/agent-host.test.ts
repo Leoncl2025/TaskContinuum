@@ -146,6 +146,24 @@ describe('AHP original chat connection', () => {
 })
 
 describe('Agent Host endpoints', () => {
+  it.skipIf(!process.env.TASKCONTINUUM_VERIFY_AHP_HOST)('reads the selected installed Host model catalog without sending a prompt', async () => {
+    const endpoints = await discoverAgentHosts([join(process.env.APPDATA!, 'Code', 'agent-host', 'local-endpoint', 'entries')])
+    const endpoint = endpoints.find((item) => item.instanceId === process.env.TASKCONTINUUM_VERIFY_AHP_HOST)
+    expect(endpoint).toBeDefined()
+    const abort = new AbortController()
+    const client = new AhpClient(await connectLocalAgentHost(endpoint!, abort.signal), { requestTimeoutMs: 5000 })
+    client.connect()
+    try {
+      await client.initialize({ clientId: randomUUID(), protocolVersions: ['0.9.0'] })
+      const { result, subscription } = await client.subscribe('ahp-root://')
+      try {
+        const root = result.snapshot?.state as import('@microsoft/agent-host-protocol').RootState
+        process.stdout.write(`${JSON.stringify({ modelPrompts: 0, agents: root.agents.map((agent) => ({ provider: agent.provider, models: agent.models.map(({ id, name, provider, policyState }) => ({ id, name, provider, policyState })) })) })}\n`)
+        expect(root.agents.some((agent) => agent.models.length)).toBe(true)
+      } finally { await subscription.close() }
+    } finally { await client.shutdown(); abort.abort() }
+  })
+
   it.skipIf(process.env.TASKCONTINUUM_VERIFY_AHP_LOCAL !== '1')('initializes an already running installed editor Host without sending a prompt', async () => {
     const endpoints = (await discoverAgentHosts([join(process.env.APPDATA!, 'Code', 'agent-host', 'local-endpoint', 'entries')])).filter((endpoint) => endpoint.type === 'editor')
     expect(endpoints.length).toBeGreaterThan(0)

@@ -51,7 +51,8 @@ export function AgentHostPanel({ task, target, onDetach, onClose, onDevices, onB
   const [revision, setRevision] = useState(0)
   const [catalog, setCatalog] = useState<{ key: string; revision: number; models: Awaited<ReturnType<AgentHostBridge['models']>>; error?: string }>()
   const [selection, setSelection] = useState<{ key: string; id: string }>()
-  const models = catalog?.key === key && catalog.revision === revision ? catalog.models : []
+  const currentCatalog = catalog?.key === key && catalog.revision === revision ? catalog : undefined
+  const models = currentCatalog?.models ?? []
   const modelId = selection?.key === key ? selection.id : ''
   const modelReady = models.some((model) => model.id === modelId)
   const operating = useRef(false)
@@ -120,15 +121,12 @@ export function AgentHostPanel({ task, target, onDetach, onClose, onDevices, onB
   }
   const turns = [...view?.chat?.turns ?? [], ...activeTurn ? [activeTurn] : []]
   const stateLabel = !bridge ? 'Desktop update required' : !view || view.state === 'connecting' ? 'Connecting...' : view.state === 'offline' ? 'Offline history' : pending ? 'Delivery pending' : activeTurn ? 'Agent responding' : view.readOnly ? 'Read only' : 'Connected'
+  const modelStatus = !bridge ? 'Desktop update required.' : !currentCatalog ? 'Loading models from the owner Host...' : currentCatalog.error ? undefined : !modelId ? 'Choose a model below to enable sending.' : !modelReady ? 'The selected model is unavailable. Choose another model or retry loading models.' : undefined
   return <aside className="chat-panel ahp-panel" aria-label="Agent Host task chat">
     <header className="panel-header"><span>AGENT HOST</span><div className="header-actions">{onDevices && <IconButton icon="remote" label="Manage devices" onClick={onDevices} />}<IconButton icon="refresh" label="Reconnect Agent Host" disabled={busy} onClick={() => { setError(undefined); setRevision((value) => value + 1) }} /><IconButton icon="debug-disconnect" label="Detach conversation" disabled={busy || pending} onClick={onDetach} /><IconButton icon="layout-sidebar-right-off" label="Hide chat panel" onClick={onClose} /></div></header>
     <div className="chat-context"><Icon name="copilot" /><div><strong>{view?.chat?.title || 'Original Host chat'}</strong><span title={sessionId}>{sessionId}</span></div><span className="context-badge">{task.id}</span></div>
     <div className="session-toolbar"><span role="status">{stateLabel}</span><span className="muted">AHP 0.9.0</span></div>
     <div className="vscode-execution-identity"><Icon name="server" /><span>Copilot @ {machineName}</span></div>
-    <label className="session-filter">Model<select aria-label="Agent Host model" value={modelId} disabled={busy || pending || responding || view?.readOnly || !models.length} onChange={(event) => setSelection({ key, id: event.target.value })}><option value="">Choose a model</option>{modelId && !modelReady && <option value={modelId} disabled>{modelId} (unavailable)</option>}{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
-    {catalog?.key === key && catalog.revision === revision && catalog.error && <p className="copilot-error vscode-chat-notice" role="alert">{catalog.error}</p>}
-    {(error || view?.error) && <p className="copilot-error vscode-chat-notice" role="alert">{error ?? view?.error}</p>}
-    {view?.pendingTurn?.state === 'uncertain' && <p className="vscode-chat-notice" role="status">Delivery outcome unknown. Check the original chat before another send.</p>}
     <div className="chat-log" ref={log} role="log" aria-label={`Agent Host conversation for ${task.id}`} aria-live="polite" onScroll={() => { if (log.current) following.current = log.current.scrollHeight - log.current.scrollTop - log.current.clientHeight < 60 }}>
       {!turns.length && <p className="muted">{view?.state === 'connected' ? 'No messages.' : 'Waiting for original history...'}</p>}
       {turns.map((turn) => {
@@ -136,6 +134,18 @@ export function AgentHostPanel({ task, target, onDetach, onClose, onDevices, onB
         return <div key={turn.id} data-turn-id={turn.id}><article className="message message-user"><header><Icon name="account" /><strong>{typeof actor?.username === 'string' ? actor.username : 'User'}</strong>{typeof actor?.machineName === 'string' && <span className="message-model">{actor.machineName}</span>}</header>{turn.message.model && <p className="message-notice">Requested model: {turn.message.model.id}</p>}<div className="message-text">{turn.message.text}</div><ChatImages images={imagesFor(turn)} /></article><article className="message message-assistant"><header><Icon name="copilot" /><strong>Copilot @ {machineName}</strong></header>{turn.responseParts.map((part, index) => <Response key={index} part={part} terminals={view?.terminals ?? {}} owner={machineName} />)}{activeTurn?.id === turn.id && <p className="message-notice" role="status">Responding...</p>}</article></div>
       })}
     </div>
-    <form className="composer-area" onSubmit={(event) => { event.preventDefault(); void send() }}><ChatImageStatus input={imageInput} />{view?.chat?.draft?.text && <p className="vscode-chat-notice muted">The owner has an unsent draft.</p>}<div className="composer"><ChatImages images={images} onRemove={imageInput.remove} disabled={busy} /><textarea id="chat-composer" aria-label="Message Agent Host" placeholder="Message original Agent" rows={3} maxLength={4000} value={draft} onChange={(event) => setDraft(event.target.value)} onPaste={imageInput.paste} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} /><div className="composer-toolbar"><ChatImagePicker onFiles={imageInput.add} disabled={busy || imageInput.reading} /><span className="vscode-composer-identity"><Icon name="link" />Original chat</span>{activeTurn ? <IconButton icon="debug-stop" label="Stop Agent Host response" disabled={busy || view?.readOnly || view?.state !== 'connected'} onClick={() => { void cancel() }} /> : <button className="send-button" type="submit" aria-label="Send to Agent Host" title="Send to Agent Host" disabled={!canSend || imageInput.reading || !draft.trim() && !images.length}><Icon name="arrow-up" /></button>}</div></div></form>
+    <form className="composer-area" onSubmit={(event) => { event.preventDefault(); void send() }}>
+      <ChatImageStatus input={imageInput} />
+      {(error || view?.error) && <p className="copilot-error vscode-chat-notice" role="alert">{error ?? view?.error}</p>}
+      {view?.pendingTurn?.state === 'uncertain' && <p className="vscode-chat-notice" role="status">Delivery outcome unknown. Check the original chat before another send.</p>}
+      {view?.chat?.draft?.text && <p className="vscode-chat-notice muted">The owner has an unsent draft.</p>}
+      {currentCatalog?.error && <p className="copilot-error vscode-chat-notice" role="alert">{currentCatalog.error}</p>}
+      {modelStatus && <p className="message-notice" role="status">{modelStatus}</p>}
+      <div className="ahp-model-controls">
+        <label>Model<select aria-label="Agent Host model" value={modelId} disabled={busy || pending || responding || view?.readOnly || !models.length} onChange={(event) => setSelection({ key, id: event.target.value })}><option value="">{!currentCatalog ? 'Loading models...' : !models.length ? 'Models unavailable' : 'Choose a model'}</option>{modelId && !modelReady && <option value={modelId} disabled>{modelId} (unavailable)</option>}{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
+        <IconButton icon="refresh" label="Retry loading models" disabled={!bridge || busy || !currentCatalog} onClick={() => setRevision((value) => value + 1)} />
+      </div>
+      <div className="composer"><ChatImages images={images} onRemove={imageInput.remove} disabled={busy} /><textarea id="chat-composer" aria-label="Message Agent Host" placeholder="Message original Agent" rows={3} maxLength={4000} value={draft} onChange={(event) => setDraft(event.target.value)} onPaste={imageInput.paste} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} /><div className="composer-toolbar"><ChatImagePicker onFiles={imageInput.add} disabled={busy || imageInput.reading} /><span className="vscode-composer-identity"><Icon name="link" />Original chat</span>{activeTurn ? <IconButton icon="debug-stop" label="Stop Agent Host response" disabled={busy || view?.readOnly || view?.state !== 'connected'} onClick={() => { void cancel() }} /> : <button className="send-button" type="submit" aria-label="Send to Agent Host" title="Send to Agent Host" disabled={!canSend || imageInput.reading || !draft.trim() && !images.length}><Icon name="arrow-up" /></button>}</div></div>
+    </form>
   </aside>
 }

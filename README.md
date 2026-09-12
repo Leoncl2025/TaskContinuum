@@ -123,7 +123,10 @@ remain on B. Recovery obtains authoritative snapshots; it never replays a send.
 An unknown delivery blocks further sends until its original turn is observed.
 Read-only participants cannot send or cancel.
 
-Choose **Model** in the Agent Host panel before sending. The list comes from the
+Choose **Model** immediately above the Agent Host message input before sending.
+The picker stays beside the composer rather than at the top of the chat panel.
+Loading errors and the **Retry loading models** button appear there too; retrying
+preserves your draft and never sends it automatically. The list comes from the
 original Host's provider, excludes policy-disabled models, and is scoped to that
 provider when shared through a paired device. Task Continuum sends the selection
 explicitly, including through the remote gateway; it does not assume the VS Code

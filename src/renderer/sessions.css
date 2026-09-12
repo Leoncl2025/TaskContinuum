@@ -7,6 +7,9 @@
 .copilot-connection div span { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .session-filter { display: flex; align-items: center; gap: 8px; padding: 12px 13px; font-size: 11px; color: var(--muted); }
 .session-filter select { width: 100%; min-width: 0; background: var(--input); border: 1px solid var(--border); padding: 5px; border-radius: 3px; }
+.ahp-model-controls { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.ahp-model-controls label { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; font-size: 11px; color: var(--muted); }
+.ahp-model-controls select { flex: 1; min-width: 0; width: 100%; padding: 5px; background: var(--input); border: 1px solid var(--border); border-radius: 3px; }
 .session-row { display: flex; gap: 8px; width: 100%; align-items: flex-start; text-align: left; padding: 13px; border-bottom: 1px solid var(--border); }
 .session-row:hover { background: var(--hover); }
 .session-row.is-selected { background: var(--selected); }
