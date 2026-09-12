@@ -3,10 +3,10 @@ import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { WebSocketServer } from 'ws'
 import { chatReducer, MessageKind } from '@microsoft/agent-host-protocol'
-import type { ActionEnvelope, ChatState, Message, SessionState, Snapshot } from '@microsoft/agent-host-protocol'
+import type { ActionEnvelope, ChatState, Message, RootState, SessionState, Snapshot } from '@microsoft/agent-host-protocol'
 import type { AgentHostEndpoint } from '../src/main/agentHostProtocol'
 
-export async function startAgentHostFixture() {
+export async function startAgentHostFixture(initializeMeta?: Record<string, unknown>) {
   const server = createServer()
   const sockets = new WebSocketServer({ server })
   const hostId = randomUUID()
@@ -18,7 +18,11 @@ export async function startAgentHostFixture() {
   const subscriptions = new Map<import('ws').WebSocket, Set<string>>()
   const dispatches: unknown[] = []
   let loseNextSend = false
-  const snapshot = (resource: string): Snapshot => ({ resource, fromSeq: sequence, state: resource === chatId ? structuredClone(chat) : structuredClone(session) })
+  const root: RootState = { agents: [
+    { provider: 'copilotcli', displayName: 'Copilot', description: '', models: [{ id: 'owner-model', name: 'Owner model', provider: 'copilotcli' }, { id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }, { id: 'disabled-model', name: 'Disabled', provider: 'copilotcli', policyState: 'disabled' as RootState['agents'][number]['models'][number]['policyState'] }] },
+    { provider: 'private-provider', displayName: 'Private provider', description: '', models: [{ id: 'private-model', name: 'Private model', provider: 'private-provider' }] },
+  ], activeSessions: 123, _meta: { privateMetadata: 'not shared' } }
+  const snapshot = (resource: string): Snapshot => ({ resource, fromSeq: sequence, state: structuredClone(resource === 'ahp-root://' ? root : resource === chatId ? chat : session) })
   function action(value: Record<string, unknown>) {
     const envelope = { channel: chatId, serverSeq: ++sequence, origin: undefined, action: value } as unknown as ActionEnvelope
     chat = chatReducer(chat, envelope.action as Parameters<typeof chatReducer>[1])
@@ -30,9 +34,10 @@ export async function startAgentHostFixture() {
     socket.on('message', (data) => {
       const message = JSON.parse(data.toString())
       let result: unknown = {}
-      if (message.method === 'initialize') result = { protocolVersion: '0.9.0', serverSeq: sequence, snapshots: [] }
+      if (message.method === 'initialize') result = { protocolVersion: '0.9.0', serverSeq: sequence, snapshots: [], ...(initializeMeta ? { _meta: initializeMeta } : {}) }
       else if (message.method === 'listSessions') result = { items: [{ resource: sessionId, ...session, createdAt: chat.modifiedAt, modifiedAt: chat.modifiedAt }] }
       else if (message.method === 'subscribe') { subscriptions.get(socket)!.add(message.params.channel); result = { snapshot: snapshot(message.params.channel) } }
+      else if (message.method === 'unsubscribe') subscriptions.get(socket)!.delete(message.params.channel)
       else if (message.method === 'dispatchAction') {
         dispatches.push(message.params.action)
         if (loseNextSend) { loseNextSend = false; socket.terminate(); return }

@@ -44,7 +44,7 @@ describe('workspace switching in the desktop workbench', () => {
     const owner = { clientId: crypto.randomUUID(), machineName: 'Owner-B' }
     const target = { hostId: 'host-instance-123', sessionId: 'ahp-session:/original', chatId: 'ahp-chat:/original/main', owner }
     repository[first.id] = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64), localOwner: owner }
-    window.agentHost = { list: vi.fn(async () => ({ sessions: [], warnings: [] })), watch: vi.fn(async () => crypto.randomUUID()), unwatch: vi.fn(async () => {}), send: vi.fn(async () => {}), cancel: vi.fn(async () => {}), onView: () => () => {} }
+    window.agentHost = { list: vi.fn(async () => ({ sessions: [], warnings: [] })), models: vi.fn(async () => []), watch: vi.fn(async () => crypto.randomUUID()), unwatch: vi.fn(async () => {}), send: vi.fn(async () => {}), cancel: vi.fn(async () => {}), onView: () => () => {} }
     const user = userEvent.setup()
     render(<App />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())

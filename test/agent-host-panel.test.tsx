@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ChatState } from '@microsoft/agent-host-protocol'
+import { MessageKind } from '@microsoft/agent-host-protocol'
 import type { AgentHostBridge, AgentHostView } from '../src/shared/agentHost'
 import { AgentHostPanel } from '../src/renderer/components/AgentHostPanel'
 import { demoTasks } from '../src/renderer/data/tasks'
@@ -15,6 +16,7 @@ function fixture() {
   let watchId = ''
   const bridge: AgentHostBridge = {
     list: vi.fn(async () => ({ sessions: [], warnings: [] })),
+    models: vi.fn(async () => [{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }]),
     watch: vi.fn(async () => { watchId = crypto.randomUUID(); for (const listener of listeners) listener({ id: watchId, view: structuredClone(view) }); return watchId }),
     unwatch: vi.fn(async () => {}), send: vi.fn(async () => {}), cancel: vi.fn(async () => {}),
     onView: (listener) => { listeners.add(listener); return () => listeners.delete(listener) },
@@ -24,6 +26,52 @@ function fixture() {
 }
 
 describe('Agent Host chat UI', () => {
+  it('requires an explicit model and keeps it across native updates and reconnects', async () => {
+    const setup = fixture()
+    setup.view.chat!.draft = { text: '', origin: { kind: MessageKind.User }, model: { id: 'owner-model' } }
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByRole('option', { name: 'GPT-6' })
+    await user.type(screen.getByRole('textbox'), 'Use the selected model')
+    expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Agent Host model' }), 'gpt-6')
+    act(() => setup.emit())
+    await user.click(screen.getByRole('button', { name: 'Reconnect Agent Host' }))
+    await waitFor(() => expect(setup.bridge.models).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeEnabled())
+    expect(screen.getByRole('combobox')).toHaveValue('gpt-6')
+    await user.click(screen.getByRole('button', { name: 'Send to Agent Host' }))
+    expect(setup.bridge.send).toHaveBeenCalledExactlyOnceWith(setup.target, expect.any(String), 'Use the selected model', undefined, { id: 'gpt-6' })
+  })
+
+  it('surfaces catalog failures and refuses to use a historical model', async () => {
+    const setup = fixture()
+    vi.mocked(setup.bridge.models).mockRejectedValue(new Error('Update the owner device.'))
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Update the owner device.')
+    await user.type(screen.getByRole('textbox'), 'No silent fallback')
+    expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+  })
+
+  it('blocks a selection removed from the catalog instead of switching to another model', async () => {
+    const setup = fixture()
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByRole('option', { name: 'GPT-6' })
+    await user.selectOptions(screen.getByRole('combobox'), 'gpt-6')
+    await user.type(screen.getByRole('textbox'), 'Keep this unsent prompt')
+    vi.mocked(setup.bridge.models).mockResolvedValue([{ id: 'owner-model', name: 'Owner model', provider: 'copilotcli' }])
+    await user.click(screen.getByRole('button', { name: 'Reconnect Agent Host' }))
+    await screen.findByRole('option', { name: 'Owner model' })
+    expect(screen.getByRole('combobox')).toHaveValue('gpt-6')
+    expect(screen.getByRole('option', { name: 'gpt-6 (unavailable)' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
+    expect(screen.getByRole('textbox')).toHaveValue('Keep this unsent prompt')
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+  })
+
   it('shows incremental Markdown, preserves the draft and cancels only the selected active turn', async () => {
     const setup = fixture()
     const user = userEvent.setup()
@@ -54,6 +102,7 @@ describe('Agent Host chat UI', () => {
     const user = userEvent.setup()
     render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
     await screen.findByText('Same original Host chat')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Agent Host model' }), await screen.findByRole('option', { name: 'GPT-6' }))
     const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='
     const file = new File([Uint8Array.from(atob(data), (character) => character.charCodeAt(0))], 'Screenshot.png', { type: 'image/png' })
     fireEvent.paste(screen.getByRole('textbox'), { clipboardData: { items: [{ kind: 'file', type: file.type, getAsFile: () => file }], getData: () => '' } })
@@ -62,7 +111,7 @@ describe('Agent Host chat UI', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Delivery outcome unknown.')
     expect(screen.getByRole('img', { name: file.name })).toBeInTheDocument()
     const command = vi.mocked(setup.bridge.send).mock.calls[0]
-    expect(command).toEqual([setup.target, expect.any(String), '', [{ id: expect.any(String), name: file.name, mimeType: file.type, data }]])
+    expect(command).toEqual([setup.target, expect.any(String), '', [{ id: expect.any(String), name: file.name, mimeType: file.type, data }], { id: 'gpt-6' }])
     setup.view.state = 'offline'
     setup.view.canSend = false
     setup.view.pendingTurn = { id: command[1], state: 'uncertain' }

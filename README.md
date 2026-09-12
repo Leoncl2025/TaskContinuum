@@ -123,6 +123,18 @@ remain on B. Recovery obtains authoritative snapshots; it never replays a send.
 An unknown delivery blocks further sends until its original turn is observed.
 Read-only participants cannot send or cancel.
 
+Choose **Model** in the Agent Host panel before sending. The list comes from the
+original Host's provider, excludes policy-disabled models, and is scoped to that
+provider when shared through a paired device. Task Continuum sends the selection
+explicitly, including through the remote gateway; it does not assume the VS Code
+input picker has synchronized its draft. Native model changes do not overwrite
+your selection while this panel is open. Reconnect refreshes the list, and an
+unavailable model blocks sending rather than silently falling back. Each recorded
+turn shows its requested model ID, not a guarantee of the provider's actual model.
+Both desktops need this update for remote model selection; an older owner gateway
+is rejected with an update message. Model selection does not change native tool
+approvals or create a new conversation.
+
 Git stores a distinct `agent-host` provider with owner Client ID, Host instance ID,
 session URI and chat URI. Native Copilot sessions use `copilotcli:/...` and
 `ahp-chat://default/...`; the prototype's `ahp-session:/...` form is also accepted.

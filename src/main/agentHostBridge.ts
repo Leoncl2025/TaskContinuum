@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import type { AgentHostTarget } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
-import { agentHostTargetSchema } from './agentHostProtocol'
+import { agentHostModelSelectionSchema, agentHostTargetSchema } from './agentHostProtocol'
 import type { AgentHostManager } from './agentHostManager'
 import { readClientIdentity } from './clientIdentity'
 
@@ -66,14 +66,25 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     if (watch && watch.window !== window) throw new Error('This view belongs to another window.')
     watch?.close()
   })
-  ipcMain.handle('agent-host:send', async (event, value: unknown, id: unknown, text: unknown, images: unknown) => {
+  ipcMain.handle('agent-host:models', async (event, value: unknown) => {
+    const window = requireWindow(event)
+    const root = await currentRoot()
+    const target = agentHostTargetSchema.parse(value)
+    const connection = await manager.connection(root, target)
+    await current(event, window, root, target)
+    const models = await connection.models()
+    await current(event, window, root, target)
+    return models
+  })
+  ipcMain.handle('agent-host:send', async (event, value: unknown, id: unknown, text: unknown, images: unknown, model: unknown) => {
     const window = requireWindow(event)
     const root = await currentRoot()
     const target = agentHostTargetSchema.parse(value)
     const command = chatSubmissionSchema.parse({ id, text, ...(images === undefined ? {} : { images }) })
+    const selection = agentHostModelSelectionSchema.optional().parse(model)
     const connection = await manager.connection(root, target)
     await current(event, window, root, target)
-    return connection.send(command.id, command.text, command.images, () => current(event, window, root, target), await readClientIdentity(app.getPath('userData')))
+    return connection.send(command.id, command.text, command.images, () => current(event, window, root, target), await readClientIdentity(app.getPath('userData')), selection)
   })
   ipcMain.handle('agent-host:cancel', async (event, value: unknown, id: unknown) => {
     const window = requireWindow(event)

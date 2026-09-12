@@ -1,6 +1,12 @@
 import { z } from 'zod'
 import { remoteMachineSchema } from './vscodeRemoteProtocol'
 
+export const agentHostModelSelectionSchema = z.object({
+  id: z.string().trim().min(1).max(512),
+  config: z.record(z.string().max(200), z.union([z.string().max(2000), z.number().finite(), z.boolean(), z.null()])).optional(),
+}).strict()
+export const agentHostModelInfoSchema = z.object({ id: agentHostModelSelectionSchema.shape.id, name: z.string().min(1).max(512), provider: z.string().min(1).max(100), policyState: z.string().optional() })
+
 export const agentHostIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{8,128}$/)
 export const agentHostSessionIdSchema = z.string().max(512).regex(/^(ahp-session|copilotcli):\/[^\s?#]+$/)
 export const agentHostChatIdSchema = z.string().max(512).regex(/^ahp-chat:\/[^\s?#]+$/)

@@ -1,11 +1,11 @@
 import type { Server } from 'node:http'
 import { WebSocketServer, WebSocket } from 'ws'
 import { z } from 'zod'
-import type { ActionEnvelope } from '@microsoft/agent-host-protocol'
+import type { ActionEnvelope, SessionState } from '@microsoft/agent-host-protocol'
 import type { AgentHostTarget } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
-import { agentHostTargetSchema } from './agentHostProtocol'
+import { agentHostModelSelectionSchema, agentHostTargetSchema } from './agentHostProtocol'
 import type { AgentHostConnection } from './agentHostConnection'
 
 export interface AgentHostAccess { canSend: boolean; actor: { clientId: string; machineName: string; username?: string } }
@@ -103,7 +103,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
             if (!params.protocolVersions.includes('0.9.0')) throw new Error('Unsupported protocol version.')
             const resources = params.initialSubscriptions ?? []
             if (resources.some((resource) => !connection.allowedChannel(resource))) throw new Error('Channel not authorized.')
-            result = { ...connection.handshake, snapshots: resources.map((resource) => connection.snapshot(resource)), _meta: { taskcontinuumCanSend: initialAccess.canSend } }
+            result = { ...connection.handshake, snapshots: resources.map((resource) => connection.snapshot(resource)), _meta: { taskcontinuumCanSend: initialAccess.canSend, taskcontinuumModelSelection: true } }
             for (const resource of resources) subscribed.add(resource)
             initialized = true
           } else if (request.method === 'reconnect') {
@@ -120,9 +120,16 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
             if (!initialized) throw new Error('Initialize first.')
             if (request.method === 'subscribe') {
               const { channel } = subscribeSchema.parse(request.params)
-              if (!connection.allowedChannel(channel)) throw new Error('Channel not authorized.')
-              result = { snapshot: connection.snapshot(channel) }
-              subscribed.add(channel)
+              if (channel === 'ahp-root://') {
+                const models = await connection.models()
+                const session = connection.snapshot(target.sessionId)
+                const provider = (session.state as SessionState).provider
+                result = { snapshot: { resource: channel, fromSeq: session.fromSeq, state: { agents: [{ provider, displayName: provider, description: '', models }] } } }
+              } else {
+                if (!connection.allowedChannel(channel)) throw new Error('Channel not authorized.')
+                result = { snapshot: connection.snapshot(channel) }
+                subscribed.add(channel)
+              }
             } else if (request.method === 'unsubscribe') {
               const { channel } = z.object({ channel: z.string().max(512) }).strict().parse(request.params)
               subscribed.delete(channel)
@@ -135,7 +142,8 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
                 const action = z.object({ type: z.literal('chat/turnStarted'), turnId: z.uuid(), startedAt: z.iso.datetime(), message: z.object({ text: z.string().max(4000), origin: z.object({ kind: z.literal('user') }).strict(), attachments: z.array(z.object({ type: z.literal('embeddedResource'), label: z.string().max(200), displayKind: z.literal('image'), contentType: z.string(), data: z.string(), _meta: z.object({ taskcontinuumImageId: z.uuid() }).strict() }).strict()).max(4).optional(), agent: z.unknown().optional(), model: z.unknown().optional(), _meta: z.unknown().optional() }).strict() }).strict().parse(params.action)
                 const images = action.message.attachments?.map((image) => ({ id: image._meta.taskcontinuumImageId, name: image.label, mimeType: image.contentType, data: image.data })) as ChatImageAttachment[] | undefined
                 const command = chatSubmissionSchema.parse({ id: action.turnId, text: action.message.text, ...(images?.length ? { images } : {}) })
-                await connection.send(command.id, command.text, command.images, async () => { await authorize(true) }, access.actor)
+                const model = agentHostModelSelectionSchema.optional().parse(action.message.model)
+                await connection.send(command.id, command.text, command.images, async () => { await authorize(true) }, access.actor, model)
               } else if (params.action.type === 'chat/turnCancelled') {
                 const action = z.object({ type: z.literal('chat/turnCancelled'), turnId: z.string().min(1).max(200), duration: z.number().nonnegative() }).strict().parse(params.action)
                 await connection.cancel(action.turnId, async () => { await authorize(true) })

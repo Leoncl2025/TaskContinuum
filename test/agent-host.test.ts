@@ -15,6 +15,42 @@ import { AgentHostConnection } from '../src/main/agentHostConnection'
 import { startAgentHostFixture } from './agent-host-fixture'
 
 describe('AHP original chat connection', () => {
+  it('rejects an older remote gateway rather than letting it discard the explicit model', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-old-gateway-'))
+    const host = await startAgentHostFixture({ taskcontinuumCanSend: true })
+    const target = { hostId: host.hostId, sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+    const connection = new AgentHostConnection(target, root, (signal) => connectLocalAgentHost(host.endpoint, signal))
+    try {
+      await expect(connection.models()).rejects.toThrow('Update Task Continuum on the owner device')
+      await expect(connection.send(randomUUID(), 'Keep my selection', undefined, async () => {}, undefined, { id: 'gpt-6' })).rejects.toThrow('Update Task Continuum on the owner device')
+      expect(host.dispatches).toHaveLength(0)
+    } finally { await connection.close(); await host.close(); await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('sends an explicit model instead of a stale owner selection and includes it in replay identity', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-model-'))
+    const host = await startAgentHostFixture()
+    const target = { hostId: host.hostId, sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+    const connection = new AgentHostConnection(target, root, (signal) => connectLocalAgentHost(host.endpoint, signal))
+    const model = { id: 'gpt-6', config: { reasoningEffort: 'high' } }
+    try {
+      host.draft('', { model: { id: 'owner-model' }, agent: { uri: 'file:///fixture/plan.agent.md' } })
+      expect(await connection.models()).toEqual([{ id: 'owner-model', name: 'Owner model', provider: 'copilotcli' }, { id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }])
+      for (const id of ['disabled-model', 'private-model', 'missing-model']) {
+        await expect(connection.send(randomUUID(), 'Do not silently fall back', undefined, async () => {}, undefined, { id })).rejects.toThrow('no longer available')
+      }
+      expect(host.dispatches).toHaveLength(0)
+      const id = randomUUID()
+      await connection.send(id, 'Explicit model', undefined, async () => {}, undefined, model)
+      expect(host.dispatches).toEqual([expect.objectContaining({ message: expect.objectContaining({ model, agent: { uri: 'file:///fixture/plan.agent.md' } }) })])
+      host.action({ type: 'chat/turnComplete', turnId: id, duration: 1 })
+      await expect.poll(() => connection.view.chat?.activeTurn).toBeUndefined()
+      await connection.send(id, 'Explicit model', undefined, async () => {}, undefined, model)
+      await expect(connection.send(id, 'Explicit model', undefined, async () => {}, undefined, { id: 'owner-model' })).rejects.toThrow('different content')
+      expect(host.dispatches).toHaveLength(1)
+    } finally { await connection.close(); await host.close(); await rm(root, { recursive: true, force: true }) }
+  })
+
   it('retains and clears native model and agent selections without overwriting an owner draft', async () => {
     const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-selection-'))
     const host = await startAgentHostFixture()

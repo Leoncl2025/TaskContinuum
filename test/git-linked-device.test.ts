@@ -76,8 +76,10 @@ it('streams the exact AHP chat through existing paired SSH and revokes access wi
     const selection = { model: { id: 'owner-model', config: { reasoningEffort: 'high', contextSize: 128000 } }, agent: { uri: 'file:///fixture/plan.agent.md' } }
     fixture.draft('', selection)
     const id = randomUUID()
-    await connection.send(id, 'Original over SSH', undefined, async () => {})
-    expect(fixture.dispatches).toEqual([expect.objectContaining({ type: 'chat/turnStarted', turnId: id, message: expect.objectContaining(selection) })])
+    expect(await connection.models()).toContainEqual({ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' })
+    const remoteModel = { id: 'gpt-6', config: { reasoningEffort: 'high' } }
+    await connection.send(id, 'Original over SSH', undefined, async () => {}, undefined, remoteModel)
+    expect(fixture.dispatches).toEqual([expect.objectContaining({ type: 'chat/turnStarted', turnId: id, message: expect.objectContaining({ ...selection, model: remoteModel }) })])
     fixture.action({ type: 'chat/responsePart', turnId: id, part: { id: 'answer', kind: 'markdown', content: '' } })
     fixture.action({ type: 'chat/delta', turnId: id, partId: 'answer', content: 'Incremental remote answer' })
     await expect.poll(() => connection.view.chat?.activeTurn?.responseParts).toContainEqual({ id: 'answer', kind: 'markdown', content: 'Incremental remote answer' })
@@ -90,7 +92,9 @@ it('streams the exact AHP chat through existing paired SSH and revokes access wi
     const scoped = (await raw.subscribe(target.sessionId)).result.snapshot
     expect(JSON.stringify(scoped)).not.toContain('Unshared sibling title')
     expect(JSON.stringify(scoped)).not.toContain('private-other')
-    await expect(raw.subscribe('ahp-root://')).rejects.toThrow('not authorized')
+    const catalog = (await raw.subscribe('ahp-root://')).result.snapshot
+    expect(catalog?.state).toEqual({ agents: [{ provider: 'copilotcli', displayName: 'copilotcli', description: '', models: [{ id: 'owner-model', name: 'Owner model', provider: 'copilotcli' }, { id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }] }] })
+    expect(JSON.stringify(catalog)).not.toMatch(/private|activeSessions|disabled-model/)
     await expect(raw.subscribe('ahp-chat:/private-other')).rejects.toThrow('not authorized')
     await expect(raw.resourceRead({ uri: 'file:///private.txt' })).rejects.toThrow('not authorized')
     await raw.shutdown()

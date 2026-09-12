@@ -1,4 +1,4 @@
-import type { ChatState, TerminalState } from '@microsoft/agent-host-protocol'
+import type { ChatState, ModelSelection, SessionModelInfo, TerminalState } from '@microsoft/agent-host-protocol'
 import type { ChatImageAttachment } from './chatAttachments'
 import type { SessionOwner } from './sessionBindings'
 
@@ -29,9 +29,10 @@ export interface AgentHostView {
 
 export interface AgentHostBridge {
   list(): Promise<{ sessions: AgentHostSession[]; warnings: string[] }>
+  models(target: AgentHostTarget): Promise<Pick<SessionModelInfo, 'id' | 'name' | 'provider'>[]>
   watch(target: AgentHostTarget): Promise<string>
   unwatch(id: string): Promise<void>
-  send(target: AgentHostTarget, id: string, text: string, images?: ChatImageAttachment[]): Promise<void>
+  send(target: AgentHostTarget, id: string, text: string, images?: ChatImageAttachment[], model?: ModelSelection): Promise<void>
   cancel(target: AgentHostTarget, turnId: string): Promise<void>
   onView(listener: (event: { id: string; view: AgentHostView }) => void): () => void
 }

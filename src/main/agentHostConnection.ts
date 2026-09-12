@@ -4,12 +4,12 @@ import { z } from 'zod'
 import { AhpClient } from '@microsoft/agent-host-protocol/client'
 import type { AhpTransport, Subscription } from '@microsoft/agent-host-protocol/client'
 import { MessageKind, sessionReducer, terminalReducer } from '@microsoft/agent-host-protocol'
-import type { ActionEnvelope, ChatTurnStartedAction, ChatTurnCancelledAction, InitializeResult, MessageEmbeddedResourceAttachment, SessionState, Snapshot, TerminalState } from '@microsoft/agent-host-protocol'
+import type { ActionEnvelope, ChatTurnStartedAction, ChatTurnCancelledAction, InitializeResult, MessageEmbeddedResourceAttachment, ModelSelection, SessionState, Snapshot, TerminalState } from '@microsoft/agent-host-protocol'
 import type { AgentHostTarget, AgentHostView } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
 import { AgentHostChatState } from './agentHostState'
-import { agentHostKey, agentHostTargetSchema, agentHostTerminalIdSchema } from './agentHostProtocol'
+import { agentHostKey, agentHostModelInfoSchema, agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminalIdSchema } from './agentHostProtocol'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 
 export type AgentHostEvent = { type: 'action'; envelope: ActionEnvelope } | { type: 'snapshot'; snapshot: Snapshot } | { type: 'state' }
@@ -217,8 +217,23 @@ export class AgentHostConnection {
     if (changed) { await this.save(); this.emit({ type: 'state' }) }
   }
 
-  async send(id: string, text: string, images: ChatImageAttachment[] | undefined, authorize: () => Promise<void>, actor?: { clientId: string; machineName: string; username?: string }): Promise<void> {
-    const command = chatSubmissionSchema.parse({ id, text, ...(images?.length ? { images } : {}) })
+  async models() {
+    await this.open()
+    const active = this.current!
+    if (this.initialized?._meta?.taskcontinuumCanSend !== undefined && this.initialized._meta.taskcontinuumModelSelection !== true) throw new Error('Update Task Continuum on the owner device to select remote models.')
+    const { result, subscription } = await active.client.subscribe('ahp-root://')
+    try {
+      if (this.current !== active || result.snapshot?.resource !== 'ahp-root://') throw new Error('The model catalog is unavailable.')
+      const root = z.object({ agents: z.array(z.object({ provider: z.string(), models: z.array(agentHostModelInfoSchema).max(1000) })).max(100) }).parse(result.snapshot.state)
+      const provider = (this.snapshots.get(this.target.sessionId)?.state as SessionState | undefined)?.provider
+      const agent = root.agents.find((item) => item.provider === provider)
+      if (!agent) throw new Error('The original session provider has no model catalog.')
+      return agent.models.filter((model) => model.provider === provider && model.policyState !== 'disabled').map(({ id, name, provider }) => ({ id, name, provider }))
+    } finally { await subscription.close() }
+  }
+
+  async send(id: string, text: string, images: ChatImageAttachment[] | undefined, authorize: () => Promise<void>, actor?: { clientId: string; machineName: string; username?: string }, model?: ModelSelection): Promise<void> {
+    const command = { ...chatSubmissionSchema.parse({ id, text, ...(images?.length ? { images } : {}) }), ...(model === undefined ? {} : { model: agentHostModelSelectionSchema.parse(model) }) }
     if (this.sending) throw new Error('Another message is being submitted to this chat.')
     this.sending = true
     let record: Command | undefined
@@ -226,6 +241,8 @@ export class AgentHostConnection {
     try {
       await this.open()
       await authorize()
+      const modelId = command.model?.id
+      if (modelId && !(await this.models()).some((item) => item.id === modelId)) throw new Error('The selected model is no longer available. Refresh the model list and choose another model.')
       const active = this.current!
       const fresh = await active.client.request('subscribe', { channel: this.target.chatId })
       if (this.current !== active || !fresh.snapshot) throw new Error('The connection changed before sending. Nothing was sent.')
@@ -245,8 +262,9 @@ export class AgentHostConnection {
       const latest = this.chat.value!
       if (latest.activeTurn || latest.draft?.text || latest.draft?.attachments?.length || latest.queuedMessages?.length || latest.interactivity === 'read-only' || latest.interactivity === 'hidden') throw new Error('The original chat became busy or has a new draft. Nothing was sent.')
       const selection = latest.draft ?? latest.turns.at(-1)?.message
+      const selectedModel = command.model ?? selection?.model
       const attachments: MessageEmbeddedResourceAttachment[] | undefined = command.images?.map((image) => ({ type: 'embeddedResource' as MessageEmbeddedResourceAttachment['type'], label: image.name, displayKind: 'image', contentType: image.mimeType, data: image.data, _meta: { taskcontinuumImageId: image.id } }))
-      const action: ChatTurnStartedAction = { type: 'chat/turnStarted' as ChatTurnStartedAction['type'], turnId: id, startedAt: new Date().toISOString(), message: { text: command.text, origin: { kind: MessageKind.User }, ...(attachments?.length ? { attachments } : {}), ...(selection?.agent ? { agent: selection.agent } : {}), ...(selection?.model ? { model: selection.model } : {}), ...(actor ? { _meta: { taskcontinuumActor: actor } } : {}) } }
+      const action: ChatTurnStartedAction = { type: 'chat/turnStarted' as ChatTurnStartedAction['type'], turnId: id, startedAt: new Date().toISOString(), message: { text: command.text, origin: { kind: MessageKind.User }, ...(attachments?.length ? { attachments } : {}), ...(selection?.agent ? { agent: selection.agent } : {}), ...(selectedModel ? { model: selectedModel } : {}), ...(actor ? { _meta: { taskcontinuumActor: actor } } : {}) } }
       dispatched = true
       active.client.dispatch(this.target.chatId, action)
       this.emit({ type: 'state' })

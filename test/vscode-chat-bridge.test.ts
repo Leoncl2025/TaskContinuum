@@ -26,7 +26,7 @@ describe('trusted AHP desktop operations', () => {
     let preparing = async () => {}
     const window = { isDestroyed: () => !trusted, webContents: { isDestroyed: () => !trusted, send: vi.fn() } } as unknown as BrowserWindow
     const executed = vi.fn()
-    const connection = { send: vi.fn(async (_id: string, _text: string, _images: unknown, authorize: () => Promise<void>) => { await preparing(); await authorize(); executed() }) }
+    const connection = { models: vi.fn(async () => { await preparing(); return [{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }] }), send: vi.fn(async (_id: string, _text: string, _images: unknown, authorize: () => Promise<void>) => { await preparing(); await authorize(); executed() }) }
     const manager = { authorize: vi.fn(async () => { if (!authorized) throw new Error('Session authorization changed.') }), connection: vi.fn(async () => connection), hasConsent: vi.fn(async () => true) }
     close = registerAgentHostBridge(() => { if (!trusted) throw new Error('Untrusted IPC request.'); return window }, async () => root, manager as unknown as AgentHostManager).close
     return { target, manager, executed, connection, prepare: (action: () => Promise<void>) => { preparing = action }, move: () => { root = 'workspace-b' }, revoke: () => { authorized = false }, destroy: () => { trusted = false }, send: (value: unknown = target) => native.handlers.get('agent-host:send')!({}, value, crypto.randomUUID(), 'One explicit request') }
@@ -41,6 +41,23 @@ describe('trusted AHP desktop operations', () => {
     expect(setup.manager.connection).not.toHaveBeenCalled()
   })
 
+  it('forwards explicit models and rejects malformed selections before connecting', async () => {
+    const setup = ahpFixture()
+    const send = native.handlers.get('agent-host:send')!
+    await expect(send({}, setup.target, crypto.randomUUID(), 'Use GPT-6', undefined, { id: '' })).rejects.toThrow()
+    expect(setup.manager.connection).not.toHaveBeenCalled()
+    await send({}, setup.target, crypto.randomUUID(), 'Use GPT-6', undefined, { id: 'gpt-6' })
+    expect(setup.connection.send).toHaveBeenCalledWith(expect.any(String), 'Use GPT-6', undefined, expect.any(Function), expect.objectContaining({ username: 'Alice' }), { id: 'gpt-6' })
+  })
+
+  it('authorizes catalog reads again before returning model information', async () => {
+    const setup = ahpFixture()
+    const models = native.handlers.get('agent-host:models')!
+    expect(await models({}, setup.target)).toEqual([{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }])
+    setup.prepare(async () => setup.revoke())
+    await expect(models({}, setup.target)).rejects.toThrow('authorization changed')
+  })
+
   it.each(['workspace', 'authorization', 'window'])('fences a changed %s before dispatch without replay', async (change) => {
     const setup = ahpFixture()
     setup.prepare(async () => { if (change === 'workspace') setup.move(); else if (change === 'authorization') setup.revoke(); else setup.destroy() })
@@ -53,7 +70,7 @@ describe('trusted AHP desktop operations', () => {
     const setup = ahpFixture()
     await setup.send()
     expect(setup.executed).toHaveBeenCalledOnce()
-    expect(setup.connection.send).toHaveBeenCalledWith(expect.any(String), 'One explicit request', undefined, expect.any(Function), { clientId: '00000000-0000-4000-8000-000000000001', machineName: 'Client-A', username: 'Alice' })
+    expect(setup.connection.send).toHaveBeenCalledWith(expect.any(String), 'One explicit request', undefined, expect.any(Function), { clientId: '00000000-0000-4000-8000-000000000001', machineName: 'Client-A', username: 'Alice' }, undefined)
     expect(native.confirm).not.toHaveBeenCalled()
   })
 })

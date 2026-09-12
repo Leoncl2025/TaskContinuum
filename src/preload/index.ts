@@ -59,9 +59,10 @@ contextBridge.exposeInMainWorld('vscodeChat', vscodeChat)
 
 const agentHost: AgentHostBridge = {
   list: () => ipcRenderer.invoke('agent-host:list'),
+  models: (target) => ipcRenderer.invoke('agent-host:models', target),
   watch: (target) => ipcRenderer.invoke('agent-host:watch', target),
   unwatch: (id) => ipcRenderer.invoke('agent-host:unwatch', id),
-  send: (target, id, text, images) => ipcRenderer.invoke('agent-host:send', target, id, text, images),
+  send: (target, id, text, images, model) => ipcRenderer.invoke('agent-host:send', target, id, text, images, model),
   cancel: (target, turnId) => ipcRenderer.invoke('agent-host:cancel', target, turnId),
   onView: (listener) => {
     const receive = (_event: Electron.IpcRendererEvent, value: { id: string; view: AgentHostView }) => listener(value)
