@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useEffectEvent, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useEffectEvent, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties } from 'react'
 import type { ChatAdapter } from '../shared/chat'
 import type { DesktopInfo } from '../shared/desktop'
@@ -32,8 +32,17 @@ import type { RemoteVSCodeConnection } from '../shared/remoteVSCode'
 import { AgentHostPanel } from './components/AgentHostPanel'
 import { AgentHostSessionsDialog } from './components/AgentHostSessionsDialog'
 import type { AgentHostSession } from '../shared/agentHost'
+import { agentHostKey } from '../shared/agentHost'
 
 type DialogName = 'quick-open' | 'settings' | 'new-task' | 'clear-chat' | 'migrate-links' | 'remote-sessions' | 'remote-access' | 'agent-host-sessions' | null
+
+interface CreatedChatCompletion {
+  taskId: string
+  session: AgentHostSession
+  picker: { active: boolean }
+  resolve(): void
+  reject(error: Error): void
+}
 
 export default function App({ adapter: suppliedAdapter }: { adapter?: ChatAdapter }) {
   const workspaces = useWorkspaces()
@@ -72,6 +81,10 @@ function Workbench({ suppliedAdapter, workspaces }: { suppliedAdapter?: ChatAdap
   const vscodeBinding = task && bindings[task.id]?.vscodeWorkspaceStorageId ? bindings[task.id] : undefined
   const agentHostBinding = task ? bindings[task.id]?.agentHost : undefined
   const [agentHostBusy, setAgentHostBusy] = useState(false)
+  const [createdChat, setCreatedChat] = useState<CreatedChatCompletion | null>(null)
+  const creationCompletion = useRef<CreatedChatCompletion | null>(null)
+  const creationLifetime = useRef({ active: false })
+  const creationPicker = useRef<{ active: boolean } | null>(null)
   const foreignCliBinding = Boolean(task && bindings[task.id]?.ownerIsRemote && !vscodeBinding && !agentHostBinding)
   const originalChat = Boolean(vscodeBinding) && !sharedChat
   const linkedChat = live || Boolean(vscodeBinding) || Boolean(agentHostBinding)
@@ -80,6 +93,50 @@ function Workbench({ suppliedAdapter, workspaces }: { suppliedAdapter?: ChatAdap
   const activeResponses = Object.values(chats.threads).filter((thread) => thread.messages.some((message) => message.status === 'streaming')).length
   const interaction = copilot.interactions[0]
   const workspaceLocked = activeResponses > 0 || Boolean(copilot.busy) || links.busy || Boolean(sessionDialog) || Boolean(interaction) || dialog === 'migrate-links' || dialog === 'remote-sessions' || dialog === 'remote-access' || dialog === 'agent-host-sessions' || Boolean(agentHostBinding) && agentHostBusy || sharedChat && (sharedStatus.busy || sharedStatus.pending)
+
+  useEffect(() => {
+    const scope = { active: true }
+    creationLifetime.current = scope
+    return () => {
+      scope.active = false
+      creationCompletion.current?.reject(new Error('The original workspace was closed. Reopen it to recover the saved chat.'))
+      creationCompletion.current = null
+    }
+  }, [])
+  useEffect(() => {
+    if (dialog !== 'agent-host-sessions') return
+    const picker = { active: true }
+    creationPicker.current = picker
+    return () => {
+      picker.active = false
+      if (creationPicker.current === picker) creationPicker.current = null
+      if (creationCompletion.current?.picker === picker) {
+        creationCompletion.current.reject(new Error('The picker was closed. Reopen it to recover the saved chat.'))
+        creationCompletion.current = null
+      }
+    }
+  }, [dialog])
+  const finishCreatedChat = useEffectEvent((completion: CreatedChatCompletion) => {
+    if (creationCompletion.current !== completion) return
+    creationCompletion.current = null
+    if (!completion.picker.active || dialog !== 'agent-host-sessions') { completion.reject(new Error('The picker was closed. Reopen it to recover the saved chat.')); return }
+    if (!tasks.some((item) => item.id === completion.taskId)) { completion.reject(new Error(`The original task ${completion.taskId} is no longer in this workspace.`)); return }
+    const linked = bindings[completion.taskId]?.agentHost
+    if (!links.ready || !linked) { completion.reject(new Error(links.error ?? `Reload the saved Agent Host binding for ${completion.taskId} before opening its chat.`)); return }
+    if (agentHostKey(linked) !== agentHostKey(completion.session)) { completion.reject(new Error('The task binding no longer matches the created chat. No replacement chat was selected.')); return }
+    chats.clear(completion.taskId)
+    selectTask(completion.taskId)
+    setSharedChat(false)
+    showChat()
+    setDialog(null)
+    completion.resolve()
+  })
+  useEffect(() => {
+    if (!createdChat || links.busy) return
+    let active = true
+    void Promise.resolve().then(() => { if (active) finishCreatedChat(createdChat) })
+    return () => { active = false }
+  }, [createdChat, links.busy])
 
   useEffect(() => { saveLayout(layout) }, [layout])
   const currentSession = useEffectEvent((taskId: string) => chats.getThread(taskId).sessionId)
@@ -232,6 +289,21 @@ function Workbench({ suppliedAdapter, workspaces }: { suppliedAdapter?: ChatAdap
     setDialog(null)
     setSharedChat(false)
     showChat()
+  }
+
+  async function agentHostCreated(taskId: string, session: AgentHostSession): Promise<void> {
+    const scope = creationLifetime.current
+    const picker = creationPicker.current
+    if (!scope.active || !picker?.active || !workspace || !tasks.some((item) => item.id === taskId)) throw new Error(`The original task ${taskId} is unavailable in this workspace.`)
+    await links.reload()
+    if (!scope.active) throw new Error('The original workspace was closed. Reopen it to recover the saved chat.')
+    if (!picker.active) throw new Error('The picker was closed. Reopen it to recover the saved chat.')
+    await new Promise<void>((resolve, reject) => {
+      if (creationCompletion.current) { reject(new Error('Another created chat is still opening.')); return }
+      const completion = { taskId, session, picker, resolve, reject }
+      creationCompletion.current = completion
+      setCreatedChat(completion)
+    })
   }
 
   async function openSession(session: LocalSessionSummary): Promise<void> {
@@ -407,7 +479,7 @@ function Workbench({ suppliedAdapter, workspaces }: { suppliedAdapter?: ChatAdap
     {sessionDialog && copilot.bridge && <CopilotSessionDialog key={sessionDialog.kind === 'import' ? sessionDialog.preview.token : 'new'} preview={sessionDialog.kind === 'import' ? sessionDialog.preview : undefined} directory={workspace?.root ?? copilot.status.workingDirectory} models={copilot.models} ready={copilot.status.state === 'ready'} busy={Boolean(copilot.busy)} error={copilot.error} onBrowse={() => copilot.run('Choosing directory', () => copilot.bridge!.chooseDirectory())} onConnect={connectCopilot} onSubmit={(options) => { void createSession(options) }} onLink={sessionDialog.kind === 'import' && window.vscodeChat ? () => { void linkOriginalVSCode() } : undefined} onClose={() => setSessionDialog(null)} />}
     {interaction && <CopilotInteractionDialog key={interaction.id} interaction={interaction} busy={Boolean(copilot.busy)} error={copilot.error} onRespond={(value) => { void copilot.respond(interaction.id, value) }} />}
     {dialog === 'remote-sessions' && workspace && <RemoteVSCodeDialog taskId={selectedId ?? undefined} onLink={linkRemoteVSCode} onClose={() => setDialog(null)} />}
-    {dialog === 'agent-host-sessions' && workspace && <AgentHostSessionsDialog taskId={selectedId ?? undefined} onLink={linkAgentHost} onDevices={() => setDialog('remote-sessions')} onClose={() => setDialog(null)} />}
+    {dialog === 'agent-host-sessions' && workspace && <AgentHostSessionsDialog taskId={selectedId ?? undefined} taskUnbound={Boolean(task && links.ready && !bindings[task.id])} onLink={linkAgentHost} onCreated={agentHostCreated} onDevices={() => setDialog('remote-sessions')} onClose={() => setDialog(null)} />}
     {dialog === 'remote-access' && workspace && vscodeBinding && !vscodeBinding.remoteMachineName && <RemoteVSCodeAccessDialog identity={{ nativeSessionId: vscodeBinding.id, workspaceStorageId: vscodeBinding.vscodeWorkspaceStorageId! }} onClose={() => setDialog(null)} />}
 
     {dialog === 'new-task' && !workspace && <Dialog title="New demo task" onClose={() => setDialog(null)}><form onSubmit={(event) => {

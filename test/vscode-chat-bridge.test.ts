@@ -6,6 +6,7 @@ import type { VSCodeChatTarget } from '../src/shared/remoteVSCode'
 import { registerVSCodeChatBridge } from '../src/main/vscodeChatBridge'
 import { registerAgentHostBridge } from '../src/main/agentHostBridge'
 import type { AgentHostManager } from '../src/main/agentHostManager'
+import type { AgentHostCreateRequest } from '../src/shared/agentHostCreation'
 
 const native = vi.hoisted(() => ({ handlers: new Map<string, (...args: unknown[]) => Promise<unknown>>(), confirm: vi.fn() }))
 vi.mock('electron', () => ({
@@ -27,7 +28,13 @@ describe('trusted AHP desktop operations', () => {
     const window = { isDestroyed: () => !trusted, webContents: { isDestroyed: () => !trusted, send: vi.fn() } } as unknown as BrowserWindow
     const executed = vi.fn()
     const connection = { models: vi.fn(async () => { await preparing(); return [{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }] }), send: vi.fn(async (_id: string, _text: string, _images: unknown, authorize: () => Promise<void>) => { await preparing(); await authorize(); executed() }) }
-    const manager = { authorize: vi.fn(async () => { if (!authorized) throw new Error('Session authorization changed.') }), connection: vi.fn(async () => connection), hasConsent: vi.fn(async () => true) }
+    const creations = {
+      workers: vi.fn(async () => []), list: vi.fn(async () => []),
+      create: vi.fn(async (_root: string, request: AgentHostCreateRequest, authorize: () => Promise<void>) => { await preparing(); await authorize(); executed(); return { ...request, state: 'creating' as const } }),
+      status: vi.fn(async (_root: string, operationId: string, authorize: () => Promise<void>) => { await preparing(); await authorize(); return { operationId, state: 'uncertain' as const } }),
+      bind: vi.fn(async (_root: string, operationId: string, authorize: () => Promise<void>) => { await preparing(); await authorize(); executed(); return { operationId, state: 'created-unbound' as const } }),
+    }
+    const manager = { authorize: vi.fn(async () => { if (!authorized) throw new Error('Session authorization changed.') }), connection: vi.fn(async () => connection), hasConsent: vi.fn(async () => true), creations }
     close = registerAgentHostBridge(() => { if (!trusted) throw new Error('Untrusted IPC request.'); return window }, async () => root, manager as unknown as AgentHostManager).close
     return { target, manager, executed, connection, prepare: (action: () => Promise<void>) => { preparing = action }, move: () => { root = 'workspace-b' }, revoke: () => { authorized = false }, destroy: () => { trusted = false }, send: (value: unknown = target) => native.handlers.get('agent-host:send')!({}, value, crypto.randomUUID(), 'One explicit request') }
   }
@@ -74,6 +81,40 @@ describe('trusted AHP desktop operations', () => {
     await setup.send()
     expect(setup.executed).toHaveBeenCalledOnce()
     expect(setup.connection.send).toHaveBeenCalledWith(expect.any(String), 'One explicit request', undefined, expect.any(Function), { clientId: '00000000-0000-4000-8000-000000000001', machineName: 'Client-A', username: 'Alice' }, undefined)
+    expect(native.confirm).not.toHaveBeenCalled()
+  })
+
+  it('starts creation through the trusted creation coordinator without a local or separate create consent', async () => {
+    const setup = ahpFixture()
+    const request: AgentHostCreateRequest = { operationId: crypto.randomUUID(), taskId: 'T-0007', workerId: crypto.randomUUID(), workspaceId: 'b'.repeat(64), hostId: 'worker-host-123', expectedRevision: null }
+    const create = native.handlers.get('agent-host:create')!
+    await expect(create({}, { ...request, directory: 'unapproved-path' })).rejects.toThrow()
+    expect(setup.manager.creations.create).not.toHaveBeenCalled()
+    expect(await create({}, request)).toMatchObject({ operationId: request.operationId, state: 'creating' })
+    expect(setup.manager.creations.create).toHaveBeenCalledExactlyOnceWith('workspace-a', request, expect.any(Function))
+    expect(setup.manager.hasConsent).not.toHaveBeenCalled()
+    expect(setup.manager.authorize).not.toHaveBeenCalled()
+    expect(setup.manager.connection).not.toHaveBeenCalled()
+    expect(native.confirm).not.toHaveBeenCalled()
+  })
+
+  it.each(['workspace', 'window'])('fences a changed %s before creation dispatch', async (change) => {
+    const setup = ahpFixture()
+    const request: AgentHostCreateRequest = { operationId: crypto.randomUUID(), taskId: 'T-0007', workerId: crypto.randomUUID(), workspaceId: 'b'.repeat(64), hostId: 'worker-host-123', expectedRevision: null }
+    setup.prepare(async () => { if (change === 'workspace') setup.move(); else setup.destroy() })
+    await expect(native.handlers.get('agent-host:create')!({}, request)).rejects.toThrow('changed')
+    expect(setup.executed).not.toHaveBeenCalled()
+  })
+
+  it('routes recovery and binding retries separately, never to create or send', async () => {
+    const setup = ahpFixture()
+    const operationId = crypto.randomUUID()
+    await native.handlers.get('agent-host:creations')!({}, 'T-0007')
+    await native.handlers.get('agent-host:creation-workers')!({}, 'T-0007')
+    expect(await native.handlers.get('agent-host:creation-status')!({}, operationId)).toEqual({ operationId, state: 'uncertain' })
+    expect(await native.handlers.get('agent-host:bind-creation')!({}, operationId)).toEqual({ operationId, state: 'created-unbound' })
+    expect(setup.manager.creations.create).not.toHaveBeenCalled()
+    expect(setup.connection.send).not.toHaveBeenCalled()
     expect(native.confirm).not.toHaveBeenCalled()
   })
 })

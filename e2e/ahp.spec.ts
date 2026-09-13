@@ -22,11 +22,12 @@ import { VSCodeDeviceClient } from '../src/main/vscodeDeviceClient'
 import { deviceInvitationSchema } from '../src/main/vscodeDeviceProtocol'
 import { newSshKeyPair, openSessionSshBridge, startSessionSshHost } from '../src/main/devTunnel/sessionSsh'
 import { canonicalPolicyRoot, locallyLinkedAgentHostSessions, recordLocalLink } from '../src/main/linkedSessionPolicy'
-import { updateRepositoryAgentHostLink } from '../src/main/repositorySessionLinks'
+import { readRepositorySessionLinks, updateRepositoryAgentHostLink } from '../src/main/repositorySessionLinks'
+import { AgentHostCreationClient } from '../src/main/agentHostCreationClient'
 
 test('subscribes two clients to an isolated actual VS Code Agent Host', async () => {
   test.skip(!process.env.TASKCONTINUUM_VERIFY_AHP_CLI, 'Set the installed code-tunnel executable to verify AHP without user sessions.')
-  test.setTimeout(180000)
+  test.setTimeout(240000)
   const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-'))
   const home = join(root, 'home')
   await mkdir(home)
@@ -52,6 +53,8 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
   host.stderr.on('data', capture)
   const clients: AhpClient[] = []
   let production: AgentHostConnection | undefined
+  let createdConnection: AgentHostConnection | undefined
+  let creationClient: AgentHostCreationClient | undefined
   let registry: AgentHostRegistry | undefined
   let deviceHost: VSCodeDeviceHost | undefined
   let deviceClient: VSCodeDeviceClient | undefined
@@ -101,7 +104,8 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
     console.log(JSON.stringify({ advertisedProviders: catalog.agents.map((agent) => agent.provider) }))
     if (!provider) throw new Error('This isolated Host does not advertise a Copilot provider.')
     const session = `copilotcli:/${randomUUID()}`
-    await clients[0].request('createSession', { channel: session, provider, workingDirectories: [pathToFileURL(home).href] })
+    const creationAck = await clients[0].request('createSession', { channel: session, provider, workingDirectories: [pathToFileURL(home).href] })
+    expect(creationAck).toBeNull()
     const firstSession = await clients[0].subscribe(session)
     const secondSession = await clients[1].subscribe(session)
     const firstState = firstSession.result.snapshot?.state as SessionState
@@ -126,6 +130,20 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
     const discovery = join(root, 'discovery'), tasksB = join(root, 'tasks-b'), tasksA = join(root, 'tasks-a')
     const profileB = join(root, 'gateway-b'), profileA = join(root, 'gateway-a')
     await Promise.all([mkdir(discovery), mkdir(tasksB), mkdir(join(tasksA, '.taskcontinuum'), { recursive: true })])
+    for (const folder of [tasksA, tasksB]) {
+      await mkdir(join(folder, '.agentdesk'), { recursive: true })
+      await writeFile(join(folder, '.agentdesk', 'config.json'), JSON.stringify({ schemaVersion: '1.0', workspace: 'Isolated remote creation' }))
+      for (const taskId of ['T-0001', 'T-0007']) {
+        const taskDirectory = join(folder, 'tasks', `${taskId}-ahp`)
+        await mkdir(taskDirectory, { recursive: true })
+        await writeFile(join(taskDirectory, 'task.json'), JSON.stringify({ schemaVersion: '1.0', id: taskId, title: 'Isolated native AH creation', type: 'feature', status: 'backlog', priority: 'P2', relations: { level: 'task', parent: null } }))
+      }
+    }
+    await cp(resolve('e2e/fixtures/ahp/output.mjs'), join(tasksB, 'output.mjs'))
+    for (const folder of [tasksA, tasksB]) {
+      await promisify(execFile)('git', ['init', '--quiet', '--initial-branch=main', folder], { windowsHide: true })
+      await promisify(execFile)('git', ['-C', folder, '-c', 'user.name=Task Continuum Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '--allow-empty', '-m', 'Initialize isolated creation fixture\n\nCo-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>'], { windowsHide: true })
+    }
     const owner = { clientId: randomUUID(), machineName: hostname() }
     const participant = { clientId: randomUUID(), username: 'Observer', machineName: 'Viewer-A' }
     const endpoint: AgentHostEndpoint = { schemaVersion: 2, type: 'standalone', pid: host.pid!, instanceId: randomUUID(), connectionToken: token, protocolVersion: '0.9.0', endpoint: { type: 'tcp', host: '127.0.0.1', port } }
@@ -231,9 +249,60 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
     expect(((await resumed.subscribe(unrelatedChat)).result.snapshot?.state as ChatState).turns).toHaveLength(0)
     expect(pairedConnections).toBe(1)
     expect(legacyCalls).toBe(0)
+    phase = 'Native remote creation through inherited send permission'
+    const defaultConfig = await clients[0].request('resolveSessionConfig', { channel: 'ahp-root://', provider, workingDirectory: pathToFileURL(tasksB).href })
+    const folderConfig = await clients[0].request('resolveSessionConfig', { channel: 'ahp-root://', provider, workingDirectory: pathToFileURL(tasksB).href, config: { isolation: 'folder' } })
+    expect(defaultConfig.values.isolation).toBe('worktree')
+    expect(folderConfig.values).toMatchObject({ isolation: 'folder', autoApprove: 'default', mode: 'interactive' })
+    console.log(JSON.stringify({ nativeGitDefaultIsolation: defaultConfig.values.isolation, selectedIsolation: folderConfig.values.isolation, nativePermissionMode: folderConfig.values.autoApprove, nativeAgentMode: folderConfig.values.mode }))
+    creationClient = new AgentHostCreationClient(profileA, deviceClient)
+    const workers = await creationClient.workers(tasksA, 'T-0007')
+    const worker = workers.find((item) => item.owner.clientId === owner.clientId)
+    const creationWorkspace = worker?.workspaces.find((item) => item.taskState === 'available' && item.canSend)
+    if (!worker || !creationWorkspace) throw new Error(`No send-authorized creation workspace: ${JSON.stringify(workers)}`)
+    expect(worker.hosts).toContainEqual(expect.objectContaining({ hostId: endpoint.instanceId, available: true }))
+    const createRequest = { operationId: randomUUID(), taskId: 'T-0007', workerId: worker.id, workspaceId: creationWorkspace.id, hostId: endpoint.instanceId, expectedRevision: creationWorkspace.expectedRevision }
+    let created = await creationClient.create(tasksA, createRequest, async () => {})
+    await expect.poll(async () => {
+      created = await creationClient!.status(tasksA, createRequest.operationId, async () => {})
+      if (created.state === 'failed' || created.state === 'created-unbound') throw new Error(created.error ?? 'Native creation or binding failed.')
+      return created.state
+    }, { timeout: 60000, intervals: [100, 250, 500] }).toBe('ready')
+    if (!created.session) throw new Error('Native creation did not return its exact session identity.')
+    const createdSession = created.session
+    expect(createdSession.owner).toEqual(owner)
+    expect(createdSession.sessionId).not.toBe(session)
+    expect(createdSession.sessionId).not.toBe(unrelatedSession)
+    const createdA = (await readRepositorySessionLinks(tasksA)).document.bindings['T-0007']
+    const createdB = (await readRepositorySessionLinks(tasksB)).document.bindings['T-0007']
+    expect(createdA).toEqual(createdB)
+    expect(createdA).toMatchObject({ provider: 'agent-host', hostId: endpoint.instanceId, sessionId: createdSession.sessionId, chatId: createdSession.chatId, owner })
+    expect((await creationClient.create(tasksA, createRequest, async () => {})).session?.sessionId).toBe(createdSession.sessionId)
+    await creationClient.close()
+    creationClient = new AgentHostCreationClient(profileA, deviceClient)
+    expect((await creationClient.status(tasksA, createRequest.operationId, async () => {})).session?.sessionId).toBe(createdSession.sessionId)
+    const createdTarget = { hostId: createdSession.hostId, sessionId: createdSession.sessionId, chatId: createdSession.chatId, owner: createdSession.owner }
+    createdConnection = new AgentHostConnection(createdTarget, profileA, (signal) => deviceClient!.agentHostTransport(tasksA, createdTarget, signal))
+    await createdConnection.open()
+    expect(createdConnection.view.chat?.turns).toHaveLength(0)
+    phase = 'Created session execution, cancellation and reopening'
+    const createdTurn = randomUUID()
+    await createdConnection.send(createdTurn, '!node output.mjs', undefined, async () => {})
+    const createdOutput = () => Object.values(createdConnection!.view.terminals).flatMap((state) => state.content.map((part) => part.type === 'command' ? part.output : part.value)).join('')
+    await expect.poll(createdOutput, { intervals: [10, 20, 50] }).toContain('AHP_ALPHA:')
+    expect(createdConnection.view.chat?.activeTurn?.id).toBe(createdTurn)
+    await createdConnection.cancel(createdTurn, async () => {})
+    await expect.poll(() => createdConnection!.view.chat?.activeTurn).toBeUndefined()
+    await createdConnection.close()
+    createdConnection = new AgentHostConnection(createdTarget, profileA, (signal) => deviceClient!.agentHostTransport(tasksA, createdTarget, signal))
+    await createdConnection.open()
+    expect(createdConnection.view.chat?.turns.map((turn) => turn.id)).toEqual([createdTurn])
+    expect(pairedConnections).toBe(1)
+    expect(legacyCalls).toBe(0)
     phase = 'Production access revocation without stopping the owner Host'
     await deviceHost.setWorkspace(pair.id, await canonicalPolicyRoot(tasksB), null)
     await expect.poll(() => production!.view.state).toBe('offline')
+    await expect.poll(() => createdConnection!.view.state).toBe('offline')
     await clients[0].ping()
     expect(ssh.forwardedConnections()).toBeGreaterThanOrEqual(2)
     const timings = firstTerminalEvents.flatMap(({ envelope, receivedAt }) => envelope.action.type === 'terminal/data'
@@ -244,12 +313,14 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
       ? [...envelope.action.data.matchAll(/AHP_\w+:(\d+)/g)].map((match) => receivedAt - Number(match[1])) : [])
     expect(sshTimings.length).toBeGreaterThan(0)
     expect(Math.max(...sshTimings)).toBeLessThan(2000)
-    const report = { protocolVersion: '0.9.0', provider, productionClientVerified: true, productionPairedSshVerified: true, ownerInitiatedBeforeCompletion: true, revocationVerified: true, sameSession: true, sameChat: true, otherSessionUnchanged: true, observedBeforeCompletion: true, reconnect: recovered.type, executionCount: 2, pairedConnections, modelGenerationRequested: false, maximumLoopbackOutputLatencyMs: Math.max(...timings), maximumSshFirstOutputLatencyMs: Math.max(...sshTimings), sshConnections: ssh.forwardedConnections(), chatActions: [...new Set(firstChatEvents.map(({ envelope }) => envelope.action.type))], limitation: 'Two Host-local commands and terminal streams through the production paired SSH gateway on one machine; no real Copilot model delta, native tool integration or physical-network latency verified.' }
+    const report = { protocolVersion: '0.9.0', provider, productionClientVerified: true, productionPairedSshVerified: true, ownerInitiatedBeforeCompletion: true, nativeCreationAndBindingVerified: true, creationRecoveryWithoutReplay: true, createdSessionCancellationVerified: true, revocationVerified: true, sameSession: true, sameChat: true, otherSessionUnchanged: true, observedBeforeCompletion: true, reconnect: recovered.type, executionCount: 3, pairedConnections, modelGenerationRequested: false, maximumLoopbackOutputLatencyMs: Math.max(...timings), maximumSshFirstOutputLatencyMs: Math.max(...sshTimings), sshConnections: ssh.forwardedConnections(), chatActions: [...new Set(firstChatEvents.map(({ envelope }) => envelope.action.type))], limitation: 'Three Host-local commands (one cancelled), native creation and bindings through the production paired SSH gateway on one machine; no real Copilot model delta, native tool integration or physical-network latency verified.' }
     console.log(JSON.stringify(report))
     await test.info().attach('ahp-proof-of-concept', { body: Buffer.from(JSON.stringify(report, null, 2)), contentType: 'application/json' })
   } catch (error) {
     throw new Error(`${phase}: ${error instanceof Error ? error.message : String(error)}\n${output}`.replaceAll(token, '[redacted]'), { cause: error })
   } finally {
+    await creationClient?.close()
+    await createdConnection?.close()
     await production?.close()
     deviceClient?.close()
     await deviceHost?.close()

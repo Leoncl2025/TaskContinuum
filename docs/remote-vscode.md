@@ -13,6 +13,8 @@ VS Code 1.137 Agent Host supporting AHP 0.9.0 and its normal provider sign-in.
 The legacy Local instructions below remain applicable only to `vscode-copilot`
 links; they are not a prerequisite for AHP.
 
+To link an existing session:
+
 1. On B, open the task workspace and **Agent Host sessions**. Approve access once,
   choose an existing Host chat, and link it to the selected task. A task already
   linked to another conversation must be explicitly detached first; this does not
@@ -27,6 +29,40 @@ links; they are not a prerequisite for AHP.
 4. Send explicitly in **AGENT HOST**. Live text and terminal output do not wait for
   VS Code journal saves. Stop targets the exact active turn, with read/send access.
   Provider sign-in, tool confirmations and agent questions still use the owner UI.
+
+### Create on a Remote Worker
+
+In **Agent Host sessions**, use **Create on remote worker** for an unbound task.
+Select a paired worker, one of its shared task workspaces, and the exact available
+Copilot Host. Existing **Read and send** workspace access includes creation:
+there is no separate create permission or approval. Read-only, expired, revoked,
+offline, and unsupported choices cannot create sessions.
+
+This increment executes in the selected worker's shared task workspace itself.
+The client supplies an opaque workspace ID, not a filesystem path. It does not
+provision a machine or start a replacement Host. This action explicitly selects
+native **Folder** isolation, not the Host's Git-workspace **Worktree** default,
+so execution stays in the chosen folder. Other supported native configuration
+defaults are preserved; creation does not send an initial prompt or bypass
+native tool approvals. After creation, use the existing Host panel to choose a
+model, send, watch live output, or cancel the exact active turn.
+An acknowledged empty native chat can retain lifecycle `creating` until its
+first explicit send. A confirmed creation/binding is not a claim that the model
+runtime has initialized, and Task Continuum never sends a warm-up prompt.
+
+The worker saves a durable operation before invoking native creation. After
+confirming the native session and chat identities, it saves that task's Git
+binding and private owner receipt. The caller then saves only the matching task
+binding under its own revision check. Other bindings are not overwritten, and
+this flow does not automatically commit, push, pull, or merge either checkout.
+
+If a connection drops, reopen the creation controls and check the saved operation.
+Recovery queries the same operation; it never retries native creation or user
+messages automatically. **Created but not bound** keeps the exact created session
+available for an explicit binding retry after resolving a conflict. That action
+only retries binding, not creation. A completed operation does not silently
+restore a binding that was later detached. Operation records remain outside Git
+and do not grant access after send permission is removed.
 
 ### Native VS Code Controls
 
@@ -57,9 +93,11 @@ and [Host/client tool ownership](https://code.visualstudio.com/docs/agents/conce
 
 ### Access and Recovery
 
-The gateway accepts only initialize, snapshot recovery, ping, allowed subscriptions,
+The session-stream gateway accepts only initialize, snapshot recovery, ping, allowed subscriptions,
 and guarded send/cancel for the pinned chat. It rejects root/other-chat subscriptions,
-filesystem access, arbitrary tools, Host configuration and session creation.
+filesystem access, arbitrary tools, Host configuration and raw session creation.
+The separate device creation/status/bind commands are restricted to the paired
+worker's existing send-scoped workspaces; they do not forward arbitrary AHP RPCs.
 Its session summary excludes sibling chats. Terminals must be referenced by the
 selected chat and retain its session/chat ownership. Changes to workspace policy
 revalidate active sockets immediately; each outgoing batch and control also checks

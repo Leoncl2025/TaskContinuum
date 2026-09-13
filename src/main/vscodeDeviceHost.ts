@@ -1,8 +1,8 @@
-import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { createServer } from 'node:http'
 import type { IncomingMessage } from 'node:http'
 import { hostname } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { z } from 'zod'
 import { chatImageAttachmentsSchema, MAX_CHAT_IMAGE_REQUEST_BYTES } from '../shared/chatAttachments'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
@@ -17,6 +17,12 @@ import type { AgentHostAccess } from './agentHostGateway'
 import type { AgentHostSession, AgentHostTarget } from '../shared/agentHost'
 import type { AgentHostRegistry } from './agentHostRegistry'
 import { agentHostKey } from './agentHostProtocol'
+import { AgentHostCreationRequestError, AgentHostCreationService, agentHostCreationWorkspaceId } from './agentHostCreationService'
+import { agentHostCreateCommandSchema, agentHostCreationBindSchema, agentHostCreationLookupSchema, agentHostWorkerCatalogSchema, creationTaskIdSchema } from './agentHostCreationProtocol'
+import { canonicalPolicyRoot } from './linkedSessionPolicy'
+import { readRepositorySessionLinks } from './repositorySessionLinks'
+import { readTaskWorkspace } from './workspaceReader'
+import type { AgentHostCreationWorkspace } from '../shared/agentHostCreation'
 
 const policySchema = z.object({ identity: vscodeIdentitySchema, canSend: z.boolean(), revision: z.uuid(), invitation: remoteInvitationSchema.optional(), linkedRoot: z.string().optional() }).strict()
 const workspacePolicySchema = z.object({ root: z.string().min(1), canSend: z.boolean() }).strict()
@@ -40,6 +46,7 @@ export class VSCodeDeviceHost {
   private abort = new AbortController()
   private agentHosts?: { registry: AgentHostRegistry; linked(root: string): Promise<AgentHostTarget[]> }
   private agentHostGateway?: ReturnType<typeof attachAgentHostGateway>
+  private agentHostCreations?: AgentHostCreationService
 
   constructor(private readonly directory: string, private readonly protector: DeviceProtector,
     private readonly resolve: (identity: VSCodeChatIdentity, participant: Pairing['participant'], canSend: boolean, prior?: RemoteVSCodeInvitation) => Promise<RemoteVSCodeInvitation>,
@@ -49,6 +56,56 @@ export class VSCodeDeviceHost {
   setAgentHostAccess(registry: AgentHostRegistry, linked: (root: string) => Promise<AgentHostTarget[]>): void {
     if (this.server) throw new Error('Agent Host access must be configured before device publication.')
     this.agentHosts = { registry, linked }
+    this.agentHostCreations = new AgentHostCreationService(this.directory, registry, (pairId, workspaceId) => this.authorizedCreationWorkspace(pairId, workspaceId))
+  }
+
+  private async authorizedCreationWorkspace(pairId: string, workspaceId: string): Promise<string> {
+    await this.load()
+    await this.writing
+    const pair = this.state!.pairs.find((item) => item.id === pairId)
+    if (this.closed || !pair || !this.permitted(pairId) || !this.agentHosts) throw new AgentHostCreationRequestError(403, 'The original device pairing is unavailable, revoked, or expired.')
+    for (const policy of pair.workspaces) {
+      if (!policy.canSend) continue
+      let canonical: string
+      try {
+        canonical = await canonicalPolicyRoot(policy.root)
+        if (await agentHostCreationWorkspaceId(canonical) !== workspaceId) continue
+      } catch { continue }
+      await this.writing
+      const current = this.state!.pairs.find((item) => item.id === pairId)
+      if (this.closed || !this.permitted(pairId) || !current?.workspaces.some((item) => item.root === policy.root && item.canSend)) throw new AgentHostCreationRequestError(403, 'Workspace send permission changed.')
+      return canonical
+    }
+    throw new AgentHostCreationRequestError(403, 'The paired workspace does not currently grant send permission.')
+  }
+
+  private async agentHostWorkers(pair: Pairing, taskId: string) {
+    if (!this.agentHosts) throw new DeviceRequestError(404, true)
+    const policies = JSON.stringify(pair.workspaces)
+    const workspaces: AgentHostCreationWorkspace[] = []
+    for (const policy of pair.workspaces) {
+      let id: string
+      let reachable = true
+      try { id = await agentHostCreationWorkspaceId(policy.root) } catch {
+        id = createHash('sha256').update(process.platform === 'win32' ? policy.root.toLowerCase() : policy.root).digest('hex')
+        reachable = false
+      }
+      if (workspaces.some((workspace) => workspace.id === id)) continue
+      const workspace: AgentHostCreationWorkspace = { id, name: basename(policy.root).slice(0, 300) || 'Authorized workspace', canSend: policy.canSend, taskState: 'unavailable', expectedRevision: null }
+      try {
+        if (!reachable) throw new Error('Unavailable workspace.')
+        const [tasks, links] = await Promise.all([readTaskWorkspace(policy.root), readRepositorySessionLinks(policy.root)])
+        workspace.expectedRevision = links.revision
+        workspace.taskState = !tasks.tasks.some((task) => task.id === taskId) ? 'missing' : links.document.bindings[taskId] ? 'bound' : 'available'
+      } catch { workspace.error = 'The authorized task workspace or its session bindings could not be read.' }
+      workspaces.push(workspace)
+    }
+    const hosts = await this.agentHosts.registry.creationHosts(AbortSignal.any([this.abort.signal, AbortSignal.timeout(8000)]))
+    const owner = await this.agentHosts.registry.creationOwner()
+    await this.writing
+    const current = this.state!.pairs.find((item) => item.id === pair.id)
+    if (this.closed || !current || !this.permitted(pair.id) || JSON.stringify(current.workspaces) !== policies) throw new AgentHostCreationRequestError(403, 'The device pairing or authorized workspace policy changed.')
+    return agentHostWorkerCatalogSchema.parse({ ownerId: this.state!.ownerId, deviceId: pair.id, owner, hosts, workspaces })
   }
 
   private async authorizedAgentHost(token: string, target: AgentHostTarget, send: boolean): Promise<AgentHostAccess> {
@@ -129,14 +186,16 @@ export class VSCodeDeviceHost {
   async list(): Promise<Pairing[]> { await this.load(); return structuredClone(this.state!.pairs) }
   async ownerId(): Promise<string> { await this.load(); return this.state!.ownerId }
   async setWorkspace(id: string, root: string, permission: boolean | null): Promise<void> {
+    const originalRoot = root
+    root = permission === null ? await canonicalPolicyRoot(root).catch(() => process.platform === 'win32' ? root.toLowerCase() : root) : await canonicalPolicyRoot(root)
     const revoke: RemoteVSCodeInvitation[] = []
     await this.update((state) => {
       const pair = state.pairs.find((item) => item.id === id)
       if (!pair) throw new Error('Device not paired.')
-      pair.workspaces = pair.workspaces.filter((item) => item.root !== root)
+      pair.workspaces = pair.workspaces.filter((item) => item.root !== root && item.root !== originalRoot)
       if (permission !== null) pair.workspaces.push(workspacePolicySchema.parse({ root, canSend: permission }))
       pair.sessions = pair.sessions.filter((policy) => {
-        if (policy.linkedRoot !== root) return true
+        if (policy.linkedRoot !== root && policy.linkedRoot !== originalRoot) return true
         const invitation = policy.invitation ?? this.invitations.get(this.key(id, policy.identity))
         if (invitation) revoke.push(invitation)
         this.invitations.delete(this.key(id, policy.identity))
@@ -245,12 +304,19 @@ export class VSCodeDeviceHost {
           let pair = this.state!.pairs.find((item) => Buffer.byteLength(bearer) === Buffer.byteLength(item.token) && timingSafeEqual(Buffer.from(bearer), Buffer.from(item.token)))
           if (!pair || !this.permitted(pair.id)) { response.writeHead(403).end(); return }
           const body = await this.body(request)
-          await this.refreshLinked(pair.id)
+          const creationRoute = ['/device/agent-host/workers', '/device/agent-host/create', '/device/agent-host/creation-status', '/device/agent-host/creation-bind'].includes(request.url ?? '')
+          if (!creationRoute) await this.refreshLinked(pair.id)
           pair = this.state!.pairs.find((item) => item.id === pair!.id)
           if (!pair) { response.writeHead(403).end(); return }
           if (!this.permitted(pair.id)) { response.writeHead(403).end(); return }
           let result: unknown
-          if (request.url === '/device/agent-host/sessions') {
+          if (creationRoute) {
+            if (!this.agentHostCreations) throw new DeviceRequestError(404, true)
+            if (request.url === '/device/agent-host/workers') result = await this.agentHostWorkers(pair, z.object({ taskId: creationTaskIdSchema }).strict().parse(body).taskId)
+            else if (request.url === '/device/agent-host/create') result = await this.agentHostCreations.begin(pair.id, agentHostCreateCommandSchema.parse(body))
+            else if (request.url === '/device/agent-host/creation-status') result = await this.agentHostCreations.status(pair.id, agentHostCreationLookupSchema.parse(body))
+            else result = await this.agentHostCreations.bind(pair.id, agentHostCreationBindSchema.parse(body))
+          } else if (request.url === '/device/agent-host/sessions') {
             z.object({}).strict().parse(body)
             result = await this.agentHostCatalog(pair)
           } else if (request.url === '/device/sessions') {
@@ -280,7 +346,10 @@ export class VSCodeDeviceHost {
           if (!this.permitted(pair.id)) { response.writeHead(403).end(); return }
           response.setHeader('Content-Type', 'application/json')
           response.end(JSON.stringify(result))
-        })().catch((error: unknown) => { if (!response.headersSent) response.writeHead(error instanceof DeviceRequestError ? error.status : 503); response.end() })
+        })().catch((error: unknown) => {
+          if (!response.headersSent) response.writeHead(error instanceof DeviceRequestError || error instanceof AgentHostCreationRequestError ? error.status : error instanceof z.ZodError && request.url?.startsWith('/device/agent-host/') ? 400 : 503)
+          response.end()
+        })
       })
       server.requestTimeout = 15000
       server.headersTimeout = 10000
@@ -307,6 +376,7 @@ export class VSCodeDeviceHost {
     this.closed = true
     this.abort.abort()
     this.agentHostGateway?.close()
+    await this.agentHostCreations?.close()
     await this.starting?.catch(() => undefined)
     this.server?.closeAllConnections()
     if (this.server?.listening) await new Promise<void>((resolve) => this.server!.close(() => resolve()))

@@ -1,0 +1,14 @@
+.ah-creation { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 16px; }
+.ah-creation h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; }
+.ah-creation p { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.ah-creation-pickers { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.ah-creation-pickers .form-field { min-width: 0; }
+.ah-creation-selection { font-size: 12px; }
+.ah-creation-operations { display: grid; gap: 12px; margin-top: 16px; }
+.ah-creation-operation { padding: 12px; border: 1px solid var(--border); border-radius: 4px; }
+.ah-creation-operation h4 { margin: 0 0 12px; font-size: 13px; }
+.ah-creation-operation dl { display: grid; gap: 6px; margin: 0 0 12px; font-size: 12px; }
+.ah-creation-operation dl > div { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 8px; }
+.ah-creation-operation dt { color: var(--muted); }
+.ah-creation-operation dd { margin: 0; overflow-wrap: anywhere; }
+.ah-creation-actions { display: flex; flex-wrap: wrap; gap: 8px; }

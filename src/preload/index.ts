@@ -59,6 +59,11 @@ contextBridge.exposeInMainWorld('vscodeChat', vscodeChat)
 
 const agentHost: AgentHostBridge = {
   list: () => ipcRenderer.invoke('agent-host:list'),
+  creationWorkers: (taskId) => ipcRenderer.invoke('agent-host:creation-workers', taskId),
+  creations: (taskId) => ipcRenderer.invoke('agent-host:creations', taskId),
+  create: (request) => ipcRenderer.invoke('agent-host:create', request),
+  creationStatus: (operationId) => ipcRenderer.invoke('agent-host:creation-status', operationId),
+  bindCreation: (operationId) => ipcRenderer.invoke('agent-host:bind-creation', operationId),
   models: (target) => ipcRenderer.invoke('agent-host:models', target),
   watch: (target) => ipcRenderer.invoke('agent-host:watch', target),
   unwatch: (id) => ipcRenderer.invoke('agent-host:unwatch', id),

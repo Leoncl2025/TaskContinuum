@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/renderer/App'
@@ -7,6 +7,8 @@ import { saveSessionBindings } from '../src/renderer/chat/sessionBindings'
 import type { WorkspaceBridge, WorkspaceSnapshot, WorkspaceState } from '../src/shared/workspace'
 import type { SendMessageRequest } from '../src/shared/sessions'
 import type { SessionLinksSnapshot } from '../src/shared/sessionBindings'
+import type { AgentHostBridge, AgentHostSession } from '../src/shared/agentHost'
+import type { AgentHostCreation, AgentHostWorker } from '../src/shared/agentHostCreation'
 import { mockCopilotBridge } from './copilot-fixtures'
 
 afterEach(() => { delete window.workspace; delete window.copilot; delete window.agentHost })
@@ -35,7 +37,188 @@ function fixtures() {
   return { bridge, first, second, repository }
 }
 
+function creationFixture() {
+  const workspace = fixtures()
+  const owner = { clientId: crypto.randomUUID(), machineName: 'Creation worker' }
+  const target = { hostId: 'exact-host-123', sessionId: 'ahp-session:/new-chat', chatId: 'ahp-chat:/new-chat/main', owner }
+  const session: AgentHostSession = { ...target, title: 'Created chat', provider: 'copilotcli', updatedAt: '', canSend: true }
+  const worker: AgentHostWorker = { id: 'paired-worker', owner, state: 'connected', hosts: [{ hostId: target.hostId, name: 'Native Host', available: true }], workspaces: [{ id: 'worker-workspace', name: 'Worker project', canSend: true, taskState: 'available', expectedRevision: 'd'.repeat(64) }] }
+  const saved = new Map<string, AgentHostCreation>()
+  const agentHost: AgentHostBridge = {
+    list: vi.fn(async () => ({ sessions: [], warnings: [] })), creationWorkers: vi.fn(async () => [worker]),
+    creations: vi.fn(async (taskId) => [...saved.values()].filter((operation) => operation.taskId === taskId)),
+    create: vi.fn(async (request) => {
+      const operation: AgentHostCreation = { ...request, state: 'ready', session }
+      saved.set(request.operationId, operation)
+      workspace.repository[workspace.first.id] = { document: { schemaVersion: 1, bindings: { ...workspace.repository[workspace.first.id]?.document.bindings, [request.taskId]: { provider: 'agent-host', ...target } } }, revision: 'e'.repeat(64) }
+      return operation
+    }),
+    creationStatus: vi.fn(async (id) => saved.get(id)!),
+    bindCreation: vi.fn(async (id) => saved.get(id)!),
+    models: vi.fn(async () => []), watch: vi.fn(async () => crypto.randomUUID()),
+    unwatch: vi.fn(async () => {}), send: vi.fn(async () => {}), cancel: vi.fn(async () => {}), onView: () => () => {},
+  }
+  window.agentHost = agentHost
+  return { ...workspace, agentHost, target, saved }
+}
+
+async function selectCreationTarget(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
+  await screen.findByRole('option', { name: /Creation worker/ })
+  await waitFor(() => expect(screen.getByRole('combobox', { name: 'Remote worker' })).toBeEnabled())
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Remote worker' }), 'paired-worker')
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Shared worker workspace' }), 'worker-workspace')
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Exact Agent Host' }), 'exact-host-123')
+}
+
 describe('workspace switching in the desktop workbench', () => {
+  it('does not select a replacement chat when the created binding changes during reload', async () => {
+    const { bridge, first, repository, agentHost, target } = creationFixture()
+    first.tasks.push({ ...first.tasks[0], id: 'T-0003', title: 'Keep selected task' })
+    const user = userEvent.setup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    await screen.findByRole('heading', { level: 1, name: 'Actual UI task' })
+    await user.click(screen.getByRole('button', { name: 'T-0003 Keep selected task' }))
+    await user.click(screen.getByRole('tab', { name: 'Actual UI task' }))
+    await selectCreationTarget(user)
+    let finishReload!: (snapshot: SessionLinksSnapshot) => void
+    vi.mocked(bridge.getSessionLinks).mockImplementationOnce(() => new Promise((resolve) => { finishReload = resolve }))
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    await waitFor(() => expect(finishReload).toBeTypeOf('function'))
+    fireEvent.click(screen.getByRole('tab', { name: 'Keep selected task' }))
+    const replacement = { ...target, sessionId: 'ahp-session:/replacement', chatId: 'ahp-chat:/replacement/main' }
+    repository[first.id] = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...replacement } } }, revision: 'f'.repeat(64) }
+    await act(async () => { finishReload(repository[first.id]) })
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Keep selected task'))
+    expect(agentHost.watch).not.toHaveBeenCalled()
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+    expect(agentHost.send).not.toHaveBeenCalled()
+  })
+
+  it('reloads the already-saved creation binding for its original task and clears only that task', async () => {
+    const { bridge, first, repository, agentHost, target } = creationFixture()
+    first.tasks.push({ ...first.tasks[0], id: 'T-0003', title: 'Other task draft' })
+    const user = userEvent.setup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    await screen.findByRole('heading', { level: 1, name: 'Actual UI task' })
+    await user.click(screen.getByRole('button', { name: 'T-0003 Other task draft' }))
+    await user.type(screen.getByRole('textbox', { name: 'Message to demo agent' }), 'Keep the other task draft')
+    await user.click(screen.getByRole('tab', { name: 'Actual UI task' }))
+    await user.type(screen.getByRole('textbox', { name: 'Message to demo agent' }), 'Clear only the original task draft')
+    await selectCreationTarget(user)
+    let finishReload!: (snapshot: SessionLinksSnapshot) => void
+    vi.mocked(bridge.getSessionLinks).mockImplementationOnce(() => new Promise((resolve) => { finishReload = resolve }))
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    await waitFor(() => expect(finishReload).toBeTypeOf('function'))
+    fireEvent.click(screen.getByRole('tab', { name: 'Other task draft' }))
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Other task draft')
+    await act(async () => { finishReload(repository[first.id]) })
+    expect(await screen.findByRole('complementary', { name: 'Agent Host task chat' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Actual UI task')
+    await waitFor(() => expect(agentHost.watch).toHaveBeenCalledWith(target))
+    expect(screen.queryByRole('dialog', { name: 'Agent Host sessions' })).not.toBeInTheDocument()
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+    expect(agentHost.create).toHaveBeenCalledExactlyOnceWith({ operationId: expect.any(String), taskId: 'T-0002', workerId: 'paired-worker', workspaceId: 'worker-workspace', hostId: target.hostId, expectedRevision: 'd'.repeat(64) })
+    expect(agentHost.send).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('tab', { name: 'Other task draft' }))
+    expect(screen.getByRole('textbox', { name: 'Message to demo agent' })).toHaveValue('Keep the other task draft')
+    await user.click(screen.getByRole('tab', { name: 'Actual UI task' }))
+    await user.click(screen.getByRole('button', { name: 'Detach conversation' }))
+    await user.click(screen.getByRole('button', { name: 'Detach session' }))
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message to demo agent' })).toHaveValue(''))
+  })
+
+  it('retains a ready operation for recovery when reloading its saved binding fails', async () => {
+    const { bridge, agentHost } = creationFixture()
+    const user = userEvent.setup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    await screen.findByRole('heading', { level: 1, name: 'Actual UI task' })
+    await selectCreationTarget(user)
+    vi.mocked(bridge.getSessionLinks).mockRejectedValueOnce(new Error('Saved links could not be read.'))
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    const dialog = screen.getByRole('dialog', { name: 'Agent Host sessions' })
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Saved links could not be read.')
+    expect(within(dialog).getByText('ahp-session:/new-chat')).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Open created chat' }))
+    expect(await screen.findByRole('complementary', { name: 'Agent Host task chat' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Agent Host sessions' })).not.toBeInTheDocument()
+    expect(agentHost.create).toHaveBeenCalledTimes(1)
+    expect(agentHost.bindCreation).not.toHaveBeenCalled()
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+  })
+
+  it('does not apply an old creation callback in a new workspace with the same task ID', async () => {
+    const { bridge, first, second, repository, agentHost } = creationFixture()
+    const user = userEvent.setup()
+    const original = render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    await screen.findByRole('heading', { level: 1, name: 'Actual UI task' })
+    await selectCreationTarget(user)
+    let finishReload!: (snapshot: SessionLinksSnapshot) => void
+    vi.mocked(bridge.getSessionLinks).mockImplementationOnce(() => new Promise((resolve) => { finishReload = resolve }))
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    await waitFor(() => expect(finishReload).toBeTypeOf('function'))
+    original.unmount()
+    await bridge.openRecent(second.id)
+    render(<App />)
+    await screen.findByRole('heading', { level: 1, name: 'Different task with same ID' })
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message to demo agent' })).toBeEnabled())
+    await user.type(screen.getByRole('textbox', { name: 'Message to demo agent' }), 'Keep the new workspace draft')
+    expect(screen.getByRole('textbox', { name: 'Message to demo agent' })).toHaveValue('Keep the new workspace draft')
+    await act(async () => { finishReload(repository[first.id]) })
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Different task with same ID')
+    expect(screen.getByRole('textbox', { name: 'Message to demo agent' })).toHaveValue('Keep the new workspace draft')
+    expect(screen.queryByRole('complementary', { name: 'Agent Host task chat' })).not.toBeInTheDocument()
+    expect(repository[second.id]).toBeUndefined()
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+    expect(agentHost.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not close a newly opened picker when completion from a closed picker arrives', async () => {
+    const { bridge, first, repository, agentHost } = creationFixture()
+    first.tasks.push({ ...first.tasks[0], id: 'T-0003', title: 'New picker task' })
+    const user = userEvent.setup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    await screen.findByRole('heading', { level: 1, name: 'Actual UI task' })
+    await selectCreationTarget(user)
+    let finishReload!: (snapshot: SessionLinksSnapshot) => void
+    vi.mocked(bridge.getSessionLinks).mockImplementationOnce(() => new Promise((resolve) => { finishReload = resolve }))
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    await waitFor(() => expect(finishReload).toBeTypeOf('function'))
+    await user.click(screen.getByRole('button', { name: 'Close Agent Host sessions' }))
+    await user.click(screen.getByRole('button', { name: 'T-0003 New picker task' }))
+    await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
+    await act(async () => { finishReload(repository[first.id]) })
+    expect(screen.getByRole('dialog', { name: 'Agent Host sessions' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('New picker task')
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0003' })).toBeInTheDocument()
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+    expect(agentHost.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('passes a bound task to the picker as ineligible for creation', async () => {
+    const { first, repository, agentHost } = creationFixture()
+    repository[first.id] = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'github-copilot', sessionId: 'already-linked' } } }, revision: 'b'.repeat(64) }
+    const user = userEvent.setup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    await screen.findByRole('heading', { level: 1, name: 'Actual UI task' })
+    await selectCreationTarget(user)
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    expect(screen.getByText(/Creation requires an unbound task/)).toBeInTheDocument()
+    expect(agentHost.create).not.toHaveBeenCalled()
+  })
+
   it('opens an AHP Git link without resuming or creating a CLI session', async () => {
     const { first, repository } = fixtures()
     const host = mockCopilotBridge()
@@ -44,7 +227,7 @@ describe('workspace switching in the desktop workbench', () => {
     const owner = { clientId: crypto.randomUUID(), machineName: 'Owner-B' }
     const target = { hostId: 'host-instance-123', sessionId: 'ahp-session:/original', chatId: 'ahp-chat:/original/main', owner }
     repository[first.id] = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64), localOwner: owner }
-    window.agentHost = { list: vi.fn(async () => ({ sessions: [], warnings: [] })), models: vi.fn(async () => []), watch: vi.fn(async () => crypto.randomUUID()), unwatch: vi.fn(async () => {}), send: vi.fn(async () => {}), cancel: vi.fn(async () => {}), onView: () => () => {} }
+    window.agentHost = { list: vi.fn(async () => ({ sessions: [], warnings: [] })), creationWorkers: vi.fn(async () => []), creations: vi.fn(async () => []), create: vi.fn(async () => { throw new Error('No creation expected.') }), creationStatus: vi.fn(async () => { throw new Error('No creation expected.') }), bindCreation: vi.fn(async () => { throw new Error('No creation expected.') }), models: vi.fn(async () => []), watch: vi.fn(async () => crypto.randomUUID()), unwatch: vi.fn(async () => {}), send: vi.fn(async () => {}), cancel: vi.fn(async () => {}), onView: () => () => {} }
     const user = userEvent.setup()
     render(<App />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())

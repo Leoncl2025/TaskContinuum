@@ -17,6 +17,10 @@ function fixture() {
   let watchId = ''
   const bridge: AgentHostBridge = {
     list: vi.fn(async () => ({ sessions: [], warnings: [] })),
+    creationWorkers: vi.fn(async () => []), creations: vi.fn(async () => []),
+    create: vi.fn(async () => { throw new Error('The chat panel must not create a session.') }),
+    creationStatus: vi.fn(async () => { throw new Error('No creation operation in the chat panel.') }),
+    bindCreation: vi.fn(async () => { throw new Error('No creation operation in the chat panel.') }),
     models: vi.fn(async () => [{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }]),
     watch: vi.fn(async () => { watchId = crypto.randomUUID(); for (const listener of listeners) listener({ id: watchId, view: structuredClone(view) }); return watchId }),
     unwatch: vi.fn(async () => {}), send: vi.fn(async () => {}), cancel: vi.fn(async () => {}),

@@ -19,6 +19,8 @@ import type { SessionOwner } from '../shared/sessionBindings'
 import type { AgentHostSession, AgentHostTarget } from '../shared/agentHost'
 import { agentHostCatalogSchema, agentHostTargetSchema } from './agentHostProtocol'
 import { connectAgentHostWebSocket } from './agentHostTransport'
+import type { AgentHostCreateRequest, AgentHostCreation, AgentHostWorker } from '../shared/agentHostCreation'
+import { agentHostCreateCommandSchema, agentHostCreateRequestSchema, agentHostCreationResultSchema, agentHostWorkerCatalogSchema, creationTaskIdSchema, creationRevisionSchema } from './agentHostCreationProtocol'
 
 const knownSchema = z.object({ id: z.uuid(), invitation: remoteInvitationSchema }).strict()
 const peerSchema = z.object({ id: z.uuid(), root: z.string().min(1), invitation: deviceInvitationSchema,
@@ -309,6 +311,89 @@ export class VSCodeDeviceClient {
     const combined = AbortSignal.any([signal, active.abort.signal])
     const encoded = Buffer.from(JSON.stringify(target)).toString('base64url')
     return connectAgentHostWebSocket(`ws://127.0.0.1:${active.tunnel.port}/device/agent-host?target=${encoded}`, { headers: { Host: `127.0.0.1:${peer.invitation.port}`, Authorization: `Bearer ${peer.invitation.token}` } }, combined)
+  }
+
+  private async creationPeer(root: string, workerId: string): Promise<Peer> {
+    const peer = await this.peer(root, z.uuid().parse(workerId))
+    if (!peer.invitation.ownerClientId) throw new Error('This worker invitation does not identify an Agent Host owner. Pair again with an updated worker.')
+    if (this.closed || !peer.enabled || Date.parse(peer.invitation.expiresAt) <= Date.now()) throw new Error('The worker connection is disabled or expired. Connect it in Devices.')
+    await this.validateRecipient(peer.invitation)
+    if (!this.active.has(peer.id)) await this.ensure(peer, false)
+    this.currentCreationPeer(peer, this.active.get(peer.id))
+    return peer
+  }
+
+  private currentCreationPeer(peer: Peer, active: Active | undefined): asserts active is Active {
+    if (this.closed || !this.peers.includes(peer) || !peer.enabled || Date.parse(peer.invitation.expiresAt) <= Date.now()
+      || !active || active.abort.signal.aborted || this.active.get(peer.id) !== active) throw new Error('The selected worker connection or identity changed.')
+  }
+
+  async agentHostWorker(root: string, workerId: string, taskId: string): Promise<AgentHostWorker> {
+    creationTaskIdSchema.parse(taskId)
+    const peer = await this.peer(root, z.uuid().parse(workerId))
+    const clientId = peer.invitation.ownerClientId
+    if (!clientId) throw new Error('This device does not advertise an Agent Host owner identity.')
+    const worker: AgentHostWorker = { id: peer.id, owner: { clientId, machineName: peer.invitation.machineName }, state: 'offline', hosts: [], workspaces: [] }
+    try {
+      await this.creationPeer(root, workerId)
+      const active = this.active.get(peer.id)
+      this.currentCreationPeer(peer, active)
+      const catalog = agentHostWorkerCatalogSchema.parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/agent-host/workers', { taskId }, active.abort.signal))
+      this.currentCreationPeer(peer, active)
+      if (catalog.ownerId !== peer.invitation.ownerId || catalog.deviceId !== peer.invitation.id
+        || catalog.owner.clientId !== clientId || catalog.owner.machineName.toLowerCase() !== peer.invitation.machineName.toLowerCase()) throw new Error('The worker catalog returned a different authenticated owner.')
+      return { ...worker, state: 'connected', hosts: catalog.hosts, workspaces: catalog.workspaces }
+    } catch (error) {
+      return { ...worker, state: error instanceof DeviceRequestError && error.status === 404 ? 'unsupported' : 'offline',
+        error: (error instanceof Error ? error.message : 'The selected worker could not be queried.').slice(0, 2000) }
+    }
+  }
+
+  async agentHostWorkers(root: string, taskId: string): Promise<AgentHostWorker[]> {
+    creationTaskIdSchema.parse(taskId)
+    await this.load()
+    const canonical = await this.root(root)
+    const ids = this.peers.filter((peer) => peer.root === canonical && peer.invitation.ownerClientId).map((peer) => peer.id)
+    const workers: AgentHostWorker[] = []
+    for (const id of ids) workers.push(await this.agentHostWorker(root, id, taskId))
+    return workers
+  }
+
+  private async creationRequest(root: string, value: AgentHostCreateRequest, path: '/device/agent-host/create' | '/device/agent-host/creation-status' | '/device/agent-host/creation-bind', body: unknown, authorize: () => Promise<void>): Promise<AgentHostCreation> {
+    const request = agentHostCreateRequestSchema.parse(value)
+    const peer = await this.creationPeer(root, request.workerId)
+    const active = this.active.get(peer.id)
+    this.currentCreationPeer(peer, active)
+    await authorize()
+    this.currentCreationPeer(peer, active)
+    try {
+      const result = agentHostCreationResultSchema.parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, path, body, active.abort.signal))
+      this.currentCreationPeer(peer, active)
+      if (result.operationId !== request.operationId || result.workspaceId !== request.workspaceId || result.taskId !== request.taskId || result.hostId !== request.hostId
+        || result.session && (result.session.provider !== 'copilotcli' || result.session.owner.clientId !== peer.invitation.ownerClientId
+          || result.session.owner.machineName.toLowerCase() !== peer.invitation.machineName.toLowerCase())) throw new Error('The worker returned a different creation operation or session identity. No replacement was selected.')
+      return { ...result, workerId: peer.id }
+    } catch (error) {
+      if (this.active.get(peer.id) === active && !(error instanceof DeviceRequestError)) {
+        this.drop(peer.id)
+        this.retry.set(peer.id, { count: 1, at: Date.now() + 2000 })
+      }
+      throw error
+    }
+  }
+
+  agentHostCreate(root: string, value: AgentHostCreateRequest, authorize: () => Promise<void>): Promise<AgentHostCreation> {
+    const request = agentHostCreateRequestSchema.parse(value)
+    const { operationId, taskId, workspaceId, hostId, expectedRevision } = request
+    return this.creationRequest(root, request, '/device/agent-host/create', agentHostCreateCommandSchema.parse({ operationId, taskId, workspaceId, hostId, expectedRevision }), authorize)
+  }
+
+  agentHostCreationStatus(root: string, request: AgentHostCreateRequest, authorize: () => Promise<void>): Promise<AgentHostCreation> {
+    return this.creationRequest(root, request, '/device/agent-host/creation-status', { operationId: request.operationId, workspaceId: request.workspaceId }, authorize)
+  }
+
+  agentHostBindCreation(root: string, request: AgentHostCreateRequest, revision: string | null, authorize: () => Promise<void>): Promise<AgentHostCreation> {
+    return this.creationRequest(root, request, '/device/agent-host/creation-bind', { operationId: request.operationId, workspaceId: request.workspaceId, expectedRevision: creationRevisionSchema.parse(revision) }, authorize)
   }
 
   close(): void { this.closed = true; for (const peer of this.peers) this.drop(peer.id) }

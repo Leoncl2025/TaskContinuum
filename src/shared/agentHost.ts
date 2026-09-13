@@ -1,6 +1,7 @@
 import type { ChatState, ModelSelection, SessionModelInfo, TerminalState } from '@microsoft/agent-host-protocol'
 import type { ChatImageAttachment } from './chatAttachments'
 import type { SessionOwner } from './sessionBindings'
+import type { AgentHostCreateRequest, AgentHostCreation, AgentHostWorker } from './agentHostCreation'
 
 export interface AgentHostTarget {
   hostId: string
@@ -29,6 +30,11 @@ export interface AgentHostView {
 
 export interface AgentHostBridge {
   list(): Promise<{ sessions: AgentHostSession[]; warnings: string[] }>
+  creationWorkers(taskId: string): Promise<AgentHostWorker[]>
+  creations(taskId: string): Promise<AgentHostCreation[]>
+  create(request: AgentHostCreateRequest): Promise<AgentHostCreation>
+  creationStatus(operationId: string): Promise<AgentHostCreation>
+  bindCreation(operationId: string): Promise<AgentHostCreation>
   models(target: AgentHostTarget): Promise<Pick<SessionModelInfo, 'id' | 'name' | 'provider' | 'configSchema'>[]>
   watch(target: AgentHostTarget): Promise<string>
   unwatch(id: string): Promise<void>

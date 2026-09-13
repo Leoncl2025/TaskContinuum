@@ -10,12 +10,16 @@ import { agentHostKey, agentHostTargetSchema } from './agentHostProtocol'
 import { canonicalPolicyRoot, locallyLinkedAgentHostSessions } from './linkedSessionPolicy'
 import { readRepositorySessionLinks } from './repositorySessionLinks'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
+import { AgentHostCreationClient } from './agentHostCreationClient'
 
 export class AgentHostManager {
   private readonly remote = new Map<string, AgentHostConnection>()
   private consentWrite: Promise<void> = Promise.resolve()
+  readonly creations: AgentHostCreationClient
 
-  constructor(private readonly directory: string, readonly local: AgentHostRegistry, private readonly devices: VSCodeDeviceClient, private readonly owner: () => Promise<SessionOwner>) {}
+  constructor(private readonly directory: string, readonly local: AgentHostRegistry, private readonly devices: VSCodeDeviceClient, private readonly owner: () => Promise<SessionOwner>) {
+    this.creations = new AgentHostCreationClient(directory, devices)
+  }
 
   private async consents(): Promise<string[]> {
     try { return z.array(z.string().max(4096)).max(100).parse(await readJsonBounded(join(this.directory, 'agent-host-consents.json'), 512 * 1024)) } catch (error) {
@@ -77,5 +81,5 @@ export class AgentHostManager {
     return connection
   }
 
-  async close(): Promise<void> { await Promise.all([...this.remote.values()].map((connection) => connection.close())); await this.local.close(); await this.consentWrite; this.remote.clear() }
+  async close(): Promise<void> { await this.creations.close(); await Promise.all([...this.remote.values()].map((connection) => connection.close())); await this.local.close(); await this.consentWrite; this.remote.clear() }
 }

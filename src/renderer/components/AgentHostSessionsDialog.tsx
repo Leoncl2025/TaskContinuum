@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { agentHostKey } from '../../shared/agentHost'
 import type { AgentHostSession } from '../../shared/agentHost'
 import { Dialog, Icon, IconButton } from './Primitives'
+import { AgentHostCreationControls } from './AgentHostCreationControls'
 
-export function AgentHostSessionsDialog({ taskId, onLink, onDevices, onClose }: { taskId?: string; onLink(session: AgentHostSession): Promise<void>; onDevices(): void; onClose(): void }) {
+export function AgentHostSessionsDialog({ taskId, taskUnbound = false, onLink, onCreated, onDevices, onClose }: { taskId?: string; taskUnbound?: boolean; onLink(session: AgentHostSession): Promise<void>; onCreated?(taskId: string, session: AgentHostSession): Promise<void>; onDevices(): void; onClose(): void }) {
   const bridge = window.agentHost
   const [sessions, setSessions] = useState<AgentHostSession[]>([])
   const [warnings, setWarnings] = useState<string[]>([])
@@ -35,5 +36,6 @@ export function AgentHostSessionsDialog({ taskId, onLink, onDevices, onClose }: 
       {!busy && !filtered.length && <p className="muted">No available Agent Host sessions.</p>}
       {filtered.map((session) => <section key={agentHostKey(session)} className="ahp-catalog-item" aria-label={`Host session ${session.title}`}><div><strong><Icon name="copilot" />{session.title}</strong><p className="muted">{session.owner.machineName} / {session.provider} / {session.canSend ? 'Read and send' : 'Read only'}</p><span className="muted ahp-session-id" title={session.sessionId}>{session.sessionId}</span></div><IconButton icon="link" label={`Link ${session.title} to ${taskId ?? 'task'}`} disabled={busy || !taskId} onClick={() => { void link(session) }} /></section>)}
     </div>
+    <AgentHostCreationControls taskId={taskId} taskUnbound={taskUnbound} disabled={busy} onCreated={onCreated} />
   </Dialog>
 }

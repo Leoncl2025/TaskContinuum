@@ -62,7 +62,7 @@ test('links and streams original AHP chats in the sandboxed desktop without a Co
     })
     const security = await page!.evaluate(async () => ({ info: await window.desktop!.getInfo(), keys: Object.keys(window.agentHost!).sort(), require: typeof Reflect.get(window, 'require') }))
     expect(security.info.security).toEqual({ contextIsolated: true, sandboxed: true })
-    expect(security.keys).toEqual(['cancel', 'list', 'models', 'onView', 'send', 'unwatch', 'watch'])
+    expect(security.keys).toEqual(['bindCreation', 'cancel', 'create', 'creationStatus', 'creationWorkers', 'creations', 'list', 'models', 'onView', 'send', 'unwatch', 'watch'])
     expect(security.require).toBe('undefined')
     expect(await page!.evaluate(async (value) => { try { await window.agentHost!.watch({ ...value, chatId: 'ahp-chat:/not-linked' }); return false } catch { return true } }, target)).toBe(true)
     expect(fixture.dispatches).toHaveLength(0)

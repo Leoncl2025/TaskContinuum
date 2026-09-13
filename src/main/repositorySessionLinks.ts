@@ -7,6 +7,7 @@ import { sessionLinksPath } from '../shared/sessionBindings'
 import { remoteMachineSchema } from './vscodeRemoteProtocol'
 import { agentHostTargetSchema } from './agentHostProtocol'
 import type { AgentHostTarget } from '../shared/agentHost'
+import { readTaskWorkspace } from './workspaceReader'
 
 const taskIdSchema = z.string().regex(/^T-\d{4,}$/)
 const sessionIdSchema = z.string().min(1).max(240).regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/)
@@ -91,6 +92,23 @@ export function updateRepositoryAgentHostLink(root: string, taskId: string, targ
   return updateLink(root, taskId, sessionLinkSchema.parse({ ...agentHostTargetSchema.parse(target), provider: 'agent-host' }), expectedRevision)
 }
 
+export function bindRepositoryAgentHostCreation(root: string, taskId: string, target: AgentHostTarget, expectedRevision: string | null, authorize?: () => Promise<void>): Promise<SessionLinksSnapshot> {
+  taskIdSchema.parse(taskId)
+  const selected = sessionLinkSchema.parse({ ...agentHostTargetSchema.parse(target), provider: 'agent-host' })
+  const check = async () => {
+    if (!(await readTaskWorkspace(root)).tasks.some((task) => task.id === taskId)) throw new Error('The task does not exist in this workspace. No binding was written.')
+    await authorize?.()
+  }
+  return writeRepositorySessionLinks(root, expectedRevision, async (before) => {
+    await check()
+    const prior = before.bindings[taskId]
+    if (prior && JSON.stringify(prior) !== JSON.stringify(selected)) throw new Error('The task already has a different session binding. Creation cannot replace it.')
+    const existingTask = Object.entries(before.bindings).find(([id, link]) => id !== taskId && linkKey(link) === linkKey(selected))?.[0]
+    if (existingTask) throw new Error(`This session is already linked to ${existingTask}. Detach it there before moving it.`)
+    return { schemaVersion: 1, bindings: { ...before.bindings, [taskId]: selected } }
+  }, check)
+}
+
 function updateLink(root: string, taskId: string, selected: SessionLink | null, expectedRevision: string | null): Promise<SessionLinksSnapshot> {
   return writeRepositorySessionLinks(root, expectedRevision, (before) => {
     const prior = before.bindings[taskId]
@@ -112,7 +130,7 @@ export async function migrateRepositorySessionLinks(root: string, bindings: Reco
   return writeRepositorySessionLinks(root, null, () => document)
 }
 
-async function writeRepositorySessionLinks(root: string, expectedRevision: string | null, update: (before: SessionLinksDocument) => SessionLinksDocument): Promise<SessionLinksSnapshot> {
+async function writeRepositorySessionLinks(root: string, expectedRevision: string | null, update: (before: SessionLinksDocument) => SessionLinksDocument | Promise<SessionLinksDocument>, beforeCommit?: () => Promise<void>): Promise<SessionLinksSnapshot> {
   if (expectedRevision !== null && !/^[a-f\d]{64}$/.test(expectedRevision)) throw new Error('Invalid session link revision.')
   const { directory, file } = await checkedPaths(root, true)
   const lockPath = join(directory, 'session-bindings.lock')
@@ -125,7 +143,7 @@ async function writeRepositorySessionLinks(root: string, expectedRevision: strin
   try {
     const before = await readRepositorySessionLinks(root)
     if (before.revision !== expectedRevision) throw new Error('Session links changed on disk. Reload the bindings and retry; no changes were written.')
-    const changed = documentSchema.parse(update(before.document))
+    const changed = documentSchema.parse(await update(before.document))
     const document: SessionLinksDocument = { schemaVersion: 1, bindings: Object.fromEntries(Object.entries(changed.bindings).sort(([left], [right]) => left.localeCompare(right))) }
     if (JSON.stringify(document) === JSON.stringify(before.document)) return before
     const content = JSON.stringify(document, null, 2) + '\n'
@@ -134,6 +152,11 @@ async function writeRepositorySessionLinks(root: string, expectedRevision: strin
     if ((await readRepositorySessionLinks(root)).revision !== before.revision) throw new Error('Session links changed on disk. Reload the bindings and retry; no changes were written.')
     try { await writeTemporary(join(directory, '.gitignore'), 'session-bindings.lock\nsession-bindings.*.tmp\n') } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
+    if (beforeCommit) {
+      await beforeCommit()
+      if ((await readRepositorySessionLinks(root)).revision !== before.revision) throw new Error('Session links changed on disk. Reload the bindings and retry; no changes were written.')
+      await beforeCommit()
     }
     await rename(temporary, file)
     return { document, revision: createHash('sha256').update(content).digest('hex') }

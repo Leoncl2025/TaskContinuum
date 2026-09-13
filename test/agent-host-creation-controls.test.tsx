@@ -1,0 +1,350 @@
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { AgentHostBridge, AgentHostSession } from '../src/shared/agentHost'
+import type { AgentHostCreation, AgentHostWorker } from '../src/shared/agentHostCreation'
+import { AgentHostCreationControls } from '../src/renderer/components/AgentHostCreationControls'
+import { AgentHostSessionsDialog } from '../src/renderer/components/AgentHostSessionsDialog'
+
+afterEach(() => { delete window.agentHost; vi.useRealTimers() })
+
+function fixture() {
+  const owner = { clientId: 'authenticated-owner', machineName: 'Paired workstation' }
+  const worker: AgentHostWorker = {
+    id: 'caller-local-worker', owner, state: 'connected',
+    hosts: [{ hostId: 'exact-host-123', name: 'Native Host', available: true }],
+    workspaces: [{ id: 'remote-workspace', name: 'Worker project', canSend: true, taskState: 'available', expectedRevision: 'a'.repeat(64) }],
+  }
+  const session: AgentHostSession = { hostId: worker.hosts[0].hostId, sessionId: 'ahp-session:/created', chatId: 'ahp-chat:/created/main', owner, title: 'New native chat', provider: 'copilotcli', canSend: true, updatedAt: '' }
+  const saved = new Map<string, AgentHostCreation>()
+  const bridge: AgentHostBridge = {
+    list: vi.fn(async () => ({ sessions: [], warnings: [] })),
+    creationWorkers: vi.fn(async () => [worker]),
+    creations: vi.fn(async (taskId) => [...saved.values()].filter((operation) => operation.taskId === taskId)),
+    create: vi.fn(async (request) => {
+      const operation: AgentHostCreation = { ...request, state: 'ready', session }
+      saved.set(operation.operationId, operation)
+      return operation
+    }),
+    creationStatus: vi.fn(async (id) => {
+      const operation = saved.get(id)
+      if (!operation) throw new Error('The saved operation cannot be reached.')
+      return operation
+    }),
+    bindCreation: vi.fn(async (id) => {
+      const operation = saved.get(id)
+      if (!operation) throw new Error('No saved chat to bind.')
+      const ready: AgentHostCreation = { ...operation, state: 'ready', session, error: undefined }
+      saved.set(id, ready)
+      return ready
+    }),
+    models: vi.fn(async () => []), watch: vi.fn(async () => 'watch'),
+    unwatch: vi.fn(async () => {}), send: vi.fn(async () => {}), cancel: vi.fn(async () => {}),
+    onView: () => () => {},
+  }
+  window.agentHost = bridge
+  function operation(state: AgentHostCreation['state']): AgentHostCreation {
+    const value: AgentHostCreation = { operationId: crypto.randomUUID(), taskId: 'T-0002', workerId: worker.id, workspaceId: worker.workspaces[0].id, hostId: worker.hosts[0].hostId, state, ...(state === 'ready' || state === 'created-unbound' ? { session } : {}) }
+    saved.set(value.operationId, value)
+    return value
+  }
+  return { bridge, worker, session, saved, operation }
+}
+
+async function choose(user: ReturnType<typeof userEvent.setup>) {
+  await screen.findByRole('option', { name: /Paired workstation/ })
+  await waitFor(() => expect(screen.getByRole('combobox', { name: 'Remote worker' })).toBeEnabled())
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Remote worker' }), 'caller-local-worker')
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Shared worker workspace' }), 'remote-workspace')
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Exact Agent Host' }), 'exact-host-123')
+}
+
+describe('explicit remote Agent Host creation', () => {
+  it('distinguishes acknowledged lazy native initialization from a saved task assignment', async () => {
+    const { bridge, operation } = fixture()
+    operation('ready').nativeLifecycle = 'creating'
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound />)
+    expect(await screen.findByText('The Host acknowledged this chat. Its native agent initializes on the first explicit send; no warm-up prompt was sent.')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Created and assigned · T-0002' })).toBeInTheDocument()
+    expect(bridge.create).not.toHaveBeenCalled()
+    expect(bridge.send).not.toHaveBeenCalled()
+  })
+
+  it('uses send access on a paired worker with zero sessions without another permission dialog or prompt', async () => {
+    const { bridge, worker, session } = fixture()
+    const onCreated = vi.fn(async () => {})
+    const onLink = vi.fn(async () => {})
+    const user = userEvent.setup()
+    render(<AgentHostSessionsDialog taskId="T-0002" taskUnbound onLink={onLink} onCreated={onCreated} onDevices={vi.fn()} onClose={vi.fn()} />)
+    await choose(user)
+    expect(screen.getByText('No available Agent Host sessions.')).toBeInTheDocument()
+    expect(screen.getByText(/Creates in the selected workspace folder/)).toHaveTextContent('Creates in the selected workspace folder (no worktree). Native tool approvals remain on the worker. No prompt is sent.')
+    expect(bridge.creationWorkers).toHaveBeenCalledWith('T-0002')
+    expect(bridge.creations).toHaveBeenCalledWith('T-0002')
+    expect(bridge.create).not.toHaveBeenCalled()
+    expect(bridge.send).not.toHaveBeenCalled()
+    expect(screen.getAllByRole('dialog')).toHaveLength(1)
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    await waitFor(() => expect(onCreated).toHaveBeenCalledExactlyOnceWith('T-0002', session))
+    expect(bridge.create).toHaveBeenCalledExactlyOnceWith({
+      operationId: expect.stringMatching(/^[0-9a-f-]{36}$/), taskId: 'T-0002', workerId: worker.id,
+      workspaceId: worker.workspaces[0].id, hostId: worker.hosts[0].hostId, expectedRevision: 'a'.repeat(64),
+    })
+    expect(bridge.send).not.toHaveBeenCalled()
+    expect(bridge.models).not.toHaveBeenCalled()
+    expect(bridge.bindCreation).not.toHaveBeenCalled()
+    expect(onLink).not.toHaveBeenCalled()
+    expect(screen.getByText('ahp-session:/created')).toBeInTheDocument()
+    expect(screen.getByText('ahp-chat:/created/main')).toBeInTheDocument()
+  })
+
+  it.each(['read-only', 'offline', 'bound locally', 'bound remotely', 'missing task', 'unverified task', 'unsupported', 'unavailable Host'] as const)('denies creation for %s', async (reason) => {
+    const { bridge, worker } = fixture()
+    if (reason === 'read-only') worker.workspaces[0].canSend = false
+    if (reason === 'offline') worker.state = 'offline'
+    if (reason === 'bound remotely') worker.workspaces[0].taskState = 'bound'
+    if (reason === 'missing task') worker.workspaces[0].taskState = 'missing'
+    if (reason === 'unverified task') worker.workspaces[0].taskState = 'unavailable'
+    if (reason === 'unsupported') worker.state = 'unsupported'
+    if (reason === 'unavailable Host') worker.hosts[0].available = false
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound={reason !== 'bound locally'} />)
+    await choose(user)
+    const button = screen.getByRole('button', { name: 'Create and assign to T-0002' })
+    expect(button).toBeDisabled()
+    await user.click(button)
+    expect(bridge.create).not.toHaveBeenCalled()
+    expect(bridge.send).not.toHaveBeenCalled()
+    expect(screen.getAllByRole('status').length).toBeGreaterThan(0)
+  })
+
+  it('shows unavailable APIs in an older preload while existing linking still works', async () => {
+    const { session } = fixture()
+    const list = vi.fn(async () => ({ sessions: [session], warnings: [] }))
+    window.agentHost = { list } as unknown as AgentHostBridge
+    const onLink = vi.fn(async () => {})
+    const user = userEvent.setup()
+    render(<AgentHostSessionsDialog taskId="T-0002" taskUnbound onLink={onLink} onDevices={vi.fn()} onClose={vi.fn()} />)
+    expect(screen.getByText(/Remote creation is unavailable/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    await user.click(await screen.findByRole('button', { name: 'Link New native chat to T-0002' }))
+    expect(onLink).toHaveBeenCalledExactlyOnceWith(session)
+  })
+
+  it('does not discover or create without a selected task', async () => {
+    const { bridge } = fixture()
+    render(<AgentHostCreationControls taskUnbound />)
+    expect(screen.getByRole('button', { name: 'Create and assign' })).toBeDisabled()
+    expect(bridge.creationWorkers).not.toHaveBeenCalled()
+    expect(bridge.creations).not.toHaveBeenCalled()
+    expect(bridge.create).not.toHaveBeenCalled()
+  })
+
+  it('requires the exact selected Host and passes a null remote revision unchanged', async () => {
+    const { bridge, worker } = fixture()
+    worker.hosts.push({ hostId: 'second-host', name: 'Second native Host', available: true })
+    worker.workspaces[0].expectedRevision = null
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound />)
+    await choose(user)
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Exact Agent Host' }), '')
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Exact Agent Host' }), 'second-host')
+    expect(bridge.create).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    expect(bridge.create).toHaveBeenCalledWith({ operationId: expect.any(String), taskId: 'T-0002', workerId: worker.id, workspaceId: 'remote-workspace', hostId: 'second-host', expectedRevision: null })
+  })
+
+  it('fails closed when saved operations cannot be read and displays discovery errors', async () => {
+    const { bridge, worker } = fixture()
+    worker.error = 'Worker capabilities are limited.'
+    worker.workspaces[0].error = 'Task revision warning.'
+    worker.hosts[0].error = 'Native Host warning.'
+    vi.mocked(bridge.creations).mockRejectedValue(new Error('Saved operation store unavailable.'))
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound />)
+    await choose(user)
+    expect(screen.getByText(/Creation is disabled to avoid duplicates/)).toHaveTextContent('Saved operation store unavailable.')
+    expect(screen.getByText('Worker capabilities are limited.')).toBeInTheDocument()
+    expect(screen.getByText('Task revision warning.')).toBeInTheDocument()
+    expect(screen.getByText('Native Host warning.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    expect(bridge.create).not.toHaveBeenCalled()
+  })
+
+  it('shows a worker discovery failure without creating or sending', async () => {
+    const { bridge } = fixture()
+    vi.mocked(bridge.creationWorkers).mockRejectedValue(new Error('Device disconnected.'))
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Device disconnected.')
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    expect(bridge.create).not.toHaveBeenCalled()
+    expect(bridge.send).not.toHaveBeenCalled()
+  })
+
+  it('keeps an IPC rejection uncertain and checks the same operation instead of resubmitting', async () => {
+    const { bridge } = fixture()
+    vi.mocked(bridge.create).mockRejectedValue(new Error('Connection ended before acknowledgement.'))
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound />)
+    await choose(user)
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    expect(await screen.findByText('Connection ended before acknowledgement.')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Outcome uncertain · T-0002' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Check status' }))
+    expect(bridge.creationStatus).toHaveBeenCalledExactlyOnceWith(vi.mocked(bridge.create).mock.calls[0][0].operationId)
+    expect(bridge.create).toHaveBeenCalledTimes(1)
+    expect(bridge.bindCreation).not.toHaveBeenCalled()
+  })
+
+  it('recovers an uncertain durable operation after remount without another create', async () => {
+    const { bridge, operation, saved, session } = fixture()
+    const uncertain = operation('uncertain')
+    const user = userEvent.setup()
+    const first = render(<AgentHostCreationControls taskId="T-0002" taskUnbound />)
+    await waitFor(() => expect(bridge.creationStatus).toHaveBeenCalledExactlyOnceWith(uncertain.operationId))
+    first.unmount()
+    const onCreated = vi.fn(async () => {})
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound onCreated={onCreated} />)
+    await waitFor(() => expect(bridge.creationStatus).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Check status' })).toBeEnabled())
+    const row = screen.getByRole('region', { name: `Creation ${uncertain.operationId}` })
+    expect(within(row).getByText('caller-local-worker')).toBeInTheDocument()
+    expect(within(row).getByText(/Paired workstation/)).toBeInTheDocument()
+    saved.set(uncertain.operationId, { ...uncertain, state: 'ready', session })
+    await user.click(screen.getByRole('button', { name: 'Check status' }))
+    await waitFor(() => expect(onCreated).toHaveBeenCalledExactlyOnceWith('T-0002', session))
+    expect(vi.mocked(bridge.creationStatus).mock.calls.every(([id]) => id === uncertain.operationId)).toBe(true)
+    expect(bridge.create).not.toHaveBeenCalled()
+    expect(bridge.send).not.toHaveBeenCalled()
+    expect(bridge.bindCreation).not.toHaveBeenCalled()
+  })
+
+  it('polls and checks on reconnect without creating or retrying binding', async () => {
+    vi.useFakeTimers()
+    const { bridge, operation } = fixture()
+    const uncertain = operation('uncertain')
+    await act(async () => { render(<AgentHostCreationControls taskId="T-0002" taskUnbound />) })
+    expect(bridge.creationStatus).toHaveBeenCalledExactlyOnceWith(uncertain.operationId)
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    expect(bridge.creationStatus).toHaveBeenCalledTimes(2)
+    await act(async () => { window.dispatchEvent(new Event('online')) })
+    expect(bridge.creationStatus).toHaveBeenCalledTimes(3)
+    expect(bridge.create).not.toHaveBeenCalled()
+    expect(bridge.bindCreation).not.toHaveBeenCalled()
+  })
+
+  it('retries only binding for a created-unbound session and retains binding failures', async () => {
+    const { bridge, operation } = fixture()
+    const unbound = operation('created-unbound')
+    vi.mocked(bridge.bindCreation).mockRejectedValueOnce(new Error('Repository revision changed.'))
+    const onCreated = vi.fn(async () => {})
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound onCreated={onCreated} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry binding' })).toBeEnabled())
+    expect(bridge.bindCreation).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: 'Retry binding' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Repository revision changed.')
+    expect(screen.getByText('ahp-session:/created')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Retry binding' }))
+    await waitFor(() => expect(onCreated).toHaveBeenCalledExactlyOnceWith('T-0002', unbound.session))
+    expect(vi.mocked(bridge.bindCreation).mock.calls).toEqual([[unbound.operationId], [unbound.operationId]])
+    expect(bridge.create).not.toHaveBeenCalled()
+    expect(bridge.send).not.toHaveBeenCalled()
+  })
+
+  it('guards rapid double clicks and permits a fresh operation only after confirmed failure', async () => {
+    const { bridge, saved } = fixture()
+    let complete!: (operation: AgentHostCreation) => void
+    vi.mocked(bridge.create).mockImplementationOnce((request) => {
+      saved.set(request.operationId, { ...request, state: 'creating' })
+      return new Promise((resolve) => { complete = resolve })
+    })
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound />)
+    await choose(user)
+    const button = screen.getByRole('button', { name: 'Create and assign to T-0002' })
+    act(() => { fireEvent.click(button); fireEvent.click(button) })
+    expect(bridge.create).toHaveBeenCalledTimes(1)
+    const request = vi.mocked(bridge.create).mock.calls[0][0]
+    await act(async () => { const failed: AgentHostCreation = { ...request, state: 'failed', error: 'Host rejected creation before starting.' }; saved.set(request.operationId, failed); complete(failed) })
+    expect(screen.getByRole('heading', { name: 'Creation failed · T-0002' })).toBeInTheDocument()
+    expect(bridge.create).toHaveBeenCalledTimes(1)
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    expect(bridge.create).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(bridge.create).mock.calls[1][0].operationId).not.toBe(request.operationId)
+  })
+
+  it('does not open or bind another task when selection changes during creation', async () => {
+    const { bridge, session, saved } = fixture()
+    let complete!: (operation: AgentHostCreation) => void
+    vi.mocked(bridge.create).mockImplementationOnce((request) => {
+      saved.set(request.operationId, { ...request, state: 'creating' })
+      return new Promise((resolve) => { complete = resolve })
+    })
+    const onCreated = vi.fn(async () => {})
+    const user = userEvent.setup()
+    const result = render(<AgentHostCreationControls taskId="T-0002" taskUnbound onCreated={onCreated} />)
+    await choose(user)
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    const request = vi.mocked(bridge.create).mock.calls[0][0]
+    result.rerender(<AgentHostCreationControls taskId="T-0003" taskUnbound onCreated={onCreated} />)
+    await act(async () => { const ready: AgentHostCreation = { ...request, state: 'ready', session }; saved.set(request.operationId, ready); complete(ready) })
+    await waitFor(() => expect(bridge.creations).toHaveBeenCalledWith('T-0003'))
+    expect(onCreated).not.toHaveBeenCalled()
+    expect(bridge.create).toHaveBeenCalledTimes(1)
+    expect(request.taskId).toBe('T-0002')
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0003' })).toBeDisabled()
+    expect(screen.queryByRole('region', { name: `Creation ${request.operationId}` })).not.toBeInTheDocument()
+    result.unmount()
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound onCreated={onCreated} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open created chat' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open created chat' }))
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith('T-0002', session)
+    expect(bridge.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects a mismatched result and retains the original operation identity', async () => {
+    const { bridge } = fixture()
+    vi.mocked(bridge.create).mockImplementationOnce(async (request) => ({ ...request, taskId: 'T-0003', state: 'ready' }))
+    const onCreated = vi.fn(async () => {})
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound onCreated={onCreated} />)
+    await choose(user)
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('does not match the original creation operation')
+    expect(onCreated).not.toHaveBeenCalled()
+    expect(screen.getByRole('heading', { name: 'Outcome uncertain · T-0002' })).toBeInTheDocument()
+  })
+
+  it('keeps a saved ready chat recoverable when the workbench callback fails', async () => {
+    const { bridge } = fixture()
+    const onCreated = vi.fn(async () => {}).mockRejectedValueOnce(new Error('Local links could not be reloaded.'))
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound onCreated={onCreated} />)
+    await choose(user)
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Local links could not be reloaded.')
+    expect(screen.getByRole('heading', { name: 'Created and assigned · T-0002' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Open created chat' }))
+    expect(onCreated).toHaveBeenCalledTimes(2)
+    expect(bridge.create).toHaveBeenCalledTimes(1)
+    expect(bridge.bindCreation).not.toHaveBeenCalled()
+  })
+
+  it('does not treat resolved history as a pending operation after a task was detached', async () => {
+    const { bridge, operation } = fixture()
+    operation('ready')
+    const onCreated = vi.fn(async () => {})
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound onCreated={onCreated} />)
+    await choose(user)
+    expect(screen.getByRole('heading', { name: 'Created and assigned · T-0002' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeEnabled()
+    expect(onCreated).not.toHaveBeenCalled()
+    expect(bridge.create).not.toHaveBeenCalled()
+  })
+})

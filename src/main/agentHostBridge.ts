@@ -7,6 +7,7 @@ import { chatSubmissionSchema } from '../shared/chatAttachments'
 import { agentHostModelSelectionSchema, agentHostTargetSchema } from './agentHostProtocol'
 import type { AgentHostManager } from './agentHostManager'
 import { readClientIdentity } from './clientIdentity'
+import { agentHostCreateRequestSchema, creationTaskIdSchema } from './agentHostCreationProtocol'
 
 export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>, manager: AgentHostManager) {
   const watches = new Map<string, { window: BrowserWindow; close(): void }>()
@@ -31,6 +32,43 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     await current(event, window, root)
     return result
   })
+  ipcMain.handle('agent-host:creation-workers', async (event, value: unknown) => {
+    const window = requireWindow(event)
+    const root = await currentRoot()
+    const taskId = creationTaskIdSchema.parse(value)
+    await current(event, window, root)
+    const result = await manager.creations.workers(root, taskId)
+    await current(event, window, root)
+    return result
+  })
+  ipcMain.handle('agent-host:creations', async (event, value: unknown) => {
+    const window = requireWindow(event)
+    const root = await currentRoot()
+    const taskId = creationTaskIdSchema.parse(value)
+    const result = await manager.creations.list(root, taskId)
+    await current(event, window, root)
+    return result
+  })
+  ipcMain.handle('agent-host:create', async (event, value: unknown) => {
+    const window = requireWindow(event)
+    const root = await currentRoot()
+    const request = agentHostCreateRequestSchema.parse(value)
+    await current(event, window, root)
+    const result = await manager.creations.create(root, request, () => current(event, window, root))
+    await current(event, window, root)
+    return result
+  })
+  for (const [channel, bind] of [['creation-status', false], ['bind-creation', true]] as const) {
+    ipcMain.handle(`agent-host:${channel}`, async (event, value: unknown) => {
+      const window = requireWindow(event)
+      const root = await currentRoot()
+      const id = z.uuid().parse(value)
+      await current(event, window, root)
+      const result = await (bind ? manager.creations.bind(root, id, () => current(event, window, root)) : manager.creations.status(root, id, () => current(event, window, root)))
+      await current(event, window, root)
+      return result
+    })
+  }
   ipcMain.handle('agent-host:watch', async (event, value: unknown) => {
     const window = requireWindow(event)
     const root = await currentRoot()
