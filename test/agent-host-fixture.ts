@@ -5,6 +5,7 @@ import { WebSocketServer } from 'ws'
 import { chatReducer, MessageKind } from '@microsoft/agent-host-protocol'
 import type { ActionEnvelope, ChatState, Message, RootState, SessionState, Snapshot } from '@microsoft/agent-host-protocol'
 import type { AgentHostEndpoint } from '../src/main/agentHostProtocol'
+import { modelConfigFixture } from './agent-host-model-fixture'
 
 export async function startAgentHostFixture(initializeMeta?: Record<string, unknown>) {
   const server = createServer()
@@ -19,7 +20,7 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
   const dispatches: unknown[] = []
   let loseNextSend = false
   const root: RootState = { agents: [
-    { provider: 'copilotcli', displayName: 'Copilot', description: '', models: [{ id: 'owner-model', name: 'Owner model', provider: 'copilotcli' }, { id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }, { id: 'disabled-model', name: 'Disabled', provider: 'copilotcli', policyState: 'disabled' as RootState['agents'][number]['models'][number]['policyState'] }] },
+    { provider: 'copilotcli', displayName: 'Copilot', description: '', models: [{ id: 'owner-model', name: 'Owner model', provider: 'copilotcli' }, { id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli', configSchema: modelConfigFixture }, { id: 'disabled-model', name: 'Disabled', provider: 'copilotcli', policyState: 'disabled' as RootState['agents'][number]['models'][number]['policyState'] }] },
     { provider: 'private-provider', displayName: 'Private provider', description: '', models: [{ id: 'private-model', name: 'Private model', provider: 'private-provider' }] },
   ], activeSessions: 123, _meta: { privateMetadata: 'not shared' } }
   const snapshot = (resource: string): Snapshot => ({ resource, fromSeq: sequence, state: structuredClone(resource === 'ahp-root://' ? root : resource === chatId ? chat : session) })

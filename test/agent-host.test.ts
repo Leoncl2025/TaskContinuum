@@ -7,12 +7,14 @@ import { join } from 'node:path'
 import { once } from 'node:events'
 import { WebSocketServer } from 'ws'
 import { AhpClient } from '@microsoft/agent-host-protocol/client'
-import type { ChatTurnStartedAction } from '@microsoft/agent-host-protocol'
+import type { ChatTurnStartedAction, ModelSelection } from '@microsoft/agent-host-protocol'
 import { describe, expect, it } from 'vitest'
 import { connectLocalAgentHost, discoverAgentHosts } from '../src/main/agentHostTransport'
 import type { AgentHostEndpoint } from '../src/main/agentHostProtocol'
 import { AgentHostConnection } from '../src/main/agentHostConnection'
 import { startAgentHostFixture } from './agent-host-fixture'
+import { modelConfigFixture } from './agent-host-model-fixture'
+import { agentHostModelInfoSchema } from '../src/main/agentHostProtocol'
 
 describe('AHP original chat connection', () => {
   it('rejects an older remote gateway rather than letting it discard the explicit model', async () => {
@@ -27,19 +29,37 @@ describe('AHP original chat connection', () => {
     } finally { await connection.close(); await host.close(); await rm(root, { recursive: true, force: true }) }
   })
 
+  it('rejects a model-selection gateway without configuration support before dispatch', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-old-config-'))
+    const host = await startAgentHostFixture({ taskcontinuumCanSend: true, taskcontinuumModelSelection: true })
+    const target = { hostId: host.hostId, sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+    const connection = new AgentHostConnection(target, root, (signal) => connectLocalAgentHost(host.endpoint, signal))
+    try {
+      await expect(connection.models()).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'gpt-6' })]))
+      await expect(connection.send(randomUUID(), 'Keep my config', undefined, async () => {}, undefined, { id: 'gpt-6', config: { thinkingLevel: 'max' } })).rejects.toThrow('Update Task Continuum on the owner device to configure remote models')
+      expect(host.dispatches).toHaveLength(0)
+      await connection.send(randomUUID(), 'Use defaults', undefined, async () => {}, undefined, { id: 'gpt-6' })
+      expect(host.dispatches).toEqual([expect.objectContaining({ message: expect.objectContaining({ model: { id: 'gpt-6' } }) })])
+    } finally { await connection.close(); await host.close(); await rm(root, { recursive: true, force: true }) }
+  })
+
   it('sends an explicit model instead of a stale owner selection and includes it in replay identity', async () => {
     const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-model-'))
     const host = await startAgentHostFixture()
     const target = { hostId: host.hostId, sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
     const connection = new AgentHostConnection(target, root, (signal) => connectLocalAgentHost(host.endpoint, signal))
-    const model = { id: 'gpt-6', config: { reasoningEffort: 'high' } }
+    const model = { id: 'gpt-6', config: { thinkingLevel: 'max', contextSize: 872000 } }
     try {
       host.draft('', { model: { id: 'owner-model' }, agent: { uri: 'file:///fixture/plan.agent.md' } })
-      expect(await connection.models()).toEqual([{ id: 'owner-model', name: 'Owner model', provider: 'copilotcli' }, { id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }])
+      expect(await connection.models()).toEqual([{ id: 'owner-model', name: 'Owner model', provider: 'copilotcli' }, { id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli', configSchema: modelConfigFixture }])
       for (const id of ['disabled-model', 'private-model', 'missing-model']) {
         await expect(connection.send(randomUUID(), 'Do not silently fall back', undefined, async () => {}, undefined, { id })).rejects.toThrow('no longer available')
       }
       expect(host.dispatches).toHaveLength(0)
+      const invalidConfigs: NonNullable<ModelSelection['config']>[] = [{ thinkingLevel: 'invalid' }, { contextSize: '872000' }, { unknown: true }]
+      for (const config of invalidConfigs) {
+        await expect(connection.send(randomUUID(), 'Reject invalid config', undefined, async () => {}, undefined, { id: 'gpt-6', config })).rejects.toThrow(/unsupported value|Unknown model option/)
+      }
       const id = randomUUID()
       await connection.send(id, 'Explicit model', undefined, async () => {}, undefined, model)
       expect(host.dispatches).toEqual([expect.objectContaining({ message: expect.objectContaining({ model, agent: { uri: 'file:///fixture/plan.agent.md' } }) })])
@@ -47,6 +67,7 @@ describe('AHP original chat connection', () => {
       await expect.poll(() => connection.view.chat?.activeTurn).toBeUndefined()
       await connection.send(id, 'Explicit model', undefined, async () => {}, undefined, model)
       await expect(connection.send(id, 'Explicit model', undefined, async () => {}, undefined, { id: 'owner-model' })).rejects.toThrow('different content')
+      await expect(connection.send(id, 'Explicit model', undefined, async () => {}, undefined, { id: 'gpt-6', config: { thinkingLevel: 'low' } })).rejects.toThrow('different content')
       expect(host.dispatches).toHaveLength(1)
     } finally { await connection.close(); await host.close(); await rm(root, { recursive: true, force: true }) }
   })
@@ -158,7 +179,10 @@ describe('Agent Host endpoints', () => {
       const { result, subscription } = await client.subscribe('ahp-root://')
       try {
         const root = result.snapshot?.state as import('@microsoft/agent-host-protocol').RootState
-        process.stdout.write(`${JSON.stringify({ modelPrompts: 0, agents: root.agents.map((agent) => ({ provider: agent.provider, models: agent.models.map(({ id, name, provider, policyState }) => ({ id, name, provider, policyState })) })) })}\n`)
+        for (const agent of root.agents) for (const model of agent.models) {
+          expect(agentHostModelInfoSchema.parse(model).configSchema).toEqual(model.configSchema)
+        }
+        process.stdout.write(`${JSON.stringify({ modelPrompts: 0, agents: root.agents.map((agent) => ({ provider: agent.provider, models: agent.models.filter((model) => !process.env.TASKCONTINUUM_VERIFY_AHP_MODEL || model.id === process.env.TASKCONTINUUM_VERIFY_AHP_MODEL).map(({ id, name, provider, policyState, configSchema }) => ({ id, name, provider, policyState, configSchema })) })) })}\n`)
         expect(root.agents.some((agent) => agent.models.length)).toBe(true)
       } finally { await subscription.close() }
     } finally { await client.shutdown(); abort.abort() }

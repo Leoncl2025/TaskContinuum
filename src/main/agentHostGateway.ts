@@ -103,7 +103,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
             if (!params.protocolVersions.includes('0.9.0')) throw new Error('Unsupported protocol version.')
             const resources = params.initialSubscriptions ?? []
             if (resources.some((resource) => !connection.allowedChannel(resource))) throw new Error('Channel not authorized.')
-            result = { ...connection.handshake, snapshots: resources.map((resource) => connection.snapshot(resource)), _meta: { taskcontinuumCanSend: initialAccess.canSend, taskcontinuumModelSelection: true } }
+            result = { ...connection.handshake, snapshots: resources.map((resource) => connection.snapshot(resource)), _meta: { taskcontinuumCanSend: initialAccess.canSend, taskcontinuumModelSelection: true, taskcontinuumModelConfig: true } }
             for (const resource of resources) subscribed.add(resource)
             initialized = true
           } else if (request.method === 'reconnect') {

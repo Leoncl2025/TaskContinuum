@@ -22,6 +22,7 @@ import { startAgentHostFixture } from './agent-host-fixture'
 import { updateRepositoryAgentHostLink } from '../src/main/repositorySessionLinks'
 import { locallyLinkedAgentHostSessions } from '../src/main/linkedSessionPolicy'
 import { AhpClient } from '@microsoft/agent-host-protocol/client'
+import { modelConfigFixture } from './agent-host-model-fixture'
 
 it('streams the exact AHP chat through existing paired SSH and revokes access without a Companion', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-device-'))
@@ -76,8 +77,8 @@ it('streams the exact AHP chat through existing paired SSH and revokes access wi
     const selection = { model: { id: 'owner-model', config: { reasoningEffort: 'high', contextSize: 128000 } }, agent: { uri: 'file:///fixture/plan.agent.md' } }
     fixture.draft('', selection)
     const id = randomUUID()
-    expect(await connection.models()).toContainEqual({ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' })
-    const remoteModel = { id: 'gpt-6', config: { reasoningEffort: 'high' } }
+    expect(await connection.models()).toContainEqual({ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli', configSchema: modelConfigFixture })
+    const remoteModel = { id: 'gpt-6', config: { thinkingLevel: 'max', contextSize: 872000 } }
     await connection.send(id, 'Original over SSH', undefined, async () => {}, undefined, remoteModel)
     expect(fixture.dispatches).toEqual([expect.objectContaining({ type: 'chat/turnStarted', turnId: id, message: expect.objectContaining({ ...selection, model: remoteModel }) })])
     fixture.action({ type: 'chat/responsePart', turnId: id, part: { id: 'answer', kind: 'markdown', content: '' } })
@@ -93,7 +94,7 @@ it('streams the exact AHP chat through existing paired SSH and revokes access wi
     expect(JSON.stringify(scoped)).not.toContain('Unshared sibling title')
     expect(JSON.stringify(scoped)).not.toContain('private-other')
     const catalog = (await raw.subscribe('ahp-root://')).result.snapshot
-    expect(catalog?.state).toEqual({ agents: [{ provider: 'copilotcli', displayName: 'copilotcli', description: '', models: [{ id: 'owner-model', name: 'Owner model', provider: 'copilotcli' }, { id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }] }] })
+    expect(catalog?.state).toEqual({ agents: [{ provider: 'copilotcli', displayName: 'copilotcli', description: '', models: [{ id: 'owner-model', name: 'Owner model', provider: 'copilotcli' }, { id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli', configSchema: modelConfigFixture }] }] })
     expect(JSON.stringify(catalog)).not.toMatch(/private|activeSessions|disabled-model/)
     await expect(raw.subscribe('ahp-chat:/private-other')).rejects.toThrow('not authorized')
     await expect(raw.resourceRead({ uri: 'file:///private.txt' })).rejects.toThrow('not authorized')

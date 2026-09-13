@@ -46,8 +46,11 @@ describe('trusted AHP desktop operations', () => {
     const send = native.handlers.get('agent-host:send')!
     await expect(send({}, setup.target, crypto.randomUUID(), 'Use GPT-6', undefined, { id: '' })).rejects.toThrow()
     expect(setup.manager.connection).not.toHaveBeenCalled()
-    await send({}, setup.target, crypto.randomUUID(), 'Use GPT-6', undefined, { id: 'gpt-6' })
-    expect(setup.connection.send).toHaveBeenCalledWith(expect.any(String), 'Use GPT-6', undefined, expect.any(Function), expect.objectContaining({ username: 'Alice' }), { id: 'gpt-6' })
+    await expect(send({}, setup.target, crypto.randomUUID(), 'Use GPT-6', undefined, { id: 'gpt-6', config: { contextSize: [872000] } })).rejects.toThrow()
+    expect(setup.manager.connection).not.toHaveBeenCalled()
+    const model = { id: 'gpt-6', config: { thinkingLevel: 'max', contextSize: 872000 } }
+    await send({}, setup.target, crypto.randomUUID(), 'Use GPT-6', undefined, model)
+    expect(setup.connection.send).toHaveBeenCalledWith(expect.any(String), 'Use GPT-6', undefined, expect.any(Function), expect.objectContaining({ username: 'Alice' }), model)
   })
 
   it('authorizes catalog reads again before returning model information', async () => {

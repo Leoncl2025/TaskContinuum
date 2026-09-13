@@ -8,6 +8,7 @@ import type { ActionEnvelope, ChatTurnStartedAction, ChatTurnCancelledAction, In
 import type { AgentHostTarget, AgentHostView } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
+import { modelConfigErrors } from '../shared/agentHostModelConfig'
 import { AgentHostChatState } from './agentHostState'
 import { agentHostKey, agentHostModelInfoSchema, agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminalIdSchema } from './agentHostProtocol'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
@@ -228,7 +229,7 @@ export class AgentHostConnection {
       const provider = (this.snapshots.get(this.target.sessionId)?.state as SessionState | undefined)?.provider
       const agent = root.agents.find((item) => item.provider === provider)
       if (!agent) throw new Error('The original session provider has no model catalog.')
-      return agent.models.filter((model) => model.provider === provider && model.policyState !== 'disabled').map(({ id, name, provider }) => ({ id, name, provider }))
+      return agent.models.filter((model) => model.provider === provider && model.policyState !== 'disabled').map(({ id, name, provider, configSchema }) => ({ id, name, provider, ...(configSchema ? { configSchema } : {}) }))
     } finally { await subscription.close() }
   }
 
@@ -241,8 +242,14 @@ export class AgentHostConnection {
     try {
       await this.open()
       await authorize()
-      const modelId = command.model?.id
-      if (modelId && !(await this.models()).some((item) => item.id === modelId)) throw new Error('The selected model is no longer available. Refresh the model list and choose another model.')
+      if (command.model) {
+        const modelId = command.model.id
+        const selected = (await this.models()).find((item) => item.id === modelId)
+        if (!selected) throw new Error('The selected model is no longer available. Refresh the model list and choose another model.')
+        if (Object.keys(command.model.config ?? {}).length && this.initialized?._meta?.taskcontinuumCanSend !== undefined && this.initialized._meta.taskcontinuumModelConfig !== true) throw new Error('Update Task Continuum on the owner device to configure remote models.')
+        const errors = modelConfigErrors(selected.configSchema, command.model.config ?? {})
+        if (errors.length) throw new Error(errors.join(' '))
+      }
       const active = this.current!
       const fresh = await active.client.request('subscribe', { channel: this.target.chatId })
       if (this.current !== active || !fresh.snapshot) throw new Error('The connection changed before sending. Nothing was sent.')

@@ -29,7 +29,7 @@ export interface AgentHostView {
 
 export interface AgentHostBridge {
   list(): Promise<{ sessions: AgentHostSession[]; warnings: string[] }>
-  models(target: AgentHostTarget): Promise<Pick<SessionModelInfo, 'id' | 'name' | 'provider'>[]>
+  models(target: AgentHostTarget): Promise<Pick<SessionModelInfo, 'id' | 'name' | 'provider' | 'configSchema'>[]>
   watch(target: AgentHostTarget): Promise<string>
   unwatch(id: string): Promise<void>
   send(target: AgentHostTarget, id: string, text: string, images?: ChatImageAttachment[], model?: ModelSelection): Promise<void>

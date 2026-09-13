@@ -138,6 +138,18 @@ Both desktops need this update for remote model selection; an older owner gatewa
 is rejected with an update message. Model selection does not change native tool
 approvals or create a new conversation.
 
+**Model options** beside the composer are generated from the selected model's
+Host-provided `configSchema`, including Thinking Level and Context Size when
+advertised. Enum labels come from the Host; numeric and boolean values retain
+their types through IPC and the paired gateway. **Default** omits that override
+and uses the Host's default (not the native editor's unsynchronized selection).
+Switching models clears overrides; reconnecting retains them, but changed or
+removed options block sending until corrected or reset to defaults. Read-only
+options cannot be changed. Configuration is checked again against the current
+catalog before dispatch. Update both desktops for remote configuration support.
+Each turn records its requested config for inspection. Options are retained only
+while the panel stays open, not across application restarts.
+
 Git stores a distinct `agent-host` provider with owner Client ID, Host instance ID,
 session URI and chat URI. Native Copilot sessions use `copilotcli:/...` and
 `ahp-chat://default/...`; the prototype's `ahp-session:/...` form is also accepted.

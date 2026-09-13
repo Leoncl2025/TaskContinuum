@@ -10,6 +10,9 @@ import { ChatMarkdown } from './ChatMarkdown'
 import { ChatImagePicker, ChatImages, ChatImageStatus } from './ChatImages'
 import { useChatImageInput } from '../chat/useChatImageInput'
 import { Icon, IconButton } from './Primitives'
+import { AgentHostModelConfig } from './AgentHostModelConfig'
+import { modelConfigErrors } from '../../shared/agentHostModelConfig'
+import type { ModelConfig } from '../../shared/agentHostModelConfig'
 
 function terminalText(state: TerminalState | undefined): string {
   return state ? stripAnsi(state.content.map((part) => part.type === 'command' ? part.output : part.value).join('')) : ''
@@ -50,11 +53,14 @@ export function AgentHostPanel({ task, target, onDetach, onClose, onDevices, onB
   const [busy, setBusy] = useState(false)
   const [revision, setRevision] = useState(0)
   const [catalog, setCatalog] = useState<{ key: string; revision: number; models: Awaited<ReturnType<AgentHostBridge['models']>>; error?: string }>()
-  const [selection, setSelection] = useState<{ key: string; id: string }>()
+  const [selection, setSelection] = useState<{ key: string; id: string; config?: ModelConfig }>()
   const currentCatalog = catalog?.key === key && catalog.revision === revision ? catalog : undefined
   const models = currentCatalog?.models ?? []
   const modelId = selection?.key === key ? selection.id : ''
-  const modelReady = models.some((model) => model.id === modelId)
+  const selectedModel = models.find((model) => model.id === modelId)
+  const modelReady = Boolean(selectedModel)
+  const config = selection?.key === key ? selection.config ?? {} : {}
+  const configErrors = selectedModel ? modelConfigErrors(selectedModel.configSchema, config) : []
   const operating = useRef(false)
   const mounted = useRef(false)
   const following = useRef(true)
@@ -98,7 +104,7 @@ export function AgentHostPanel({ task, target, onDetach, onClose, onDevices, onB
     const command = attempted.current
     if (command && (view?.chat?.activeTurn?.id === command.id || view?.chat?.turns.some((turn) => turn.id === command.id))) confirmed()
   }, [view])
-  const canSend = Boolean(bridge && modelReady && !busy && !pending && !activeTurn && !view?.readOnly && (view?.canSend || view?.state === 'offline'))
+  const canSend = Boolean(bridge && modelReady && !configErrors.length && !busy && !pending && !activeTurn && !view?.readOnly && (view?.canSend || view?.state === 'offline'))
   async function send(): Promise<void> {
     if (!canSend || !bridge || operating.current || imageInput.isReading() || !draft.trim() && !images.length) return
     operating.current = true
@@ -107,7 +113,7 @@ export function AgentHostPanel({ task, target, onDetach, onClose, onDevices, onB
     const command = { id: crypto.randomUUID(), text: draft.trim(), images }
     attempted.current = command
     try {
-      await bridge.send(target, command.id, command.text, command.images.length ? command.images : undefined, { id: modelId })
+      await bridge.send(target, command.id, command.text, command.images.length ? command.images : undefined, { id: modelId, ...(Object.keys(config).length ? { config } : {}) })
       if (mounted.current) { confirm(command); following.current = true }
     } catch (failure) { if (mounted.current && attempted.current?.id === command.id) setError(failure instanceof Error ? failure.message : 'Delivery was not confirmed. Inspect the original before retrying.') }
     finally { operating.current = false; if (mounted.current) setBusy(false) }
@@ -131,7 +137,7 @@ export function AgentHostPanel({ task, target, onDetach, onClose, onDevices, onB
       {!turns.length && <p className="muted">{view?.state === 'connected' ? 'No messages.' : 'Waiting for original history...'}</p>}
       {turns.map((turn) => {
         const actor = turn.message._meta?.taskcontinuumActor as { username?: string; machineName?: string } | undefined
-        return <div key={turn.id} data-turn-id={turn.id}><article className="message message-user"><header><Icon name="account" /><strong>{typeof actor?.username === 'string' ? actor.username : 'User'}</strong>{typeof actor?.machineName === 'string' && <span className="message-model">{actor.machineName}</span>}</header>{turn.message.model && <p className="message-notice">Requested model: {turn.message.model.id}</p>}<div className="message-text">{turn.message.text}</div><ChatImages images={imagesFor(turn)} /></article><article className="message message-assistant"><header><Icon name="copilot" /><strong>Copilot @ {machineName}</strong></header>{turn.responseParts.map((part, index) => <Response key={index} part={part} terminals={view?.terminals ?? {}} owner={machineName} />)}{activeTurn?.id === turn.id && <p className="message-notice" role="status">Responding...</p>}</article></div>
+        return <div key={turn.id} data-turn-id={turn.id}><article className="message message-user"><header><Icon name="account" /><strong>{typeof actor?.username === 'string' ? actor.username : 'User'}</strong>{typeof actor?.machineName === 'string' && <span className="message-model">{actor.machineName}</span>}</header>{turn.message.model && <><p className="message-notice">Requested model: {turn.message.model.id}</p>{Object.keys(turn.message.model.config ?? {}).length > 0 && <p className="message-notice">Requested config: {JSON.stringify(turn.message.model.config)}</p>}</>}<div className="message-text">{turn.message.text}</div><ChatImages images={imagesFor(turn)} /></article><article className="message message-assistant"><header><Icon name="copilot" /><strong>Copilot @ {machineName}</strong></header>{turn.responseParts.map((part, index) => <Response key={index} part={part} terminals={view?.terminals ?? {}} owner={machineName} />)}{activeTurn?.id === turn.id && <p className="message-notice" role="status">Responding...</p>}</article></div>
       })}
     </div>
     <form className="composer-area" onSubmit={(event) => { event.preventDefault(); void send() }}>
@@ -145,6 +151,8 @@ export function AgentHostPanel({ task, target, onDetach, onClose, onDevices, onB
         <label>Model<select aria-label="Agent Host model" value={modelId} disabled={busy || pending || responding || view?.readOnly || !models.length} onChange={(event) => setSelection({ key, id: event.target.value })}><option value="">{!currentCatalog ? 'Loading models...' : !models.length ? 'Models unavailable' : 'Choose a model'}</option>{modelId && !modelReady && <option value={modelId} disabled>{modelId} (unavailable)</option>}{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
         <IconButton icon="refresh" label="Retry loading models" disabled={!bridge || busy || !currentCatalog} onClick={() => setRevision((value) => value + 1)} />
       </div>
+      {selectedModel && <AgentHostModelConfig schema={selectedModel.configSchema} config={config} disabled={busy || pending || responding || Boolean(view?.readOnly)} onChange={(config) => setSelection({ key, id: modelId, config })} />}
+      {configErrors.map((message) => <p key={message} className="copilot-error message-notice" role="alert">{message}</p>)}
       <div className="composer"><ChatImages images={images} onRemove={imageInput.remove} disabled={busy} /><textarea id="chat-composer" aria-label="Message Agent Host" placeholder="Message original Agent" rows={3} maxLength={4000} value={draft} onChange={(event) => setDraft(event.target.value)} onPaste={imageInput.paste} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} /><div className="composer-toolbar"><ChatImagePicker onFiles={imageInput.add} disabled={busy || imageInput.reading} /><span className="vscode-composer-identity"><Icon name="link" />Original chat</span>{activeTurn ? <IconButton icon="debug-stop" label="Stop Agent Host response" disabled={busy || view?.readOnly || view?.state !== 'connected'} onClick={() => { void cancel() }} /> : <button className="send-button" type="submit" aria-label="Send to Agent Host" title="Send to Agent Host" disabled={!canSend || imageInput.reading || !draft.trim() && !images.length}><Icon name="arrow-up" /></button>}</div></div>
     </form>
   </aside>

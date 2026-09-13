@@ -6,6 +6,7 @@ import { MessageKind } from '@microsoft/agent-host-protocol'
 import type { AgentHostBridge, AgentHostView } from '../src/shared/agentHost'
 import { AgentHostPanel } from '../src/renderer/components/AgentHostPanel'
 import { demoTasks } from '../src/renderer/data/tasks'
+import { modelConfigFixture } from './agent-host-model-fixture'
 
 afterEach(() => { delete window.agentHost; delete window.desktop })
 
@@ -26,6 +27,63 @@ function fixture() {
 }
 
 describe('Agent Host chat UI', () => {
+  it('renders Host config options, preserves typed values on reconnect, and sends them explicitly', async () => {
+    const setup = fixture()
+    vi.mocked(setup.bridge.models).mockResolvedValue([{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli', configSchema: modelConfigFixture }])
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByRole('option', { name: 'GPT-6' })
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Agent Host model' }), 'gpt-6')
+    expect(screen.getByRole('combobox', { name: 'Thinking Level' })).toHaveDisplayValue('Default (Medium)')
+    expect(screen.getByRole('combobox', { name: 'Context Size' })).toHaveDisplayValue('Default (272K)')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Thinking Level' }), screen.getByRole('option', { name: 'Max' }))
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Context Size' }), screen.getByRole('option', { name: '872K' }))
+    await user.click(screen.getByRole('button', { name: 'Reconnect Agent Host' }))
+    await screen.findByRole('combobox', { name: 'Thinking Level' })
+    expect(screen.getByRole('combobox', { name: 'Thinking Level' })).toHaveDisplayValue('Max')
+    await user.type(screen.getByRole('textbox'), 'Use model config')
+    await user.click(screen.getByRole('button', { name: 'Send to Agent Host' }))
+    expect(setup.bridge.send).toHaveBeenCalledExactlyOnceWith(setup.target, expect.any(String), 'Use model config', undefined, { id: 'gpt-6', config: { thinkingLevel: 'max', contextSize: 872000 } })
+  })
+
+  it('clears config on model change and restores Host defaults without copying native config', async () => {
+    const setup = fixture()
+    vi.mocked(setup.bridge.models).mockResolvedValue([{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli', configSchema: modelConfigFixture }, { id: 'other', name: 'Other model', provider: 'copilotcli' }])
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByRole('option', { name: 'GPT-6' })
+    const picker = screen.getByRole('combobox', { name: 'Agent Host model' })
+    await user.selectOptions(picker, 'gpt-6')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Thinking Level' }), screen.getByRole('option', { name: 'Max' }))
+    await user.selectOptions(picker, 'other')
+    expect(screen.queryByRole('combobox', { name: 'Thinking Level' })).not.toBeInTheDocument()
+    await user.selectOptions(picker, 'gpt-6')
+    expect(screen.getByRole('combobox', { name: 'Thinking Level' })).toHaveDisplayValue('Default (Medium)')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Context Size' }), screen.getByRole('option', { name: '872K' }))
+    await user.click(screen.getByRole('button', { name: 'Reset model options to defaults' }))
+    await user.type(screen.getByRole('textbox'), 'Use defaults')
+    await user.click(screen.getByRole('button', { name: 'Send to Agent Host' }))
+    expect(setup.bridge.send).toHaveBeenCalledExactlyOnceWith(setup.target, expect.any(String), 'Use defaults', undefined, { id: 'gpt-6' })
+  })
+
+  it('blocks a config value invalidated by a catalog refresh until the user resets it', async () => {
+    const setup = fixture()
+    vi.mocked(setup.bridge.models).mockResolvedValue([{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli', configSchema: modelConfigFixture }])
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByRole('option', { name: 'GPT-6' })
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Agent Host model' }), 'gpt-6')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Thinking Level' }), screen.getByRole('option', { name: 'Max' }))
+    vi.mocked(setup.bridge.models).mockResolvedValue([{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli', configSchema: { type: 'object', properties: { thinkingLevel: { type: 'string', title: 'Thinking Level', enum: ['low'], default: 'low' } } } }])
+    await user.click(screen.getByRole('button', { name: 'Retry loading models' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('unsupported value')
+    await user.type(screen.getByRole('textbox'), 'Do not silently change config')
+    expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Reset model options to defaults' }))
+    expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeEnabled()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+  })
+
   it('requires an explicit model and keeps it across native updates and reconnects', async () => {
     const setup = fixture()
     setup.view.chat!.draft = { text: '', origin: { kind: MessageKind.User }, model: { id: 'owner-model' } }
