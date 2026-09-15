@@ -103,7 +103,8 @@ describe('client-scoped SSH sessions', () => {
       expect(await manager.read(tasks, first.target)).toMatchObject({ connectionState: 'offline', canSend: false })
       const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10000)
       try {
-        expect(await manager.read(tasks, first.target)).toMatchObject({ connectionState: 'connected' })
+        const recovered = await manager.read(tasks, first.target)
+        expect(recovered, recovered.bridgeError).toMatchObject({ connectionState: 'connected' })
         expect(transport).toHaveBeenCalledTimes(2)
         expect(dispatch).toHaveBeenCalledTimes(1)
       } finally { clock.mockRestore() }

@@ -23,6 +23,8 @@ import { readRepositorySessionLinks, updateRepositorySessionLink } from './repos
 import { AgentHostRegistry } from './agentHostRegistry'
 import { AgentHostManager } from './agentHostManager'
 import { locallyLinkedAgentHostSessions } from './linkedSessionPolicy'
+import { WorkspaceSyncService } from './remoteConfig/service'
+import { registerGitSyncBridge } from './remoteConfig/bridge'
 
 async function requirePrivateDestination(file: string): Promise<void> {
   let directory = await realpath(dirname(file))
@@ -35,7 +37,7 @@ async function requirePrivateDestination(file: string): Promise<void> {
   }
 }
 
-export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>) {
+export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>, onConfigurationChanged: () => void = () => {}) {
   const protector = {
     available: () => safeStorage.isEncryptionAvailable() && (process.platform !== 'linux' || safeStorage.getSelectedStorageBackend() !== 'basic_text'),
     encrypt: (value: string) => safeStorage.encryptString(value), decrypt: (value: Buffer) => safeStorage.decryptString(value),
@@ -46,7 +48,7 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
   const host = new VSCodeDeviceHost(app.getPath('userData'), protector,
     (identity, participant, canSend, prior) => resolveDeviceSession(store, identity, participant, canSend, prior),
     (invitation) => revokeRemoteVSCode(store, invitation.identity, invitation.grant.id),
-    async (root) => locallyLinkedSessions(app.getPath('userData'), root, await readClientIdentity(app.getPath('userData'))))
+    async (root) => { await gitSync.requireReadyRoot(root); return locallyLinkedSessions(app.getPath('userData'), root, await readClientIdentity(app.getPath('userData'))) })
   const devices = new VSCodeDeviceClient(app.getPath('userData'), protector,
     (invitation, signal) => tunnels.connect(invitation.devTunnel, invitation.id, invitation.port, signal),
     async (invitation) => {
@@ -67,13 +69,21 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     const { clientId, machineName } = await manager.identity()
     return { clientId, machineName }
   })
-  host.setAgentHostAccess(registry, async (root) => locallyLinkedAgentHostSessions(app.getPath('userData'), root, await readClientIdentity(app.getPath('userData'))))
-  void tunnels.startRecovery(async () => {
+  host.setAgentHostAccess(registry, async (root) => { await gitSync.requireReadyRoot(root); return locallyLinkedAgentHostSessions(app.getPath('userData'), root, await readClientIdentity(app.getPath('userData'))) })
+  const gitSync = new WorkspaceSyncService({
+    directory: app.getPath('userData'), keys, tunnels, host, devices,
+    identity: () => manager.identity(), onChange: onConfigurationChanged,
+  })
+  registerGitSyncBridge(requireWindow, currentRoot, gitSync)
+  const recovery = gitSync.restore().then(() => tunnels.startRecovery(async () => {
     const pairs = (await host.list()).filter((pair) => Date.parse(pair.expiresAt) > Date.now())
-    if (!pairs.length) return
-    const port = await host.start()
-    for (const pair of pairs) tunnels.authorize(pair, pair.publicKey, port, true)
-  }).catch(() => undefined)
+    if (pairs.length) {
+      const port = await host.start()
+      for (const pair of pairs) tunnels.authorize(pair, pair.publicKey, port, true)
+    }
+    await gitSync.restoreControlGrants()
+  })).then(() => gitSync.startRestored())
+  void recovery.catch((error: unknown) => console.error('Automatic workspace recovery failed:', error instanceof Error ? error.message : 'Invalid saved state'))
   const json = [{ name: 'JSON', extensions: ['json'] }]
   const id = (value: unknown) => z.uuid().parse(value)
   function handle(channel: string, action: (window: BrowserWindow, ...values: unknown[]) => unknown): void {
@@ -161,7 +171,13 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     const root = await currentRoot()
     const selected = id(value)
     const consent = await dialog.showMessageBox(window, { type: 'warning', message: 'Revoke this device and all its session access?', buttons: ['Cancel', 'Revoke'], defaultId: 0, cancelId: 0 })
-    if (consent.response === 1) { await unchanged(root); tunnels.revoke(selected); await host.revoke(selected) }
+    if (consent.response === 1) {
+      await unchanged(root)
+      const pair = (await host.list()).find((entry) => entry.id === selected)
+      tunnels.revoke(selected)
+      await host.revoke(selected)
+      if (pair) await gitSync.revokeEverywhere(pair.participant.clientId)
+    }
   })
   handle('device-share', async (window, value, target, permission) => {
     const root = await currentRoot()
@@ -280,5 +296,12 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     const confirmation = await dialog.showMessageBox(window, { type: 'warning', title: 'Revoke remote access', message: 'Revoke this remote invitation?', detail: 'Future reads and submissions will be rejected. An already-running Agent response is not stopped.', buttons: ['Cancel', 'Revoke'], defaultId: 0, cancelId: 0 })
     if (confirmation.response === 1) { await unchanged(root); await revokeRemoteVSCode(store, identity, selected); tunnels.revoke(selected) }
   })
-  return { manager, agentHosts, close: async () => { manager.close(); await tunnels.close(); await host.close(); await agentHosts.close() } }
+  return { manager, agentHosts, gitSync, close: async () => {
+    try { await recovery } catch (error) { console.error('Closing after workspace recovery failure:', error instanceof Error ? error.message : 'Invalid saved state') }
+    await gitSync.close()
+    manager.close()
+    await tunnels.close()
+    await host.close()
+    await agentHosts.close()
+  } }
 }

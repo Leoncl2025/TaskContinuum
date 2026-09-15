@@ -5,8 +5,9 @@ import { readSessionBindings, saveSessionBindings } from '../src/renderer/chat/s
 import type { WorkspaceBridge, WorkspaceSnapshot } from '../src/shared/workspace'
 import type { SessionLinksSnapshot } from '../src/shared/sessionBindings'
 import { demoTasks } from '../src/renderer/data/tasks'
+import { gitSyncUiFixture } from './remote-config-ui-fixture'
 
-afterEach(() => { delete window.workspace })
+afterEach(() => { delete window.workspace; delete window.remoteVSCode })
 
 function fixture() {
   const workspace: WorkspaceSnapshot = { id: 'workspace-one', name: 'TaskContinuum-ad', title: 'Task Continuum', root: 'Q:\\src\\Projects\\TaskContinuum-ad', tasks: [demoTasks[1]], warnings: [], loadedAt: '2026-09-06T00:00:00Z' }
@@ -33,6 +34,28 @@ function fixture() {
 }
 
 describe('repository-backed session binding state', () => {
+  it('loads SSH provisional binding changes immediately and drains notifications received during a save', async () => {
+    const { workspace, bridge } = fixture()
+    const remote = gitSyncUiFixture()
+    window.remoteVSCode = remote.remote
+    const view = renderHook(() => useSessionLinks(workspace))
+    await waitFor(() => expect(view.result.current.ready).toBe(true))
+    const synced: SessionLinksSnapshot = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'github-copilot', sessionId: 'ssh-change' } } }, revision: 'c'.repeat(64) }
+    vi.mocked(bridge.getSessionLinks).mockResolvedValue(synced)
+    await act(async () => remote.notify())
+    expect(view.result.current.bindings['T-0002'].id).toBe('ssh-change')
+    let finish!: (value: SessionLinksSnapshot) => void
+    vi.mocked(bridge.updateSessionLink).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    let saving!: Promise<void>
+    act(() => { saving = view.result.current.attach('T-0003', { id: 'saving', title: 'Saving' }) })
+    const final: SessionLinksSnapshot = { ...synced, revision: 'd'.repeat(64), document: { schemaVersion: 1, bindings: { ...synced.document.bindings, 'T-0004': { provider: 'github-copilot', sessionId: 'newer-ssh-change' } } } }
+    vi.mocked(bridge.getSessionLinks).mockResolvedValue(final)
+    act(() => remote.notify())
+    await act(async () => { finish(synced); await saving })
+    expect(view.result.current.bindings['T-0004'].id).toBe('newer-ssh-change')
+    expect(bridge.updateSessionLink).toHaveBeenCalledOnce()
+    view.unmount()
+  })
   it('refreshes Git-pulled links without a second attach operation', async () => {
     const { workspace, bridge } = fixture()
     const view = renderHook(() => useSessionLinks(workspace))

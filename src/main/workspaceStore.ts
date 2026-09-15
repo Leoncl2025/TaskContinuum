@@ -33,6 +33,10 @@ function descriptor(snapshot: WorkspaceSnapshot): WorkspaceDescriptor {
   return { id: snapshot.id, name: snapshot.name, title: snapshot.title, root: snapshot.root }
 }
 
+function visibleLinks(snapshot: SessionLinksSnapshot, localOwner?: SessionOwner): SessionLinksSnapshot {
+  return { document: snapshot.document, revision: snapshot.revision, ...(localOwner ? { localOwner } : {}) }
+}
+
 export class WorkspaceStore {
   private readonly stateFile: string
   private readonly startupFolder?: string
@@ -129,7 +133,7 @@ export class WorkspaceStore {
   }
 
   getSessionLinks(workspaceId: unknown): Promise<SessionLinksSnapshot> {
-    return this.update(async () => ({ ...await readRepositorySessionLinks(this.selectedWorkspace(workspaceId).root), localOwner: await this.localOwner() }))
+    return this.update(async () => visibleLinks(await readRepositorySessionLinks(this.selectedWorkspace(workspaceId).root), await this.localOwner()))
   }
 
   private async localOwner(): Promise<SessionOwner> {
@@ -152,7 +156,7 @@ export class WorkspaceStore {
         if (agentHostKey(verified) !== agentHostKey(target)) throw new Error('The verified Agent Host identity changed.')
         const saved = await updateRepositoryAgentHostLink(workspace.root, request.taskId, verified, request.expectedRevision)
         await recordLocalLink(this.stateDirectory, workspace.root, request.taskId, saved.document.bindings[request.taskId], localOwner)
-        return { ...saved, localOwner }
+        return visibleLinks(saved, localOwner)
       }
       let owner = request.sessionId === null ? undefined : localOwner
       if (request.vscodeRemoteMachineName && request.vscodeWorkspaceStorageId) {
@@ -162,7 +166,7 @@ export class WorkspaceStore {
       if (request.sessionId && request.vscodeWorkspaceStorageId && owner?.clientId === localOwner.clientId) await this.originals.locateOriginal({ nativeSessionId: request.sessionId, workspaceStorageId: request.vscodeWorkspaceStorageId })
       const saved = await updateRepositorySessionLink(workspace.root, request.taskId, request.sessionId, request.expectedRevision, request.vscodeWorkspaceStorageId, request.vscodeRemoteMachineName, owner)
       await recordLocalLink(this.stateDirectory, workspace.root, request.taskId, saved.document.bindings[request.taskId], localOwner)
-      return { ...saved, localOwner }
+      return visibleLinks(saved, localOwner)
     })
   }
 
@@ -172,7 +176,7 @@ export class WorkspaceStore {
       const workspace = this.selectedWorkspace(request.workspaceId)
       const taskIds = new Set((await readTaskWorkspace(workspace.root)).tasks.map((task) => task.id))
       if (Object.keys(request.bindings).some((id) => !taskIds.has(id))) throw new Error('A local session link refers to a task that no longer exists.')
-      return migrateRepositorySessionLinks(workspace.root, request.bindings)
+      return visibleLinks(await migrateRepositorySessionLinks(workspace.root, request.bindings))
     })
   }
 }

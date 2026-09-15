@@ -1,5 +1,6 @@
 import type { VSCodeChatIdentity, VSCodeChatParticipant, VSCodeExecutionIdentity } from './vscodeChat'
 import type { DevTunnelBridge } from './devTunnel'
+import type { WorkspaceGitSyncBridge } from './gitSync'
 
 export interface VSCodeChatTarget extends VSCodeChatIdentity {
   remoteMachineName?: string
@@ -32,6 +33,7 @@ export interface RemoteVSCodeGrant {
 }
 
 export interface RemoteVSCodeBridge {
+  gitSync?: WorkspaceGitSyncBridge
   devices?: {
     list(): Promise<{ id: string; machineName: string; state: 'connected' | 'connecting' | 'offline'; enabled: boolean; expiresAt: string; error?: string }[]>
     recipients(): Promise<{ id: string; username: string; machineName: string; expiresAt: string; linkedAccess?: 'none' | 'read' | 'send' }[]>

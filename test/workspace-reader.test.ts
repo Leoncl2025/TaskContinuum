@@ -1,15 +1,19 @@
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { readTaskWorkspace } from '../src/main/workspaceReader'
 import { filterTasks, taskProgress } from '../src/shared/tasks'
 
 const roots: string[] = []
+async function fixtureRoot() {
+  const directory = join(process.cwd(), 'artifacts', 'task-document-tests')
+  await mkdir(directory, { recursive: true })
+  return directory
+}
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))) })
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'taskcontinuum-workspace-'))
+  const root = await mkdtemp(join(await fixtureRoot(), 'taskcontinuum-workspace-'))
   roots.push(root)
   const directory = join(root, 'tasks', 'T-0002-real-task')
   await mkdir(directory, { recursive: true })
@@ -35,7 +39,8 @@ describe('read-only task workspaces', () => {
     expect(workspace.tasks[0].checklist).toEqual([{ id: 'CL-001', title: 'Completed criterion', done: true }, { id: 'CL-002', title: 'Pending criterion', done: false }])
     expect(taskProgress(workspace.tasks[0])).toBe(50)
     expect(filterTasks(workspace.tasks, '', 'active')).toHaveLength(1)
-    expect(workspace.warnings).toEqual([])
+    expect(workspace.diagnostics?.some((issue) => issue.code === 'SCHEMA_INVALID')).toBe(true)
+    expect(workspace.warnings.some((warning) => warning.includes('SCHEMA_INVALID'))).toBe(true)
     expect(await readFile(join(directory, 'Checklist.md'), 'utf8')).toBe(checklist)
   })
 
@@ -67,7 +72,7 @@ describe('read-only task workspaces', () => {
 
   it('does not follow task directory links outside the selected workspace', async () => {
     const { root } = await fixture()
-    const outside = await mkdtemp(join(tmpdir(), 'taskcontinuum-outside-'))
+    const outside = await mkdtemp(join(await fixtureRoot(), 'taskcontinuum-outside-'))
     roots.push(outside)
     await symlink(outside, join(root, 'tasks', 'T-0003-linked'), process.platform === 'win32' ? 'junction' : 'dir')
     const workspace = await readTaskWorkspace(root)
@@ -79,6 +84,8 @@ describe('read-only task workspaces', () => {
     const { root, directory, task } = await fixture()
     await writeFile(join(directory, 'task.json'), JSON.stringify({ ...task, progress: { mode: 'manual', percent: 35, manualPercent: 40 } }))
     expect(taskProgress((await readTaskWorkspace(root)).tasks[0])).toBe(40)
+    await writeFile(join(directory, 'task.json'), JSON.stringify({ ...task, progress: { mode: 'rollup', percent: 37 } }))
+    expect(taskProgress((await readTaskWorkspace(root)).tasks[0])).toBe(37)
     await rm(directory, { recursive: true })
     expect((await readTaskWorkspace(root)).tasks).toEqual([])
   })

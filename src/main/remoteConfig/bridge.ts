@@ -1,0 +1,73 @@
+import { dialog, ipcMain, shell } from 'electron'
+import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
+import { z } from 'zod'
+import type { WorkspaceGitSyncStatus } from '../../shared/gitSync'
+import type { RemoteSettingChanges } from './settingsFile'
+
+export interface GitSyncActions {
+  status(root: string): Promise<WorkspaceGitSyncStatus>
+  enable(root: string): Promise<void>
+  disable(root: string): Promise<void>
+  syncNow(root: string): Promise<void>
+  revokeDevice(root: string, deviceId: string): Promise<void>
+  setSettings(root: string, expectedRevision: string | null, changes: RemoteSettingChanges): Promise<void>
+}
+
+export function registerGitSyncBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>, service: GitSyncActions): void {
+  function handle(name: string, action: (window: BrowserWindow, value: unknown) => Promise<unknown>) {
+    ipcMain.handle(`remote-vscode:git-${name}`, (event, value: unknown) => action(requireWindow(event), value))
+  }
+  async function unchanged(root: string) {
+    if (await currentRoot() !== root) throw new Error('The active workspace changed. Repeat this action in the intended workspace.')
+  }
+  handle('status', async () => service.status(await currentRoot()))
+  handle('enable', async (window) => {
+    const root = await currentRoot()
+    const consent = await dialog.showMessageBox(window, {
+      type: 'warning', title: 'Enable automatic workspace links',
+      message: 'Synchronize this workspace and automatically link its enrolled devices?',
+      detail: `Workspace: ${root}\nTaskCon will migrate current bindings, pull/rebase every 15 seconds, and immediately commit/push public identities, invitations and configuration changes to this branch's configured upstream. Dirty user files are not staged or discarded.\n\nNew signed device identities in this shared repository will be admitted and pinned under this local policy. SSH remains restricted to the app's metadata gateway and previously locally-confirmed linked sessions (read only). Existing fingerprint changes stay blocked. Private keys and bearer invitations never enter Git. Native session creation, sending prompts and OS shell access are not authorized by this enrollment.\n\nSign in to the same Dev Tunnel owner account on each machine. You can pause synchronization or revoke peers in Devices.`,
+      buttons: ['Cancel', 'Enable automatic links'], defaultId: 0, cancelId: 0,
+    })
+    if (consent.response !== 1) return false
+    await unchanged(root)
+    await service.enable(root)
+    return true
+  })
+  handle('disable', async () => service.disable(await currentRoot()))
+  handle('sync', async () => service.syncNow(await currentRoot()))
+  handle('revoke', async (window, value) => {
+    const root = await currentRoot()
+    const deviceId = z.uuid().parse(value)
+    const consent = await dialog.showMessageBox(window, {
+      type: 'warning', message: 'Revoke this device from automatic workspace links?',
+      detail: 'This blocks future automatic admission and closes the workspace connection. Original sessions and other workspaces are not deleted.',
+      buttons: ['Cancel', 'Revoke'], defaultId: 0, cancelId: 0,
+    })
+    if (consent.response !== 1) return
+    await unchanged(root)
+    await service.revokeDevice(root, deviceId)
+  })
+  handle('setting', async (_window, value) => {
+    const request = z.object({
+      key: z.enum(['autoLink', 'tunnelEnabled', 'connectTimeoutMs']),
+      value: z.union([z.boolean(), z.number(), z.null()]),
+      expectedRevision: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+    }).strict().parse(value)
+    const root = await currentRoot()
+    if (request.key === 'connectTimeoutMs') {
+      const timeout = request.value === null ? null : z.number().int().min(1000).max(120000).parse(request.value)
+      await service.setSettings(root, request.expectedRevision, { connectTimeoutMs: timeout })
+    } else {
+      const flag = request.value === null ? null : z.boolean().parse(request.value)
+      await service.setSettings(root, request.expectedRevision, { [request.key]: flag })
+    }
+  })
+  handle('open-settings', async () => {
+    const root = await currentRoot()
+    const file = (await service.status(root)).settingsFile
+    if (!file) throw new Error('Enable workspace synchronization before opening its local configuration editor.')
+    const error = await shell.openPath(file)
+    if (error) throw new Error(error)
+  })
+}

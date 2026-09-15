@@ -130,8 +130,10 @@ void app.whenReady().then(async () => {
   const workspaces = registerWorkspaceBridge(requireTrustedWindow, copilotHost.allowDirectory, async (root, target) => remoteVSCode?.manager.remoteOwner(root, target), async (root, target) => {
     if (!remoteVSCode) throw new Error('Agent Host access is not ready.')
     return remoteVSCode.agentHosts.verifyLink(root, target)
+  }, async (root) => { await remoteVSCode?.gitSync.open(root) })
+  remoteVSCode = registerRemoteVSCodeBridge(requireTrustedWindow, workspaces.currentRoot, () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('remote-vscode:git-bindings-changed')
   })
-  remoteVSCode = registerRemoteVSCodeBridge(requireTrustedWindow, workspaces.currentRoot)
   vscodeChat = registerVSCodeChatBridge(requireTrustedWindow, () => mainWindow, remoteVSCode.manager, workspaces.currentRoot)
   agentHost = registerAgentHostBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.agentHosts)
   sharedDesktop = registerSharedBridge(requireTrustedWindow, () => mainWindow, workspaces.currentRoot, copilotHost.requireDirectory)

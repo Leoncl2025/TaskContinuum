@@ -10,6 +10,9 @@ import { z } from 'zod'
 import type { AcceptanceItem, TaskRecord } from '../shared/tasks'
 import { taskStatuses } from '../shared/tasks'
 import type { WorkspaceSnapshot } from '../shared/workspace'
+import { validateDocuments, type DocumentDiagnostic } from './taskDocuments/validation'
+import { Config as FixedConfig } from '../shared/taskDocuments/config'
+import { Task as FixedTask } from '../shared/taskDocuments/task'
 
 const configSchema = z.object({
   schemaVersion: z.literal('1.0'),
@@ -99,7 +102,8 @@ export async function readTaskWorkspace(folder: string): Promise<WorkspaceSnapsh
   try { rawConfig = JSON.parse(await read('.agentdesk/config.json')) } catch (error) {
     throw new Error(`Choose an AgentDesk workspace containing .agentdesk/config.json. ${error instanceof Error ? error.message : ''}`)
   }
-  const parsedConfig = configSchema.safeParse(rawConfig)
+  const fixedConfig = FixedConfig.safeParse(rawConfig)
+  const parsedConfig = fixedConfig.success ? fixedConfig : configSchema.safeParse(rawConfig)
   if (!parsedConfig.success) throw new Error('The selected folder has an invalid AgentDesk workspace configuration.')
   const config = parsedConfig.data
   if (isAbsolute(config.paths.tasks) || !inside(root, resolve(root, config.paths.tasks))) throw new Error('The configured tasks path must stay inside the workspace.')
@@ -108,16 +112,20 @@ export async function readTaskWorkspace(folder: string): Promise<WorkspaceSnapsh
   if (entries.length > 1000) throw new Error('The workspace exceeds the 1,000 task limit.')
   const tasks: TaskRecord[] = []
   const ids = new Set<string>()
+  const fixedIds = new Set<string>()
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
     const directory = join(config.paths.tasks, entry.name)
     try {
       const canonical = await containedPath(root, join(root, directory))
       if (!(await stat(canonical)).isDirectory()) continue
-      const parsed = taskSchema.safeParse(JSON.parse(await read(join(directory, 'task.json'))))
+      const rawTask: unknown = JSON.parse(await read(join(directory, 'task.json')))
+      const fixedTask = FixedTask.safeParse(rawTask)
+      const parsed = fixedTask.success ? fixedTask : taskSchema.safeParse(rawTask)
       if (!parsed.success) throw new Error('task.json has invalid or unsupported fields.')
       const task = parsed.data
       if (ids.has(task.id)) throw new Error(`Duplicate task ID ${task.id}.`)
       ids.add(task.id)
+      if (fixedTask.success) fixedIds.add(task.id)
       async function document(file: string): Promise<string | null> {
         try { return await read(join(directory, file)) } catch (error) {
           warnings.push(`${entry.name}/${file}: ${error instanceof Error ? error.message : 'Cannot read document.'}`)
@@ -148,8 +156,21 @@ export async function readTaskWorkspace(folder: string): Promise<WorkspaceSnapsh
       warnings.push(`${entry.name}: ${error instanceof Error ? error.message : 'Cannot read task.'}`)
     }
   }
+  let diagnostics: DocumentDiagnostic[]
+  try {
+    const validated = validateDocuments(root)
+    diagnostics = validated.issues
+    for (const task of tasks) {
+      const percent = validated.graph.percent.get(task.id)
+      if (fixedIds.has(task.id) && percent !== undefined) task.progress = percent
+    }
+  } catch (error) {
+    diagnostics = [{ severity: 'error', code: 'SCHEMA_INVALID', message: error instanceof Error ? error.message : 'Document validation failed.' }]
+  }
+  // Legacy TaskCon documents remain readable, but never masquerade as contract-valid.
+  warnings.push(...diagnostics.map((item) => `${item.severity.toUpperCase()} [${item.code}] ${item.taskId ?? item.path ?? 'workspace'}: ${item.message}`))
   return {
     id: createHash('sha256').update(process.platform === 'win32' ? root.toLowerCase() : root).digest('hex'),
-    name: basename(root), title: config.workspace, root, tasks, warnings, loadedAt: new Date().toISOString(),
+    name: basename(root), title: config.workspace, root, tasks, warnings, diagnostics, loadedAt: new Date().toISOString(),
   }
 }

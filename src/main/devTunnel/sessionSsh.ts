@@ -1,4 +1,5 @@
-import { timingSafeEqual } from 'node:crypto'
+import { createPublicKey, generateKeyPairSync, randomBytes, timingSafeEqual } from 'node:crypto'
+import type { KeyObject } from 'node:crypto'
 import { createConnection, createServer } from 'node:net'
 import type { Socket } from 'node:net'
 import type { Duplex } from 'node:stream'
@@ -11,9 +12,30 @@ type Access = { id: string; key: Buffer; port: number; expires: number }
 export type SshKeyPair = { publicKey: string; privateKey: string }
 
 export function newSshKeyPair(): SshKeyPair {
-  const pair = ssh2.utils.generateKeyPairSync('ed25519')
-  const publicKey = pair.public.split(' ').slice(0, 2).join(' ')
-  return { publicKey: sshPublicKeySchema.parse(publicKey), privateKey: pair.private }
+  return encodeDeviceSshKey(generateKeyPairSync('ed25519').privateKey)
+}
+
+export function encodeDeviceSshKey(privateKeyObject: KeyObject): SshKeyPair {
+  if (privateKeyObject.type !== 'private' || privateKeyObject.asymmetricKeyType !== 'ed25519') throw new Error('An Ed25519 private key is required.')
+  const publicBytes = createPublicKey(privateKeyObject).export({ format: 'der', type: 'spki' }).subarray(-32)
+  const seed = privateKeyObject.export({ format: 'der', type: 'pkcs8' }).subarray(-32)
+  const uint32 = (value: number) => { const bytes = Buffer.alloc(4); bytes.writeUInt32BE(value); return bytes }
+  const field = (value: Buffer | string) => { const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value); return Buffer.concat([uint32(bytes.length), bytes]) }
+  const publicBlob = Buffer.concat([field('ssh-ed25519'), field(publicBytes)])
+  const check = randomBytes(4)
+  // OpenSSH's unencrypted Ed25519 container retains fixed-width key bytes, including leading zeros.
+  const privateFields = Buffer.concat([check, check, field('ssh-ed25519'), field(publicBytes), field(Buffer.concat([seed, publicBytes])), field('')])
+  const padding = Buffer.from(Array.from({ length: 8 - privateFields.length % 8 }, (_, index) => index + 1))
+  const container = Buffer.concat([
+    Buffer.from('openssh-key-v1\0'), field('none'), field('none'), field(''), uint32(1), field(publicBlob),
+    field(Buffer.concat([privateFields, padding])),
+  ])
+  const encoded = container.toString('base64')
+  const lines: string[] = []
+  for (let offset = 0; offset < encoded.length; offset += 70) lines.push(encoded.slice(offset, offset + 70))
+  const privateKey = `-----BEGIN OPENSSH PRIVATE KEY-----\n${lines.join('\n')}\n-----END OPENSSH PRIVATE KEY-----\n`
+  const publicKey = sshPublicKeySchema.parse(`ssh-ed25519 ${publicBlob.toString('base64')}`)
+  return { publicKey, privateKey }
 }
 
 export async function startSessionSshHost(key: SshKeyPair, port = 0) {

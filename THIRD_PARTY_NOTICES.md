@@ -39,6 +39,23 @@ product affiliation or grant permission to use hosted Copilot services.
 
 ## Markdown and workspace parsing
 
+### AgentDesk document contract port
+
+- Source: https://github.com/lianc_microsoft/AgentDesk
+- Copied revision: `0cabc9faf70cc482de4fd94a31e0a281ec9a6e83`.
+- License: MIT, as declared by the upstream package manifests. The source
+  checkout does not supply a separate copyright notice or LICENSE file.
+- Attribution: AgentDesk contributors. Original source comments are retained.
+- Copied/adapted: shared common/config/task/job/index/front-matter/schema
+  definitions, workspace loader, graph and hashing; server scanner and pure
+  index construction and field-update allow-list; graph/parser/scanner tests
+  and fixtures.
+- Local changes isolate Zod 3 compatibility, add bounded filesystem access,
+  diagnostics and portable CLI orchestration. No AgentDesk runtime is used.
+- `@11ty/gray-matter` 3.0.0: https://github.com/11ty/gray-matter (MIT).
+- `zod-to-json-schema` 3.25.2: https://github.com/StefanTerdell/zod-to-json-schema (ISC).
+  The dependency installation retains its license and copyright notice.
+
 - `react-markdown` 10.1.0: https://github.com/remarkjs/react-markdown (MIT).
 - `unified` 11.0.5: https://github.com/unifiedjs/unified (MIT).
 - `remark-parse` 11.0.0, `remark-gfm` 4.0.1, and `remark-frontmatter` 5.0.0:

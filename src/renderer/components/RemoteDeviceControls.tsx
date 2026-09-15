@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { VSCodeChatIdentity } from '../../shared/vscodeChat'
 import type { RemoteVSCodeBridge } from '../../shared/remoteVSCode'
 import { Icon, IconButton } from './Primitives'
+import { WorkspaceGitSyncControls } from './WorkspaceGitSyncControls'
 
 type Device = Awaited<ReturnType<NonNullable<RemoteVSCodeBridge['devices']>['list']>>[number]
 type Recipient = Awaited<ReturnType<NonNullable<RemoteVSCodeBridge['devices']>['recipients']>>[number]
@@ -30,6 +31,7 @@ export function RemoteDeviceConnections() {
   if (!api) return null
   return <div className="remote-device-controls">
     <h3>Devices</h3>
+    <WorkspaceGitSyncControls />
     <button type="button" className="secondary-button" disabled={!!busy} onClick={() => { void run('import', () => api.import()) }}><Icon name="import" />Import device invitation</button>
     {error && <p className="copilot-error" role="alert">{error}</p>}
     {devices.map((device) => <div className="remote-vscode-row" key={device.id}>

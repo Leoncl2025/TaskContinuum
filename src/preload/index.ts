@@ -78,6 +78,20 @@ const agentHost: AgentHostBridge = {
 contextBridge.exposeInMainWorld('agentHost', agentHost)
 
 const remoteVSCode: RemoteVSCodeBridge = {
+  gitSync: {
+    status: () => ipcRenderer.invoke('remote-vscode:git-status'),
+    enable: () => ipcRenderer.invoke('remote-vscode:git-enable'),
+    disable: () => ipcRenderer.invoke('remote-vscode:git-disable'),
+    syncNow: () => ipcRenderer.invoke('remote-vscode:git-sync'),
+    revokeDevice: (deviceId) => ipcRenderer.invoke('remote-vscode:git-revoke', deviceId),
+    setSetting: (key, value, expectedRevision) => ipcRenderer.invoke('remote-vscode:git-setting', { key, value, expectedRevision }),
+    openSettings: () => ipcRenderer.invoke('remote-vscode:git-open-settings'),
+    onBindingsChanged: (listener) => {
+      const receive = () => listener()
+      ipcRenderer.on('remote-vscode:git-bindings-changed', receive)
+      return () => ipcRenderer.removeListener('remote-vscode:git-bindings-changed', receive)
+    },
+  },
   devices: {
     list: () => ipcRenderer.invoke('remote-vscode:devices'),
     recipients: () => ipcRenderer.invoke('remote-vscode:device-recipients'),

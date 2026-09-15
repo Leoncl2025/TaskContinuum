@@ -135,6 +135,11 @@ export class ManagedDevTunnels {
     })
   }
 
+  publicEndpoint(): { tunnelId: string; sshPort: number; hostPublicKey: string } | undefined {
+    if (this.state.state !== 'hosting' || !this.host || !this.publication || !this.cloudHost?.connected()) return undefined
+    return { tunnelId: this.publication.tunnelId, sshPort: this.host.port, hostPublicKey: this.host.publicKey }
+  }
+
   authorize(grant: { id: string; expiresAt: string }, clientPublicKey: string, bridgePort: number, device = false): DevTunnelRoute {
     if (!this.host || !this.publication || !this.cloudHost?.connected()) throw new Error('Publish this machine before creating a Dev Tunnel invitation.')
     const route = devTunnelRouteSchema.parse({ kind: 'dev-tunnel', tunnelId: this.publication.tunnelId, sshPort: this.host.port, hostPublicKey: this.host.publicKey, clientPublicKey })

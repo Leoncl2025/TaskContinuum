@@ -28,6 +28,7 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
   const [error, setError] = useState<string | null>(null)
   const mounted = useRef(false)
   const pending = useRef(Boolean(workspace))
+  const flushRefresh = useRef<(() => void) | undefined>(undefined)
 
   useEffect(() => {
     mounted.current = true
@@ -36,6 +37,22 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
     let cancelled = false
     let lastRevision: string | null | undefined
     let refreshing = false
+    let refreshRequested = false
+    const refresh = () => {
+      if (!bridge || cancelled) return
+      if (pending.current || refreshing) { refreshRequested = true; return }
+      refreshRequested = false
+      refreshing = true
+      void bridge.getSessionLinks(workspace.id).then((value) => {
+        if (cancelled || pending.current) { refreshRequested = true; return }
+        if (value.revision !== lastRevision) { lastRevision = value.revision; setSnapshot(value); setBindings(uiBindings(value)) }
+        setError(null)
+      }).catch((failure: unknown) => { if (!cancelled && !pending.current) setError(failure instanceof Error ? failure.message : 'Repository session links could not be refreshed.') }).finally(() => {
+        refreshing = false
+        if (refreshRequested && !pending.current && !cancelled) refresh()
+      })
+    }
+    flushRefresh.current = () => { if (refreshRequested) refresh() }
     const load = bridge ? bridge.getSessionLinks(workspace.id) : Promise.reject(new Error('The workspace session link bridge is unavailable.'))
     void load.then((value) => {
       if (cancelled) return
@@ -46,18 +63,11 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
     }).catch((failure: unknown) => {
       if (!cancelled) setError(failure instanceof Error ? failure.message : 'Repository session links could not be read.')
     }).finally(() => {
-      if (!cancelled) { pending.current = false; setBusy(false) }
+      if (!cancelled) { pending.current = false; setBusy(false); flushRefresh.current?.() }
     })
-    const timer = setInterval(() => {
-      if (!bridge || pending.current || refreshing || cancelled) return
-      refreshing = true
-      void bridge.getSessionLinks(workspace.id).then((value) => {
-        if (cancelled || pending.current) return
-        if (value.revision !== lastRevision) { lastRevision = value.revision; setSnapshot(value); setBindings(uiBindings(value)) }
-        setError(null)
-      }).catch((failure: unknown) => { if (!cancelled && !pending.current) setError(failure instanceof Error ? failure.message : 'Repository session links could not be refreshed.') }).finally(() => { refreshing = false })
-    }, 5000)
-    return () => { cancelled = true; mounted.current = false; clearInterval(timer) }
+    const timer = setInterval(refresh, 5000)
+    const unsubscribe = window.remoteVSCode?.gitSync?.onBindingsChanged(refresh)
+    return () => { cancelled = true; mounted.current = false; flushRefresh.current = undefined; clearInterval(timer); unsubscribe?.() }
   }, [bridge, workspace])
 
   useEffect(() => { if (!workspace) saveSessionBindings(bindings) }, [bindings, workspace])
@@ -81,6 +91,7 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
     } finally {
       pending.current = false
       if (mounted.current) setBusy(false)
+      flushRefresh.current?.()
     }
   }
 
@@ -120,6 +131,7 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
     } finally {
       pending.current = false
       if (mounted.current) setBusy(false)
+      flushRefresh.current?.()
     }
   }
 

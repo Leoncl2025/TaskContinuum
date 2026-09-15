@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { realpath, rm } from 'node:fs/promises'
-import { join } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { z } from 'zod'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
@@ -104,6 +104,41 @@ export class VSCodeDeviceClient {
       return { id: peer.id, machineName: peer.invitation.machineName, state: this.active.has(peer.id) ? 'connected' as const : this.connecting.has(peer.id) ? 'connecting' as const : 'offline' as const,
         enabled: peer.enabled, expiresAt: peer.invitation.expiresAt, error: this.errors.get(peer.id) }
     })
+  }
+
+  async connectOwner(root: string, ownerClientId: string): Promise<void> {
+    await this.load()
+    const canonical = await this.root(root)
+    const peer = this.peers.find((item) => item.root === canonical && item.invitation.ownerClientId === z.uuid().parse(ownerClientId))
+    if (!peer) throw new Error('The authenticated owner has no imported device invitation.')
+    await this.connect(root, peer.id)
+  }
+
+  async disconnectOwner(root: string, ownerClientId: string): Promise<void> {
+    await this.load()
+    if (!isAbsolute(root)) throw new Error('Disconnect requires an absolute enrolled workspace root.')
+    const canonical = process.platform === 'win32' ? resolve(root).toLowerCase() : resolve(root)
+    z.uuid().parse(ownerClientId)
+    const peers = this.peers.filter((item) => item.root === canonical && item.invitation.ownerClientId === ownerClientId)
+    for (const peer of peers) { this.drop(peer.id); peer.enabled = false }
+    if (peers.length) await this.update(() => {})
+  }
+
+  async publicIdentities(root: string) {
+    await this.load()
+    const canonical = await this.root(root)
+    return this.peers.filter((item) => item.root === canonical && item.invitation.ownerClientId).map((item) => ({
+      deviceId: item.invitation.ownerClientId!,
+      machineName: item.invitation.machineName,
+      hostPublicKey: item.invitation.devTunnel.hostPublicKey,
+    }))
+  }
+
+  async ownerConnected(root: string, ownerClientId: string): Promise<boolean> {
+    await this.load()
+    const canonical = process.platform === 'win32' ? resolve(root).toLowerCase() : resolve(root)
+    const peer = this.peers.find((item) => item.root === canonical && item.invitation.ownerClientId === ownerClientId)
+    return !!peer && peer.enabled && !!this.active.get(peer.id) && !this.active.get(peer.id)!.abort.signal.aborted
   }
   async sessions(root: string): Promise<RemoteVSCodeConnection[]> {
     await this.list(root)
@@ -226,7 +261,9 @@ export class VSCodeDeviceClient {
     const file = join(this.directory, 'remote-vscode-device-cache', `${known.id}.json`)
     let requested: Active | undefined
     try {
-      if (!this.active.has(peer.id)) await this.ensure(peer)
+      // A transport can exist while its reconnect is still loading the session catalog.
+      await this.connecting.get(peer.id)
+      if (!this.active.has(peer.id) || this.active.get(peer.id)!.refreshed === 0) await this.ensure(peer)
       const active = this.active.get(peer.id)!
       if (!active.available.has(known.id)) throw new Error('Session is unavailable or no longer shared.')
       requested = active

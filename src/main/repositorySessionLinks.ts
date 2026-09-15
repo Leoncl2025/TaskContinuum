@@ -1,37 +1,43 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, open, readFile, realpath, rename, rm } from 'node:fs/promises'
 import { isAbsolute, join, relative, sep } from 'node:path'
-import { z } from 'zod'
 import type { SessionLink, SessionLinksDocument, SessionLinksSnapshot, SessionOwner } from '../shared/sessionBindings'
 import { sessionLinksPath } from '../shared/sessionBindings'
-import { remoteMachineSchema } from './vscodeRemoteProtocol'
+import { remoteConfigFormat } from '../shared/remoteConfig'
 import { agentHostTargetSchema } from './agentHostProtocol'
 import type { AgentHostTarget } from '../shared/agentHost'
 import { readTaskWorkspace } from './workspaceReader'
+import { sessionLinkSchema, sessionLinkTaskIdSchema as taskIdSchema, sessionLinkIdSchema as sessionIdSchema, sessionLinkKey as linkKey, sessionLinksDocumentSchema as documentSchema } from './sessionLinkSchema'
+import { readCheckedFile } from './remoteConfig/records'
+export { sessionOwnerSchema, sessionLinkSchema, sessionLinkKey } from './sessionLinkSchema'
 
-const taskIdSchema = z.string().regex(/^T-\d{4,}$/)
-const sessionIdSchema = z.string().min(1).max(240).regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/)
-export const sessionOwnerSchema = z.object({ clientId: z.uuid(), machineName: remoteMachineSchema }).strict()
-export const sessionLinkSchema = z.discriminatedUnion('provider', [
-  z.object({ provider: z.literal('github-copilot'), sessionId: sessionIdSchema, owner: sessionOwnerSchema.optional() }).strict(),
-  z.object({ provider: z.literal('vscode-copilot'), sessionId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,199}$/), workspaceStorageId: z.string().regex(/^[a-f0-9]{32}$/), remoteMachineName: remoteMachineSchema.optional(), owner: sessionOwnerSchema.optional() }).strict(),
-  agentHostTargetSchema.extend({ provider: z.literal('agent-host') }).strict(),
-])
-function linkKey(link: SessionLink): string {
-  if (link.provider === 'agent-host') return `${link.provider}:${link.owner.clientId}:${link.hostId}:${link.sessionId}`
-  return `${link.provider}:${link.owner?.clientId ?? (link.provider === 'vscode-copilot' ? link.remoteMachineName?.toLowerCase() ?? '' : '')}:${link.provider === 'vscode-copilot' ? `${link.workspaceStorageId}:` : ''}${link.sessionId}`
+export interface RepositorySessionLinksBackend {
+  read(): Promise<SessionLinksSnapshot>
+  update(expectedRevision: string | null, transform: (before: SessionLinksDocument) => SessionLinksDocument | Promise<SessionLinksDocument>, beforeWrite?: () => Promise<void>): Promise<SessionLinksSnapshot>
+  writeBinding?(taskId: string, target: SessionLink | null, expectedRevision: string | null, beforeWrite?: () => Promise<void>): Promise<SessionLinksSnapshot>
 }
-const documentSchema = z.object({
-  schemaVersion: z.literal(1),
-  bindings: z.record(taskIdSchema, sessionLinkSchema),
-}).strict().superRefine((value, context) => {
-  const sessions = new Set<string>()
-  for (const binding of Object.values(value.bindings)) {
-    if (sessions.has(linkKey(binding))) context.addIssue({ code: 'custom', message: 'A session can be linked to only one task.' })
-    sessions.add(linkKey(binding))
+const backends = new Map<string, RepositorySessionLinksBackend>()
+
+async function canonicalRoot(root: string): Promise<string> {
+  const canonical = await realpath(root)
+  return process.platform === 'win32' ? canonical.toLowerCase() : canonical
+}
+
+export async function registerRepositorySessionLinksBackend(root: string, backend: RepositorySessionLinksBackend): Promise<() => void> {
+  const canonical = await canonicalRoot(root)
+  if (backends.has(canonical)) throw new Error('This workspace already has a session links backend.')
+  backends.set(canonical, backend)
+  let registered = true
+  return () => {
+    if (!registered) return
+    registered = false
+    if (backends.get(canonical) === backend) backends.delete(canonical)
   }
-  if (Object.keys(value.bindings).length > 1000) context.addIssue({ code: 'custom', message: 'The session link limit is 1,000 tasks.' })
-})
+}
+
+function bindingSnapshot(snapshot: SessionLinksSnapshot): SessionLinksSnapshot {
+  return { document: snapshot.document, revision: snapshot.revision, ...(snapshot.localOwner ? { localOwner: snapshot.localOwner } : {}) }
+}
 const maximumBytes = 512 * 1024
 
 function inside(root: string, path: string): boolean {
@@ -66,7 +72,35 @@ function parse(text: string): SessionLinksDocument {
   }
 }
 
+async function assertLegacyFallbackAllowed(root: string): Promise<void> {
+  const { directory } = await checkedPaths(root, false)
+  let content: Buffer
+  try { content = await readCheckedFile(root, join(directory, 'workspace.json'), 4096) }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
+  let descriptor: unknown
+  try { descriptor = JSON.parse(content.toString('utf8')) }
+  catch { throw new Error('The workspace descriptor is invalid. Restore its remote configuration enrollment before accessing session bindings; legacy fallback is disabled.') }
+  if (descriptor && typeof descriptor === 'object' && 'remoteConfigFormat' in descriptor && descriptor.remoteConfigFormat === remoteConfigFormat) {
+    throw new Error('This workspace uses immutable remote configuration. Its enrolled binding backend is not ready. Restore enrollment before reading or changing bindings; session-bindings.json is archival only.')
+  }
+  throw new Error('The workspace descriptor has an unsupported remote configuration format. Restore its enrollment before accessing session bindings; legacy fallback is disabled.')
+}
+
 export async function readRepositorySessionLinks(root: string): Promise<SessionLinksSnapshot> {
+  const canonical = await canonicalRoot(root)
+  const backend = backends.get(canonical)
+  if (backend) return bindingSnapshot(await backend.read())
+  await assertLegacyFallbackAllowed(root)
+  const snapshot = await readLegacyRepositorySessionLinks(root)
+  const current = backends.get(canonical)
+  if (current) return bindingSnapshot(await current.read())
+  await assertLegacyFallbackAllowed(root)
+  const ready = backends.get(canonical)
+  return ready ? bindingSnapshot(await ready.read()) : snapshot
+}
+
+/** Migration/archive inspection only; this intentionally bypasses the effective routing backend. */
+export async function readLegacyRepositorySessionLinks(root: string): Promise<SessionLinksSnapshot> {
   const { file } = await checkedPaths(root, false)
   let content: Buffer
   try { content = await readFile(file) } catch (error) {
@@ -109,7 +143,9 @@ export function bindRepositoryAgentHostCreation(root: string, taskId: string, ta
   }, check)
 }
 
-function updateLink(root: string, taskId: string, selected: SessionLink | null, expectedRevision: string | null): Promise<SessionLinksSnapshot> {
+async function updateLink(root: string, taskId: string, selected: SessionLink | null, expectedRevision: string | null): Promise<SessionLinksSnapshot> {
+  const backend = backends.get(await canonicalRoot(root))
+  if (backend?.writeBinding) return bindingSnapshot(await backend.writeBinding(taskId, selected, expectedRevision))
   return writeRepositorySessionLinks(root, expectedRevision, (before) => {
     const prior = before.bindings[taskId]
     if (prior?.owner && selected && prior.sessionId === selected.sessionId && prior.provider === selected.provider && prior.owner.clientId !== selected.owner?.clientId) throw new Error('Session ownership cannot be changed by linking. Ownership transfer is not supported.')
@@ -130,8 +166,17 @@ export async function migrateRepositorySessionLinks(root: string, bindings: Reco
   return writeRepositorySessionLinks(root, null, () => document)
 }
 
-async function writeRepositorySessionLinks(root: string, expectedRevision: string | null, update: (before: SessionLinksDocument) => SessionLinksDocument | Promise<SessionLinksDocument>, beforeCommit?: () => Promise<void>): Promise<SessionLinksSnapshot> {
+export async function writeRepositorySessionLinks(root: string, expectedRevision: string | null, update: (before: SessionLinksDocument) => SessionLinksDocument | Promise<SessionLinksDocument>, beforeCommit?: () => Promise<void>): Promise<SessionLinksSnapshot> {
   if (expectedRevision !== null && !/^[a-f\d]{64}$/.test(expectedRevision)) throw new Error('Invalid session link revision.')
+  const canonical = await canonicalRoot(root)
+  const backend = backends.get(canonical)
+  if (backend) return bindingSnapshot(await backend.update(expectedRevision, update, beforeCommit))
+  async function requireLegacyWriter() {
+    if (backends.has(canonical)) throw new Error('The enrolled binding backend changed during this legacy edit. Reload and retry; no legacy changes were written.')
+    await assertLegacyFallbackAllowed(root)
+    if (backends.has(canonical)) throw new Error('The enrolled binding backend changed during this legacy edit. Reload and retry; no legacy changes were written.')
+  }
+  await requireLegacyWriter()
   const { directory, file } = await checkedPaths(root, true)
   const lockPath = join(directory, 'session-bindings.lock')
   let lock
@@ -141,23 +186,26 @@ async function writeRepositorySessionLinks(root: string, expectedRevision: strin
   }
   const temporary = join(directory, `session-bindings.${randomUUID()}.tmp`)
   try {
-    const before = await readRepositorySessionLinks(root)
+    const before = await readLegacyRepositorySessionLinks(root)
     if (before.revision !== expectedRevision) throw new Error('Session links changed on disk. Reload the bindings and retry; no changes were written.')
+    await requireLegacyWriter()
     const changed = documentSchema.parse(await update(before.document))
     const document: SessionLinksDocument = { schemaVersion: 1, bindings: Object.fromEntries(Object.entries(changed.bindings).sort(([left], [right]) => left.localeCompare(right))) }
+    await requireLegacyWriter()
     if (JSON.stringify(document) === JSON.stringify(before.document)) return before
     const content = JSON.stringify(document, null, 2) + '\n'
     if (Buffer.byteLength(content) > maximumBytes) throw new Error('The session link file exceeds the 512 KB limit.')
     await writeTemporary(temporary, content)
-    if ((await readRepositorySessionLinks(root)).revision !== before.revision) throw new Error('Session links changed on disk. Reload the bindings and retry; no changes were written.')
+    if ((await readLegacyRepositorySessionLinks(root)).revision !== before.revision) throw new Error('Session links changed on disk. Reload the bindings and retry; no changes were written.')
     try { await writeTemporary(join(directory, '.gitignore'), 'session-bindings.lock\nsession-bindings.*.tmp\n') } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     }
     if (beforeCommit) {
       await beforeCommit()
-      if ((await readRepositorySessionLinks(root)).revision !== before.revision) throw new Error('Session links changed on disk. Reload the bindings and retry; no changes were written.')
+      if ((await readLegacyRepositorySessionLinks(root)).revision !== before.revision) throw new Error('Session links changed on disk. Reload the bindings and retry; no changes were written.')
       await beforeCommit()
     }
+    await requireLegacyWriter()
     await rename(temporary, file)
     return { document, revision: createHash('sha256').update(content).digest('hex') }
   } finally {

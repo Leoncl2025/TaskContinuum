@@ -1,5 +1,6 @@
 import type { TaskRecord } from './tasks'
 import type { MigrateSessionLinks, SessionLinksSnapshot, UpdateSessionLink } from './sessionBindings'
+import type { Issue } from './taskDocuments/common'
 
 export interface WorkspaceDescriptor {
   id: string
@@ -11,6 +12,7 @@ export interface WorkspaceDescriptor {
 export interface WorkspaceSnapshot extends WorkspaceDescriptor {
   tasks: TaskRecord[]
   warnings: string[]
+  diagnostics?: Array<Omit<Issue, 'code'> & { code: string; line?: number }>
   loadedAt: string
 }
 
