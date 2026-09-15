@@ -2,6 +2,7 @@
 import { createServer } from 'node:http'
 import { createConnection } from 'node:net'
 import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
 import ssh2 from 'ssh2'
 import { TunnelRelayTunnelClient } from '@microsoft/dev-tunnels-connections'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -28,6 +29,11 @@ async function fixture() {
 }
 
 describe('application-managed SSH', () => {
+  it('loads Dev Tunnels through the main process CommonJS entry point', () => {
+    const require = createRequire(import.meta.url)
+    expect(require('@microsoft/dev-tunnels-connections')).toHaveProperty('TunnelRelayTunnelClient', expect.any(Function))
+  })
+
   it('loads the pinned Dev Tunnels SDK with the patched UUID dependency', async () => {
     const client = new TunnelRelayTunnelClient()
     client.acceptLocalConnectionsForForwardedPorts = false
