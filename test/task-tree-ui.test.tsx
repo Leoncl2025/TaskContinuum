@@ -16,7 +16,7 @@ const nodes = buildTaskTree(tasks)
 
 function Sidebar() {
   const [query, setQuery] = useState('')
-  return <TaskSidebar tasks={tasks} selectedId={null} view="tasks" query={query} onQuery={setQuery} onSelect={vi.fn()} onCreate={vi.fn()} onClose={vi.fn()} threads={{}} />
+  return <TaskSidebar tasks={tasks} selectedId={null} query={query} onQuery={setQuery} onSelect={vi.fn()} onCreate={vi.fn()} onClose={vi.fn()} />
 }
 
 describe('task explorer tree', () => {

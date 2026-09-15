@@ -5,8 +5,9 @@ import { join, resolve } from 'node:path'
 import { _electron as electron, expect, test } from '@playwright/test'
 import type { ElectronApplication, Page } from '@playwright/test'
 import { startAgentHostFixture } from '../test/agent-host-fixture'
+import { enableAutomaticLinks, prepareAutomaticLinksRepository, readDesktopBindings } from './immutable-workspace-fixture'
 
-test('links and streams original AHP chats in the sandboxed desktop without a Companion', async () => {
+test('links and streams original AHP chats through immutable workspace bindings', async () => {
   test.setTimeout(90000)
   const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-desktop-'))
   const workspace = join(root, 'tasks')
@@ -42,7 +43,11 @@ test('links and streams original AHP chats in the sandboxed desktop without a Co
     await app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false }) })
   }
   try {
+    const enrolled = await prepareAutomaticLinksRepository(workspace, join(root, 'immutable-fixture'))
+    Object.assign(environment, enrolled.environment)
     await launch()
+    await enableAutomaticLinks(app!, page!, profile)
+    await expect(page!.getByRole('alert').filter({ hasText: 'backend is not ready' })).toHaveCount(0)
     await page!.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
     const picker = page!.getByRole('dialog', { name: 'Agent Host sessions' })
     await expect(picker.getByRole('region', { name: 'Host session Original Host chat' })).toBeVisible()
@@ -50,20 +55,26 @@ test('links and streams original AHP chats in the sandboxed desktop without a Co
     await expect(picker).toBeHidden()
     const panel = page!.getByRole('complementary', { name: 'Agent Host task chat' })
     await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
-    const saved = JSON.parse(await readFile(join(workspace, '.taskcontinuum/session-bindings.json'), 'utf8'))
-    expect(saved.bindings['T-0001']).toMatchObject({ provider: 'agent-host', hostId: fixture.hostId, sessionId: fixture.sessionId, chatId: fixture.chatId })
+    const saved = await readDesktopBindings(page!)
+    expect(saved.document.bindings['T-0001']).toMatchObject({ provider: 'agent-host', hostId: fixture.hostId, sessionId: fixture.sessionId, chatId: fixture.chatId, owner: saved.localOwner })
+    expect(saved.revision).toMatch(/^[a-f0-9]{64}$/)
     expect(JSON.stringify(saved)).not.toContain(fixture.endpoint.connectionToken)
     expect(JSON.stringify(saved)).not.toContain(discovery)
+    await expect(readFile(join(workspace, '.taskcontinuum', 'session-bindings.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     const target = await page!.evaluate(async () => {
       const state = await window.workspace!.getState()
       const link = (await window.workspace!.getSessionLinks(state.current!.id)).document.bindings['T-0001']
       if (link.provider !== 'agent-host') throw new Error('AHP link was not retained.')
       return { hostId: link.hostId, sessionId: link.sessionId, chatId: link.chatId, owner: link.owner }
     })
-    const security = await page!.evaluate(async () => ({ info: await window.desktop!.getInfo(), keys: Object.keys(window.agentHost!).sort(), require: typeof Reflect.get(window, 'require') }))
+    const security = await page!.evaluate(async () => ({
+      info: await window.desktop!.getInfo(), keys: Object.keys(window.agentHost!).sort(), require: typeof Reflect.get(window, 'require'),
+      retiredBridges: ['copilot', 'vscodeChat', 'sharedSessions'].filter((name) => Reflect.has(window, name)),
+    }))
     expect(security.info.security).toEqual({ contextIsolated: true, sandboxed: true })
     expect(security.keys).toEqual(['bindCreation', 'cancel', 'create', 'creationStatus', 'creationWorkers', 'creations', 'list', 'models', 'onView', 'send', 'unwatch', 'watch'])
     expect(security.require).toBe('undefined')
+    expect(security.retiredBridges).toEqual([])
     expect(await page!.evaluate(async (value) => { try { await window.agentHost!.watch({ ...value, chatId: 'ahp-chat:/not-linked' }); return false } catch { return true } }, target)).toBe(true)
     expect(fixture.dispatches).toHaveLength(0)
     await panel.getByRole('textbox', { name: 'Message Agent Host' }).fill('A draft while B is responding')
@@ -129,13 +140,15 @@ test('links and streams original AHP chats in the sandboxed desktop without a Co
     await launch()
     const restored = page!.getByRole('complementary', { name: 'Agent Host task chat' })
     await expect(restored).toBeVisible()
+    expect((await readDesktopBindings(page!)).document).toEqual(saved.document)
     await expect(restored.getByRole('heading', { name: 'Owner live reply' })).toBeVisible()
     await expect(restored.getByText('Streaming before completion')).toBeVisible()
     expect(fixture.dispatches).toHaveLength(1)
     await restored.getByRole('button', { name: 'Detach conversation' }).click()
     await page!.getByRole('button', { name: 'Detach session', exact: true }).click()
     await expect(restored).toHaveCount(0)
-    expect(JSON.parse(await readFile(join(workspace, '.taskcontinuum/session-bindings.json'), 'utf8')).bindings).toEqual({})
+    expect((await readDesktopBindings(page!)).document.bindings).toEqual({})
+    await expect(readFile(join(workspace, '.taskcontinuum', 'session-bindings.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await readFile(taskFile, 'utf8')).toBe(taskText)
     expect(fixture.dispatches).toHaveLength(1)
     expect(errors).toEqual([])

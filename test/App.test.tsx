@@ -1,58 +1,73 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/renderer/App'
-import type { ChatAdapter } from '../src/shared/chat'
 
 function explorer() { return within(screen.getByRole('complementary', { name: 'Task explorer' })) }
-afterEach(() => { vi.unstubAllGlobals() })
+afterEach(() => {
+  vi.unstubAllGlobals()
+  for (const name of ['copilot', 'vscodeChat', 'sharedSessions']) Reflect.deleteProperty(window, name)
+})
 
 describe('workbench', () => {
-  it('renders the required panes and honest demo status', () => {
+  it('renders the required panes with honest task-only demo status', () => {
     render(<App />)
     expect(screen.getByRole('navigation', { name: 'Workbench navigation' })).toBeInTheDocument()
     expect(screen.getByRole('complementary', { name: 'Task chat' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('UI based on Electron')
-    expect(screen.getByText('No services connected')).toBeInTheDocument()
+    expect(screen.getByText('No Agent Host linked')).toBeInTheDocument()
     expect(screen.getByText('LOCAL DEMO')).toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: /Message/ })).not.toBeInTheDocument()
   })
-  it('filters and selects tasks', async () => {
-    const user = userEvent.setup(); render(<App />)
+
+  it('filters and selects tasks without starting a conversation', async () => {
+    const user = userEvent.setup()
+    render(<App />)
     await user.type(screen.getByRole('textbox', { name: 'Filter tasks' }), 'backend')
     expect(explorer().queryByRole('button', { name: 'T-0002 UI based on Electron' })).not.toBeInTheDocument()
     await user.click(explorer().getByRole('button', { name: 'T-0003 Backend service' }))
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Backend service')
-    expect(screen.getByRole('log')).toHaveAccessibleName('Conversation for T-0003')
+    expect(screen.queryByRole('log')).not.toBeInTheDocument()
+    expect(screen.getByText(/Demo tasks do not start conversations/)).toBeInTheDocument()
   })
+
   it('shows a recoverable empty search state', async () => {
-    const user = userEvent.setup(); render(<App />)
+    const user = userEvent.setup()
+    render(<App />)
     await user.type(screen.getByRole('textbox', { name: 'Filter tasks' }), 'missing-task')
     expect(screen.getByText('No matching tasks')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Clear filters' }))
     expect(explorer().getByRole('button', { name: 'T-0003 Backend service' })).toBeInTheDocument()
   })
+
   it('filters by status and collapses the task group', async () => {
-    const user = userEvent.setup(); render(<App />)
+    const user = userEvent.setup()
+    render(<App />)
     await user.click(screen.getByRole('button', { name: 'Collapse T-0001' }))
     expect(explorer().queryByRole('button', { name: 'T-0003 Backend service' })).not.toBeInTheDocument()
     await user.click(within(screen.getByRole('group', { name: 'Task status filter' })).getByRole('button', { name: /^Done/ }))
     expect(explorer().getByRole('button', { name: 'DEMO-01 Map the first user journey' })).toBeInTheDocument()
   })
+
   it('derives progress from local checklist edits', async () => {
-    const user = userEvent.setup(); render(<App />)
+    const user = userEvent.setup()
+    render(<App />)
     expect(screen.getByRole('progressbar')).toHaveAttribute('value', '40')
     await user.click(screen.getByRole('checkbox', { name: /Build the task explorer/ }))
     expect(screen.getByRole('progressbar')).toHaveAttribute('value', '60')
     await user.selectOptions(screen.getByRole('combobox', { name: 'Task status' }), 'done')
     expect(screen.getByRole('combobox', { name: 'Task status' })).toHaveValue('done')
   })
+
   it('supports document tab keyboard navigation', async () => {
-    const user = userEvent.setup(); render(<App />)
+    const user = userEvent.setup()
+    render(<App />)
     screen.getByRole('tab', { name: 'Overview' }).focus()
     await user.keyboard('{ArrowRight}')
     expect(screen.getByRole('tab', { name: 'Requirements' })).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByRole('heading', { name: 'What success looks like' })).toBeInTheDocument()
   })
+
   it('toggles panels independently with shortcuts', () => {
     render(<App />)
     fireEvent.keyDown(window, { key: 'b', ctrlKey: true })
@@ -63,12 +78,12 @@ describe('workbench', () => {
     fireEvent.keyDown(window, { key: 'b', ctrlKey: true })
     expect(screen.getByRole('complementary', { name: 'Task explorer' })).toBeInTheDocument()
   })
-  it('resizes both panel edges with the keyboard while preserving drafts and hidden widths', () => {
+
+  it('resizes both panel edges with the keyboard and preserves hidden widths', () => {
     vi.stubGlobal('innerWidth', 1440)
     render(<App />)
     const sidebar = screen.getByRole('separator', { name: 'Resize Explorer' })
     const chat = screen.getByRole('separator', { name: 'Resize Chat' })
-    fireEvent.change(screen.getByRole('textbox', { name: 'Message to demo agent' }), { target: { value: 'Unsent draft' } })
     fireEvent.keyDown(sidebar, { key: 'ArrowRight', shiftKey: true })
     fireEvent.keyDown(chat, { key: 'ArrowLeft', shiftKey: true })
     expect(sidebar).toHaveAttribute('aria-valuenow', '308')
@@ -79,12 +94,12 @@ describe('workbench', () => {
     expect(screen.queryByRole('separator', { name: 'Resize Explorer' })).not.toBeInTheDocument()
     fireEvent.keyDown(window, { key: 'b', ctrlKey: true })
     expect(screen.getByRole('separator', { name: 'Resize Explorer' })).toHaveAttribute('aria-valuenow', '308')
-    expect(screen.getByRole('textbox', { name: 'Message to demo agent' })).toHaveValue('Unsent draft')
     fireEvent.keyDown(chat, { key: 'End' })
     expect(chat).toHaveAttribute('aria-valuenow', chat.getAttribute('aria-valuemax')!)
     fireEvent.keyDown(chat, { key: 'Home' })
     expect(chat).toHaveAttribute('aria-valuenow', '310')
   })
+
   it('restores widths, fits a smaller window without overwriting preferences, and resets sizing', async () => {
     vi.stubGlobal('innerWidth', 1440)
     localStorage.setItem('taskcontinuum:layout:v1', JSON.stringify({ sidebar: true, chat: true, theme: 'light', sidebarWidth: 400, chatWidth: 500 }))
@@ -111,8 +126,10 @@ describe('workbench', () => {
     expect(reopened.container.querySelector('.workbench')).toHaveAttribute('data-theme', 'light')
     expect(JSON.parse(localStorage.getItem('taskcontinuum:layout:v1')!)).toMatchObject({ sidebarWidth: 258, chatWidth: 355, theme: 'light' })
   })
+
   it('opens and searches the quick switcher', async () => {
-    const user = userEvent.setup(); render(<App />)
+    const user = userEvent.setup()
+    render(<App />)
     fireEvent.keyDown(window, { key: 'p', ctrlKey: true })
     const dialog = screen.getByRole('dialog', { name: 'Quick open' })
     await user.type(within(dialog).getByRole('textbox', { name: 'Find a task' }), 'T-0004')
@@ -120,16 +137,22 @@ describe('workbench', () => {
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Technical design')
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
-  it('persists display preferences and labels integrations as disconnected', async () => {
-    const user = userEvent.setup(); const { container } = render(<App />)
+
+  it('persists display preferences and reports only native integration capabilities', async () => {
+    const user = userEvent.setup()
+    const { container } = render(<App />)
     await user.click(screen.getByRole('button', { name: 'Preferences' }))
     await user.click(screen.getByRole('radio', { name: 'Light' }))
     expect(container.querySelector('.workbench')).toHaveAttribute('data-theme', 'light')
-    expect(screen.getAllByText('Not connected')).toHaveLength(4)
+    expect(screen.getByText('Native Agent Host (AHP)')).toBeInTheDocument()
+    expect(screen.getAllByText('Desktop API unavailable')).toHaveLength(2)
+    expect(screen.queryByText('GitHub Copilot CLI')).not.toBeInTheDocument()
     expect(localStorage.getItem('taskcontinuum:layout:v1')).toContain('light')
   })
-  it('creates a local-only task and handles an empty workspace', async () => {
-    const user = userEvent.setup(); render(<App />)
+
+  it('creates a local-only task and handles an empty selection', async () => {
+    const user = userEvent.setup()
+    render(<App />)
     await user.click(screen.getByRole('button', { name: 'Create demo task' }))
     await user.type(screen.getByRole('textbox', { name: 'Title' }), 'Explore a new idea')
     await user.click(screen.getByRole('button', { name: 'Create task' }))
@@ -138,92 +161,11 @@ describe('workbench', () => {
     for (const title of ['Explore a new idea', 'UI based on Electron', 'Task Continuum MVP']) await user.click(screen.getByRole('button', { name: `Close ${title}` }))
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Make room for meaningful work.')
   })
-})
 
-describe('task-scoped chat', () => {
-  it('renders partial and completed Markdown responses without formatting the submitted user text', async () => {
-    let finish!: () => void
-    const adapter: ChatAdapter = { label: 'Test', kind: 'demo', async *stream() {
-      yield { type: 'delta', text: '## Reply\n\n**Formatted**\n\n```ts\nconst result = ' }
-      await new Promise<void>((resolve) => { finish = resolve })
-      yield { type: 'delta', text: '1;\n```\n\n| State |\n| --- |\n| Done |' }
-      yield { type: 'complete' }
-    } }
-    const user = userEvent.setup()
-    render(<App adapter={adapter} />)
-    await user.type(screen.getByRole('textbox', { name: 'Message to demo agent' }), '**Raw request**')
-    await user.click(screen.getByRole('button', { name: 'Send message' }))
-    await screen.findByRole('heading', { name: 'Reply', level: 2 })
-    expect(screen.getByText('Formatted').tagName).toBe('STRONG')
-    expect(screen.getByRole('article', { name: 'Your message' })).toHaveTextContent('**Raw request**')
-    expect(screen.getByLabelText('Code block')).toHaveTextContent('const result =')
-    await act(async () => { finish() })
-    expect(await screen.findByRole('table')).toHaveTextContent('Done')
-    expect(screen.getByLabelText('Code block')).toHaveTextContent('const result = 1;')
-    expect(screen.queryByRole('button', { name: 'Stop response' })).not.toBeInTheDocument()
-  })
-
-  it('keeps drafts and conversations separate when switching tasks', async () => {
-    const user = userEvent.setup(); render(<App />)
-    await user.type(screen.getByRole('textbox', { name: 'Message to demo agent' }), 'Plan for the UI')
-    await user.click(explorer().getByRole('button', { name: 'T-0003 Backend service' }))
-    expect(screen.getByRole('textbox', { name: 'Message to demo agent' })).toHaveValue('')
-    await user.type(screen.getByRole('textbox', { name: 'Message to demo agent' }), 'Host draft')
-    await user.click(explorer().getByRole('button', { name: 'T-0002 UI based on Electron' }))
-    expect(screen.getByRole('textbox', { name: 'Message to demo agent' })).toHaveValue('Plan for the UI')
-    await user.click(screen.getByRole('button', { name: 'Send message' }))
-    await user.click(explorer().getByRole('button', { name: 'T-0003 Backend service' }))
-    expect(screen.getByRole('textbox', { name: 'Message to demo agent' })).toHaveValue('Host draft')
-    expect(within(screen.getByRole('log')).queryByText('Plan for the UI')).not.toBeInTheDocument()
-    await user.click(explorer().getByRole('button', { name: 'T-0002 UI based on Electron' }))
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Stop response' })).not.toBeInTheDocument())
-    expect(within(screen.getByRole('log')).getByText(/A next step for T-0002/)).toBeInTheDocument()
-  })
-  it('does not send whitespace, Shift+Enter, or an IME composition Enter', async () => {
-    const user = userEvent.setup(); render(<App />)
-    const input = screen.getByRole('textbox', { name: 'Message to demo agent' })
-    expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled()
-    await user.type(input, '  ')
-    expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled()
-    await user.type(input, 'Draft')
-    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
-    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
-    expect(screen.queryByRole('article', { name: 'Your message' })).not.toBeInTheDocument()
-  })
-  it('stops streaming and can clear only the selected conversation', async () => {
-    const user = userEvent.setup(); render(<App />)
-    await user.click(screen.getByRole('button', { name: 'Review risks' }))
-    await user.click(screen.getByRole('button', { name: 'Stop response' }))
-    await screen.findByText('Response stopped')
-    await user.click(screen.getByRole('button', { name: 'Clear conversation' }))
-    await user.click(screen.getByRole('button', { name: 'Clear messages' }))
-    expect(screen.queryByRole('article', { name: 'Your message' })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Summarize this task' })).toBeInTheDocument()
-  })
-  it('reports incomplete streams instead of claiming success', async () => {
-    const incomplete: ChatAdapter = { label: 'Test', kind: 'demo', async *stream() { yield { type: 'delta', text: 'Partial output' } } }
-    const user = userEvent.setup(); render(<App adapter={incomplete} />)
-    await user.click(screen.getByRole('button', { name: 'Summarize this task' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('Response failed')
-    expect(screen.getByText(/The response stream ended before completion/)).toBeInTheDocument()
-  })
-  it('aborts active work on unmount', async () => {
-    let signal: AbortSignal | undefined
-    const adapter: ChatAdapter = { label: 'Test', kind: 'demo', async *stream(request) {
-      signal = request.signal
-      yield { type: 'delta', text: 'Started' }
-      await new Promise<void>((resolve) => request.signal.addEventListener('abort', () => resolve(), { once: true }))
-      yield { type: 'complete' }
-    } }
-    const user = userEvent.setup(); const view = render(<App adapter={adapter} />)
-    await user.click(screen.getByRole('button', { name: 'Summarize this task' }))
-    view.unmount()
-    expect(signal?.aborted).toBe(true)
-    await act(async () => {})
-  })
   it('uses a single pane on a compact viewport and returns to the task after selection', async () => {
     vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({ matches: true, media: query, onchange: null, addEventListener: vi.fn(), removeEventListener: vi.fn(), addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: () => true }))
-    const user = userEvent.setup(); render(<App />)
+    const user = userEvent.setup()
+    render(<App />)
     expect(screen.queryByRole('separator')).not.toBeInTheDocument()
     expect(screen.queryByRole('complementary')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Tasks' }))
@@ -232,6 +174,27 @@ describe('task-scoped chat', () => {
     expect(screen.queryByRole('complementary')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Toggle chat panel' }))
     expect(screen.getByRole('complementary', { name: 'Task chat' })).toBeInTheDocument()
-    expect(screen.queryByRole('separator')).not.toBeInTheDocument()
+    expect(screen.queryByRole('main')).not.toBeInTheDocument()
+  })
+
+  it('never reads legacy runtime globals or activates old browser session data', async () => {
+    const legacyKeys = ['taskcontinuum:copilot-mode', 'taskcontinuum:session-bindings:v1', 'taskcontinuum:session-bindings:v1:workspace-one']
+    for (const key of legacyKeys) localStorage.setItem(key, 'preserved-old-data')
+    const getItem = vi.spyOn(Storage.prototype, 'getItem')
+    const setItem = vi.spyOn(Storage.prototype, 'setItem')
+    const removeItem = vi.spyOn(Storage.prototype, 'removeItem')
+    const legacyAccess = vi.fn(() => { throw new Error('A retired runtime was accessed.') })
+    for (const name of ['copilot', 'vscodeChat', 'sharedSessions']) Object.defineProperty(window, name, { configurable: true, get: legacyAccess })
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(explorer().getByRole('button', { name: 'T-0003 Backend service' }))
+    await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Open a task workspace')
+    expect(legacyAccess).not.toHaveBeenCalled()
+    for (const key of legacyKeys) expect(getItem).not.toHaveBeenCalledWith(key)
+    expect(setItem.mock.calls.some(([key]) => legacyKeys.includes(key))).toBe(false)
+    expect(removeItem).not.toHaveBeenCalled()
+    for (const key of legacyKeys) expect(localStorage.getItem(key)).toBe('preserved-old-data')
+    for (const name of ['Sessions', 'Shared sessions', 'Connect Copilot', 'New Copilot session', 'Remote VS Code sessions']) expect(screen.queryByRole('button', { name })).not.toBeInTheDocument()
   })
 })

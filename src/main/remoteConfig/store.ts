@@ -2,13 +2,13 @@ import { createHash } from 'node:crypto'
 import { lstat, mkdir, open, realpath, rm } from 'node:fs/promises'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { z } from 'zod'
-import type { SessionLink, SessionLinksDocument, SessionLinksSnapshot } from '../../shared/sessionBindings'
+import type { SessionLink, SessionLinksDocument } from '../../shared/sessionBindings'
 import {
   remoteConfigLimits, type BindingNotificationAcknowledgement, type RemoteActor, type RemoteConfigSnapshot,
   type RemoteConfigStoreStatus, type RemotePayloads, type RemoteRecord, type RemoteRecordFile, type RemoteRecordKind,
   type RemoteSettingChanges, type RemoteSettingsSnapshot, type SettingPayload, type SettingScope,
 } from '../../shared/remoteConfig'
-import { readLegacyRepositorySessionLinks, type RepositorySessionLinksBackend } from '../repositorySessionLinks'
+import type { RepositorySessionLinksBackend } from '../repositorySessionLinks'
 import { sessionLinkKey, sessionLinkSchema, sessionLinksDocumentSchema, sessionLinkTaskIdSchema } from '../sessionLinkSchema'
 import { BindingOverlay } from './overlay'
 import {
@@ -19,7 +19,6 @@ import {
 
 const stateSchema = z.object({
   schemaVersion: z.literal(1), workspaceId: z.uuid(), initialized: z.boolean(),
-  legacyRevision: operationIdSchema.nullable(), legacyDocument: sessionLinksDocumentSchema,
   canonicalIds: z.array(operationIdSchema).max(remoteConfigLimits.records),
   localIds: z.array(operationIdSchema).max(remoteConfigLimits.records).default([]),
 }).strict()
@@ -35,7 +34,6 @@ export interface RemoteConfigStoreOptions {
   sign: RecordSigner
   trust: RecordTrust
   overlay?: BindingOverlay
-  readLegacy?(): Promise<SessionLinksSnapshot>
   onLocalChange?: LocalChangeListener
   onChange?(): void
   onError?(error: unknown): void
@@ -45,10 +43,6 @@ interface Journal { schemaVersion: 1; workspaceId: string; operations: RemoteRec
 interface RecordSources { canonical: RemoteRecord[]; outbox: RemoteRecord[] }
 
 function sha(value: unknown): string { return createHash('sha256').update(canonicalJson(value)).digest('hex') }
-export function legacyMigrationNonce(workspaceId: string, document: SessionLinksDocument, taskId: string): string {
-  const seed = sha(['TaskCon.LegacyBindings.v1', workspaceId, document, taskId])
-  return `${seed.slice(0, 8)}-${seed.slice(8, 12)}-5${seed.slice(13, 16)}-a${seed.slice(17, 20)}-${seed.slice(20, 32)}`
-}
 
 export class RemoteConfigStore implements RepositorySessionLinksBackend {
   private pending: Promise<unknown> = Promise.resolve()
@@ -76,32 +70,16 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     try { return JSON.parse((await readCheckedFile(this.options.stateDirectory, join(this.options.stateDirectory, name), maximum)).toString('utf8')) as unknown }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
   }
-  private async legacy(): Promise<SessionLinksSnapshot> {
-    const result = this.options.readLegacy ? await this.options.readLegacy() : await readLegacyRepositorySessionLinks(this.options.workspaceRoot)
-    return { ...result, document: sessionLinksDocumentSchema.parse(result.document) }
-  }
   private async state(): Promise<StoreState> {
     const saved = await this.localJson('store.json', 2 * 1024 * 1024)
     if (saved !== undefined) {
-      const state = stateSchema.parse(saved)
+      const parsed = stateSchema.safeParse(saved)
+      if (!parsed.success) throw new RemoteConfigError('unsupported-state', 'The saved binding store is invalid or uses legacy configuration. Restore a new-format store; legacy state is not migrated.')
+      const state = parsed.data
       if (state.workspaceId !== this.options.workspaceId) throw new RemoteConfigError('workspace-mismatch', 'Saved remote configuration belongs to another workspace. It was not reset.')
       return state
     }
-    const legacy = await this.legacy()
-    return { schemaVersion: 1, workspaceId: this.options.workspaceId, initialized: false, legacyRevision: legacy.revision, legacyDocument: legacy.document, canonicalIds: [], localIds: [] }
-  }
-  private trust(state: StoreState): RecordTrust {
-    return {
-      ...this.options.trust, allowLegacyBindings: true,
-      authorize: async (record) => {
-        if (record.kind === 'binding' && record.payload.action === 'set' && !record.payload.target.owner && !this.options.trust.allowLegacyBindings) {
-          const baseline = state.legacyDocument.bindings[record.payload.taskId]
-          if (!baseline || canonicalJson(baseline) !== canonicalJson(record.payload.target)
-            || record.nonce !== legacyMigrationNonce(this.options.workspaceId, state.legacyDocument, record.payload.taskId)) return false
-        }
-        return this.options.trust.authorize(record)
-      },
-    }
+    return { schemaVersion: 1, workspaceId: this.options.workspaceId, initialized: false, canonicalIds: [], localIds: [] }
   }
   private async notify(operations: RemoteRecord[], snapshot: RemoteConfigSnapshot): Promise<void> {
     if (!operations.length) return
@@ -156,7 +134,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     const operations = parsed.operations.map(parseRecord)
     for (const record of operations) {
       if (record.actor.deviceId !== this.options.actor.deviceId) throw new RemoteConfigError('wrong-actor', 'A local pending batch has a different operation author.')
-      await verifyRecord(record, this.trust(parsed.state))
+      await verifyRecord(record, this.options.trust)
     }
     // Replays the exact previously persisted intentions; never reparent after a restart.
     for (const record of operations) await appendRecord(this.options.outboxRoot, record)
@@ -171,17 +149,13 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     if (state.canonicalIds.some((id) => !present.has(id))) throw new RemoteConfigError('immutable-removal', 'A previously accepted canonical operation was removed. Synchronization is blocked; historical records cannot be deleted or compacted.')
     const allPresent = new Set([...present, ...outbox.map((record) => record.operationId)])
     if (state.localIds.some((id) => !allPresent.has(id))) throw new RemoteConfigError('immutable-removal', 'A durably saved local operation was removed before canonical publication. Restore its original record; no older configuration was activated.')
-    if (state.initialized) {
-      const legacy = await this.legacy()
-      if (legacy.revision !== state.legacyRevision) throw new RemoteConfigError('legacy-write', 'The archived session-bindings.json changed after remote configuration was enabled. Old-client writes are unsupported; restore the archive and use the effective store.')
-    }
     return { canonical, outbox }
   }
   private async snapshot(state: StoreState, sources?: RecordSources): Promise<RemoteConfigSnapshot> {
     const { canonical, outbox } = sources ?? await this.sources(state)
     const records = unionRecords(canonical, outbox)
-    const overlay = await this.options.overlay?.reconcile(canonical, this.trust(state))
-    const resolution = await resolveRecords(unionRecords(records, overlay?.records ?? []), this.trust(state))
+    const overlay = await this.options.overlay?.reconcile(canonical, this.options.trust)
+    const resolution = await resolveRecords(unionRecords(records, overlay?.records ?? []), this.options.trust)
     const bindings = resolution.bindings
     for (const marker of overlay?.awaitingSync ?? []) {
       delete bindings[marker.taskId]
@@ -189,13 +163,9 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       if (entity) entity.state = 'blocked'
       resolution.diagnostics.push({ code: 'awaiting-sync', message: 'A provisional binding expired or was recovered after restart. Await the exact canonical operation or explicitly cancel it.', entityKey: `binding:${marker.taskId}`, operationId: marker.operationId })
     }
-    let document: SessionLinksDocument = { schemaVersion: 1, bindings }
-    let revision: string | null = sha({ resolution: resolution.revision, canonical: canonical.map((record) => record.operationId), overlay: overlay?.revision ?? null, initialized: state.initialized })
-    if (!state.initialized) {
-      const legacy = await this.legacy()
-      document = legacy.document
-      revision = legacy.revision
-    } else {
+    const document: SessionLinksDocument = { schemaVersion: 1, bindings }
+    const revision = sha({ resolution: resolution.revision, canonical: canonical.map((record) => record.operationId), overlay: overlay?.revision ?? null, initialized: state.initialized })
+    if (state.initialized) {
       const accepted = canonical.map((record) => record.operationId).sort()
       if (canonicalJson(accepted) !== canonicalJson(state.canonicalIds) && !resolution.blocked) {
         state.canonicalIds = accepted
@@ -281,7 +251,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
   private async commitBatch(state: StoreState, operations: RemoteRecord[]): Promise<void> {
     for (const record of operations) {
       if (record.actor.deviceId !== this.options.actor.deviceId) throw new RemoteConfigError('wrong-actor', 'A local write must retain the local enrolled author.')
-      await verifyRecord(record, this.trust(state))
+      await verifyRecord(record, this.options.trust)
     }
     state.localIds = [...new Set([...state.localIds, ...operations.map((record) => record.operationId)])].sort()
     const journal: Journal = { schemaVersion: 1, workspaceId: this.options.workspaceId, operations, state }
@@ -298,42 +268,24 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     } as unknown as RecordInput<K>, this.options.sign)
   }
 
-  /** Explicit cutover only. Merely constructing/registering/reading the backend preserves legacy routing. */
-  initialize(expectedLegacyRevision?: string | null): Promise<RemoteConfigSnapshot> {
+  initialize(): Promise<RemoteConfigSnapshot> {
     return this.transaction(async (state, recovered) => {
       if (state.initialized) {
         const snapshot = await this.snapshot(state)
         return { value: snapshot, changed: recovered, snapshot }
       }
-      const baseline = await this.legacy()
-      if (expectedLegacyRevision !== undefined && baseline.revision !== expectedLegacyRevision) throw new RemoteConfigError('stale-revision', 'The legacy migration preview changed. Reload it before initialization.')
-      state.legacyDocument = baseline.document
-      state.legacyRevision = baseline.revision
       const before = await this.snapshot(state)
-      if (before.resolution.blocked) throw new RemoteConfigError('blocked-config', 'Remote configuration must validate before legacy migration.')
-      const operations: RemoteRecord[] = []
-      for (const [taskId, target] of Object.entries(baseline.document.bindings).sort(([left], [right]) => left < right ? -1 : 1)) {
-        // Any retained history, including a tombstone, proves this task already entered the new authority.
-        if (before.resolution.entities[`binding:${taskId}`]) continue
-        operations.push(await this.make('binding', { action: 'set', taskId, target }, before, {
-          nonce: legacyMigrationNonce(this.options.workspaceId, baseline.document, taskId),
-          // Legacy creation time is unknown; the epoch sentinel keeps repeated imports byte-identical.
-          createdAt: '1970-01-01T00:00:00.000Z', parents: [],
-        }))
-      }
-      const candidate = await resolveRecords(unionRecords(before.records, operations), this.trust(state))
-      if (candidate.blocked || candidate.diagnostics.some((diagnostic) => diagnostic.code === 'duplicate-session')) throw new RemoteConfigError('migration-conflict', 'Legacy migration would introduce an invalid binding or duplicate session claim. The legacy baseline remains authoritative.')
-      if ((await this.legacy()).revision !== baseline.revision) throw new RemoteConfigError('stale-revision', 'Legacy bindings changed during migration. No migration batch was written.')
+      if (before.resolution.blocked) throw new RemoteConfigError('blocked-config', 'Immutable remote configuration must validate before initialization.')
       state.initialized = true
-      await this.commitBatch(state, operations)
+      await this.commitBatch(state, [])
       const snapshot = await this.snapshot(state)
-      return { value: snapshot, changed: unionRecords(recovered, operations), snapshot }
+      return { value: snapshot, changed: recovered, snapshot }
     })
   }
 
   update(expectedRevision: string | null, transform: (before: SessionLinksDocument) => SessionLinksDocument | Promise<SessionLinksDocument>, beforeWrite?: () => Promise<void>): Promise<RemoteConfigSnapshot> {
     return this.transaction(async (state, recovered) => {
-      if (!state.initialized) throw new RemoteConfigError('initialization-required', 'Explicitly initialize or migrate this workspace before writing immutable bindings. Legacy bindings have not been replaced.')
+      if (!state.initialized) throw new RemoteConfigError('initialization-required', 'Enable the immutable binding store before writing session bindings.')
       const before = await this.ensureRevision(state, expectedRevision)
       const document = sessionLinksDocumentSchema.parse(await transform(structuredClone(before.document)))
       const operations: RemoteRecord[] = []
@@ -341,12 +293,11 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
         const previous = before.document.bindings[taskId]
         const target = document.bindings[taskId]
         if (canonicalJson(previous ?? null) === canonicalJson(target ?? null)) continue
-        if (target && target.provider !== 'agent-host') throw new RemoteConfigError('unsupported-provider', 'New enrolled bindings must use Agent Host. Existing migrated provider records remain readable.')
         if (previous?.owner && target && previous.provider === target.provider && previous.sessionId === target.sessionId && previous.owner.clientId !== target.owner?.clientId) throw new RemoteConfigError('ownership-transfer', 'Session ownership cannot be changed by linking.')
         operations.push(await this.make('binding', target ? { action: 'set', taskId, target } : { action: 'delete', taskId }, before))
       }
       if (!operations.length) return { value: before, changed: recovered, snapshot: before }
-      await this.validateNew(state, before, operations)
+      await this.validateNew(before, operations)
       await this.ensureRevision(state, expectedRevision)
       if (beforeWrite) {
         await beforeWrite()
@@ -363,9 +314,8 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
   async writeBinding(taskId: string, target: SessionLink | null, expectedRevision: string | null, beforeWrite?: () => Promise<void>): Promise<RemoteConfigSnapshot> {
     sessionLinkTaskIdSchema.parse(taskId)
     const selected = target === null ? null : sessionLinkSchema.parse(target)
-    if (selected && selected.provider !== 'agent-host') throw new RemoteConfigError('unsupported-provider', 'New enrolled bindings must use Agent Host. Existing migrated provider records remain readable.')
     return this.transaction(async (state, recovered) => {
-      if (!state.initialized) throw new RemoteConfigError('initialization-required', 'Explicitly initialize the legacy baseline before writing binding operations.')
+      if (!state.initialized) throw new RemoteConfigError('initialization-required', 'Enable the immutable binding store before writing session bindings.')
       const before = await this.ensureRevision(state, expectedRevision)
       const entity = before.resolution.entities[`binding:${taskId}`]
       const prior = before.document.bindings[taskId]
@@ -378,7 +328,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
         return { value: before, changed: recovered, snapshot: before }
       }
       const record = await this.make('binding', selected ? { action: 'set', taskId, target: selected } : { action: 'delete', taskId }, before)
-      await this.validateNew(state, before, [record])
+      await this.validateNew(before, [record])
       await this.ensureRevision(state, expectedRevision)
       if (beforeWrite) {
         await beforeWrite()
@@ -391,7 +341,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       return { value: snapshot, changed: unionRecords(recovered, [record]), snapshot }
     })
   }
-  private async validateNew(state: StoreState, before: RemoteConfigSnapshot, operations: RemoteRecord[]): Promise<void> {
+  private async validateNew(before: RemoteConfigSnapshot, operations: RemoteRecord[]): Promise<void> {
     const durable = unionRecords(before.records, operations)
     for (const operation of operations) {
       if (operation.kind === 'binding' && before.awaitingSync.some((marker) => marker.taskId === operation.payload.taskId)) throw new RemoteConfigError('awaiting-sync', 'Synchronize or explicitly cancel the unresolved provisional binding before editing this task.')
@@ -399,7 +349,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       recordClosure(operation, durable, remoteConfigLimits.records)
     }
     const union = unionRecords(before.resolution.records, operations)
-    const after = await resolveRecords(union, this.trust(state))
+    const after = await resolveRecords(union, this.options.trust)
     const changed = new Set(operations.map(entityKey))
     const errors = after.diagnostics.filter((diagnostic) => !diagnostic.entityKey || changed.has(diagnostic.entityKey))
     if (after.blocked || errors.length) throw new RemoteConfigError('invalid-change', errors[0]?.message ?? 'The change would activate invalid or conflicting remote configuration.')
@@ -413,12 +363,11 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
 
   append<K extends RemoteRecordKind>(kind: K, payload: RemotePayloads[K], expectedRevision?: string | null, metadata?: Pick<RecordInput<K>, 'nonce' | 'createdAt' | 'parents'>): Promise<RemoteRecord<K>> {
     return this.transaction(async (state, recovered) => {
-      if (!state.initialized && kind === 'binding') throw new RemoteConfigError('initialization-required', 'Initialize the legacy binding baseline before publishing binding edits.')
-      if (kind === 'binding' && 'target' in payload && payload.target.provider !== 'agent-host') throw new RemoteConfigError('unsupported-provider', 'New enrolled bindings must use Agent Host. Legacy records are only imported by explicit migration.')
+      if (!state.initialized && kind === 'binding') throw new RemoteConfigError('initialization-required', 'Enable the immutable binding store before publishing session bindings.')
       if (kind === 'device' && payload.action === 'publish' && !devicePublicationSchema.safeParse(payload).success) throw new RemoteConfigError('publication-metadata', 'New device publications require the existing public username and a scoped controlPort on every Dev Tunnel route.')
       const before = expectedRevision === undefined ? await this.snapshot(state) : await this.ensureRevision(state, expectedRevision)
       const record = await this.make(kind, payload, before, metadata)
-      await this.validateNew(state, before, [record])
+      await this.validateNew(before, [record])
       if (expectedRevision !== undefined) await this.ensureRevision(state, expectedRevision)
       await this.commitBatch(state, [record])
       const snapshot = await this.snapshot(state)
@@ -441,7 +390,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
         if (value === null && (!existing || existing.state === 'deleted')) continue
         operations.push(await this.make('setting', payload, before))
       }
-      await this.validateNew(state, before, operations)
+      await this.validateNew(before, operations)
       await this.ensureRevision(state, expectedRevision)
       if (operations.length) await this.commitBatch(state, operations)
       const snapshot = operations.length ? await this.snapshot(state) : before
@@ -453,7 +402,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     return this.transaction(async (state, recovered) => {
       if (!state.initialized || !this.options.overlay) throw new RemoteConfigError('overlay-disabled', 'This workspace has not enabled temporary binding notifications.')
       const { canonical } = await this.sources(state)
-      const value = await this.options.overlay.accept(notification, senderId, canonical, this.trust(state))
+      const value = await this.options.overlay.accept(notification, senderId, canonical, this.options.trust)
       const snapshot = await this.snapshot(state)
       return { value, changed: recovered, snapshot }
     })

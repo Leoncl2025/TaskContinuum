@@ -1,41 +1,38 @@
-import { useEffect, useRef, useState } from 'react'
-import type { SessionLink, SessionLinksSnapshot } from '../../shared/sessionBindings'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { SessionLinksSnapshot } from '../../shared/sessionBindings'
 import type { WorkspaceSnapshot } from '../../shared/workspace'
-import { clearSessionBindings, readSessionBindings, saveSessionBindings, sessionBindingKey } from './sessionBindings'
 import type { SessionBinding, SessionBindings } from './sessionBindings'
 
 function uiBindings(snapshot: SessionLinksSnapshot): SessionBindings {
   return Object.fromEntries(Object.entries(snapshot.document.bindings).map(([taskId, link]) => {
-    if (link.provider === 'agent-host') return [taskId, { id: link.sessionId, title: 'Agent Host', owner: link.owner, ownerIsRemote: link.owner.clientId !== snapshot.localOwner?.clientId, agentHost: { hostId: link.hostId, sessionId: link.sessionId, chatId: link.chatId, owner: link.owner } }]
-    const machine = link.owner ? link.owner.clientId !== snapshot.localOwner?.clientId ? link.owner.machineName : undefined : link.provider === 'vscode-copilot' ? link.remoteMachineName : undefined
-    return [taskId, { id: link.sessionId, title: 'GitHub Copilot', ...(link.owner ? { owner: link.owner, ownerIsRemote: link.owner.clientId !== snapshot.localOwner?.clientId } : {}), ...(link.provider === 'vscode-copilot' ? { vscodeWorkspaceStorageId: link.workspaceStorageId, ...(machine ? { remoteMachineName: machine } : {}) } : {}) }]
+    if (link.provider !== 'agent-host' || !link.hostId || !link.sessionId || !link.chatId || !link.owner?.clientId || !link.owner.machineName) throw new Error('Workspace session bindings must contain owned Agent Host targets. Legacy session configuration is not supported.')
+    return [taskId, { id: link.sessionId, title: 'Agent Host', owner: link.owner, ownerIsRemote: link.owner.clientId !== snapshot.localOwner?.clientId, agentHost: { hostId: link.hostId, sessionId: link.sessionId, chatId: link.chatId, owner: link.owner } }]
   }))
-}
-
-function repositoryLink(binding: SessionBinding): SessionLink {
-  if (binding.agentHost) return { provider: 'agent-host', ...binding.agentHost }
-  return binding.vscodeWorkspaceStorageId
-    ? { provider: 'vscode-copilot', sessionId: binding.id, workspaceStorageId: binding.vscodeWorkspaceStorageId, ...(binding.remoteMachineName ? { remoteMachineName: binding.remoteMachineName } : {}) }
-    : { provider: 'github-copilot', sessionId: binding.id }
 }
 
 export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
   const bridge = window.workspace
-  const [bindings, setBindings] = useState<SessionBindings>(() => workspace ? {} : readSessionBindings())
-  const [legacy] = useState<SessionBindings>(() => workspace ? Object.fromEntries(Object.entries(readSessionBindings(workspace.id)).filter(([taskId]) => workspace.tasks.some((task) => task.id === taskId))) : {})
+  const [bindings, setBindings] = useState<SessionBindings>({})
   const [snapshot, setSnapshot] = useState<SessionLinksSnapshot | null>(null)
   const [busy, setBusy] = useState(Boolean(workspace))
   const [error, setError] = useState<string | null>(null)
   const mounted = useRef(false)
   const pending = useRef(Boolean(workspace))
   const flushRefresh = useRef<(() => void) | undefined>(undefined)
+  const lastRevision = useRef<string | null | undefined>(undefined)
+  const readGeneration = useRef(0)
+  const applySnapshot = useCallback((value: SessionLinksSnapshot) => {
+    const next = uiBindings(value)
+    lastRevision.current = value.revision
+    setSnapshot(value)
+    setBindings(next)
+  }, [])
 
   useEffect(() => {
     mounted.current = true
     if (!workspace) return () => { mounted.current = false }
     pending.current = true
     let cancelled = false
-    let lastRevision: string | null | undefined
     let refreshing = false
     let refreshRequested = false
     const refresh = () => {
@@ -43,11 +40,16 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
       if (pending.current || refreshing) { refreshRequested = true; return }
       refreshRequested = false
       refreshing = true
+      const generation = readGeneration.current
       void bridge.getSessionLinks(workspace.id).then((value) => {
-        if (cancelled || pending.current) { refreshRequested = true; return }
-        if (value.revision !== lastRevision) { lastRevision = value.revision; setSnapshot(value); setBindings(uiBindings(value)) }
+        if (cancelled || pending.current || generation !== readGeneration.current) { refreshRequested = true; return }
+        if (value.revision !== lastRevision.current) applySnapshot(value)
         setError(null)
-      }).catch((failure: unknown) => { if (!cancelled && !pending.current) setError(failure instanceof Error ? failure.message : 'Repository session links could not be refreshed.') }).finally(() => {
+      }).catch((failure: unknown) => {
+        if (cancelled) return
+        if (pending.current || generation !== readGeneration.current) { refreshRequested = true; return }
+        setError(failure instanceof Error ? failure.message : 'Repository session links could not be refreshed.')
+      }).finally(() => {
         refreshing = false
         if (refreshRequested && !pending.current && !cancelled) refresh()
       })
@@ -56,9 +58,7 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
     const load = bridge ? bridge.getSessionLinks(workspace.id) : Promise.reject(new Error('The workspace session link bridge is unavailable.'))
     void load.then((value) => {
       if (cancelled) return
-      lastRevision = value.revision
-      setSnapshot(value)
-      setBindings(uiBindings(value))
+      applySnapshot(value)
       setError(null)
     }).catch((failure: unknown) => {
       if (!cancelled) setError(failure instanceof Error ? failure.message : 'Repository session links could not be read.')
@@ -68,23 +68,24 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
     const timer = setInterval(refresh, 5000)
     const unsubscribe = window.remoteVSCode?.gitSync?.onBindingsChanged(refresh)
     return () => { cancelled = true; mounted.current = false; flushRefresh.current = undefined; clearInterval(timer); unsubscribe?.() }
-  }, [bridge, workspace])
+  }, [applySnapshot, bridge, workspace])
 
-  useEffect(() => { if (!workspace) saveSessionBindings(bindings) }, [bindings, workspace])
-
-  function ready(): void {
+  function ready() {
+    if (!workspace) throw new Error('Open a task workspace before changing an Agent Host binding.')
     if (pending.current) throw new Error('Session links are still loading or saving.')
-    if (workspace && (!bridge || !snapshot || error)) throw new Error('Reload repository session links before changing the connection.')
+    if (!bridge || !snapshot || error) throw new Error('Reload repository session links before changing the connection.')
+    return { workspace, bridge, snapshot }
   }
 
-  async function run(action: () => Promise<SessionLinksSnapshot>): Promise<void> {
-    ready()
+  async function run(action: (context: ReturnType<typeof ready>) => Promise<SessionLinksSnapshot>): Promise<void> {
+    const context = ready()
+    readGeneration.current += 1
     pending.current = true
     setBusy(true)
     setError(null)
     try {
-      const value = await action()
-      if (mounted.current) { setSnapshot(value); setBindings(uiBindings(value)) }
+      const value = await action(context)
+      if (mounted.current) applySnapshot(value)
     } catch (failure) {
       if (mounted.current) setError(failure instanceof Error ? failure.message : 'The session link could not be saved.')
       throw failure
@@ -96,36 +97,26 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
   }
 
   async function attach(taskId: string, binding: SessionBinding): Promise<void> {
-    ready()
-    if (!workspace) {
-      setBindings((current) => ({ ...Object.fromEntries(Object.entries(current).filter(([id, link]) => id === taskId || sessionBindingKey(link) !== sessionBindingKey(binding))), [taskId]: binding }))
-      return
-    }
-    await run(() => bridge!.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: binding.id, expectedRevision: snapshot!.revision, ...(binding.owner ? { owner: binding.owner } : {}), ...(binding.agentHost ? { agentHost: { hostId: binding.agentHost.hostId, chatId: binding.agentHost.chatId }, owner: binding.agentHost.owner } : {}), ...(binding.vscodeWorkspaceStorageId ? { vscodeWorkspaceStorageId: binding.vscodeWorkspaceStorageId, ...(binding.remoteMachineName ? { vscodeRemoteMachineName: binding.remoteMachineName } : {}) } : {}) }))
+    await run(({ workspace, bridge, snapshot }) => {
+      const target = binding.agentHost
+      if (!target || !target.hostId || !target.sessionId || !target.chatId || !target.owner?.clientId || !target.owner.machineName || 'vscodeWorkspaceStorageId' in binding || 'remoteMachineName' in binding) throw new Error('Workspace session links require an owned Agent Host target. Local Copilot and VS Code session bindings are not supported.')
+      if (binding.id !== target.sessionId || binding.owner && (binding.owner.clientId !== target.owner.clientId || binding.owner.machineName !== target.owner.machineName)) throw new Error('The selected session and owner must match the Agent Host target.')
+      return bridge.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: target.sessionId, agentHost: { hostId: target.hostId, chatId: target.chatId }, owner: target.owner, expectedRevision: snapshot.revision })
+    })
   }
 
   async function detach(taskId: string): Promise<void> {
-    ready()
-    if (!workspace) {
-      setBindings((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== taskId)))
-      return
-    }
-    await run(() => bridge!.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: null, expectedRevision: snapshot!.revision }))
-  }
-
-  async function migrate(): Promise<void> {
-    if (!workspace || !bridge || !snapshot || snapshot.revision !== null) throw new Error('Local bindings can only be migrated before a repository link file exists.')
-    await run(() => bridge.migrateSessionLinks({ workspaceId: workspace.id, bindings: Object.fromEntries(Object.entries(legacy).map(([taskId, binding]) => [taskId, repositoryLink(binding)])) }))
-    clearSessionBindings(workspace.id)
+    await run(({ workspace, bridge, snapshot }) => bridge.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: null, expectedRevision: snapshot.revision }))
   }
 
   async function reload(): Promise<void> {
     if (!workspace || !bridge || pending.current) return
+    readGeneration.current += 1
     pending.current = true
     setBusy(true)
     try {
       const value = await bridge.getSessionLinks(workspace.id)
-      if (mounted.current) { setSnapshot(value); setBindings(uiBindings(value)); setError(null) }
+      if (mounted.current) { applySnapshot(value); setError(null) }
     } catch (failure) {
       if (mounted.current) setError(failure instanceof Error ? failure.message : 'Repository session links could not be read.')
     } finally {
@@ -136,8 +127,7 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
   }
 
   return {
-    bindings, busy, error, legacy, attach, detach, migrate, reload,
-    ready: !busy && !error && (!workspace || snapshot !== null),
-    needsMigration: Boolean(workspace && snapshot?.revision === null && Object.keys(legacy).length),
+    bindings, busy, error, attach, detach, reload,
+    ready: !busy && !error && workspace !== null && snapshot !== null,
   }
 }

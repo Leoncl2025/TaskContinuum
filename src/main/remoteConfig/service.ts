@@ -554,7 +554,7 @@ export class WorkspaceSyncService {
         if (descriptor && descriptor.workspaceId !== runtime.enrollment.workspaceId) throw new Error('The remote workspace identity changed. No records were accepted.')
         const records = unionRecords(await readRecords(root), await runtime.store.getPendingRecords())
         await this.admitRecords(runtime, records)
-        const resolved = await resolveRecords(records, { ...runtime.store.options.trust, allowLegacyBindings: true })
+        const resolved = await resolveRecords(records, runtime.store.options.trust)
         if (resolved.blocked) throw new Error(resolved.diagnostics.map((issue) => issue.message).join('; ').slice(0, 2000))
       },
     })

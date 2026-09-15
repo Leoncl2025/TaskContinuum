@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { remoteClientSchema, remoteInvitationSchema, remoteMachineSchema } from './vscodeRemoteProtocol'
+import { remoteClientSchema, remoteMachineSchema } from './vscodeRemoteProtocol'
 import { devTunnelRouteSchema } from './devTunnel/protocol'
 
 export const deviceInvitationSchema = z.object({
@@ -11,6 +11,6 @@ export const deviceInvitationSchema = z.object({
   port: z.number().int().min(1024).max(65535), devTunnel: devTunnelRouteSchema,
 }).strict()
 export type DeviceInvitation = z.infer<typeof deviceInvitationSchema>
-export const deviceCatalogSchema = z.object({
-  ownerId: z.uuid(), deviceId: z.uuid(), sessions: z.array(remoteInvitationSchema).max(32),
+export const deviceIdentitySchema = z.object({
+  ownerId: z.uuid(), deviceId: z.uuid(),
 }).strict()

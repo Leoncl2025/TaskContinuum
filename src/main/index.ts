@@ -4,10 +4,7 @@ import { pathToFileURL } from 'node:url'
 import { app, BrowserWindow, clipboard, ipcMain, Menu, net, protocol } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
 import { APP_URL, PRODUCTION_CSP, isTrustedRendererUrl, rendererSecurityPreferences, resolveRendererAsset, validateDevUrl } from './security'
-import { registerCopilotBridge } from './copilotBridge'
 import { registerWorkspaceBridge } from './workspaceBridge'
-import { registerSharedBridge } from './sharedBridge'
-import { registerVSCodeChatBridge } from './vscodeChatBridge'
 import { registerRemoteVSCodeBridge } from './remoteVSCodeBridge'
 import { registerWindowZoom, WindowZoomPreferences } from './windowZoom'
 import { registerAgentHostBridge } from './agentHostBridge'
@@ -25,9 +22,6 @@ protocol.registerSchemesAsPrivileged([
 
 const devUrl = app.isPackaged ? undefined : validateDevUrl(process.env.ELECTRON_RENDERER_URL)
 let mainWindow: BrowserWindow | undefined
-let copilotHost: ReturnType<typeof registerCopilotBridge> | undefined
-let sharedDesktop: ReturnType<typeof registerSharedBridge> | undefined
-let vscodeChat: ReturnType<typeof registerVSCodeChatBridge> | undefined
 let agentHost: ReturnType<typeof registerAgentHostBridge> | undefined
 let remoteVSCode: ReturnType<typeof registerRemoteVSCodeBridge> | undefined
 let windowZoom: WindowZoomPreferences | undefined
@@ -89,9 +83,13 @@ async function createWindow(): Promise<void> {
   window.webContents.on('will-navigate', (event) => event.preventDefault())
   window.webContents.on('will-frame-navigate', (event) => event.preventDefault())
   window.webContents.on('will-redirect', (event) => event.preventDefault())
-  window.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { if (initialNavigation) { initialNavigation = false; return }; copilotHost?.cancelAll(); vscodeChat?.close(); agentHost?.close() } })
-  window.webContents.on('render-process-gone', () => { copilotHost?.cancelAll(); void remoteVSCode?.close().catch(() => undefined) })
-  window.webContents.on('destroyed', () => { copilotHost?.cancelAll(); vscodeChat?.close(); agentHost?.close(); void remoteVSCode?.close().catch(() => undefined) })
+  window.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { if (initialNavigation) { initialNavigation = false; return }; agentHost?.close() } })
+  const closeConnections = () => {
+    agentHost?.close()
+    void remoteVSCode?.close().catch((error: unknown) => console.error('Remote device shutdown failed:', error))
+  }
+  window.webContents.on('render-process-gone', closeConnections)
+  window.webContents.on('destroyed', closeConnections)
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
   window.webContents.session.setPermissionCheckHandler(() => false)
   if (devUrl) {
@@ -126,17 +124,14 @@ void app.whenReady().then(async () => {
     }
   })
   registerDesktopBridge()
-  copilotHost = registerCopilotBridge(requireTrustedWindow, () => mainWindow)
-  const workspaces = registerWorkspaceBridge(requireTrustedWindow, copilotHost.allowDirectory, async (root, target) => remoteVSCode?.manager.remoteOwner(root, target), async (root, target) => {
+  const workspaces = registerWorkspaceBridge(requireTrustedWindow, async (root, target) => {
     if (!remoteVSCode) throw new Error('Agent Host access is not ready.')
     return remoteVSCode.agentHosts.verifyLink(root, target)
   }, async (root) => { await remoteVSCode?.gitSync.open(root) })
   remoteVSCode = registerRemoteVSCodeBridge(requireTrustedWindow, workspaces.currentRoot, () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('remote-vscode:git-bindings-changed')
   })
-  vscodeChat = registerVSCodeChatBridge(requireTrustedWindow, () => mainWindow, remoteVSCode.manager, workspaces.currentRoot)
   agentHost = registerAgentHostBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.agentHosts)
-  sharedDesktop = registerSharedBridge(requireTrustedWindow, () => mainWindow, workspaces.currentRoot, copilotHost.requireDirectory)
   await createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -151,9 +146,9 @@ app.on('before-quit', (event) => {
   event.preventDefault()
   if (quitting) return
   quitting = true
-  void Promise.all([copilotHost?.disconnect(), sharedDesktop?.close(), remoteVSCode?.close(), windowZoom?.flush()]).catch((error: unknown) => console.error(error)).finally(() => {
+  agentHost?.close()
+  void Promise.all([remoteVSCode?.close(), windowZoom?.flush()]).catch((error: unknown) => console.error(error)).finally(() => {
     cleanupComplete = true
     app.quit()
   })
-  if (!copilotHost) { cleanupComplete = true; app.quit() }
 })

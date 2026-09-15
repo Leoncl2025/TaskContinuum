@@ -34,7 +34,7 @@ async function fixture() {
       const path = incoming.url ?? ''
       requests.push({ path, body })
       outgoing.writeHead(responseStatus, { 'Content-Type': 'application/json' })
-      outgoing.end(JSON.stringify(path === '/device/agent-host/workers' ? catalog : result))
+      outgoing.end(JSON.stringify(path === '/device/identity' ? { ownerId, deviceId: pairId } : path === '/device/agent-host/workers' ? catalog : result))
     })().catch((error: unknown) => { outgoing.writeHead(500); outgoing.end(error instanceof Error ? error.message : 'Fixture request failed') })
   })
   server.listen(0, '127.0.0.1')
@@ -59,7 +59,7 @@ describe('paired device creation transport', () => {
   it('discovers a worker with no existing sessions without querying the legacy session catalog', async () => {
     const setup = await fixture()
     expect(setup.workers).toMatchObject([{ owner: setup.owner, state: 'connected', workspaces: [{ canSend: true, taskState: 'available' }] }])
-    expect(setup.requests.map((request) => request.path)).toEqual(['/device/agent-host/workers'])
+    expect(setup.requests.map((request) => request.path)).toEqual(['/device/identity', '/device/agent-host/workers'])
     expect(setup.transport).toHaveBeenCalledOnce()
   })
 
@@ -70,10 +70,10 @@ describe('paired device creation transport', () => {
     expect(created).toEqual({ ...setup.result, workerId: setup.request.workerId })
     await setup.client.agentHostCreationStatus(setup.root, setup.request, authorize)
     await setup.client.agentHostBindCreation(setup.root, setup.request, 'c'.repeat(64), authorize)
-    expect(setup.requests.map((request) => request.path)).toEqual(['/device/agent-host/workers', '/device/agent-host/create', '/device/agent-host/creation-status', '/device/agent-host/creation-bind'])
-    expect(setup.requests[1].body).toEqual({ operationId: setup.request.operationId, taskId: 'T-0007', workspaceId: setup.request.workspaceId, hostId: setup.request.hostId, expectedRevision: null })
-    expect(setup.requests[2].body).toEqual({ operationId: setup.request.operationId, workspaceId: setup.request.workspaceId })
-    expect(setup.requests[3].body.expectedRevision).toBe('c'.repeat(64))
+    expect(setup.requests.map((request) => request.path)).toEqual(['/device/identity', '/device/agent-host/workers', '/device/agent-host/create', '/device/agent-host/creation-status', '/device/agent-host/creation-bind'])
+    expect(setup.requests[2].body).toEqual({ operationId: setup.request.operationId, taskId: 'T-0007', workspaceId: setup.request.workspaceId, hostId: setup.request.hostId, expectedRevision: null })
+    expect(setup.requests[3].body).toEqual({ operationId: setup.request.operationId, workspaceId: setup.request.workspaceId })
+    expect(setup.requests[4].body.expectedRevision).toBe('c'.repeat(64))
     expect(setup.transport).toHaveBeenCalledOnce()
     expect(authorize).toHaveBeenCalledTimes(3)
   })

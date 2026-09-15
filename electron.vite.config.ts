@@ -9,7 +9,7 @@ export default defineConfig({
   main: {
     build: {
       externalizeDeps: { exclude: ['unified', 'remark-parse', 'remark-gfm', 'remark-frontmatter', 'mdast-util-to-string', '@microsoft/agent-host-protocol'] },
-      lib: { entry: { index: resolve(root, 'src/main/index.ts'), 'shared-host': resolve(root, 'src/main/shared/daemon.ts') }, formats: ['cjs'], fileName: (_format, name) => `${name}.cjs` },
+      lib: { entry: { index: resolve(root, 'src/main/index.ts') }, formats: ['cjs'], fileName: (_format, name) => `${name}.cjs` },
     },
   },
   preload: {

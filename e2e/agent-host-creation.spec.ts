@@ -5,6 +5,7 @@ import { _electron as electron, expect, test } from '@playwright/test'
 import type { ElectronApplication, Locator, Page } from '@playwright/test'
 import type { AgentHostSession, AgentHostTarget } from '../src/shared/agentHost'
 import type { AgentHostCreateRequest, AgentHostCreation, AgentHostWorker } from '../src/shared/agentHostCreation'
+import type { SessionLinksSnapshot } from '../src/shared/sessionBindings'
 
 interface MockLedger {
   workers: AgentHostWorker[]
@@ -14,11 +15,10 @@ interface MockLedger {
 
 interface MockFiles {
   ledger: string
-  bindingsDirectory: string
-  bindings: string
+  bindingSnapshot: string
 }
 
-async function installCreationMock(app: ElectronApplication, files: MockFiles): Promise<void> {
+async function installCreationMock(app: ElectronApplication, files: MockFiles, workspaceId: string): Promise<void> {
   await app.evaluate(({ ipcMain, dialog, session }, files) => {
     const fs = process.getBuiltinModule('fs')
     const read = (): MockLedger => JSON.parse(fs.readFileSync(files.ledger, 'utf8'))
@@ -44,6 +44,11 @@ async function installCreationMock(app: ElectronApplication, files: MockFiles): 
       callback({ cancel: external })
     })
     const handlers: Record<string, (...args: unknown[]) => unknown> = {
+      'workspace:session-links': (id) => {
+        record('workspace:session-links', [id])
+        if (id !== files.workspaceId) throw new Error('The binding snapshot belongs to a different fixture workspace.')
+        return JSON.parse(fs.readFileSync(files.bindingSnapshot, 'utf8')) as SessionLinksSnapshot
+      },
       'agent-host:creation-workers': (taskId) => record('agent-host:creation-workers', [taskId]).workers,
       'agent-host:creations': (taskId) => record('agent-host:creations', [taskId]).operations.filter((operation) => operation.taskId === taskId),
       'agent-host:create': (value) => {
@@ -73,9 +78,12 @@ async function installCreationMock(app: ElectronApplication, files: MockFiles): 
         const operation = state.operations.find((item) => item.operationId === id)
         if (operation?.state !== 'created-unbound' || !operation.session) throw new Error('Binding retry must use the already-created chat.')
         const { hostId, sessionId, chatId, owner } = operation.session
-        fs.mkdirSync(files.bindingsDirectory, { recursive: true })
-        fs.writeFileSync(`${files.bindings}.next`, JSON.stringify({ schemaVersion: 1, bindings: { [operation.taskId]: { provider: 'agent-host', hostId, sessionId, chatId, owner } } }))
-        fs.renameSync(`${files.bindings}.next`, files.bindings)
+        const before = JSON.parse(fs.readFileSync(files.bindingSnapshot, 'utf8')) as SessionLinksSnapshot
+        const document: SessionLinksSnapshot['document'] = { schemaVersion: 1, bindings: { ...before.document.bindings, [operation.taskId]: { provider: 'agent-host', hostId, sessionId, chatId, owner } } }
+        const revision = process.getBuiltinModule('crypto').createHash('sha256').update(JSON.stringify(document)).digest('hex')
+        const snapshot: SessionLinksSnapshot = { ...before, document, revision }
+        fs.writeFileSync(`${files.bindingSnapshot}.next`, JSON.stringify(snapshot))
+        fs.renameSync(`${files.bindingSnapshot}.next`, files.bindingSnapshot)
         operation.state = 'ready'
         delete operation.error
         const workspace = state.workers.find((item) => item.id === operation.workerId)?.workspaces.find((item) => item.id === operation.workspaceId)
@@ -103,7 +111,7 @@ async function installCreationMock(app: ElectronApplication, files: MockFiles): 
       }, 0)
       return id
     })
-  }, files)
+  }, { ...files, workspaceId })
 }
 
 async function selectTarget(picker: Locator, worker: string, workspace: string, host: string): Promise<void> {
@@ -121,7 +129,8 @@ test('creates explicitly through sandboxed IPC and recovers the same operation a
   const discovery = join(root, 'empty-discovery')
   const home = join(root, 'home')
   const taskDirectory = join(workspace, 'tasks', 'T-0001-creation')
-  const files: MockFiles = { ledger: join(profile, 'mock-creation-ledger.json'), bindingsDirectory: join(workspace, '.taskcontinuum'), bindings: join(workspace, '.taskcontinuum', 'session-bindings.json') }
+  // Both files are mock IPC fixture state, outside the workspace and its immutable records.
+  const files: MockFiles = { ledger: join(profile, 'mock-creation-ledger.json'), bindingSnapshot: join(profile, 'mock-workspace-binding-snapshot.json') }
   const revision = 'd'.repeat(64)
   const workerOwner = { clientId: '00000000-0000-4000-8000-000000000017', machineName: 'Paired-send-worker' }
   const workers: AgentHostWorker[] = [
@@ -140,6 +149,10 @@ test('creates explicitly through sandboxed IPC and recovers the same operation a
   await writeFile(join(workspace, '.agentdesk', 'config.json'), JSON.stringify({ schemaVersion: '1.0', workspace: 'Mock remote creation workspace' }))
   await writeFile(taskFile, taskText)
   await writeFile(files.ledger, JSON.stringify({ workers, operations: [], calls: [] } satisfies MockLedger))
+  await writeFile(files.bindingSnapshot, JSON.stringify({
+    document: { schemaVersion: 1, bindings: {} }, revision: null,
+    localOwner: { clientId: '00000000-0000-4000-8000-000000000021', machineName: 'Creation UI fixture' },
+  } satisfies SessionLinksSnapshot))
   const environment = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined))
   delete environment.ELECTRON_RUN_AS_NODE
   delete environment.ELECTRON_RENDERER_URL
@@ -159,7 +172,10 @@ test('creates explicitly through sandboxed IPC and recovers the same operation a
     page.on('pageerror', (error) => errors.push(error.message))
     page.on('request', (request) => { if (/^(https?|wss?):/.test(request.url())) externalRequests.push(request.url()) })
     await expect(page.getByRole('heading', { level: 1, name: 'Remote creation lifecycle' })).toBeVisible()
-    await installCreationMock(app, files)
+    const workspaceId = (await page.evaluate(() => window.workspace!.getState())).current!.id
+    await installCreationMock(app, files, workspaceId)
+    await page.reload()
+    await expect(page.getByRole('heading', { level: 1, name: 'Remote creation lifecycle' })).toBeVisible()
   }
   async function openPicker(): Promise<Locator> {
     await page.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
@@ -170,9 +186,13 @@ test('creates explicitly through sandboxed IPC and recovers the same operation a
   }
   try {
     await launch()
-    const security = await page!.evaluate(async () => ({ info: await window.desktop!.getInfo(), require: typeof Reflect.get(window, 'require') }))
+    const security = await page!.evaluate(async () => ({
+      info: await window.desktop!.getInfo(), require: typeof Reflect.get(window, 'require'),
+      retiredBridges: ['copilot', 'vscodeChat', 'sharedSessions'].filter((name) => Reflect.has(window, name)),
+    }))
     expect(security.info.security).toEqual({ contextIsolated: true, sandboxed: true })
     expect(security.require).toBe('undefined')
+    expect(security.retiredBridges).toEqual([])
     let picker = await openPicker()
     const create = () => picker.getByRole('button', { name: 'Create and assign to T-0001', exact: true })
     await expect(picker.getByText('No available Agent Host sessions.', { exact: true })).toBeVisible()
@@ -260,7 +280,11 @@ test('creates explicitly through sandboxed IPC and recovers the same operation a
     await expect(panel).toBeVisible()
     await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
     const target: AgentHostTarget = { hostId: createdSession.hostId, sessionId: createdSession.sessionId, chatId: createdSession.chatId, owner: createdSession.owner }
-    expect(JSON.parse(await readFile(files.bindings, 'utf8'))).toEqual({ schemaVersion: 1, bindings: { 'T-0001': { provider: 'agent-host', ...target } } })
+    const snapshot = JSON.parse(await readFile(files.bindingSnapshot, 'utf8')) as SessionLinksSnapshot
+    expect(snapshot.document).toEqual({ schemaVersion: 1, bindings: { 'T-0001': { provider: 'agent-host', ...target } } })
+    expect(snapshot.revision).toMatch(/^[a-f0-9]{64}$/)
+    expect(await page!.evaluate(async () => window.workspace!.getSessionLinks((await window.workspace!.getState()).current!.id))).toEqual(snapshot)
+    await expect(readFile(join(workspace, '.taskcontinuum', 'session-bindings.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await calls('agent-host:watch')).toEqual([{ channel: 'agent-host:watch', args: [target] }])
     expect(await calls('agent-host:bind-creation')).toEqual([{ channel: 'agent-host:bind-creation', args: [operation.operationId] }])
     expect(await calls('agent-host:create')).toHaveLength(1)
@@ -271,6 +295,12 @@ test('creates explicitly through sandboxed IPC and recovers the same operation a
     expect(errors).toEqual([])
     expect(externalRequests).toEqual([])
     await page!.screenshot({ path: resolve('artifacts', 'agent-host-creation-recovered-desktop.png') })
+    await page!.reload()
+    await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
+    expect(await calls('agent-host:create')).toHaveLength(1)
+    expect(await calls('agent-host:bind-creation')).toHaveLength(1)
+    expect(errors).toEqual([])
+    expect(externalRequests).toEqual([])
   } finally {
     await app?.close()
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })

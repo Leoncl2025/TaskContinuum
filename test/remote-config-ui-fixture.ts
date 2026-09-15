@@ -17,9 +17,7 @@ export function gitSyncUiFixture() {
   }
   const remote: RemoteVSCodeBridge = {
     gitSync: api,
-    list: vi.fn(async () => []), connect: vi.fn(async () => {}), disconnect: vi.fn(async () => {}), forget: vi.fn(async () => {}),
-    exportIdentity: vi.fn(async () => true), importInvitation: vi.fn(async () => null),
-    share: vi.fn(async () => true), grants: vi.fn(async () => []), revoke: vi.fn(async () => {}),
+    exportIdentity: vi.fn(async () => true),
   }
   return { api, remote, notify: () => { for (const listener of listeners) listener() }, setStatus: (value: WorkspaceGitSyncStatus) => { status = value } }
 }

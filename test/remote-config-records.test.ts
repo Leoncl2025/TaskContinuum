@@ -1,26 +1,17 @@
-import { createPrivateKey, createPublicKey, randomUUID, sign } from 'node:crypto'
+import { createHash, randomUUID, verify } from 'node:crypto'
 import { link, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { DevicePayload, RemoteRecord } from '../src/shared/remoteConfig'
 import type { SessionLink } from '../src/shared/sessionBindings'
-import { sshFingerprint } from '../src/main/devTunnel/protocol'
 import {
-  appendRecord, canonicalJson, createRecord, entityKey, readRecords, recordClosure, recordPath,
+  appendRecord, canonicalJson, createRecord, entityKey, parseRecord, readRecords, recordClosure, recordPath,
   resolvedSettings, resolveRecords, serializeRecord, verifyRecord, type RecordInput, type RecordTrust,
 } from '../src/main/remoteConfig/records'
+import { immutableRecordSigner as signer, signedBindingFixture } from './immutable-bindings-fixture'
 
 const workspaceId = '10000000-0000-4000-8000-000000000001'
 const at = '2026-09-14T09:00:00.000Z'
-function signer(index: number) {
-  const key = createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.alloc(32, index)]), format: 'der', type: 'pkcs8' })
-  const raw = createPublicKey(key).export({ format: 'der', type: 'spki' }).subarray(-32)
-  const publicKey = `ssh-ed25519 ${Buffer.concat([Buffer.from('0000000b7373682d6564323535313900000020', 'hex'), raw]).toString('base64')}`
-  return {
-    actor: { deviceId: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`, keyId: sshFingerprint(publicKey) },
-    publicKey, sign: (bytes: Buffer) => sign(null, bytes, key),
-  }
-}
 const a = signer(1)
 const b = signer(2)
 const c = signer(3)
@@ -96,6 +87,31 @@ describe('canonical signed immutable remote records', () => {
     await expect(verifyRecord(record, { ...trust, trustedKey: new Map([[a.actor.deviceId, a.publicKey]]), authorize: () => false })).rejects.toThrow('does not authorize')
   })
 
+  it.each([
+    { name: 'GitHub Copilot', target: { provider: 'github-copilot', sessionId: 'original', owner: target().owner } },
+    { name: 'VS Code Copilot', target: { provider: 'vscode-copilot', sessionId: 'original', workspaceStorageId: 'a'.repeat(32), owner: target().owner } },
+    { name: 'ownerless Agent Host', target: { provider: 'agent-host', hostId: 'host-main', sessionId: 'copilotcli:/original', chatId: 'ahp-chat:/original' } },
+  ])('rejects $name in correctly signed historical records instead of enabling legacy compatibility', async ({ target: value }) => {
+    const invalid: unknown = value
+    const author = signer(1)
+    const old = signedBindingFixture(invalid, author, workspaceId)
+    const { operationId, signature, ...body } = old
+    const bytes = Buffer.from(`TaskCon.RemoteConfig.v1\n${canonicalJson(body)}`, 'utf8')
+    expect(verify(null, bytes, author.verificationKey, Buffer.from(signature.value, 'base64'))).toBe(true)
+    expect(operationId).toBe(createHash('sha256').update(canonicalJson({ ...body, signature })).digest('hex'))
+    expect(() => parseRecord(old)).toThrow('schema')
+    await expect(verifyRecord(old, trust)).rejects.toThrow('schema')
+    const resolved = await resolveRecords([old], trust)
+    expect(resolved.bindings).toEqual({})
+    expect(resolved.blocked).toBe(true)
+    expect(resolved.diagnostics).toContainEqual(expect.objectContaining({ code: 'invalid-record' }))
+    await expect(Reflect.apply(createRecord, undefined, [{
+      kind: 'binding', workspaceId, actor: author.actor, payload: { action: 'set', taskId: 'T-0001', target: invalid },
+    }, author.sign])).rejects.toThrow()
+    const modern = signedBindingFixture(target(), author, workspaceId)
+    expect(await verifyRecord(modern, trust)).toEqual(modern)
+  })
+
   it('excludes bearer credentials, private key fields, arbitrary commands and SSH setting dictionaries', async () => {
     const good = await make({ kind: 'device', payload: identity() })
     for (const payload of [
@@ -154,7 +170,7 @@ describe('canonical signed immutable remote records', () => {
 
   it('disables every task claiming one canonical session, including different chat IDs', async () => {
     const one = await make({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: target() } })
-    const two = await make({ kind: 'binding', payload: { action: 'set', taskId: 'T-0002', target: { ...target(), chatId: 'ahp-chat:/different' } as SessionLink } }, b)
+    const two = await make({ kind: 'binding', payload: { action: 'set', taskId: 'T-0002', target: { ...target(), chatId: 'ahp-chat:/different' } } }, b)
     const separate = await make({ kind: 'binding', payload: { action: 'set', taskId: 'T-0003', target: target('separate') } })
     const conflicted = await resolveRecords([one, two, separate], trust)
     expect(Object.keys(conflicted.bindings)).toEqual(['T-0003'])

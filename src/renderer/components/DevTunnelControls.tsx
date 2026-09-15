@@ -57,10 +57,3 @@ export function DevTunnelControls({ hosting = false, onStatus, onBusy }: {
     {(error || status?.error) && <p className="copilot-error" role="alert">{error ?? status?.error}</p>}
   </section>
 }
-
-export function RemoteTransportPicker({ managed, disabled, onChange }: { managed: boolean; disabled?: boolean; onChange(value: boolean): void }) {
-  return <fieldset className="remote-transport-picker" disabled={disabled}><legend className="sr-only">Remote transport</legend>
-    <label><input type="radio" name="remote-transport" checked={managed} onChange={() => onChange(true)} />Dev Tunnel + SSH</label>
-    <label><input type="radio" name="remote-transport" checked={!managed} onChange={() => onChange(false)} />SSH alias</label>
-  </fieldset>
-}

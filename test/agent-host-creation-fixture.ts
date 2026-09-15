@@ -157,12 +157,11 @@ export async function createPairedAgentHostCreationFixture() {
   const participant = { clientId: randomUUID(), username: 'Creation tester', machineName: 'Caller-A' }
   const key = creationFixtureKey()
   const protector = { available: () => true, encrypt: (value: string) => Buffer.from(value), decrypt: (value: Buffer) => value.toString() }
-  let legacyCalls = 0
   let registry: AgentHostRegistry
   let host: VSCodeDeviceHost
   const makeHost = () => {
     registry = new AgentHostRegistry(profile, [discovery], async () => owner)
-    host = new VSCodeDeviceHost(profile, protector, async () => { legacyCalls++; throw new Error('The legacy Companion must not be used for Agent Host creation.') })
+    host = new VSCodeDeviceHost(profile, protector)
     host.setAgentHostAccess(registry, (folder) => locallyLinkedAgentHostSessions(profile, folder, owner))
   }
   makeHost()
@@ -178,7 +177,6 @@ export async function createPairedAgentHostCreationFixture() {
     get host() { return host },
     get registry() { return registry },
     get port() { return port },
-    get legacyCalls() { return legacyCalls },
     begin: (value = request) => call('/device/agent-host/create', value).then((result) => agentHostCreationResultSchema.parse(result)),
     status: (value = request) => call('/device/agent-host/creation-status', { operationId: value.operationId, workspaceId: value.workspaceId }).then((result) => agentHostCreationResultSchema.parse(result)),
     bind: (revision: string | null, value = request) => call('/device/agent-host/creation-bind', { operationId: value.operationId, workspaceId: value.workspaceId, expectedRevision: revision }).then((result) => agentHostCreationResultSchema.parse(result)),

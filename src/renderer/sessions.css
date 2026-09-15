@@ -55,10 +55,6 @@
 .vscode-execution-identity { display: flex; align-items: flex-start; gap: 7px; padding: 8px 14px; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; flex-shrink: 0; }
 .vscode-execution-identity > span { min-width: 0; }
 .vscode-chat-notice { margin: 0; padding: 8px 14px; font-size: 11px; overflow-wrap: anywhere; flex-shrink: 0; max-height: 100px; overflow: auto; }
-.message[data-delivery-id] header { display: grid; grid-template-columns: 16px minmax(0, 1fr) 26px; row-gap: 4px; }
-.message[data-delivery-id] header > strong { min-width: 0; overflow-wrap: anywhere; }
-.message[data-delivery-id] .message-model { grid-column: 2; grid-row: 2; margin-left: 0; min-width: 0; overflow-wrap: anywhere; }
-.message[data-delivery-id] header > .icon-button { grid-column: 3; grid-row: 1 / span 2; }
 .message-text.message-markdown { white-space: normal; min-width: 0; }
 .message-markdown > :first-child { margin-top: 0; }
 .message-markdown > :last-child { margin-bottom: 0; }

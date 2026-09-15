@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import type { VSCodeChatIdentity } from '../../shared/vscodeChat'
 import type { RemoteVSCodeBridge } from '../../shared/remoteVSCode'
 import { Icon, IconButton } from './Primitives'
 import { WorkspaceGitSyncControls } from './WorkspaceGitSyncControls'
@@ -49,7 +48,7 @@ export function RemoteDeviceConnections() {
   </div>
 }
 
-export function RemoteDeviceAccess({ identity, canSend, hosting }: { identity?: VSCodeChatIdentity; canSend: boolean; hosting: boolean }) {
+export function RemoteDeviceAccess({ canSend, hosting }: { canSend: boolean; hosting: boolean }) {
   const api = window.remoteVSCode?.devices
   const [recipients, setRecipients] = useState<Recipient[]>([])
   const [selected, setSelected] = useState('')
@@ -74,16 +73,14 @@ export function RemoteDeviceAccess({ identity, canSend, hosting }: { identity?: 
   return <div className="remote-device-controls">
     <h3>Paired devices</h3>
     <button type="button" className="secondary-button" disabled={busy || !hosting} onClick={() => { void run(() => api.pair(canSend), 'Device invitation saved; linked-session workspace policy enabled.') }}><Icon name="person-add" />Pair device</button>
-    {!identity && api.adoptLinks && <button type="button" className="secondary-button" disabled={busy} onClick={() => { void run(() => api.adoptLinks!(), 'Local owner links registered. Refresh the workspace before committing.') }}><Icon name="check" />Register existing local links</button>}
+    {api.adoptLinks && <button type="button" className="secondary-button" disabled={busy} onClick={() => { void run(() => api.adoptLinks!(), 'Existing Agent Host links confirmed on this device.') }}><Icon name="check" />Confirm existing Agent Host links</button>}
     <label className="form-field">Recipient device<select aria-label="Paired recipient device" value={selected} disabled={busy} onChange={(event) => setSelected(event.target.value)}><option value="">Select device</option>{recipients.map((recipient) => <option key={recipient.id} value={recipient.id}>{recipient.username} @ {recipient.machineName}</option>)}</select></label>
     <div className="remote-vscode-actions">
-      {identity ? <><button type="button" className="primary-button" disabled={busy || !selected} onClick={() => { void run(() => api.share(selected, identity, canSend), 'Session access saved for the paired device.') }}><Icon name="share" />Share session</button><IconButton icon="circle-slash" label="Remove device access to this session" disabled={busy || !selected} onClick={() => { void run(() => api.unshare(selected, identity), 'Session access removed.') }} /></> : <>
-        <button type="button" className="primary-button" disabled={busy || !selected || !api.workspace} onClick={() => { void run(() => api.workspace!(selected, canSend ? 'send' : 'read'), 'Linked-session workspace access enabled.') }}><Icon name="link" />Enable linked sessions</button>
-        <IconButton icon="circle-slash" label="Disable linked sessions for this workspace" disabled={busy || !selected || !api.workspace} onClick={() => { void run(() => api.workspace!(selected, 'none'), 'Linked-session workspace access disabled.') }} />
-      </>}
+      <button type="button" className="primary-button" disabled={busy || !selected || !api.workspace} onClick={() => { void run(() => api.workspace!(selected, canSend ? 'send' : 'read'), 'Linked-session workspace access enabled.') }}><Icon name="link" />Enable linked sessions</button>
+      <IconButton icon="circle-slash" label="Disable linked sessions for this workspace" disabled={busy || !selected || !api.workspace} onClick={() => { void run(() => api.workspace!(selected, 'none'), 'Linked-session workspace access disabled.') }} />
       <IconButton icon="debug-disconnect" label="Revoke paired device" disabled={busy || !selected} onClick={() => { void run(() => api.revoke(selected), 'Device revoked.'); setSelected('') }} />
     </div>
-    {!identity && selected && <p className="muted">Workspace access: {recipients.find((item) => item.id === selected)?.linkedAccess ?? 'none'}</p>}
+    {selected && <p className="muted">Workspace access: {recipients.find((item) => item.id === selected)?.linkedAccess ?? 'none'}</p>}
     {error && <p className="copilot-error" role="alert">{error}</p>}
     {message && <p role="status" className="muted">{message}</p>}
   </div>

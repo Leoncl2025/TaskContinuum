@@ -9,18 +9,20 @@ format; their checker is owned by TaskCon.
 
 1. Open the repository root as a task workspace. Its current branch must track
    one existing remote branch; no `main` or remote URL is guessed.
-2. Open **Remote VS Code sessions** in the activity bar.
+2. Open **Remote devices** in the activity bar.
 3. Sign in to the same owner account for the private Dev Tunnel on each device.
 4. Under **Automatic workspace links**, select **Enable automatic links** and
    read the native consent dialog. Do this on existing B/C before enrolling A.
 
-Consent covers publishing the public metadata and current binding migration,
+Consent covers publishing the public metadata and using immutable Agent Host bindings,
 automatic metadata exchange with signed devices in this shared repository, and
 read-only access to previously owner-confirmed linked sessions. It does not
 permit OS shell access, automatic native session creation, prompts, tool
 approvals, or new authorization receipts from remote binding data.
 
-An unconfigured workspace only reads its documents. Opening a workspace or
+An unconfigured workspace only reads its documents. Session binding reads and
+writes require enabling the immutable backend; there is no legacy fallback.
+Opening a workspace or
 canceling the native dialog does not create Git enrollment or publish keys.
 Pause stops automatic synchronization and workspace connections; it does not
 fall back to the archived binding file.
@@ -86,11 +88,19 @@ invitations, enrollment pins, the outbox, overlay markers, configuration editor
 state and an isolated Git replica. Generated views are not a second Git authority.
 The private key store continues to use OS protection.
 
-The existing `session-bindings.json` is an archival migration baseline after
-cutover. Changed old-client writes are reported instead of merged or silently
-accepted. Upgrade/disable old writers before migration. Descriptor-bearing
-workspaces without a ready enrolled backend fail closed rather than reading the
-archive as live routing data.
+Session bindings accept only `agent-host` targets with `hostId`, `sessionId`,
+`chatId` and a stable owner (`clientId`, `machineName`). GitHub Copilot SDK,
+VS Code journal and ownerless binding formats are unsupported, including
+inside signed Git records and SSH notifications.
+
+The old `session-bindings.json` and workspace-keyed browser bindings are not
+read, migrated or written. Existing files remain untouched; even malformed
+old data cannot become active or block the new store. Enable Automatic workspace
+links, then explicitly select the existing Agent Host sessions again. There is
+no migration button or migration IPC. Existing incompatible local store metadata
+or authorization receipts are reported as unsupported, never reset or imported.
+Do not delete immutable history, private identities or pending outboxes to bypass
+an error.
 
 ## Settings and recovery
 

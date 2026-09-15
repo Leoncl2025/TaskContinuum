@@ -1,30 +1,20 @@
-import { createPrivateKey, createPublicKey, randomUUID, sign } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { link, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SessionLink } from '../src/shared/sessionBindings'
-import { remoteConfigFormat, type BindingChangedNotification, type DevicePayload, type RemoteRecord, type RemoteSettingChanges } from '../src/shared/remoteConfig'
+import type { BindingChangedNotification, DevicePayload, RemoteRecord, RemoteSettingChanges } from '../src/shared/remoteConfig'
 import {
-  migrateRepositorySessionLinks, readLegacyRepositorySessionLinks, readRepositorySessionLinks,
-  registerRepositorySessionLinksBackend, updateRepositoryAgentHostLink, updateRepositorySessionLink,
+  readRepositorySessionLinks, registerRepositorySessionLinksBackend, removeRepositorySessionLink, updateRepositoryAgentHostLink,
   writeRepositorySessionLinks,
 } from '../src/main/repositorySessionLinks'
 import { locallyLinkedAgentHostSessions, recordLocalLink } from '../src/main/linkedSessionPolicy'
-import { sshFingerprint } from '../src/main/devTunnel/protocol'
 import { appendRecord, createRecord, readRecords, recordPath, serializeRecord, type RecordInput, type RecordTrust } from '../src/main/remoteConfig/records'
 import { BindingOverlay } from '../src/main/remoteConfig/overlay'
-import { legacyMigrationNonce, RemoteConfigStore, type RemoteConfigStoreOptions } from '../src/main/remoteConfig/store'
+import { RemoteConfigStore, type RemoteConfigStoreOptions } from '../src/main/remoteConfig/store'
+import { immutableRecordSigner as signer, signedBindingFixture } from './immutable-bindings-fixture'
 
 const workspaceId = '10000000-0000-4000-8000-000000000001'
-function signer(index: number) {
-  const key = createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.alloc(32, index)]), format: 'der', type: 'pkcs8' })
-  const raw = createPublicKey(key).export({ format: 'der', type: 'spki' }).subarray(-32)
-  const publicKey = `ssh-ed25519 ${Buffer.concat([Buffer.from('0000000b7373682d6564323535313900000020', 'hex'), raw]).toString('base64')}`
-  return {
-    actor: { deviceId: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`, keyId: sshFingerprint(publicKey) },
-    publicKey, sign: (bytes: Buffer) => sign(null, bytes, key),
-  }
-}
 const a = signer(1)
 const b = signer(2)
 const trust: RecordTrust = {
@@ -43,11 +33,11 @@ function notice(record: RemoteRecord, dependencies: RemoteRecord[] = []): Bindin
   if (record.kind !== 'binding') throw new Error('Test requires a binding operation.')
   return { schemaVersion: 1, kind: 'binding.changed', workspaceId, recipientId: b.actor.deviceId, operation: record, dependencies }
 }
-async function descriptor(root: string): Promise<string> {
+async function legacyFile(root: string, content: string): Promise<string> {
   const directory = join(root, '.taskcontinuum')
   await mkdir(directory, { recursive: true })
-  const file = join(directory, 'workspace.json')
-  await writeFile(file, JSON.stringify({ schemaVersion: 1, kind: 'taskcontinuum-workspace', workspaceId, remoteConfigFormat }))
+  const file = join(directory, 'session-bindings.json')
+  await writeFile(file, content)
   return file
 }
 const directories: string[] = []
@@ -72,96 +62,169 @@ afterEach(async () => {
 })
 
 describe('effective repository binding backend and durable immutable store', () => {
-  it('never falls back to archival bindings when an immutable descriptor exists without a ready backend', async () => {
+  it('requires a registered immutable backend with an old file and never falls back after backend removal', async () => {
     const f = await fixture()
-    const legacy = await updateRepositorySessionLink(f.workspaceRoot, 'T-0001', 'archived', null)
-    const file = await descriptor(f.workspaceRoot)
-    const contents = await readFile(file, 'utf8')
-    await expect(readRepositorySessionLinks(f.workspaceRoot)).rejects.toThrow('backend is not ready')
-    await expect(updateRepositorySessionLink(f.workspaceRoot, 'T-0002', 'stale-write', legacy.revision)).rejects.toThrow('archival only')
-    expect(await readLegacyRepositorySessionLinks(f.workspaceRoot)).toEqual(legacy)
-    const initialized = await f.store.initialize(legacy.revision)
+    const raw = JSON.stringify({ schemaVersion: 1, bindings: { 'T-0001': { provider: 'github-copilot', sessionId: 'archived' } } })
+    const file = await legacyFile(f.workspaceRoot, raw)
+    const transform = vi.fn<Parameters<typeof writeRepositorySessionLinks>[2]>((document) => document)
+    await expect(readRepositorySessionLinks(f.workspaceRoot)).rejects.toThrow('Enable Automatic workspace links')
+    await expect(writeRepositorySessionLinks(f.workspaceRoot, null, transform)).rejects.toThrow('legacy session configuration is not supported')
+    expect(transform).not.toHaveBeenCalled()
+    const initialized = await f.store.initialize()
+    expect(initialized.document.bindings).toEqual({})
+    expect(await readRecords(f.outboxRoot)).toEqual([])
     const dispose = await registerRepositorySessionLinksBackend(f.workspaceRoot, f.store)
     disposers.push(dispose)
     await f.store.writeBinding('T-0001', binding('current'), initialized.revision)
     f.changed.mockClear()
     expect((await readRepositorySessionLinks(f.workspaceRoot)).document.bindings['T-0001']).toEqual(binding('current'))
-    expect((await readLegacyRepositorySessionLinks(f.workspaceRoot)).document.bindings['T-0001']).toEqual(legacy.document.bindings['T-0001'])
     expect(f.changed).not.toHaveBeenCalled()
-    expect(await readFile(file, 'utf8')).toBe(contents)
+    expect(await readFile(file, 'utf8')).toBe(raw)
     dispose()
     await expect(readRepositorySessionLinks(f.workspaceRoot)).rejects.toThrow('backend is not ready')
+    expect(await readFile(file, 'utf8')).toBe(raw)
   })
 
-  it('rejects invalid, unknown-format, oversized and linked descriptors without writing the legacy archive', async () => {
+  it.each(['{', '<<<<<<< ours\n{}\n=======\n{}\n>>>>>>> theirs\n', 'x'.repeat(4097)])('ignores malformed old JSON without importing or repairing it (%#)', async (raw) => {
     const f = await fixture()
-    const legacy = await updateRepositorySessionLink(f.workspaceRoot, 'T-0001', 'archived', null)
-    const file = await descriptor(f.workspaceRoot)
-    for (const content of ['{', JSON.stringify({ remoteConfigFormat: 'future-unknown-format' }), 'x'.repeat(4097)]) {
-      await writeFile(file, content)
-      await expect(readRepositorySessionLinks(f.workspaceRoot)).rejects.toThrow()
-      await expect(updateRepositorySessionLink(f.workspaceRoot, 'T-0001', null, legacy.revision)).rejects.toThrow()
-      expect(await readLegacyRepositorySessionLinks(f.workspaceRoot)).toEqual(legacy)
-    }
-    await descriptor(f.workspaceRoot)
-    await link(file, join(f.home, 'linked-workspace.json'))
-    await expect(readRepositorySessionLinks(f.workspaceRoot)).rejects.toThrow('hard links')
-    expect(await readLegacyRepositorySessionLinks(f.workspaceRoot)).toEqual(legacy)
-  })
-
-  it('aborts an in-progress legacy edit if immutable enrollment appears during its transform', async () => {
-    const f = await fixture()
-    const legacy = await updateRepositorySessionLink(f.workspaceRoot, 'T-0001', 'original', null)
-    await expect(writeRepositorySessionLinks(f.workspaceRoot, legacy.revision, async (document) => {
-      await descriptor(f.workspaceRoot)
-      return { ...document, bindings: { 'T-0001': binding('new') } }
-    })).rejects.toThrow('backend is not ready')
-    expect(await readLegacyRepositorySessionLinks(f.workspaceRoot)).toEqual(legacy)
-    expect(await readdir(join(f.workspaceRoot, '.taskcontinuum'))).not.toContain('session-bindings.lock')
-  })
-
-  it('keeps the legacy baseline until explicit initialization and never rewrites its archive', async () => {
-    const f = await fixture()
-    const legacy = await migrateRepositorySessionLinks(f.workspaceRoot, { 'T-0001': { provider: 'github-copilot', sessionId: 'historical' } })
-    const raw = await readFile(join(f.workspaceRoot, '.taskcontinuum', 'session-bindings.json'), 'utf8')
-    disposers.push(await registerRepositorySessionLinksBackend(f.workspaceRoot, f.store))
-    expect(await readRepositorySessionLinks(f.workspaceRoot)).toMatchObject(legacy)
-    await expect(writeRepositorySessionLinks(f.workspaceRoot, legacy.revision, (document) => document)).rejects.toThrow('initialize')
+    const file = await legacyFile(f.workspaceRoot, raw)
+    const before = await f.store.read()
+    expect(before).toMatchObject({ initialized: false, document: { schemaVersion: 1, bindings: {} }, records: [] })
+    const initialized = await f.store.initialize()
+    expect(initialized).toMatchObject({ initialized: true, document: before.document, records: [] })
+    expect(await readFile(file, 'utf8')).toBe(raw)
+    expect(await readdir(join(f.workspaceRoot, '.taskcontinuum'))).toEqual(['session-bindings.json'])
     expect(await readRecords(f.outboxRoot)).toEqual([])
-    const migrated = await f.store.initialize(legacy.revision)
-    expect(migrated.initialized).toBe(true)
-    expect(migrated.document).toEqual(legacy.document)
-    expect(migrated.revision).not.toBe(legacy.revision)
-    const records = await readRecords(f.outboxRoot)
-    expect(records).toHaveLength(1)
-    expect(records[0].nonce).toBe(legacyMigrationNonce(workspaceId, legacy.document, 'T-0001'))
-    expect(await readFile(join(f.workspaceRoot, '.taskcontinuum', 'session-bindings.json'), 'utf8')).toBe(raw)
-    expect(f.changed).toHaveBeenCalledTimes(1)
-    await f.store.initialize()
-    expect(await readRecords(f.outboxRoot)).toEqual(records)
-    expect(f.changed).toHaveBeenCalledTimes(1)
-    await writeFile(join(f.workspaceRoot, '.taskcontinuum', 'session-bindings.json'), raw.replace('historical', 'old-client-edit'))
-    await expect(f.store.read()).rejects.toThrow('Old-client writes')
+    expect(f.changed).not.toHaveBeenCalled()
   })
 
-  it('deduplicates deterministic migration retries and never resurrects canonical tombstones', async () => {
-    const first = await fixture(a)
-    const second = await fixture(a)
-    const baseline = { 'T-0001': binding('old'), 'T-0002': binding('two') }
-    const one = await migrateRepositorySessionLinks(first.workspaceRoot, baseline)
-    const two = await migrateRepositorySessionLinks(second.workspaceRoot, baseline)
-    await first.store.initialize(one.revision)
-    await second.store.initialize(two.revision)
-    expect(await readRecords(second.outboxRoot)).toEqual(await readRecords(first.outboxRoot))
-    const records = await readRecords(first.outboxRoot)
-    const prior = records.find((record) => record.kind === 'binding' && record.payload.taskId === 'T-0001')!
-    const deleted = await operation({ kind: 'binding', payload: { action: 'delete', taskId: 'T-0001' }, parents: [prior.operationId] })
-    const third = await fixture(b)
-    await migrateRepositorySessionLinks(third.workspaceRoot, baseline)
-    for (const record of [...records, deleted]) await appendRecord(third.recordsRoot, record)
-    const snapshot = await third.store.initialize()
-    expect(snapshot.document.bindings).toEqual({ 'T-0002': binding('two') })
-    expect(await readRecords(third.outboxRoot)).toEqual([])
+  it('does not follow or rewrite linked old files during initialization or later edits', async () => {
+    const f = await fixture()
+    const raw = JSON.stringify({ schemaVersion: 1, bindings: { 'T-0001': binding('archived') } })
+    const file = await legacyFile(f.workspaceRoot, raw)
+    const outside = join(f.home, 'linked-old-file.json')
+    await link(file, outside)
+    const initial = await f.store.initialize()
+    disposers.push(await registerRepositorySessionLinksBackend(f.workspaceRoot, f.store))
+    expect(initial.document.bindings).toEqual({})
+    const changedArchive = '{old client wrote broken JSON'
+    const saved = await writeRepositorySessionLinks(f.workspaceRoot, initial.revision, async (document) => {
+      await writeFile(outside, changedArchive)
+      return { ...document, bindings: { 'T-0001': binding('new') } }
+    })
+    expect((await f.store.read()).document).toEqual(saved.document)
+    expect(await readFile(file, 'utf8')).toBe(changedArchive)
+    expect(await readFile(outside, 'utf8')).toBe(changedArchive)
+    expect(await readdir(join(f.workspaceRoot, '.taskcontinuum'))).toEqual(['session-bindings.json'])
+    expect(await f.store.getRecords()).toHaveLength(1)
+  })
+
+  it('does not import any old provider or derived snapshot, and ignores old edits after initialization', async () => {
+    const f = await fixture()
+    const old: unknown = { schemaVersion: 1, bindings: {
+      'T-0001': { provider: 'github-copilot', sessionId: 'historical' },
+      'T-0002': { provider: 'vscode-copilot', sessionId: 'historical', workspaceStorageId: 'a'.repeat(32), owner: target().owner },
+      'T-0003': binding('snapshot-only'),
+    } }
+    const raw = JSON.stringify(old)
+    const file = await legacyFile(f.workspaceRoot, raw)
+    disposers.push(await registerRepositorySessionLinksBackend(f.workspaceRoot, f.store))
+    const before = await readRepositorySessionLinks(f.workspaceRoot)
+    expect(before.document.bindings).toEqual({})
+    await expect(writeRepositorySessionLinks(f.workspaceRoot, before.revision, (document) => document)).rejects.toThrow('Enable the immutable binding store')
+    await expect(f.store.writeBinding('T-0004', binding('new'), before.revision)).rejects.toThrow('Enable the immutable binding store')
+    await expect(f.store.append('binding', { action: 'set', taskId: 'T-0004', target: binding('new') })).rejects.toThrow('Enable the immutable binding store')
+    const initialized = await f.store.initialize()
+    expect(initialized.initialized).toBe(true)
+    expect(initialized.document.bindings).toEqual({})
+    expect(initialized.revision).not.toBe(before.revision)
+    expect(await f.store.initialize()).toEqual(initialized)
+    expect(await readRecords(f.outboxRoot)).toEqual([])
+    expect(f.changed).not.toHaveBeenCalled()
+    const state = JSON.parse(await readFile(join(f.stateDirectory, 'store.json'), 'utf8'))
+    expect(Object.keys(state).sort()).toEqual(['canonicalIds', 'initialized', 'localIds', 'schemaVersion', 'workspaceId'])
+    expect(await readFile(file, 'utf8')).toBe(raw)
+    await writeFile(file, raw.replace('historical', 'old-client-edit'))
+    expect(await f.store.read()).toEqual(initialized)
+    expect(f.changed).not.toHaveBeenCalled()
+  })
+
+  it('resolves only canonical and outbox records before enrollment and never resurrects their tombstones', async () => {
+    const f = await fixture(b)
+    const base = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding('old') } })
+    const deleted = await operation({ kind: 'binding', payload: { action: 'delete', taskId: 'T-0001' }, parents: [base.operationId] })
+    const pending = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0002', target: binding('two') } }, b)
+    for (const record of [base, deleted]) await appendRecord(f.recordsRoot, record)
+    await appendRecord(f.outboxRoot, pending)
+    const raw = JSON.stringify({ schemaVersion: 1, bindings: { 'T-0001': binding('resurrected'), 'T-0003': binding('not-imported') } })
+    const file = await legacyFile(f.workspaceRoot, raw)
+    const before = await f.store.read()
+    expect(before.initialized).toBe(false)
+    expect(before.document.bindings).toEqual({ 'T-0002': binding('two') })
+    expect(before.resolution.entities['binding:T-0001'].state).toBe('deleted')
+    const initialized = await f.store.initialize()
+    expect(initialized.document).toEqual(before.document)
+    expect(initialized.records).toEqual(before.records)
+    expect(await readRecords(f.outboxRoot)).toEqual([pending])
+    expect(await f.store.initialize()).toEqual(initialized)
+    expect(await readFile(file, 'utf8')).toBe(raw)
+    expect(f.changed).not.toHaveBeenCalled()
+  })
+
+  it('retains settings and device publication before binding initialization without enabling binding writes', async () => {
+    const f = await fixture()
+    const before = await f.store.read()
+    const settings = await f.store.updateSettings(before.revision, { autoLink: false })
+    expect(settings.initialized).toBe(false)
+    const device = await f.store.append('device', {
+      action: 'publish', deviceId: a.actor.deviceId,
+      identity: { username: 'fixture-user', machineName: 'machine-1', clientPublicKey: a.publicKey, hostPublicKey: a.publicKey, clientKeyId: a.actor.keyId, hostKeyId: a.actor.keyId },
+      routes: [{ kind: 'dev-tunnel', tunnelId: 'test-route.use', sshPort: 2200, controlPort: 2201 }],
+    })
+    const pending = await f.store.getRecords()
+    expect(pending).toHaveLength(2)
+    expect(pending).toContainEqual(device)
+    await expect(f.store.append('binding', { action: 'set', taskId: 'T-0001', target: binding() })).rejects.toThrow('Enable the immutable binding store')
+    const initialized = await f.store.initialize()
+    expect(initialized.records).toEqual(pending)
+    expect(initialized.document.bindings).toEqual({})
+    expect((await f.store.getSettings()).values.autoLink).toBe(false)
+    expect(f.changed).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    { legacyDocument: { schemaVersion: 1, bindings: {} } },
+    { legacyRevision: 'a'.repeat(64) },
+    { allowLegacyBindings: true },
+    { migrationNonce: '00000000-0000-4000-8000-000000000099' },
+  ])('rejects saved legacy state metadata rather than resetting or migrating it (%#)', async (metadata) => {
+    const f = await fixture()
+    const initial = await f.store.initialize()
+    const saved = await f.store.writeBinding('T-0001', binding('retained'), initial.revision)
+    const file = join(f.stateDirectory, 'store.json')
+    const content = JSON.stringify({ ...JSON.parse(await readFile(file, 'utf8')), ...metadata })
+    await writeFile(file, content)
+    await expect(f.store.read()).rejects.toMatchObject({ code: 'unsupported-state' })
+    await expect(f.store.initialize()).rejects.toThrow('legacy state is not migrated')
+    expect(await readFile(file, 'utf8')).toBe(content)
+    expect(await readRecords(f.outboxRoot)).toEqual(saved.records)
+  })
+
+  it('reopens initialized new-format state without dropping its accepted or pending immutable records', async () => {
+    const f = await fixture()
+    const initial = await f.store.initialize()
+    const first = await f.store.writeBinding('T-0001', binding('retained'), initial.revision)
+    await appendRecord(f.recordsRoot, first.records[0])
+    const synced = await f.store.read()
+    const second = await f.store.writeBinding('T-0002', binding('pending'), synced.revision)
+    await f.store.close()
+    const reopened = new RemoteConfigStore(f.options)
+    stores.push(reopened)
+    f.changed.mockClear()
+    expect(await reopened.initialize()).toEqual(second)
+    expect(await reopened.getRecords()).toEqual(second.records)
+    expect(await reopened.getPendingRecords()).toHaveLength(1)
+    expect(f.changed).not.toHaveBeenCalled()
   })
 
   it('registers by canonical root, routes existing callers through one store, and leaves other roots unchanged', async () => {
@@ -177,11 +240,11 @@ describe('effective repository binding backend and durable immutable store', () 
     expect(saved).not.toHaveProperty('records')
     const alias = process.platform === 'win32' ? enrolled.workspaceRoot.toUpperCase() : enrolled.workspaceRoot
     expect((await readRepositorySessionLinks(alias)).document).toEqual(saved.document)
-    expect((await readLegacyRepositorySessionLinks(enrolled.workspaceRoot)).document.bindings).toEqual({})
-    const legacy = await updateRepositorySessionLink(other.workspaceRoot, 'T-0001', 'legacy-native', null)
-    expect((await readRepositorySessionLinks(other.workspaceRoot)).document).toEqual(legacy.document)
+    await expect(readFile(join(enrolled.workspaceRoot, '.taskcontinuum', 'session-bindings.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readRepositorySessionLinks(other.workspaceRoot)).rejects.toThrow('Enable Automatic workspace links')
+    expect(await readdir(other.workspaceRoot)).toEqual([])
     dispose()
-    expect((await readRepositorySessionLinks(enrolled.workspaceRoot)).document.bindings).toEqual({})
+    await expect(readRepositorySessionLinks(enrolled.workspaceRoot)).rejects.toThrow('Enable Automatic workspace links')
     disposers.push(await registerRepositorySessionLinksBackend(enrolled.workspaceRoot, enrolled.store))
     dispose()
     expect((await readRepositorySessionLinks(enrolled.workspaceRoot)).document.bindings['T-0001']).toEqual(binding())
@@ -240,7 +303,7 @@ describe('effective repository binding backend and durable immutable store', () 
     for (const record of [first, second]) await appendRecord(f.recordsRoot, record)
     const before = await readRepositorySessionLinks(f.workspaceRoot)
     expect(before.document.bindings).toEqual({})
-    await updateRepositorySessionLink(f.workspaceRoot, 'T-0001', null, before.revision)
+    await removeRepositorySessionLink(f.workspaceRoot, 'T-0001', before.revision)
     const snapshot = await f.store.read()
     expect(snapshot.resolution.entities['binding:T-0001'].state).toBe('deleted')
     expect((await f.store.getPendingRecords())[0].parents).toEqual([first.operationId, second.operationId].sort())
@@ -399,7 +462,8 @@ describe('effective repository binding backend and durable immutable store', () 
     expect(Object.values((await f.store.read()).resolution.invitations)).toEqual([renewed])
     await f.store.append('device', { action: 'remove', deviceId: a.actor.deviceId })
     await expect(f.store.append('device', payload(a))).rejects.toThrow('reenrollment')
-    await expect(f.store.append('binding', { action: 'set', taskId: 'T-0002', target: { provider: 'github-copilot', sessionId: 'legacy-new' } })).rejects.toThrow('Agent Host')
+    const legacyPayload: unknown = { action: 'set', taskId: 'T-0002', target: { provider: 'github-copilot', sessionId: 'legacy-new' } }
+    await expect(Reflect.apply(f.store.append, f.store, ['binding', legacyPayload])).rejects.toThrow()
   })
 
   it('exposes settings, public exports, pending operations and exact synced reconciliation without echoing overlays', async () => {
@@ -459,19 +523,29 @@ describe('SSH binding overlay and exact canonical reconciliation', () => {
     return { ...f, base, before, change: changed, overlay, requestSync, onChange, advance: (milliseconds: number) => { time += milliseconds } }
   }
 
-  it('uses the same explicit migration policy for canonical and provisional dependency validation', async () => {
+  it.each(['github-copilot', 'vscode-copilot', 'ownerless-agent-host'])('rejects signed %s records as canonical history and provisional dependencies alike', async (provider) => {
     const f = await fixture(b, (paths) => ({
       overlay: new BindingOverlay({ workspaceId, recipientId: b.actor.deviceId, trust, markerFile: join(paths.stateDirectory, 'pending-overlay.json') }),
     }))
-    const legacy = await migrateRepositorySessionLinks(f.workspaceRoot, { 'T-0001': { provider: 'github-copilot', sessionId: 'historic-ownerless' } })
-    const initialized = await f.store.initialize(legacy.revision)
-    const imported = initialized.records[0]
-    await appendRecord(f.recordsRoot, imported)
-    const changed = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding('modern') }, parents: [imported.operationId] })
-    expect((await f.store.receiveOverlay(notice(changed, [imported]), a.actor.deviceId)).result).toBe('provisional')
-    expect((await f.store.read()).document.bindings['T-0001']).toEqual(binding('modern'))
-    expect((await f.store.getRecords()).some((record) => record.operationId === changed.operationId)).toBe(false)
-    expect(f.changed).toHaveBeenCalledTimes(1)
+    const initialized = await f.store.initialize()
+    const oldTarget: unknown = provider === 'ownerless-agent-host'
+      ? { provider: 'agent-host', hostId: 'host-main', sessionId: 'copilotcli:/historic', chatId: 'ahp-chat:/historic' }
+      : { provider, sessionId: 'historic', ...(provider === 'vscode-copilot' ? { workspaceStorageId: 'a'.repeat(32), owner: target().owner } : {}) }
+    const old = signedBindingFixture(oldTarget, a, workspaceId)
+    const changed = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding('modern') }, parents: [old.operationId] })
+    expect((await f.store.receiveOverlay({ ...notice(changed), dependencies: [old] }, a.actor.deviceId)).result).toBe('rejected')
+    expect((await f.store.receiveOverlay({ ...notice(changed), operation: old }, a.actor.deviceId)).result).toBe('rejected')
+    expect(await f.store.read()).toEqual(initialized)
+    expect(await f.store.getRecords()).toEqual([])
+    expect(f.changed).not.toHaveBeenCalled()
+    const directory = join(f.recordsRoot, '.taskcontinuum', 'records', 'v1', 'bindings', 'T-0001')
+    await mkdir(directory, { recursive: true })
+    const content = JSON.stringify(old)
+    const file = join(directory, `${old.operationId}.json`)
+    await writeFile(file, content)
+    await expect(f.store.read()).rejects.toThrow('schema')
+    expect(await readFile(file, 'utf8')).toBe(content)
+    expect(await readRecords(f.outboxRoot)).toEqual([])
   })
 
   it('routes a received binding before Git arrives and never creates local authorization receipts or an echoed edit', async () => {

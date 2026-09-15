@@ -174,7 +174,6 @@ export interface RecordTrust {
   trustedKey: RecordKeySource
   /** Enforce enrolled editor, task-existence and binding-target policy as appropriate for this operation. */
   authorize(record: RemoteRecord): Awaitable<boolean>
-  allowLegacyBindings?: boolean
   allowKeyRotation?(record: RemoteRecord<'device'>, previous: RemoteRecord<'device'>): Awaitable<boolean>
   allowDeviceReactivation?(record: RemoteRecord<'device'>): Awaitable<boolean>
   maximumInvitationLifetimeMs?: number
@@ -208,8 +207,7 @@ export async function verifyRecord(input: unknown, trust: RecordTrust): Promise<
     }
   }
   if (record.kind === 'binding' && record.payload.action === 'set') {
-    if (!record.payload.target.owner && !trust.allowLegacyBindings) deny('Published session bindings require a stable owner identity.')
-    if (record.payload.target.owner && !uuidSchema.safeParse(record.payload.target.owner.clientId).success) deny('Published owner identities must use canonical lowercase UUIDs.')
+    if (!uuidSchema.safeParse(record.payload.target.owner.clientId).success) deny('Published owner identities must use canonical lowercase UUIDs.')
   }
   if (record.kind === 'setting' && record.payload.scope === 'device' && record.actor.deviceId !== record.payload.deviceId) deny('Only the owning device can change its device settings.')
   if (!await trust.authorize(record)) deny('The enrolled policy does not authorize this operation, task or target.')

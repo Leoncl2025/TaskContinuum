@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createConnection, createServer } from 'node:net'
 import { hostname, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -24,6 +24,7 @@ import { newSshKeyPair, openSessionSshBridge, startSessionSshHost } from '../src
 import { canonicalPolicyRoot, locallyLinkedAgentHostSessions, recordLocalLink } from '../src/main/linkedSessionPolicy'
 import { readRepositorySessionLinks, updateRepositoryAgentHostLink } from '../src/main/repositorySessionLinks'
 import { AgentHostCreationClient } from '../src/main/agentHostCreationClient'
+import { createImmutableBindingsFixture } from '../test/immutable-bindings-fixture'
 
 test('subscribes two clients to an isolated actual VS Code Agent Host', async () => {
   test.skip(!process.env.TASKCONTINUUM_VERIFY_AHP_CLI, 'Set the installed code-tunnel executable to verify AHP without user sessions.')
@@ -59,8 +60,8 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
   let deviceHost: VSCodeDeviceHost | undefined
   let deviceClient: VSCodeDeviceClient | undefined
   let managedSsh: Awaited<ReturnType<typeof startSessionSshHost>> | undefined
+  const bindingFixtures: Awaited<ReturnType<typeof createImmutableBindingsFixture>>[] = []
   let pairedConnections = 0
-  let legacyCalls = 0
   const clientIds = [randomUUID(), randomUUID()]
   let ssh: Awaited<ReturnType<typeof startSshFixture>> | undefined
   let tunnel: Awaited<ReturnType<typeof openSshTunnel>> | undefined
@@ -129,7 +130,7 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
     const turnId = randomUUID()
     const discovery = join(root, 'discovery'), tasksB = join(root, 'tasks-b'), tasksA = join(root, 'tasks-a')
     const profileB = join(root, 'gateway-b'), profileA = join(root, 'gateway-a')
-    await Promise.all([mkdir(discovery), mkdir(tasksB), mkdir(join(tasksA, '.taskcontinuum'), { recursive: true })])
+    await Promise.all([mkdir(discovery), mkdir(tasksB), mkdir(tasksA)])
     for (const folder of [tasksA, tasksB]) {
       await mkdir(join(folder, '.agentdesk'), { recursive: true })
       await writeFile(join(folder, '.agentdesk', 'config.json'), JSON.stringify({ schemaVersion: '1.0', workspace: 'Isolated remote creation' }))
@@ -144,6 +145,10 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
       await promisify(execFile)('git', ['init', '--quiet', '--initial-branch=main', folder], { windowsHide: true })
       await promisify(execFile)('git', ['-C', folder, '-c', 'user.name=Task Continuum Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '--allow-empty', '-m', 'Initialize isolated creation fixture\n\nCo-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>'], { windowsHide: true })
     }
+    const bindingsA = await createImmutableBindingsFixture(tasksA)
+    bindingFixtures.push(bindingsA)
+    const bindingsB = await createImmutableBindingsFixture(tasksB)
+    bindingFixtures.push(bindingsB)
     const owner = { clientId: randomUUID(), machineName: hostname() }
     const participant = { clientId: randomUUID(), username: 'Observer', machineName: 'Viewer-A' }
     const endpoint: AgentHostEndpoint = { schemaVersion: 2, type: 'standalone', pid: host.pid!, instanceId: randomUUID(), connectionToken: token, protocolVersion: '0.9.0', endpoint: { type: 'tcp', host: '127.0.0.1', port } }
@@ -151,7 +156,7 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
     const target = { hostId: endpoint.instanceId, sessionId: session, chatId: chat, owner }
     const protector = { available: () => true, encrypt: (value: string) => Buffer.from(value), decrypt: (value: Buffer) => value.toString() }
     registry = new AgentHostRegistry(profileB, [discovery], async () => owner)
-    deviceHost = new VSCodeDeviceHost(profileB, protector, async () => { legacyCalls++; throw new Error('No Companion is available in this test.') })
+    deviceHost = new VSCodeDeviceHost(profileB, protector)
     deviceHost.setAgentHostAccess(registry, (folder) => locallyLinkedAgentHostSessions(profileB, folder, owner))
     managedSsh = await startSessionSshHost(newSshKeyPair())
     const key = newSshKeyPair()
@@ -165,9 +170,10 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
     managedSsh.allow(pair.id, key.publicKey, gatewayPort, pair.expiresAt, true)
     await deviceClient.import(tasksA, deviceInvitationSchema.parse({ schemaVersion: 2, provider: 'vscode-copilot-device', id: pair.id, ownerId: await deviceHost.ownerId(), ownerClientId: owner.clientId, machineName: hostname(), participant, token: pair.token, expiresAt: pair.expiresAt, port: gatewayPort,
       devTunnel: { kind: 'dev-tunnel', tunnelId: `taskcontinuum-${'f'.repeat(32)}.jpe1`, sshPort: managedSsh.port, hostPublicKey: managedSsh.publicKey, clientPublicKey: key.publicKey } }), true)
-    const linked = await updateRepositoryAgentHostLink(tasksB, 'T-0001', target, null)
+    const linked = await updateRepositoryAgentHostLink(tasksB, 'T-0001', target, bindingsB.snapshot.revision)
     await recordLocalLink(profileB, tasksB, 'T-0001', linked.document.bindings['T-0001'], owner)
-    await writeFile(join(tasksA, '.taskcontinuum/session-bindings.json'), JSON.stringify(linked.document))
+    expect((await bindingsA.importRecords(await bindingsB.store.getPendingRecords())).document).toEqual(linked.document)
+    for (const folder of [tasksA, tasksB]) await expect(readFile(join(folder, '.taskcontinuum', 'session-bindings.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     expect((await deviceClient.agentHostSessions(tasksA)).sessions).toMatchObject([{ ...target, canSend: true }])
     production = new AgentHostConnection(target, profileA, (signal) => deviceClient!.agentHostTransport(tasksA, target, signal))
     await production.open()
@@ -248,7 +254,6 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
     expect(firstChatEvents.filter(({ envelope }) => envelope.action.type === 'chat/turnStarted')).toHaveLength(2)
     expect(((await resumed.subscribe(unrelatedChat)).result.snapshot?.state as ChatState).turns).toHaveLength(0)
     expect(pairedConnections).toBe(1)
-    expect(legacyCalls).toBe(0)
     phase = 'Native remote creation through inherited send permission'
     const defaultConfig = await clients[0].request('resolveSessionConfig', { channel: 'ahp-root://', provider, workingDirectory: pathToFileURL(tasksB).href })
     const folderConfig = await clients[0].request('resolveSessionConfig', { channel: 'ahp-root://', provider, workingDirectory: pathToFileURL(tasksB).href, config: { isolation: 'folder' } })
@@ -277,6 +282,7 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
     const createdB = (await readRepositorySessionLinks(tasksB)).document.bindings['T-0007']
     expect(createdA).toEqual(createdB)
     expect(createdA).toMatchObject({ provider: 'agent-host', hostId: endpoint.instanceId, sessionId: createdSession.sessionId, chatId: createdSession.chatId, owner })
+    for (const folder of [tasksA, tasksB]) await expect(readFile(join(folder, '.taskcontinuum', 'session-bindings.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     expect((await creationClient.create(tasksA, createRequest, async () => {})).session?.sessionId).toBe(createdSession.sessionId)
     await creationClient.close()
     creationClient = new AgentHostCreationClient(profileA, deviceClient)
@@ -298,7 +304,6 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
     await createdConnection.open()
     expect(createdConnection.view.chat?.turns.map((turn) => turn.id)).toEqual([createdTurn])
     expect(pairedConnections).toBe(1)
-    expect(legacyCalls).toBe(0)
     phase = 'Production access revocation without stopping the owner Host'
     await deviceHost.setWorkspace(pair.id, await canonicalPolicyRoot(tasksB), null)
     await expect.poll(() => production!.view.state).toBe('offline')
@@ -326,6 +331,7 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
     await deviceHost?.close()
     await registry?.close()
     await managedSsh?.close()
+    for (const fixture of bindingFixtures.reverse()) await fixture.close()
     for (const client of clients) await client.shutdown()
     await Promise.all(pumps)
     tunnel?.close()

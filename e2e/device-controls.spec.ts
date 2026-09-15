@@ -1,18 +1,25 @@
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { _electron as electron, expect, test } from '@playwright/test'
-import { updateRepositorySessionLink } from '../src/main/repositorySessionLinks'
 
-test('Git owner links open the remote task and pairing/workspace controls need no session dialog', async () => {
+test('device pairing and workspace permissions ignore inert legacy session bindings', async () => {
   const root = await mkdtemp(join(tmpdir(), 'continuum-device-ui-'))
   const tasks = join(root, 'tasks-root')
   const task = join(tasks, 'tasks', 'T-0001-original')
   await mkdir(task, { recursive: true })
   await mkdir(join(tasks, '.agentdesk'), { recursive: true })
   await writeFile(join(tasks, '.agentdesk', 'config.json'), JSON.stringify({ schemaVersion: '1.0', workspace: 'Device UI fixture' }))
-  await writeFile(join(task, 'task.json'), JSON.stringify({ schemaVersion: '1.0', id: 'T-0001', title: 'Device UI task', type: 'feature', status: 'backlog', priority: 'P2', relations: { level: 'task' } }))
-  await updateRepositorySessionLink(tasks, 'T-0001', 'original', null, 'a'.repeat(32), undefined, { clientId: '00000000-0000-4000-8000-000000000003', machineName: 'Machine-B' })
+  const taskFile = join(task, 'task.json')
+  const taskText = JSON.stringify({ schemaVersion: '1.0', id: 'T-0001', title: 'Device UI task', type: 'feature', status: 'backlog', priority: 'P2', relations: { level: 'task' } })
+  await writeFile(taskFile, taskText)
+  const legacyFile = join(tasks, '.taskcontinuum', 'session-bindings.json')
+  const legacyBindings = JSON.stringify({ schemaVersion: 1, bindings: { 'T-0001': {
+    provider: 'vscode-copilot', sessionId: 'original', workspaceStorageId: 'a'.repeat(32),
+    owner: { clientId: '00000000-0000-4000-8000-000000000003', machineName: 'Machine-B' },
+  } } }, null, 2) + '\n'
+  await mkdir(join(tasks, '.taskcontinuum'))
+  await writeFile(legacyFile, legacyBindings)
   const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined))
   delete env.ELECTRON_RUN_AS_NODE
   delete env.ELECTRON_RENDERER_URL
@@ -22,54 +29,88 @@ test('Git owner links open the remote task and pairing/workspace controls need n
   const app = await electron.launch({ args: [resolve('.')], cwd: resolve('.'), env })
   try {
     const page = await app.firstWindow()
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
     await expect(page.getByRole('heading', { level: 1, name: 'Device UI task' })).toBeVisible()
     await app.evaluate(({ ipcMain }) => {
       let connected = false
-      let shared = false
+      let signedIn = false
       let paired = false
-      const participant = { clientId: '00000000-0000-4000-8000-000000000002', username: 'Alice', machineName: 'Machine-A' }
-      const execution = { agentName: 'GitHub Copilot', machineName: 'Machine-B' }
-      const target = { nativeSessionId: 'original', workspaceStorageId: 'a'.repeat(32), remoteMachineName: 'Machine-B' }
+      let linkedAccess: 'none' | 'read' | 'send' = 'none'
       const handlers: Record<string, (...args: unknown[]) => unknown> = {
-        'remote-vscode:tunnel-status': () => ({ installed: true, account: 'test@example.test', state: paired ? 'hosting' : 'idle' }),
+        'remote-vscode:tunnel-status': () => ({ installed: true, ...(signedIn ? { account: 'test@example.test' } : {}), state: paired ? 'hosting' : 'idle' }),
+        'remote-vscode:tunnel-login': () => { signedIn = true },
         'remote-vscode:devices': () => [{ id: 'device-b', machineName: 'Machine-B', state: connected ? 'connected' : 'offline', enabled: connected, expiresAt: '2099-01-01T00:00:00Z' }],
-        'remote-vscode:device-connect': () => { connected = true },
-        'remote-vscode:device-disconnect': () => { connected = false },
-        'remote-vscode:device-recipients': () => [{ id: 'device-a', username: 'Alice', machineName: 'Machine-A', expiresAt: '2099-01-01T00:00:00Z', linkedAccess: shared ? 'send' : 'none' }],
-        'remote-vscode:device-pair': (canSend) => { if (canSend !== true) throw new Error('Expected linked read/send permission'); paired = true; return true },
-        'remote-vscode:device-workspace': (id, mode) => { if (id !== 'device-a' || mode !== 'send') throw new Error('Incorrect workspace policy'); shared = true; return true },
-        'remote-vscode:device-share': (_id, identity, canSend) => { if (JSON.stringify(identity) !== JSON.stringify({ nativeSessionId: 'original', workspaceStorageId: 'a'.repeat(32) }) || canSend !== true) throw new Error('Incorrect session policy'); shared = true; return true },
-        'remote-vscode:grants': () => shared ? [{ id: 'grant', participant, canSend: true, expiresAt: '2099-01-01T00:00:00Z' }] : [],
-        'remote-vscode:list': () => connected ? ['First original', 'Second original'].map((title, index) => ({ id: `session-${index}`, deviceId: 'device-b', title, target: { ...target, nativeSessionId: `original-${index}` }, hostAlias: '', transport: 'dev-tunnel', participant, execution, canSend: index === 0, state: 'connected', expiresAt: '2099-01-01T00:00:00Z' })) : [],
-        'vscode-chat:read': (value) => {
-          if ((value as { remoteMachineName?: string }).remoteMachineName !== 'Machine-B') throw new Error('Git owner was not interpreted remotely.')
-          return { session: { id: 'original', source: 'vscode', title: 'Original on B from Git', updatedAt: new Date().toISOString() }, messages: [], deliveries: [], participant, execution, canSend: true, responding: false, connectionState: 'connected' }
+        'remote-vscode:device-connect': (id) => { if (id !== 'device-b') throw new Error('Incorrect device'); connected = true },
+        'remote-vscode:device-disconnect': (id) => { if (id !== 'device-b') throw new Error('Incorrect device'); connected = false },
+        'remote-vscode:device-recipients': () => paired ? [{ id: 'device-a', username: 'Alice', machineName: 'Machine-A', expiresAt: '2099-01-01T00:00:00Z', linkedAccess }] : [],
+        'remote-vscode:device-pair': (canSend) => {
+          if (!signedIn || canSend !== true) throw new Error('Pairing requires an account and the selected linked read/send permission.')
+          paired = true
+          linkedAccess = 'send'
+          return true
+        },
+        'remote-vscode:device-workspace': (id, mode) => {
+          if (!paired || id !== 'device-a' || mode !== 'none' && mode !== 'read' && mode !== 'send') throw new Error('Incorrect workspace policy')
+          linkedAccess = mode
+          return true
         },
       }
       for (const [name, handler] of Object.entries(handlers)) { ipcMain.removeHandler(name); ipcMain.handle(name, (_event, ...args) => handler(...args)) }
     })
     await page.reload()
-    const errors: string[] = []
-    page.on('pageerror', (error) => errors.push(error.message))
     await expect(page.getByRole('heading', { level: 1, name: 'Device UI task' })).toBeVisible()
-    await expect(page.getByText('Original on B from Git', { exact: true })).toBeVisible()
+    const surface = await page.evaluate(() => ({
+      retiredBridges: ['copilot', 'vscodeChat', 'sharedSessions'].filter((name) => Reflect.has(window, name)),
+      remote: Object.keys(window.remoteVSCode ?? {}).sort(),
+    }))
+    expect(surface).toEqual({ retiredBridges: [], remote: ['devTunnels', 'devices', 'exportIdentity', 'gitSync'] })
+    await expect(page.getByRole('alert').filter({ hasText: /Enable Automatic workspace links[\s\S]*backend is not ready/ })).toBeVisible()
+    await expect(page.getByRole('complementary', { name: 'VS Code task chat', includeHidden: true })).toHaveCount(0)
+    await expect(page.getByRole('complementary', { name: 'Agent Host task chat', includeHidden: true })).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Share original conversation remotely' })).toHaveCount(0)
-    await page.getByRole('button', { name: 'Remote VS Code sessions', exact: true }).click()
-    const connections = page.getByRole('dialog', { name: 'Remote VS Code sessions', exact: true })
+    await page.getByRole('button', { name: 'Remote devices', exact: true }).click()
+    const connections = page.getByRole('dialog', { name: 'Remote devices', exact: true })
+    const access = connections.getByRole('combobox', { name: 'Linked-session workspace access', exact: true })
+    const device = connections.locator('.remote-vscode-row').filter({ hasText: 'Machine-B' })
+    await expect(access).toHaveValue('send')
+    await expect(connections.getByRole('button', { name: 'Pair device', exact: true })).toBeDisabled()
+    await expect(connections.getByRole('button', { name: 'Enable linked sessions', exact: true })).toBeDisabled()
+    await connections.getByRole('button', { name: 'Sign in with Microsoft', exact: true }).click()
+    await expect(connections.getByText('Signed in', { exact: true })).toBeVisible()
+    await expect(connections.getByRole('button', { name: 'Pair device', exact: true })).toBeEnabled()
     await connections.getByRole('button', { name: 'Pair device', exact: true }).click()
     await expect(connections).toContainText('Device invitation saved; linked-session workspace policy enabled.')
     await connections.getByLabel('Paired recipient device').selectOption('device-a')
+    await expect(connections).toContainText('Workspace access: send')
+    await connections.getByRole('button', { name: 'Disable linked sessions for this workspace', exact: true }).click()
+    await expect(connections).toContainText('Workspace access: none')
+    await access.selectOption('read')
+    await connections.getByRole('button', { name: 'Enable linked sessions', exact: true }).click()
+    await expect(connections).toContainText('Workspace access: read')
+    await access.selectOption('send')
     await connections.getByRole('button', { name: 'Enable linked sessions', exact: true }).click()
     await expect(connections).toContainText('Workspace access: send')
+    await expect(device.getByText('offline', { exact: true })).toBeVisible()
     await connections.getByRole('button', { name: 'Connect device Machine-B', exact: true }).click()
-    await expect(connections.getByRole('region', { name: 'Remote First original' })).toBeVisible()
-    await expect(connections.getByRole('region', { name: 'Remote Second original' })).toBeVisible()
-    await expect(connections.getByRole('button', { name: 'Connect Machine-B', exact: true })).toHaveCount(0)
+    await expect(device.getByText('connected', { exact: true })).toBeVisible()
+    await expect(connections.getByRole('button', { name: 'Disconnect device Machine-B', exact: true })).toBeEnabled()
+    await expect(connections.getByRole('button', { name: /^(Import invitation|Link to T-0001|Choose recipient)$/ })).toHaveCount(0)
+    await expect(connections.getByRole('alert')).toHaveCount(0)
     await mkdir(resolve('artifacts'), { recursive: true })
     await page.screenshot({ path: resolve('artifacts/device-connections-desktop.png') })
     await app.evaluate(({ BrowserWindow }) => { const window = BrowserWindow.getAllWindows()[0]; window.setMinimumSize(380, 600); window.setSize(420, 760) })
-    expect(await connections.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+    expect(await connections.evaluate((element) => element.scrollWidth <= element.clientWidth && element.getBoundingClientRect().left >= 0 && element.getBoundingClientRect().right <= innerWidth)).toBe(true)
     await page.screenshot({ path: resolve('artifacts/device-connections-narrow.png') })
+    await connections.getByRole('button', { name: 'Disconnect device Machine-B', exact: true }).click()
+    await expect(device.getByText('offline', { exact: true })).toBeVisible()
+    await expect(connections.getByRole('button', { name: 'Connect device Machine-B', exact: true })).toBeEnabled()
+    await page.keyboard.press('Escape')
+    await expect(connections).toBeHidden()
+    await expect(page.getByRole('complementary', { name: 'VS Code task chat', includeHidden: true })).toHaveCount(0)
+    await expect(page.getByRole('complementary', { name: 'Agent Host task chat', includeHidden: true })).toHaveCount(0)
+    expect(await readFile(legacyFile, 'utf8')).toBe(legacyBindings)
+    expect(await readFile(taskFile, 'utf8')).toBe(taskText)
     expect(errors).toEqual([])
   } finally { await app.close(); await rm(root, { recursive: true, force: true, maxRetries: 3 }) }
 })

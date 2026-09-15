@@ -1,6 +1,0 @@
-**/*
-!package.json
-!README.md
-!out/
-!out/*.cjs
-!out/delivery.agent.md

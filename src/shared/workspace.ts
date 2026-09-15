@@ -1,5 +1,5 @@
 import type { TaskRecord } from './tasks'
-import type { MigrateSessionLinks, SessionLinksSnapshot, UpdateSessionLink } from './sessionBindings'
+import type { SessionLinksSnapshot, UpdateSessionLink } from './sessionBindings'
 import type { Issue } from './taskDocuments/common'
 
 export interface WorkspaceDescriptor {
@@ -30,5 +30,4 @@ export interface WorkspaceBridge {
   useDemo(): Promise<WorkspaceState>
   getSessionLinks(workspaceId: string): Promise<SessionLinksSnapshot>
   updateSessionLink(request: UpdateSessionLink): Promise<SessionLinksSnapshot>
-  migrateSessionLinks(request: MigrateSessionLinks): Promise<SessionLinksSnapshot>
 }

@@ -6,7 +6,7 @@ import type { WorkspaceGitSyncStatus } from '../src/shared/gitSync'
 
 const mocks = vi.hoisted(() => ({
   handlers: new Map<string, (event: unknown, value?: unknown) => Promise<unknown>>(),
-  consent: vi.fn(async () => ({ response: 0 })),
+  consent: vi.fn<(window: unknown, options: { detail: string }) => Promise<{ response: number }>>(async () => ({ response: 0 })),
   open: vi.fn(async () => ''),
 }))
 vi.mock('electron', () => ({
@@ -44,6 +44,9 @@ describe('Git synchronization IPC boundary', () => {
     const { service, invoke, currentRoot, requireWindow } = setup()
     expect(await invoke('enable')).toBe(false)
     expect(service.enable).not.toHaveBeenCalled()
+    const detail = mocks.consent.mock.calls[0]?.[1]?.detail
+    expect(detail).toContain('Legacy session files and browser bindings are not imported')
+    expect(detail).not.toContain('migrate current bindings')
     mocks.consent.mockResolvedValue({ response: 1 })
     expect(await invoke('enable')).toBe(true)
     expect(service.enable).toHaveBeenCalledExactlyOnceWith('Q:\\workspace')

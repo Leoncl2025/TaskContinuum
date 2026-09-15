@@ -1,25 +1,24 @@
 import { describe, expect, it } from 'vitest'
-import { readSessionBindings, saveSessionBindings } from '../src/renderer/chat/sessionBindings'
+import * as bindings from '../src/renderer/chat/sessionBindings'
+import { agentHostTargetFixture } from './immutable-bindings-fixture'
 
-describe('workspace-scoped session bindings', () => {
-  it('isolates identical task IDs from different workspace roots and the demo', () => {
-    const first = { 'T-0002': { id: 'first-session', title: 'Task Continuum work' } }
-    const second = { 'T-0002': { id: 'second-session', title: 'Other project work' } }
-    const demo = { 'T-0002': { id: 'demo-session', title: 'Demo binding' } }
-    saveSessionBindings(first, 'workspace-one')
-    saveSessionBindings(second, 'workspace-two')
-    saveSessionBindings(demo)
-    expect(readSessionBindings('workspace-one')).toEqual(first)
-    expect(readSessionBindings('workspace-two')).toEqual(second)
-    expect(readSessionBindings()).toEqual(demo)
-    expect(readSessionBindings('unopened-workspace')).toEqual({})
+describe('Agent Host-only UI binding identities', () => {
+  it('keeps the exact Host, session, chat and owner in the binding key', () => {
+    const target = agentHostTargetFixture('original')
+    const key = bindings.sessionBindingKey({ agentHost: target })
+    expect(bindings.sessionBindingKey({ agentHost: { ...target } })).toBe(key)
+    for (const other of [
+      { ...target, hostId: 'another-host' },
+      { ...target, sessionId: 'copilotcli:/another' },
+      { ...target, chatId: 'ahp-chat:/another' },
+      { ...target, owner: { ...target.owner, clientId: '00000000-0000-4000-8000-000000000099' } },
+    ]) expect(bindings.sessionBindingKey({ agentHost: other })).not.toBe(key)
   })
 
-  it('detaches only the current workspace binding', () => {
-    const other = { 'T-0002': { id: 'retained-session', title: 'Retained work' } }
-    saveSessionBindings(other, 'other-workspace')
-    saveSessionBindings({}, 'current-workspace')
-    expect(readSessionBindings('other-workspace')).toEqual(other)
-    expect(readSessionBindings('current-workspace')).toEqual({})
+  it('exposes no browser binding storage or migration helpers and leaves saved data untouched', () => {
+    const key = 'taskcontinuum:session-bindings:v1:workspace-one'
+    localStorage.setItem(key, '{old data')
+    for (const name of ['readSessionBindings', 'saveSessionBindings', 'clearSessionBindings']) expect(bindings).not.toHaveProperty(name)
+    expect(localStorage.getItem(key)).toBe('{old data')
   })
 })

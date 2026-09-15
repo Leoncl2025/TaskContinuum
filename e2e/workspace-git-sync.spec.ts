@@ -33,7 +33,7 @@ test('exposes automatic workspace links and requires native enrollment consent',
       ipcMain.handle('remote-vscode:tunnel-status', () => ({ installed: false, state: 'idle' }))
       dialog.showMessageBox = async () => ({ response: 0, checkboxChecked: false })
     })
-    await page.getByRole('button', { name: 'Remote VS Code sessions', exact: true }).click()
+    await page.getByRole('button', { name: 'Remote devices', exact: true }).click()
     const section = page.getByRole('region', { name: 'Workspace Git synchronization' })
     await expect(section).toBeVisible()
     await expect(section).toContainText('Pull/rebase every 15 seconds')

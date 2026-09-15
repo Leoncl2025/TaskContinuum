@@ -10,16 +10,34 @@ import { agentHostCreationResultSchema } from '../src/main/agentHostCreationProt
 import { agentHostTargetSchema } from '../src/main/agentHostProtocol'
 import { AgentHostConnection } from '../src/main/agentHostConnection'
 import { connectAgentHostWebSocket } from '../src/main/agentHostTransport'
-import { bindRepositoryAgentHostCreation, readRepositorySessionLinks, updateRepositorySessionLink } from '../src/main/repositorySessionLinks'
+import { bindRepositoryAgentHostCreation, readRepositorySessionLinks, removeRepositorySessionLink, updateRepositoryAgentHostLink } from '../src/main/repositorySessionLinks'
 import { canonicalPolicyRoot, locallyLinkedAgentHostSessions } from '../src/main/linkedSessionPolicy'
 import { openSessionSshBridge, startSessionSshHost } from '../src/main/devTunnel/sessionSsh'
 import { deviceRequest } from '../src/main/vscodeDeviceHttp'
 import { createAgentHostCreationCallerFixture, createPairedAgentHostCreationFixture, creationFixtureKey, deferred, writeCreationTaskWorkspace } from './agent-host-creation-fixture'
+import { agentHostTargetFixture, createImmutableBindingsFixture } from './immutable-bindings-fixture'
 
-type Fixture = Awaited<ReturnType<typeof createPairedAgentHostCreationFixture>>
+type Fixture = Awaited<ReturnType<typeof createPairedAgentHostCreationFixture>> & { bindings: Awaited<ReturnType<typeof createImmutableBindingsFixture>> }
 const fixtures: Fixture[] = []
-afterEach(async () => { for (const fixture of fixtures.splice(0)) await fixture.close() })
-async function fixture(): Promise<Fixture> { const value = await createPairedAgentHostCreationFixture(); fixtures.push(value); return value }
+const backends: Awaited<ReturnType<typeof createImmutableBindingsFixture>>[] = []
+afterEach(async () => {
+  for (const fixture of fixtures.splice(0)) await fixture.close()
+  await Promise.all(backends.splice(0).map((backend) => backend.close()))
+})
+async function fixture(): Promise<Fixture> {
+  const value = await createPairedAgentHostCreationFixture()
+  const bindings = await createImmutableBindingsFixture(value.workspace)
+  backends.push(bindings)
+  value.request.expectedRevision = bindings.snapshot.revision
+  const worker = Object.assign(value, { bindings })
+  fixtures.push(worker)
+  return worker
+}
+async function callerFixture(worker: Fixture) {
+  const caller = await createAgentHostCreationCallerFixture(worker)
+  backends.push(await createImmutableBindingsFixture(caller.workspace))
+  return caller
+}
 async function ready(worker: Fixture) {
   await expect.poll(async () => (await worker.status()).state, { timeout: 8000, interval: 25 }).toBe('ready')
   return (await worker.status()).session!
@@ -33,7 +51,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     const worker = await fixture()
     const catalog = await worker.workers()
     expect(catalog).toMatchObject({ deviceId: worker.pair.id, owner: worker.owner, hosts: [{ hostId: worker.native.hostId, available: true }],
-      workspaces: [{ id: worker.request.workspaceId, canSend: true, taskState: 'available', expectedRevision: null }] })
+      workspaces: [{ id: worker.request.workspaceId, canSend: true, taskState: 'available', expectedRevision: worker.bindings.snapshot.revision }] })
     expect(await locallyLinkedAgentHostSessions(worker.profile, worker.workspace, worker.owner)).toEqual([])
     expect(await worker.begin()).toEqual({ operationId: worker.request.operationId, taskId: 'T-0007', workspaceId: worker.request.workspaceId, hostId: worker.native.hostId, state: 'creating' })
     const session = await ready(worker)
@@ -49,13 +67,15 @@ describe('worker-authoritative native Agent Host creation', () => {
     expect(worker.native.creations).toEqual([{ channel: session.sessionId, provider: 'copilotcli', workingDirectories: [pathToFileURL(await canonicalPolicyRoot(worker.workspace)).href],
       config: { isolation: 'folder', autoApprove: 'default', mode: 'interactive' } }])
     expect(worker.native.calls.some((call) => call.method === 'dispatchAction')).toBe(false)
-    expect(worker.legacyCalls).toBe(0)
     expect(JSON.stringify(catalog) + JSON.stringify(await worker.status())).not.toContain(worker.workspace)
     expect(JSON.stringify(catalog) + JSON.stringify(await worker.status())).not.toContain(worker.pair.token)
-    const git = await readFile(join(worker.workspace, '.taskcontinuum', 'session-bindings.json'), 'utf8')
+    const immutable = await worker.bindings.store.getRecords()
+    expect(immutable).toMatchObject([{ kind: 'binding', payload: { action: 'set', taskId: 'T-0007', target: links.document.bindings['T-0007'] } }])
+    const git = JSON.stringify(immutable)
     expect(git).not.toContain(worker.request.operationId)
     expect(git).not.toContain(worker.workspace)
     expect(git).not.toContain('requestHash')
+    await expect(readFile(join(worker.workspace, '.taskcontinuum', 'session-bindings.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     expect((await worker.workers()).workspaces).toMatchObject([{ taskState: 'bound', expectedRevision: links.revision }])
     expect((await records(worker))[0]).toMatchObject({ pairId: worker.pair.id, nativeSessionId: session.sessionId, result: { state: 'ready' } })
   })
@@ -84,7 +104,7 @@ describe('worker-authoritative native Agent Host creation', () => {
 
   it.each(['none', 'caller', 'worker'] as const)('completes the production caller/device/worker flow over SSH with durable %s conflict recovery', async (conflict) => {
     const worker = await fixture()
-    const caller = await createAgentHostCreationCallerFixture(worker)
+    const caller = await callerFixture(worker)
     let raw: AhpClient | undefined
     const authorize = async () => {}
     try {
@@ -102,7 +122,8 @@ describe('worker-authoritative native Agent Host creation', () => {
       expect((await readRepositorySessionLinks(caller.workspace)).document.bindings).toEqual({})
 
       const conflictingRoot = conflict === 'caller' ? caller.workspace : worker.workspace
-      if (conflict !== 'none') await updateRepositorySessionLink(conflictingRoot, request.taskId, `${conflict}-existing-session`, null)
+      if (conflict !== 'none') await updateRepositoryAgentHostLink(conflictingRoot, request.taskId,
+        agentHostTargetFixture(`${conflict}-existing-session`, worker.owner), (await readRepositorySessionLinks(conflictingRoot)).revision)
       acknowledgement.resolve()
       await expect.poll(async () => (await caller.client.status(caller.workspace, request.operationId, authorize)).state, { timeout: 8000, interval: 25 }).toBe(conflict === 'none' ? 'ready' : 'created-unbound')
       const initial = await caller.client.status(caller.workspace, request.operationId, authorize)
@@ -113,9 +134,9 @@ describe('worker-authoritative native Agent Host creation', () => {
       expect(caller.connections).toBe(2)
 
       if (conflict !== 'none') {
-        expect((await readRepositorySessionLinks(conflictingRoot)).document.bindings[request.taskId].sessionId).toBe(`${conflict}-existing-session`)
+        expect((await readRepositorySessionLinks(conflictingRoot)).document.bindings[request.taskId].sessionId).toBe(`copilotcli:/${conflict}-existing-session`)
         const before = await readRepositorySessionLinks(conflictingRoot)
-        await updateRepositorySessionLink(conflictingRoot, request.taskId, null, before.revision)
+        await removeRepositorySessionLink(conflictingRoot, request.taskId, before.revision)
         expect((await caller.client.status(caller.workspace, request.operationId, authorize)).state).toBe('created-unbound')
         expect((await readRepositorySessionLinks(conflictingRoot)).document.bindings).toEqual({})
         expect(await caller.client.bind(caller.workspace, request.operationId, authorize)).toMatchObject({ state: 'ready', session: identity, workerId: request.workerId })
@@ -135,7 +156,6 @@ describe('worker-authoritative native Agent Host creation', () => {
       expect((await raw.request('subscribe', { channel: identity.chatId })).snapshot?.resource).toBe(identity.chatId)
       expect(worker.native.creations).toHaveLength(1)
       expect(worker.native.calls.filter((call) => call.method === 'dispatchAction')).toEqual([])
-      expect(worker.legacyCalls).toBe(0)
     } finally { await raw?.shutdown(); await caller.close() }
   })
 
@@ -182,7 +202,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     await worker.host.revoke(worker.pair.id)
     await expect(worker.status()).rejects.toMatchObject({ status: 403 })
     await expect(worker.begin()).rejects.toMatchObject({ status: 403 })
-    await expect(worker.bind(null)).rejects.toMatchObject({ status: 403 })
+    await expect(worker.bind(worker.request.expectedRevision)).rejects.toMatchObject({ status: 403 })
   })
 
   it('deduplicates operation IDs, rejects changed payloads, and reserves a task across competing paired callers', async () => {
@@ -256,7 +276,7 @@ describe('worker-authoritative native Agent Host creation', () => {
   it('binds an acknowledged verified provisional session and initializes only on the first explicit paired send', async () => {
     const worker = await fixture()
     worker.native.setLifecycle('creating')
-    const caller = await createAgentHostCreationCallerFixture(worker)
+    const caller = await callerFixture(worker)
     let connection: AgentHostConnection | undefined
     try {
       const [selected] = await caller.client.workers(caller.workspace, worker.request.taskId)
@@ -304,7 +324,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     await worker.restart()
     for (let index = 0; index < 3; index++) expect(await worker.status()).toMatchObject({ state: 'uncertain', nativeLifecycle: 'creating', error: expect.stringContaining('acknowledgement was not durably confirmed') })
     expect((await worker.begin()).state).toBe('uncertain')
-    await expect(worker.bind(null)).rejects.toMatchObject({ status: 409 })
+    await expect(worker.bind(worker.request.expectedRevision)).rejects.toMatchObject({ status: 409 })
     await expect(worker.begin({ ...worker.request, operationId: randomUUID() })).rejects.toMatchObject({ status: 409 })
     expect((await readRepositorySessionLinks(worker.workspace)).document.bindings).toEqual({})
     expect(worker.native.creations.map((request) => request.channel)).toEqual([original])
@@ -352,7 +372,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     expect((await worker.begin()).state).toBe('uncertain')
     expect(worker.native.creations).toHaveLength(1)
     expect((await readRepositorySessionLinks(worker.workspace)).document.bindings['T-0007'].sessionId).toBe(session.sessionId)
-    if (detached) await updateRepositorySessionLink(worker.workspace, 'T-0007', null, before.revision)
+    if (detached) await removeRepositorySessionLink(worker.workspace, 'T-0007', before.revision)
     worker.native.sessions.set(session.sessionId, native)
     expect(await worker.status()).toMatchObject({ state: detached ? 'created-unbound' : 'ready', nativeLifecycle: 'creating', session })
     expect((await readRepositorySessionLinks(worker.workspace)).document.bindings).toEqual(detached ? {} : before.document.bindings)
@@ -400,7 +420,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     expect(result.error).toBeTruthy()
     expect(JSON.stringify(result)).not.toContain(worker.root)
     expect((await readRepositorySessionLinks(worker.workspace)).document.bindings).toEqual({})
-    await expect(worker.bind(null)).rejects.toMatchObject({ status: 409 })
+    await expect(worker.bind(worker.request.expectedRevision)).rejects.toMatchObject({ status: 409 })
     expect(worker.native.creations).toHaveLength(1)
   })
 
@@ -471,7 +491,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     const acknowledgement = worker.native.pauseAcknowledgement()
     await worker.begin()
     await expect.poll(() => worker.native.creations.length).toBe(1)
-    const conflict = await updateRepositorySessionLink(worker.workspace, 'T-0007', 'existing-original', null)
+    const conflict = await updateRepositoryAgentHostLink(worker.workspace, 'T-0007', agentHostTargetFixture('existing-original', worker.owner), worker.bindings.snapshot.revision)
     acknowledgement.resolve()
     await expect.poll(async () => (await worker.status()).state).toBe('created-unbound')
     const session = (await worker.status()).session!
@@ -481,7 +501,7 @@ describe('worker-authoritative native Agent Host creation', () => {
       owner: session.owner, hostId: session.hostId, sessionId: session.sessionId, chatId: session.chatId,
     }, conflict.revision)).rejects.toThrow('different session binding')
     expect((await worker.bind(conflict.revision)).state).toBe('created-unbound')
-    const detached = await updateRepositorySessionLink(worker.workspace, 'T-0007', null, conflict.revision)
+    const detached = await removeRepositorySessionLink(worker.workspace, 'T-0007', conflict.revision)
     expect((await worker.status()).state).toBe('created-unbound')
     expect((await readRepositorySessionLinks(worker.workspace)).document.bindings).toEqual({})
     const bound = await worker.bind(detached.revision)
@@ -509,7 +529,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     await worker.begin()
     const session = await ready(worker)
     const prior = await readRepositorySessionLinks(worker.workspace)
-    const detached = await updateRepositorySessionLink(worker.workspace, 'T-0007', null, prior.revision)
+    const detached = await removeRepositorySessionLink(worker.workspace, 'T-0007', prior.revision)
     await worker.restart()
     expect(await worker.status()).toMatchObject({ state: 'created-unbound', session })
     expect((await worker.begin()).state).toBe('created-unbound')
@@ -524,7 +544,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     await worker.begin()
     const session = await ready(worker)
     const linked = await readRepositorySessionLinks(worker.workspace)
-    if (detached) await updateRepositorySessionLink(worker.workspace, 'T-0007', null, linked.revision)
+    if (detached) await removeRepositorySessionLink(worker.workspace, 'T-0007', linked.revision)
     await worker.restart(async () => {
       const saved = await records(worker)
       saved[0].phase = 'binding'
@@ -570,7 +590,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     await expect.poll(async () => (await worker.status()).state).toBe('created-unbound')
     expect((await readRepositorySessionLinks(worker.workspace)).document.bindings).toEqual({})
     await writeCreationTaskWorkspace(worker.workspace)
-    expect((await worker.bind(null)).state).toBe('ready')
+    expect((await worker.bind(worker.request.expectedRevision)).state).toBe('ready')
     expect(worker.native.creations).toHaveLength(1)
   })
 
@@ -603,10 +623,12 @@ describe('worker-authoritative native Agent Host creation', () => {
     await ready(worker)
     const other = join(worker.root, 'other-workspace')
     await writeCreationTaskWorkspace(other)
+    const otherBindings = await createImmutableBindingsFixture(other)
+    backends.push(otherBindings)
     await worker.host.setWorkspace(worker.pair.id, await canonicalPolicyRoot(other), true)
     const workspaceId = (await worker.workers()).workspaces.find((workspace) => workspace.id !== worker.request.workspaceId)!.id
     await expect(worker.call('/device/agent-host/creation-status', { operationId: worker.request.operationId, workspaceId })).rejects.toMatchObject({ status: 403 })
-    await expect(worker.call('/device/agent-host/creation-bind', { operationId: worker.request.operationId, workspaceId, expectedRevision: null })).rejects.toMatchObject({ status: 403 })
+    await expect(worker.call('/device/agent-host/creation-bind', { operationId: worker.request.operationId, workspaceId, expectedRevision: otherBindings.snapshot.revision })).rejects.toMatchObject({ status: 403 })
     expect(worker.native.creations).toHaveLength(1)
   })
 
@@ -629,14 +651,14 @@ describe('worker-authoritative native Agent Host creation', () => {
     expect(worker.native.creations).toEqual([])
   })
 
-  it('rechecks the optional binding authorization immediately before the atomic rename', async () => {
+  it('rechecks the optional binding authorization immediately before the immutable commit', async () => {
     const worker = await fixture()
     const root = await canonicalPolicyRoot(worker.workspace)
     const sessionId = `copilotcli:/${randomUUID()}`
     const target = { owner: worker.owner, hostId: worker.native.hostId, sessionId, chatId: `ahp-chat://default/${Buffer.from(sessionId).toString('base64url')}` }
     const reached = deferred(), release = deferred()
     let checks = 0
-    const pending = bindRepositoryAgentHostCreation(worker.workspace, 'T-0007', target, null, async () => {
+    const pending = bindRepositoryAgentHostCreation(worker.workspace, 'T-0007', target, worker.bindings.snapshot.revision, async () => {
       if (++checks === 3) { reached.resolve(); await release.promise }
       const pair = (await worker.host.list()).find((pair) => pair.id === worker.pair.id)
       if (!pair?.workspaces.some((workspace) => workspace.root === root && workspace.canSend)) throw new Error('Workspace send permission changed before commit.')

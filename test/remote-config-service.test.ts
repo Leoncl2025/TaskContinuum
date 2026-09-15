@@ -11,7 +11,7 @@ import type { WorkspaceSyncOptions } from '../src/main/remoteConfig/service'
 import { newSshKeyPair, openSessionSshBridge, startSessionSshHost } from '../src/main/devTunnel/sessionSsh'
 import { VSCodeDeviceHost } from '../src/main/vscodeDeviceHost'
 import { VSCodeDeviceClient } from '../src/main/vscodeDeviceClient'
-import { readRepositorySessionLinks, updateRepositoryAgentHostLink, updateRepositorySessionLink } from '../src/main/repositorySessionLinks'
+import { readRepositorySessionLinks, updateRepositoryAgentHostLink, removeRepositorySessionLink } from '../src/main/repositorySessionLinks'
 import { makeConfig, makeTask } from './taskDocuments/fixtures'
 import type { DevTunnelRoute } from '../src/main/devTunnel/protocol'
 import { LocalEnrollments } from '../src/main/remoteConfig/enrollment'
@@ -92,7 +92,7 @@ async function fixture(count: number) {
       },
     }
     const protector = { available: () => true, encrypt: (value: string) => Buffer.from(value), decrypt: (value: Buffer) => value.toString('utf8') }
-    const host = new VSCodeDeviceHost(data, protector, async () => { throw new Error('No session should be created by linking.') }, undefined, async () => [])
+    const host = new VSCodeDeviceHost(data, protector)
     cleanup.push(() => host.close())
     let privateGrantGate: Promise<void> | undefined
     let releasePrivateGrant: (() => void) | undefined
@@ -331,16 +331,22 @@ it('does not restore metadata grants from a delayed read after auto-linking is d
   await expect(b.service.requireReadyRoot(b.folder.toLowerCase())).rejects.toThrow('authoritative')
 }, 120000)
 
-it('restores an unopened workspace backend before consulting archived session authorization', async () => {
+it('initializes without legacy bindings and restores an unopened immutable backend before session authorization', async () => {
   const { peers, remote } = await fixture(1)
   const [peer] = peers
   const owner = { clientId: peer.identity.clientId, machineName: peer.identity.machineName }
   const target = { hostId: 'local_host_a', sessionId: 'copilotcli:/owner-session', chatId: 'ahp-chat:/owner-chat', owner }
-  const legacy = await updateRepositoryAgentHostLink(peer.folder, 'T-0001', target, null)
-  await recordLocalLink(peer.data, peer.folder, 'T-0001', legacy.document.bindings['T-0001'], owner)
+  const legacyFile = join(peer.folder, '.taskcontinuum', 'session-bindings.json')
+  await mkdir(join(peer.folder, '.taskcontinuum'), { recursive: true })
+  await writeFile(legacyFile, '{ unsupported legacy configuration')
+  await expect(readRepositorySessionLinks(peer.folder)).rejects.toThrow('Enable Automatic workspace links')
   peer.holdTunnel()
   await peer.service.enable(peer.folder)
   await vi.waitFor(() => expect(peer.tunnelStarted()).toBe(true))
+  const empty = await readRepositorySessionLinks(peer.folder)
+  expect(empty.document.bindings).toEqual({})
+  const linked = await updateRepositoryAgentHostLink(peer.folder, 'T-0001', target, empty.revision)
+  await recordLocalLink(peer.data, peer.folder, 'T-0001', linked.document.bindings['T-0001'], owner)
   expect(await git(remote, '--git-dir', remote, 'ls-tree', '-r', '--name-only', 'main', '.taskcontinuum/records/v1')).toBe('')
   peer.releaseTunnel()
   await vi.waitFor(async () => {
@@ -348,7 +354,7 @@ it('restores an unopened workspace backend before consulting archived session au
     expect((await peer.service.status(peer.folder)).pending).toBe(0)
   }, { timeout: 20000, interval: 100 })
   const current = await readRepositorySessionLinks(peer.folder)
-  await updateRepositorySessionLink(peer.folder, 'T-0001', null, current.revision)
+  await removeRepositorySessionLink(peer.folder, 'T-0001', current.revision)
   await peer.service.syncNow(peer.folder)
   expect(await locallyLinkedAgentHostSessions(peer.data, peer.folder, owner)).toEqual([])
   const restored = await peer.restart()
@@ -357,6 +363,7 @@ it('restores an unopened workspace backend before consulting archived session au
   await restored.requireReadyRoot(peer.folder.toLowerCase())
   expect(await locallyLinkedAgentHostSessions(peer.data, peer.folder, owner)).toEqual([])
   expect((await readRepositorySessionLinks(peer.folder)).document.bindings).toEqual({})
+  expect(await readFile(legacyFile, 'utf8')).toBe('{ unsupported legacy configuration')
 }, 60000)
 
 it('denies and persists revocation even when the canonical configuration becomes unreadable', async () => {

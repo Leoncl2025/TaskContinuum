@@ -1,34 +1,26 @@
 import { randomUUID } from 'node:crypto'
-import { realpath, rm } from 'node:fs/promises'
+import { realpath } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import { z } from 'zod'
-import { chatSubmissionSchema } from '../shared/chatAttachments'
-import type { ChatImageAttachment } from '../shared/chatAttachments'
-import { describeChatImages } from './chatImageStore'
-import type { RemoteVSCodeConnection, VSCodeChatTarget } from '../shared/remoteVSCode'
-import type { VSCodeChatView } from '../shared/vscodeChat'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
-import { deviceInvitationSchema, deviceCatalogSchema } from './vscodeDeviceProtocol'
+import { deviceInvitationSchema, deviceIdentitySchema } from './vscodeDeviceProtocol'
 import type { DeviceInvitation } from './vscodeDeviceProtocol'
 import { deviceRequest, DeviceRequestError } from './vscodeDeviceHttp'
-import { remoteHistorySchema, remoteInvitationSchema, sameRemoteTarget } from './vscodeRemoteProtocol'
-import { deliverySchema } from './vscodeChatDelivery'
 import type { DeviceProtector } from './vscodeDeviceHost'
-import { readRepositorySessionLinks } from './repositorySessionLinks'
-import type { SessionOwner } from '../shared/sessionBindings'
 import type { AgentHostSession, AgentHostTarget } from '../shared/agentHost'
 import { agentHostCatalogSchema, agentHostTargetSchema } from './agentHostProtocol'
 import { connectAgentHostWebSocket } from './agentHostTransport'
 import type { AgentHostCreateRequest, AgentHostCreation, AgentHostWorker } from '../shared/agentHostCreation'
 import { agentHostCreateCommandSchema, agentHostCreateRequestSchema, agentHostCreationResultSchema, agentHostWorkerCatalogSchema, creationTaskIdSchema, creationRevisionSchema } from './agentHostCreationProtocol'
 
-const knownSchema = z.object({ id: z.uuid(), invitation: remoteInvitationSchema }).strict()
 const peerSchema = z.object({ id: z.uuid(), root: z.string().min(1), invitation: deviceInvitationSchema,
-  enabled: z.boolean(), known: z.array(knownSchema).max(128),
+  enabled: z.boolean(),
+  // Preserve old catalog metadata without loading its sessions or cached transcripts.
+  known: z.array(z.unknown()).max(128).optional(),
 }).strict()
 type Peer = z.infer<typeof peerSchema>
 type Connection = { port: number; close(): void }
-type Active = { tunnel: Connection; abort: AbortController; refreshed: number; available: Set<string> }
+type Active = { tunnel: Connection; abort: AbortController; refreshed: number }
 
 export class VSCodeDeviceClient {
   private peers: Peer[] = []
@@ -60,6 +52,7 @@ export class VSCodeDeviceClient {
   private async update(action: () => void | Promise<void>): Promise<void> {
     const pending = this.writing.then(async () => {
       await this.load()
+      if (this.closed) throw new Error('Device client is closed.')
       const previous = structuredClone(this.peers)
       try {
         await action()
@@ -83,7 +76,9 @@ export class VSCodeDeviceClient {
     return peer
   }
   async import(root: string, value: unknown, autoConnect = false): Promise<void> {
-    const invitation = deviceInvitationSchema.parse(value)
+    const parsed = deviceInvitationSchema.safeParse(value)
+    if (!parsed.success) throw new Error('Only private device invitations are supported. Legacy per-session invitations cannot be imported; existing data was not changed.')
+    const invitation = parsed.data
     if (Date.parse(invitation.expiresAt) <= Date.now()) throw new Error('Device pairing expired.')
     await this.validateRecipient(invitation)
     const canonical = await this.root(root)
@@ -91,9 +86,10 @@ export class VSCodeDeviceClient {
       const prior = this.peers.find((peer) => peer.root === canonical && peer.invitation.ownerId === invitation.ownerId)
       if (this.peers.some((peer) => peer.root === canonical && peer !== prior && peer.invitation.machineName.toLowerCase() === invitation.machineName.toLowerCase())) throw new Error('Another paired identity uses this machine name. Resolve it before pairing.')
       if (prior && prior.invitation.devTunnel.hostPublicKey !== invitation.devTunnel.hostPublicKey) throw new Error('Device host key changed. Forget the previous device before pairing.')
+      if (prior?.invitation.ownerClientId && prior.invitation.ownerClientId !== invitation.ownerClientId) throw new Error('Device owner identity changed. Forget the previous device before pairing.')
       if (prior) this.drop(prior.id)
       if (!prior && this.peers.length >= 32) throw new Error('Device limit reached.')
-      this.peers = this.peers.filter((peer) => peer !== prior).concat({ id: prior?.id ?? randomUUID(), root: canonical, invitation, enabled: autoConnect, known: prior?.known ?? [] })
+      this.peers = this.peers.filter((peer) => peer !== prior).concat({ ...prior, id: prior?.id ?? randomUUID(), root: canonical, invitation, enabled: autoConnect })
     })
   }
   async list(root: string) {
@@ -101,7 +97,7 @@ export class VSCodeDeviceClient {
     const canonical = await this.root(root)
     return this.peers.filter((peer) => peer.root === canonical).map((peer) => {
       if (peer.enabled && !this.closed && (!this.active.has(peer.id) || Date.now() - this.active.get(peer.id)!.refreshed > 10000)) void this.ensure(peer).catch(() => undefined)
-      return { id: peer.id, machineName: peer.invitation.machineName, state: this.active.has(peer.id) ? 'connected' as const : this.connecting.has(peer.id) ? 'connecting' as const : 'offline' as const,
+      return { id: peer.id, machineName: peer.invitation.machineName, state: this.active.get(peer.id)?.refreshed ? 'connected' as const : this.connecting.has(peer.id) ? 'connecting' as const : 'offline' as const,
         enabled: peer.enabled, expiresAt: peer.invitation.expiresAt, error: this.errors.get(peer.id) }
     })
   }
@@ -138,46 +134,8 @@ export class VSCodeDeviceClient {
     await this.load()
     const canonical = process.platform === 'win32' ? resolve(root).toLowerCase() : resolve(root)
     const peer = this.peers.find((item) => item.root === canonical && item.invitation.ownerClientId === ownerClientId)
-    return !!peer && peer.enabled && !!this.active.get(peer.id) && !this.active.get(peer.id)!.abort.signal.aborted
-  }
-  async sessions(root: string): Promise<RemoteVSCodeConnection[]> {
-    await this.list(root)
-    const canonical = await this.root(root)
-    return this.peers.filter((peer) => peer.root === canonical).flatMap((peer) => peer.known.map((known) => {
-      const invitation = known.invitation
-      const connected = this.active.get(peer.id)?.available.has(known.id) ?? false
-      return { id: known.id, deviceId: peer.id, target: { ...invitation.identity, remoteMachineName: invitation.execution.machineName },
-        title: invitation.title, hostAlias: '', transport: 'dev-tunnel' as const, tunnelId: peer.invitation.devTunnel.tunnelId,
-        participant: invitation.grant.participant, execution: invitation.execution, canSend: connected && invitation.grant.canSend,
-        expiresAt: peer.invitation.expiresAt, state: connected ? 'connected' as const : 'offline' as const }
-    }))
-  }
-  async find(root: string, target: VSCodeChatTarget) {
-    const owner = await this.repositoryOwner(root, target)
-    if (owner) {
-      await this.load()
-      const canonical = await this.root(root)
-      const peer = this.peers.find((item) => item.root === canonical && item.invitation.ownerClientId === owner.clientId)
-      if (!peer) throw new Error(`Pair with session owner ${owner.machineName} in Devices. Git links do not grant device access.`)
-      if (!peer.known.some((item) => sameRemoteTarget(item.invitation.identity, targetIdentity(target)))) {
-        await this.ensure(peer)
-      }
-      const session = (await this.sessions(root)).find((item) => item.deviceId === peer.id && sameRemoteTarget(item.target, target))
-      if (!session) throw new Error('The owner has not made this Git-linked session available. Check its local link, workspace policy, and original VS Code bridge.')
-      return session
-    }
-    return (await this.sessions(root)).find((item) => sameRemoteTarget(item.target, target))
-  }
-  private async repositoryOwner(root: string, target: VSCodeChatTarget): Promise<SessionOwner | undefined> {
-    const { document } = await readRepositorySessionLinks(root)
-    const candidates = Object.values(document.bindings).filter((link) => link.provider === 'vscode-copilot' && link.sessionId === target.nativeSessionId && link.workspaceStorageId === target.workspaceStorageId && (!target.remoteMachineName || (link.owner?.machineName ?? link.remoteMachineName)?.toLowerCase() === target.remoteMachineName.toLowerCase()))
-    if (candidates.length > 1) throw new Error('Ambiguous repository session owner.')
-    return candidates[0]?.owner
-  }
-  async owner(root: string, target: VSCodeChatTarget): Promise<SessionOwner | undefined> {
-    const known = (await this.sessions(root)).find((session) => sameRemoteTarget(session.target, target))
-    const peer = this.peers.find((item) => item.id === known?.deviceId)
-    return peer?.invitation.ownerClientId ? { clientId: peer.invitation.ownerClientId, machineName: peer.invitation.machineName } : undefined
+    return !this.closed && !!peer && peer.enabled && Date.parse(peer.invitation.expiresAt) > Date.now()
+      && !!this.active.get(peer.id)?.refreshed && !this.active.get(peer.id)!.abort.signal.aborted
   }
   private drop(id: string): void {
     this.attempts.get(id)?.abort()
@@ -186,7 +144,7 @@ export class VSCodeDeviceClient {
     active?.abort.abort()
     active?.tunnel.close()
   }
-  private async ensure(peer: Peer, includeNativeCatalog = true): Promise<void> {
+  private async ensure(peer: Peer): Promise<void> {
     if (this.closed || !peer.enabled) throw new Error('Device connection is disabled.')
     if (this.connecting.has(peer.id)) return this.connecting.get(peer.id)
     if ((this.retry.get(peer.id)?.at ?? 0) > Date.now()) throw new Error(this.errors.get(peer.id) ?? 'Waiting to reconnect to the owner.')
@@ -199,25 +157,13 @@ export class VSCodeDeviceClient {
           const abort = new AbortController()
           this.attempts.set(peer.id, abort)
           const tunnel = await this.transport(peer.invitation, abort.signal)
-          active = { tunnel, abort, refreshed: 0, available: new Set() }
+          active = { tunnel, abort, refreshed: 0 }
           if (this.closed || !peer.enabled || abort.signal.aborted) { tunnel.close(); throw new Error('Connection cancelled.') }
           this.active.set(peer.id, active)
         }
-        if (!includeNativeCatalog) return
-        const catalog = deviceCatalogSchema.parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/sessions', {}, active.abort.signal))
-        if (catalog.ownerId !== peer.invitation.ownerId || catalog.deviceId !== peer.invitation.id) throw new Error('Device identity changed.')
-        const available = new Set<string>()
-        await this.update(() => {
-          if (this.active.get(peer.id) !== active || !peer.enabled) throw new Error('Device connection changed.')
-          for (const invitation of catalog.sessions) {
-            if (JSON.stringify(invitation.grant.participant) !== JSON.stringify(peer.invitation.participant) || invitation.execution.machineName.toLowerCase() !== peer.invitation.machineName.toLowerCase()) throw new Error('Session owner or participant changed.')
-            let known = peer.known.find((item) => sameRemoteTarget(item.invitation.identity, invitation.identity))
-            if (!known) { if (peer.known.length >= 128) throw new Error('Session catalog limit reached.'); known = { id: randomUUID(), invitation }; peer.known.push(known) }
-            known.invitation = invitation
-            available.add(known.id)
-          }
-        })
-        active.available = available
+        const identity = deviceIdentitySchema.parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/identity', {}, active.abort.signal))
+        if (identity.ownerId !== peer.invitation.ownerId || identity.deviceId !== peer.invitation.id) throw new Error('Device identity changed.')
+        this.currentPeer(peer, active)
         active.refreshed = Date.now()
         this.errors.delete(peer.id)
         this.retry.delete(peer.id)
@@ -248,87 +194,22 @@ export class VSCodeDeviceClient {
     const peer = await this.peer(root, id)
     await this.disconnect(root, id)
     await this.update(() => { this.peers = this.peers.filter((item) => item !== peer) })
-    for (const known of peer.known) await rm(join(this.directory, 'remote-vscode-device-cache', `${known.id}.json`), { force: true })
-  }
-  private async selected(root: string, target: VSCodeChatTarget) {
-    const session = await this.find(root, target)
-    if (!session) throw new Error('No device has shared this original session.')
-    const peer = await this.peer(root, session.deviceId!)
-    return { peer, known: peer.known.find((item) => item.id === session.id)! }
-  }
-  async read(root: string, target: VSCodeChatTarget): Promise<VSCodeChatView> {
-    const { peer, known } = await this.selected(root, target)
-    const file = join(this.directory, 'remote-vscode-device-cache', `${known.id}.json`)
-    let requested: Active | undefined
-    try {
-      // A transport can exist while its reconnect is still loading the session catalog.
-      await this.connecting.get(peer.id)
-      if (!this.active.has(peer.id) || this.active.get(peer.id)!.refreshed === 0) await this.ensure(peer)
-      const active = this.active.get(peer.id)!
-      if (!active.available.has(known.id)) throw new Error('Session is unavailable or no longer shared.')
-      requested = active
-      const payload = remoteHistorySchema.parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/session/read', { identity: targetIdentity(target) }, active.abort.signal))
-      if (!sameRemoteTarget(payload.identity, known.invitation.identity) || payload.view.session.id !== target.nativeSessionId || payload.view.deliveries.some((item) => item.nativeSessionId !== target.nativeSessionId) || JSON.stringify(payload.view.participant) !== JSON.stringify(peer.invitation.participant) || JSON.stringify(payload.view.execution) !== JSON.stringify(known.invitation.execution)) throw new Error('Session history identity changed.')
-      await this.update(async () => {
-        if (this.active.get(peer.id) !== active || !peer.enabled || !this.peers.includes(peer)) return
-        await writeJsonAtomic(file, payload)
-      })
-      if (this.active.get(peer.id) !== active || !peer.enabled) throw new Error('Device disconnected while reading.')
-      return payload.view
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Device is offline.'
-      const current = requested ? this.active.get(peer.id) === requested : !this.active.has(peer.id)
-      if (current) {
-        if (requested && !(error instanceof DeviceRequestError)) {
-          this.drop(peer.id)
-          this.retry.set(peer.id, { count: 1, at: Date.now() + 2000 })
-        }
-        this.errors.set(peer.id, message)
-      }
-      try {
-        const cached = remoteHistorySchema.parse(await readJsonBounded(file, 4 * 1024 * 1024))
-        if (!sameRemoteTarget(cached.identity, targetIdentity(target)) || cached.view.session.id !== target.nativeSessionId || cached.view.deliveries.some((item) => item.nativeSessionId !== target.nativeSessionId) || JSON.stringify(cached.view.participant) !== JSON.stringify(peer.invitation.participant) || JSON.stringify(cached.view.execution) !== JSON.stringify(known.invitation.execution)) throw new Error('Cached identity changed.')
-        return { ...cached.view, connectionState: 'offline', canSend: false, responding: false, bridgeError: message,
-          deliveries: cached.view.deliveries.map((delivery) => delivery.state === 'pending' ? { ...delivery, state: 'uncertain', error: 'Disconnected before confirmation. No automatic replay.' } : delivery) }
-      } catch {
-        return { session: { id: target.nativeSessionId, source: 'vscode', title: known.invitation.title, updatedAt: new Date().toISOString() }, messages: [], deliveries: [], participant: peer.invitation.participant,
-          execution: known.invitation.execution, connectionState: 'offline', canSend: false, responding: false, bridgeError: `${message} No verified cached history is available.` }
-      }
-    }
-  }
-  async send(root: string, target: VSCodeChatTarget, id: string, text: string, images?: ChatImageAttachment[]) {
-    const { peer, known } = await this.selected(root, target)
-    const active = this.active.get(peer.id)
-    if (!active || !peer.enabled || !active.available.has(known.id) || !known.invitation.grant.canSend) throw new Error('Session is not connected with send access. No message was queued or sent.')
-    try {
-      const command = chatSubmissionSchema.parse({ id, text, ...(images?.length ? { images } : {}) })
-      const result = deliverySchema.parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/session/send', { identity: targetIdentity(target), ...command }, active.abort.signal))
-      if (result.id !== command.id || result.text !== command.text || result.nativeSessionId !== target.nativeSessionId || JSON.stringify(result.images ?? []) !== JSON.stringify(describeChatImages(command.images ?? [])) || JSON.stringify(result.participant) !== JSON.stringify(peer.invitation.participant) || JSON.stringify(result.execution) !== JSON.stringify(known.invitation.execution)) throw new Error('Delivery identity mismatch. Inspect the original session before retrying.')
-      return result
-    } catch (error) {
-      if (this.active.get(peer.id) === active && !(error instanceof DeviceRequestError)) { this.drop(peer.id); this.retry.set(peer.id, { count: 1, at: Date.now() + 2000 }) }
-      throw error
-    }
-  }
-  async open(root: string, target: VSCodeChatTarget): Promise<void> {
-    const { peer, known } = await this.selected(root, target)
-    if (!this.active.has(peer.id)) await this.ensure(peer)
-    const active = this.active.get(peer.id)
-    if (!active || !peer.enabled || !active.available.has(known.id) || !known.invitation.grant.canSend) throw new Error('Opening on the owner requires a connected session with read and send access.')
-    const result = z.object({ opened: z.literal(true), nativeSessionId: z.string(), workspaceStorageId: z.string() }).strict().parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/session/open', { identity: targetIdentity(target) }, active.abort.signal))
-    if (!sameRemoteTarget(result, targetIdentity(target))) throw new Error('The owner returned a different opened session. No message was sent.')
   }
   async agentHostSessions(root: string): Promise<{ sessions: AgentHostSession[]; warnings: string[] }> {
     await this.load()
     const canonical = await this.root(root)
     const sessions: AgentHostSession[] = []
     const warnings: string[] = []
-    for (const peer of this.peers.filter((item) => item.root === canonical && item.enabled && item.invitation.ownerClientId)) {
+    for (const peer of this.peers.filter((item) => item.root === canonical && item.enabled)) {
       try {
-        if (!this.active.has(peer.id)) await this.ensure(peer, false)
+        if (!peer.invitation.ownerClientId) throw new Error('This device invitation does not identify an Agent Host owner.')
+        await this.connecting.get(peer.id)
+        if (!this.active.has(peer.id)) await this.ensure(peer)
         const active = this.active.get(peer.id)!
+        this.currentPeer(peer, active)
         const catalog = agentHostCatalogSchema.parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/agent-host/sessions', {}, active.abort.signal))
-        if (this.active.get(peer.id) !== active || !peer.enabled || catalog.ownerId !== peer.invitation.ownerId || catalog.deviceId !== peer.invitation.id || catalog.sessions.some((item) => item.owner.clientId !== peer.invitation.ownerClientId || item.owner.machineName.toLowerCase() !== peer.invitation.machineName.toLowerCase())) throw new Error('Device identity changed.')
+        this.currentPeer(peer, active)
+        if (catalog.ownerId !== peer.invitation.ownerId || catalog.deviceId !== peer.invitation.id || catalog.sessions.some((item) => item.owner.clientId !== peer.invitation.ownerClientId || item.owner.machineName.toLowerCase() !== peer.invitation.machineName.toLowerCase())) throw new Error('Device identity changed.')
         sessions.push(...catalog.sessions)
       } catch { warnings.push(`Agent Host sessions on ${peer.invitation.machineName} are unavailable or not shared.`) }
     }
@@ -343,8 +224,11 @@ export class VSCodeDeviceClient {
     if (peers.length !== 1) throw new Error('Pair with the exact Agent Host owner in Devices. Git does not grant access.')
     const peer = peers[0]
     if (!peer.enabled || Date.parse(peer.invitation.expiresAt) <= Date.now()) throw new Error('The owner connection is disabled or expired.')
-    if (!this.active.has(peer.id)) await this.ensure(peer, false)
+    if (peer.invitation.machineName.toLowerCase() !== target.owner.machineName.toLowerCase()) throw new Error('The Agent Host owner identity does not match the paired device.')
+    await this.connecting.get(peer.id)
+    if (!this.active.has(peer.id)) await this.ensure(peer)
     const active = this.active.get(peer.id)!
+    this.currentPeer(peer, active)
     const combined = AbortSignal.any([signal, active.abort.signal])
     const encoded = Buffer.from(JSON.stringify(target)).toString('base64url')
     return connectAgentHostWebSocket(`ws://127.0.0.1:${active.tunnel.port}/device/agent-host?target=${encoded}`, { headers: { Host: `127.0.0.1:${peer.invitation.port}`, Authorization: `Bearer ${peer.invitation.token}` } }, combined)
@@ -355,14 +239,15 @@ export class VSCodeDeviceClient {
     if (!peer.invitation.ownerClientId) throw new Error('This worker invitation does not identify an Agent Host owner. Pair again with an updated worker.')
     if (this.closed || !peer.enabled || Date.parse(peer.invitation.expiresAt) <= Date.now()) throw new Error('The worker connection is disabled or expired. Connect it in Devices.')
     await this.validateRecipient(peer.invitation)
-    if (!this.active.has(peer.id)) await this.ensure(peer, false)
-    this.currentCreationPeer(peer, this.active.get(peer.id))
+    await this.connecting.get(peer.id)
+    if (!this.active.has(peer.id)) await this.ensure(peer)
+    this.currentPeer(peer, this.active.get(peer.id))
     return peer
   }
 
-  private currentCreationPeer(peer: Peer, active: Active | undefined): asserts active is Active {
+  private currentPeer(peer: Peer, active: Active | undefined): asserts active is Active {
     if (this.closed || !this.peers.includes(peer) || !peer.enabled || Date.parse(peer.invitation.expiresAt) <= Date.now()
-      || !active || active.abort.signal.aborted || this.active.get(peer.id) !== active) throw new Error('The selected worker connection or identity changed.')
+      || !active || active.abort.signal.aborted || this.active.get(peer.id) !== active) throw new Error('The selected device connection or identity changed.')
   }
 
   async agentHostWorker(root: string, workerId: string, taskId: string): Promise<AgentHostWorker> {
@@ -374,9 +259,9 @@ export class VSCodeDeviceClient {
     try {
       await this.creationPeer(root, workerId)
       const active = this.active.get(peer.id)
-      this.currentCreationPeer(peer, active)
+      this.currentPeer(peer, active)
       const catalog = agentHostWorkerCatalogSchema.parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/agent-host/workers', { taskId }, active.abort.signal))
-      this.currentCreationPeer(peer, active)
+      this.currentPeer(peer, active)
       if (catalog.ownerId !== peer.invitation.ownerId || catalog.deviceId !== peer.invitation.id
         || catalog.owner.clientId !== clientId || catalog.owner.machineName.toLowerCase() !== peer.invitation.machineName.toLowerCase()) throw new Error('The worker catalog returned a different authenticated owner.')
       return { ...worker, state: 'connected', hosts: catalog.hosts, workspaces: catalog.workspaces }
@@ -400,12 +285,12 @@ export class VSCodeDeviceClient {
     const request = agentHostCreateRequestSchema.parse(value)
     const peer = await this.creationPeer(root, request.workerId)
     const active = this.active.get(peer.id)
-    this.currentCreationPeer(peer, active)
+    this.currentPeer(peer, active)
     await authorize()
-    this.currentCreationPeer(peer, active)
+    this.currentPeer(peer, active)
     try {
       const result = agentHostCreationResultSchema.parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, path, body, active.abort.signal))
-      this.currentCreationPeer(peer, active)
+      this.currentPeer(peer, active)
       if (result.operationId !== request.operationId || result.workspaceId !== request.workspaceId || result.taskId !== request.taskId || result.hostId !== request.hostId
         || result.session && (result.session.provider !== 'copilotcli' || result.session.owner.clientId !== peer.invitation.ownerClientId
           || result.session.owner.machineName.toLowerCase() !== peer.invitation.machineName.toLowerCase())) throw new Error('The worker returned a different creation operation or session identity. No replacement was selected.')
@@ -435,5 +320,3 @@ export class VSCodeDeviceClient {
 
   close(): void { this.closed = true; for (const peer of this.peers) this.drop(peer.id) }
 }
-
-function targetIdentity(target: VSCodeChatTarget) { return { nativeSessionId: target.nativeSessionId, workspaceStorageId: target.workspaceStorageId } }
