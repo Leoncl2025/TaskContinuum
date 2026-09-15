@@ -17,7 +17,6 @@ export function gitSyncUiFixture() {
   }
   const remote: RemoteVSCodeBridge = {
     gitSync: api,
-    exportIdentity: vi.fn(async () => true),
   }
   return { api, remote, notify: () => { for (const listener of listeners) listener() }, setStatus: (value: WorkspaceGitSyncStatus) => { status = value } }
 }

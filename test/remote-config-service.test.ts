@@ -17,8 +17,12 @@ import type { DevTunnelRoute } from '../src/main/devTunnel/protocol'
 import { LocalEnrollments } from '../src/main/remoteConfig/enrollment'
 import { WorkspaceGitReplica as GitReplica } from '../src/main/remoteConfig/workspaceGit'
 import { RemoteConfigStore } from '../src/main/remoteConfig/store'
-import { locallyLinkedAgentHostSessions, recordLocalLink } from '../src/main/linkedSessionPolicy'
+import { canonicalPolicyRoot, locallyLinkedAgentHostSessions, recordLocalLink } from '../src/main/linkedSessionPolicy'
 import { readRecords, recordPath, resolveRecords } from '../src/main/remoteConfig/records'
+import { AgentHostRegistry } from '../src/main/agentHostRegistry'
+import { AgentHostCreationClient } from '../src/main/agentHostCreationClient'
+import { agentHostCreationWorkspaceId } from '../src/main/agentHostCreationService'
+import { startAgentHostCreationFixture } from './agent-host-creation-fixture'
 
 const execute = promisify(execFile)
 const roots: string[] = []
@@ -188,7 +192,9 @@ it('links A/B/C over real SSH and converges immediate binding publication throug
   expect(new Set(states.map((state) => state.workspaceId)).size).toBe(1)
   expect(states.every((state) => state.peers.every((peer) => peer.state === 'linked'))).toBe(true)
   for (const peer of peers) {
-    expect((await peer.host.list()).every((pair) => pair.workspaces.every((policy) => !policy.canSend))).toBe(true)
+    const pairs = await peer.host.list()
+    expect(pairs).toHaveLength(2)
+    for (const pair of pairs) expect(pair.workspaces).toEqual([{ root: await canonicalPolicyRoot(peer.folder), canSend: true }])
   }
   const target = { hostId: 'host_machine_b', sessionId: 'copilotcli:/original-session', chatId: 'ahp-chat:/original-chat', owner: { clientId: b.identity.clientId, machineName: b.identity.machineName } }
   a.holdPublication()
@@ -256,6 +262,59 @@ it('links A/B/C over real SSH and converges immediate binding publication throug
   }, { timeout: 15000, interval: 100 })
   b.releasePublication()
 }, 180000)
+
+it('upgrades saved enrolled links and creates and assigns with write access without another permission step', async () => {
+  const { peers, root } = await fixture(2)
+  const [a, b] = peers
+  const native = await startAgentHostCreationFixture()
+  cleanup.push(() => native.close())
+  const discovery = join(b.data, 'discovery')
+  await mkdir(discovery)
+  await writeFile(join(discovery, 'host.json'), JSON.stringify(native.endpoint))
+  const owner = { clientId: b.identity.clientId, machineName: b.identity.machineName }
+  const registry = new AgentHostRegistry(b.data, [discovery], async () => owner)
+  cleanup.push(() => registry.close())
+  b.host.setAgentHostAccess(registry, (folder) => locallyLinkedAgentHostSessions(b.data, folder, owner))
+  const client = new AgentHostCreationClient(a.data, a.devices)
+  cleanup.push(() => client.close())
+  await b.service.enable(b.folder)
+  await a.service.enable(a.folder)
+  await settle(peers)
+  const pair = (await b.host.list()).find((entry) => entry.participant.clientId === a.identity.clientId)!
+  const unrelated = join(root, 'unrelated-workspace')
+  await mkdir(unrelated)
+  b.service = await b.restart()
+  await b.host.setWorkspace(pair.id, b.folder, false)
+  await b.host.setWorkspace(pair.id, unrelated, false)
+  await b.service.restore()
+  b.service.startRestored()
+  await settle(peers)
+  const restored = (await b.host.list()).find((entry) => entry.id === pair.id)!
+  expect(restored.token).toBe(pair.token)
+  expect(restored.workspaces).toContainEqual({ root: await canonicalPolicyRoot(b.folder), canSend: true })
+  expect(restored.workspaces).toContainEqual({ root: await canonicalPolicyRoot(unrelated), canSend: false })
+  expect(native.creations).toHaveLength(0)
+  const worker = (await client.workers(a.folder, 'T-0001')).find((entry) => entry.owner?.clientId === owner.clientId)!
+  expect(worker.state).toBe('connected')
+  expect(worker.hosts).toContainEqual(expect.objectContaining({ hostId: native.hostId, available: true }))
+  const workspaceId = await agentHostCreationWorkspaceId(b.folder)
+  const workspace = worker.workspaces.find((entry) => entry.id === workspaceId)!
+  expect(workspace).toMatchObject({ canSend: true, taskState: 'available' })
+  const started = await client.create(a.folder, {
+    operationId: randomUUID(), taskId: 'T-0001', workerId: worker.id, workspaceId: workspace.id,
+    hostId: native.hostId, expectedRevision: workspace.expectedRevision,
+  }, async () => {})
+  await expect.poll(async () => (await client.status(a.folder, started.operationId, async () => {})).state, { timeout: 15000, interval: 100 }).toBe('ready')
+  const result = await client.status(a.folder, started.operationId, async () => {})
+  expect(native.creations).toHaveLength(1)
+  expect(native.calls.some((call) => call.method === 'dispatchAction')).toBe(false)
+  const { hostId, sessionId, chatId, owner: sessionOwner } = result.session!
+  const binding = { provider: 'agent-host', hostId, sessionId, chatId, owner: sessionOwner }
+  expect((await readRepositorySessionLinks(a.folder)).document.bindings['T-0001']).toEqual(binding)
+  expect((await readRepositorySessionLinks(b.folder)).document.bindings['T-0001']).toEqual(binding)
+  await b.service.revokeDevice(b.folder, a.identity.clientId)
+  expect((await b.host.list()).find((entry) => entry.id === pair.id)!.workspaces).toEqual([{ root: await canonicalPolicyRoot(unrelated), canSend: false }])
+}, 120000)
 
 it('does not start Git enrollment or publication just by opening an unconfigured workspace', async () => {
   const { peers } = await fixture(1)

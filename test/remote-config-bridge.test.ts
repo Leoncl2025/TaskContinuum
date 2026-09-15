@@ -46,6 +46,12 @@ describe('Git synchronization IPC boundary', () => {
     expect(service.enable).not.toHaveBeenCalled()
     const detail = mocks.consent.mock.calls[0]?.[1]?.detail
     expect(detail).toContain('Legacy session files and browser bindings are not imported')
+    expect(detail).toContain('automatically receive read and send access')
+    expect(detail).toContain('permission to explicitly create Agent Host sessions')
+    expect(detail).toContain('no separate session-access switch is required')
+    expect(detail).toContain('No session is created and no prompt is sent just by linking')
+    expect(detail).toContain('native tool approvals remain on the execution machine')
+    expect(detail).not.toContain('(read only)')
     expect(detail).not.toContain('migrate current bindings')
     mocks.consent.mockResolvedValue({ response: 1 })
     expect(await invoke('enable')).toBe(true)

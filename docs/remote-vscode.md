@@ -24,7 +24,8 @@ To link an existing session:
   choose an existing Host chat, and link it to the selected task. A task already
   linked to another conversation must be explicitly detached first; this does not
   delete its history. No Host or chat is created automatically.
-2. Reuse **Remote devices** pairing and the linked-session workspace policy.
+2. Let **Automatic workspace links** connect the enrolled devices with read
+  and send access; no separate session-link permission is needed.
   B's current validated binding **and** private local confirmation receipt
   authorize access.
   A Git-only edit, a different owner Client ID, or a sibling chat is not authority.
@@ -182,21 +183,22 @@ upstream. An invitation issued by X to Y enables **Y -> X**. Private device
 invitation material is exchanged only inside authenticated SSH, not Git.
 Enable the immutable backend with native consent on existing B/C before enrolling A.
 
-For explicit device pairing:
+Enable **Automatic workspace links** on both desktops and wait for the peer to
+show **linked** and **connected**. Device pairing and private invitation exchange
+are automatic; there is no manual pairing, file import/export, recipient selector
+or **Enable linked sessions** step.
 
-1. On A, sign in for Dev Tunnel and **Export client identity**. This exports a
-  public device identity, never the private key.
-2. On B, sign in, choose **Linked-session access**, and **Pair device** with A's
-  identity. Review the recipient and workspace policy in the native confirmation.
-  This starts the private publication for that policy.
-3. Transfer the private device invitation through an approved channel. A uses
-  **Import device invitation**, verifies B's owner/fingerprint and consents to
-  connection for this workspace. C uses its own identity and invitation.
+Active enrolled devices receive read and send access to the shared workspace's
+locally confirmed sessions, including explicit **Create and assign**. Write access
+is sufficient for association; there is no separate link permission or read-only
+selector. Saved read-only grants for these enrolled peers are upgraded during
+reconciliation, including after restart, without granting other workspaces access.
 
-Pairing is transport/workspace consent, not native session creation, a prompt,
-tool approval or a replacement for a local owner receipt. It does not bypass
-the requirement to enable Automatic workspace links for bindings. Existing
-enabled pairs can continue independently of another offline device.
+Enrollment does not create a session or send a prompt by itself, approve tools,
+grant OS shell access or replace a local owner receipt. It still requires enabling
+Automatic workspace links for bindings. Pause, disconnect and **Revoke automatic
+link** remain available; revoked devices are not reauthorized. Existing enabled
+pairs can continue independently of another offline device.
 
 ### Immutable Binding Synchronization
 

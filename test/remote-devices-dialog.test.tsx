@@ -9,19 +9,18 @@ type Device = Awaited<ReturnType<NonNullable<RemoteVSCodeBridge['devices']>['lis
 
 function fixture() {
   const git = gitSyncUiFixture()
+  git.setStatus({
+    enabled: true, state: 'idle', intervalMs: 15000, pending: 0, provisionalTasks: [], conflicts: [], revision: null,
+    peers: [{ deviceId: 'device-b', machineName: 'Machine-B', state: 'linked' }],
+  })
   let status: DevTunnelStatus = { installed: true, account: 'owner@example.test', state: 'idle' }
-  const device: Device = { id: 'device-b', machineName: 'Machine-B', state: 'offline', enabled: false, expiresAt: '2099-01-01T00:00:00Z' }
-  let access: 'none' | 'read' | 'send' = 'none'
+  const device: Device = { id: 'device-b', machineName: 'Machine-B', state: 'connected', enabled: true, expiresAt: '2099-01-01T00:00:00Z' }
+  let forgotten = false
   const devices: NonNullable<RemoteVSCodeBridge['devices']> = {
-    list: vi.fn(async () => [{ ...device }]),
-    recipients: vi.fn(async () => [{ id: 'device-a', username: 'Alice', machineName: 'Machine-A', expiresAt: device.expiresAt, linkedAccess: access }]),
-    pair: vi.fn(async () => true),
-    workspace: vi.fn(async (_id, value) => { access = value; return true }),
-    adoptLinks: vi.fn(async () => true),
-    import: vi.fn(async () => true),
+    list: vi.fn(async () => forgotten ? [] : [{ ...device }]),
     connect: vi.fn(async () => { device.enabled = true; device.state = 'connected' }),
     disconnect: vi.fn(async () => { device.enabled = false; device.state = 'offline' }),
-    forget: vi.fn(async () => {}), revoke: vi.fn(async () => {}),
+    forget: vi.fn(async () => { forgotten = true }),
   }
   const devTunnels: NonNullable<RemoteVSCodeBridge['devTunnels']> = {
     status: vi.fn(async () => status), login: vi.fn(async () => {}),
@@ -34,84 +33,140 @@ function fixture() {
   return { ...git, remote, devices, devTunnels }
 }
 
-afterEach(() => { delete window.remoteVSCode })
+afterEach(() => { delete window.remoteVSCode; delete window.agentHost })
 
 describe('native Agent Host remote device controls', () => {
-  it('shows device, tunnel and Git controls without session invitations, SSH aliases or legacy links', async () => {
-    const { devices } = fixture()
+  it('shows trusted automatic links without manual pairing, permission controls or automatic session actions', async () => {
+    const { devices, api, devTunnels } = fixture()
+    const send = vi.fn()
+    const create = vi.fn()
+    Reflect.set(window, 'agentHost', { send, create })
     render(<RemoteDevicesDialog onClose={vi.fn()} />)
     expect(screen.getByRole('dialog', { name: 'Remote devices' })).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Dev Tunnel service' })).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Workspace Git synchronization' })).toBeInTheDocument()
-    await screen.findByRole('button', { name: 'Connect device Machine-B' })
-    expect(screen.getByRole('button', { name: 'Import device invitation' })).toBeInTheDocument()
-    for (const name of ['Import invitation', 'Share session', 'Choose recipient', 'Link to T-0003', 'Export client identity']) expect(screen.queryByRole('button', { name })).not.toBeInTheDocument()
+    await screen.findByRole('button', { name: 'Disconnect device Machine-B' })
+    expect(screen.getByText('linked', { exact: true })).toBeInTheDocument()
+    expect(screen.getByText(/Trusted automatically linked devices can read and send to linked sessions, associate sessions with tasks, and explicitly create new sessions in this shared workspace/)).toHaveTextContent('No separate per-device enable step is needed. This does not grant arbitrary operating-system permissions; native session approvals still apply. Requests are never sent and sessions are never created automatically.')
+    for (const name of [
+      'Pair device', 'Import device invitation', 'Export device identity', 'Confirm existing Agent Host links',
+      'Enable linked sessions', 'Disable linked sessions for this workspace', 'Revoke paired device',
+      'Import invitation', 'Share session', 'Choose recipient', 'Link to T-0003', 'Export client identity',
+    ]) expect(screen.queryByRole('button', { name })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Paired recipient device')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Linked-session workspace access')).not.toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /Read only|Read and send/ })).not.toBeInTheDocument()
     expect(screen.queryByLabelText('SSH host alias')).not.toBeInTheDocument()
     expect(screen.queryByRole('radio', { name: 'SSH alias' })).not.toBeInTheDocument()
     expect(screen.queryByText('Legacy session invitation')).not.toBeInTheDocument()
     expect(devices.connect).not.toHaveBeenCalled()
-    expect(devices.pair).not.toHaveBeenCalled()
+    expect(devices.disconnect).not.toHaveBeenCalled()
+    expect(devices.forget).not.toHaveBeenCalled()
+    expect(api.enable).not.toHaveBeenCalled()
+    expect(api.disable).not.toHaveBeenCalled()
+    expect(api.revokeDevice).not.toHaveBeenCalled()
+    expect(devTunnels.publish).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+    expect(create).not.toHaveBeenCalled()
   })
 
-  it('exports only the managed device identity and does not claim a cancelled export succeeded', async () => {
-    const { remote } = fixture()
-    vi.mocked(remote.exportIdentity).mockResolvedValueOnce(false)
+  it('retains automatic link revocation and pause without per-device permission grants', async () => {
+    const { api } = fixture()
     render(<RemoteDevicesDialog onClose={vi.fn()} />)
-    await screen.findByText('owner@example.test')
-    fireEvent.click(screen.getByRole('button', { name: 'Export device identity' }))
-    await waitFor(() => expect(remote.exportIdentity).toHaveBeenCalledWith(true))
-    expect(screen.queryByText('Device identity exported.')).not.toBeInTheDocument()
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Export device identity' })).toBeEnabled())
-    fireEvent.click(screen.getByRole('button', { name: 'Export device identity' }))
-    await screen.findByText('Device identity exported.')
-    vi.mocked(remote.exportIdentity).mockRejectedValueOnce(new Error('Secure device storage unavailable.'))
-    fireEvent.click(screen.getByRole('button', { name: 'Export device identity' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('Secure device storage unavailable.')
+    fireEvent.click(await screen.findByRole('button', { name: 'Revoke automatic link' }))
+    await waitFor(() => expect(api.revokeDevice).toHaveBeenCalledWith('device-b'))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Pause automatic links' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Pause automatic links' }))
+    await screen.findByRole('button', { name: 'Enable automatic links' })
+    expect(api.disable).toHaveBeenCalledOnce()
   })
 
-  it('grants and revokes workspace AH access without per-session sharing', async () => {
-    const { devices } = fixture()
+  it('guards automatic link operations while revoking and surfaces failures', async () => {
+    const { api } = fixture()
+    let reject!: (reason: Error) => void
+    vi.mocked(api.revokeDevice).mockImplementationOnce(() => new Promise<void>((_resolve, fail) => { reject = fail }))
     render(<RemoteDevicesDialog onClose={vi.fn()} />)
-    await screen.findByRole('option', { name: 'Alice @ Machine-A' })
-    fireEvent.change(screen.getByLabelText('Paired recipient device'), { target: { value: 'device-a' } })
-    fireEvent.change(screen.getByLabelText('Linked-session workspace access'), { target: { value: 'read' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Enable linked sessions' }))
-    await waitFor(() => expect(devices.workspace).toHaveBeenCalledWith('device-a', 'read'))
-    await screen.findByText('Workspace access: read')
-    fireEvent.click(screen.getByRole('button', { name: 'Disable linked sessions for this workspace' }))
-    await waitFor(() => expect(devices.workspace).toHaveBeenCalledWith('device-a', 'none'))
-    await screen.findByText('Workspace access: none')
-    fireEvent.click(screen.getByRole('button', { name: 'Revoke paired device' }))
-    await waitFor(() => expect(devices.revoke).toHaveBeenCalledWith('device-a'))
-    expect(devices).not.toHaveProperty('share')
-    expect(devices).not.toHaveProperty('unshare')
-  })
-
-  it('keeps explicit device import, pairing and AH-link confirmation', async () => {
-    const { devices } = fixture()
-    render(<RemoteDevicesDialog onClose={vi.fn()} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Import device invitation' }))
-    await waitFor(() => expect(devices.import).toHaveBeenCalledOnce())
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Pair device' })).toBeEnabled())
-    fireEvent.click(screen.getByRole('button', { name: 'Pair device' }))
-    await waitFor(() => expect(devices.pair).toHaveBeenCalledWith(true))
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm existing Agent Host links' })).toBeEnabled())
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm existing Agent Host links' }))
-    await screen.findByText('Existing Agent Host links confirmed on this device.')
-    expect(devices.adoptLinks).toHaveBeenCalledOnce()
+    fireEvent.click(await screen.findByRole('button', { name: 'Revoke automatic link' }))
+    expect(screen.getByRole('button', { name: 'Revoke automatic link' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Pause automatic links' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Sync now' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke automatic link' }))
+    expect(api.revokeDevice).toHaveBeenCalledOnce()
+    reject(new Error('Automatic link revocation failed.'))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Automatic link revocation failed.')
+    expect(screen.getByRole('button', { name: 'Revoke automatic link' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke automatic link' }))
+    await waitFor(() => expect(api.revokeDevice).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
   })
 
   it('connects and disconnects devices without invoking session controls', async () => {
     const { devices } = fixture()
     render(<RemoteDevicesDialog onClose={vi.fn()} />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Connect device Machine-B' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Disconnect device Machine-B' }))
+    await screen.findByRole('button', { name: 'Connect device Machine-B' })
+    expect(devices.disconnect).toHaveBeenCalledWith('device-b')
+    fireEvent.click(screen.getByRole('button', { name: 'Connect device Machine-B' }))
     await screen.findByRole('button', { name: 'Disconnect device Machine-B' })
     expect(devices.connect).toHaveBeenCalledWith('device-b')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reconnect device Machine-B' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect device Machine-B' }))
+    await waitFor(() => expect(devices.connect).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Forget device Machine-B' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Forget device Machine-B' }))
+    await waitFor(() => expect(devices.forget).toHaveBeenCalledWith('device-b'))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Disconnect device Machine-B' })).not.toBeInTheDocument())
+  })
+
+  it('surfaces device discovery failures', async () => {
+    const { devices } = fixture()
+    vi.mocked(devices.list).mockRejectedValueOnce(new Error('Device discovery unavailable.'))
+    render(<RemoteDevicesDialog onClose={vi.fn()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Device discovery unavailable.')
+  })
+
+  it('surfaces connection failures and keeps disconnect available while another connection is pending', async () => {
+    const { devices } = fixture()
+    vi.mocked(devices.connect).mockRejectedValueOnce(new Error('Device connection failed.'))
+    render(<RemoteDevicesDialog onClose={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Reconnect device Machine-B' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Device connection failed.')
+    let finish!: () => void
+    vi.mocked(devices.connect).mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect device Machine-B' }))
+    expect(screen.getByRole('button', { name: 'Reconnect device Machine-B' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Forget device Machine-B' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect device Machine-B' }))
+    expect(devices.connect).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('button', { name: 'Disconnect device Machine-B' })).toBeEnabled()
     fireEvent.click(screen.getByRole('button', { name: 'Disconnect device Machine-B' }))
     await screen.findByRole('button', { name: 'Connect device Machine-B' })
     expect(devices.disconnect).toHaveBeenCalledWith('device-b')
-    fireEvent.click(screen.getByRole('button', { name: 'Forget device Machine-B' }))
-    await waitFor(() => expect(devices.forget).toHaveBeenCalledWith('device-b'))
+    finish()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Forget device Machine-B' })).toBeEnabled())
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('reports disconnection errors and allows an explicit retry', async () => {
+    const { devices } = fixture()
+    vi.mocked(devices.disconnect).mockRejectedValueOnce(new Error('Device disconnect failed.'))
+    render(<RemoteDevicesDialog onClose={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Disconnect device Machine-B' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Device disconnect failed.')
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect device Machine-B' }))
+    await screen.findByRole('button', { name: 'Connect device Machine-B' })
+    expect(devices.disconnect).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps workspace links available without a devices API and reports a missing bridge', async () => {
+    const { remote } = fixture()
+    delete remote.devices
+    const { unmount } = render(<RemoteDevicesDialog onClose={vi.fn()} />)
+    await screen.findByRole('button', { name: 'Pause automatic links' })
+    unmount()
+    delete window.remoteVSCode
+    render(<RemoteDevicesDialog onClose={vi.fn()} />)
+    expect(screen.getByRole('alert')).toHaveTextContent('The remote device desktop API is unavailable.')
   })
 
   it('retains publication, reset and cancellable sign-in without legacy invitation controls', async () => {
@@ -140,7 +195,8 @@ describe('native Agent Host remote device controls', () => {
   })
 
   it('keeps Automatic workspace links available and surfaces enrollment errors', async () => {
-    const { api } = fixture()
+    const { api, setStatus } = fixture()
+    setStatus({ enabled: false, state: 'disabled', intervalMs: 15000, pending: 0, provisionalTasks: [], conflicts: [], peers: [], revision: null })
     vi.mocked(api.enable).mockRejectedValueOnce(new Error('Git upstream is required.'))
     render(<RemoteDevicesDialog onClose={vi.fn()} />)
     fireEvent.click(screen.getByRole('button', { name: 'Enable automatic links' }))

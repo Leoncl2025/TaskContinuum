@@ -27,9 +27,10 @@ describe('native-only preload boundary', () => {
     for (const name of ['copilot', 'vscodeChat', 'sharedSessions']) expect(Reflect.has(window, name)).toBe(false)
     expect(window.workspace).not.toHaveProperty('migrateSessionLinks')
     expect(window.remoteVSCode).toBeDefined()
-    for (const name of ['list', 'connect', 'disconnect', 'forget', 'share', 'grants', 'revoke', 'importInvitation']) expect(window.remoteVSCode).not.toHaveProperty(name)
-    expect(window.remoteVSCode?.devices).not.toHaveProperty('share')
-    expect(window.remoteVSCode?.devices).not.toHaveProperty('unshare')
+    expect(Object.keys(window.remoteVSCode ?? {}).sort()).toEqual(['devTunnels', 'devices', 'gitSync'])
+    for (const name of ['list', 'connect', 'disconnect', 'forget', 'share', 'grants', 'revoke', 'importInvitation', 'exportIdentity']) expect(window.remoteVSCode).not.toHaveProperty(name)
+    expect(Object.keys(window.remoteVSCode?.devices ?? {}).sort()).toEqual(['connect', 'disconnect', 'forget', 'list'])
+    for (const name of ['share', 'unshare', 'recipients', 'pair', 'workspace', 'adoptLinks', 'import', 'revoke']) expect(window.remoteVSCode?.devices).not.toHaveProperty(name)
     expect(ipc.invoke).not.toHaveBeenCalled()
   })
 
@@ -47,16 +48,24 @@ describe('native-only preload boundary', () => {
     ])
   })
 
-  it('retains device/workspace permissions, Dev Tunnel controls and binding notification cleanup', async () => {
+  it('retains device connections, automatic revocation, Dev Tunnel controls and binding notification cleanup', async () => {
     const bridge = window.remoteVSCode
-    if (!bridge?.devices?.workspace || !bridge.devTunnels || !bridge.gitSync) throw new Error('Remote device preload APIs missing.')
-    await bridge.devices.workspace('recipient-device', 'read')
+    if (!bridge?.devices || !bridge.devTunnels || !bridge.gitSync) throw new Error('Remote device preload APIs missing.')
+    await bridge.devices.list()
+    await bridge.devices.connect('automatic-device')
+    await bridge.devices.disconnect('automatic-device')
+    await bridge.devices.forget('automatic-device')
+    await bridge.gitSync.revokeDevice('automatic-device')
+    await bridge.gitSync.disable()
     await bridge.devTunnels.status(true)
-    await bridge.exportIdentity(true)
     expect(ipc.invoke.mock.calls).toEqual([
-      ['remote-vscode:device-workspace', 'recipient-device', 'read'],
+      ['remote-vscode:devices'],
+      ['remote-vscode:device-connect', 'automatic-device'],
+      ['remote-vscode:device-disconnect', 'automatic-device'],
+      ['remote-vscode:device-forget', 'automatic-device'],
+      ['remote-vscode:git-revoke', 'automatic-device'],
+      ['remote-vscode:git-disable'],
       ['remote-vscode:tunnel-status', true],
-      ['remote-vscode:export-identity', true],
     ])
     const stop = bridge.gitSync.onBindingsChanged(vi.fn())
     expect(ipc.on).toHaveBeenCalledWith('remote-vscode:git-bindings-changed', expect.any(Function))

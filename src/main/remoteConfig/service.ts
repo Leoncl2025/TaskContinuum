@@ -619,6 +619,20 @@ export class WorkspaceSyncService {
           await writeJsonAtomic(join(runtime.directory, 'runtime.json'), runtime.metadata)
         }
         if (!this.networkAllowed(runtime, generation)) return
+        const pairs = await this.options.host.list()
+        if (!this.networkAllowed(runtime, generation)) return
+        for (const peer of peers) {
+          const pair = pairs.find((entry) => entry.participant.clientId === peer.deviceId
+            && entry.publicKey === peer.clientPublicKey && Date.parse(entry.expiresAt) > Date.now())
+          const liveGrant = Object.values(current.resolution.invitations).some((record) => record.payload.action === 'grant'
+            && record.payload.issuerId === runtime.local.clientId && record.payload.recipientId === peer.deviceId)
+          if (!pair || !liveGrant) continue
+          if (pair.workspaces.some((policy) => policy.root === runtime.root && policy.canSend)
+            && runtime.grantedPairs.get(peer.deviceId) === pair.id) continue
+          // Upgrade saved read-only grants through the same revocation-safe path as new links.
+          await this.linkInvitation(runtime, peer.deviceId, runtime.connectionAbort.signal)
+          if (!this.networkAllowed(runtime, generation)) return
+        }
         await runtime.peers.reconcile(peers, incoming)
       } while (runtime.peerAgain)
     }).finally(() => {
@@ -668,8 +682,7 @@ export class WorkspaceSyncService {
   private async createLinkInvitation(runtime: Runtime, senderId: string, signal: AbortSignal, generation: number) {
     const permitted = () => this.networkAllowed(runtime, generation) && !runtime.enrollment.pins[senderId]?.blocked
     const check = () => {
-      signal.throwIfAborted()
-      if (!permitted()) throw new Error('Workspace enrollment changed while linking.')
+      if (signal.aborted || !permitted()) throw new PeerControlError('aborted')
     }
     check()
     if (!runtime.enrollment.enabled || runtime.enrollment.pins[senderId]?.blocked) throw new Error('The peer is no longer enrolled.')
@@ -690,11 +703,11 @@ export class WorkspaceSyncService {
     const existing = pair.workspaces.find((policy) => policy.root === runtime.root)
     let managed = runtime.grantedPairs.has(senderId)
     try {
-      if (!existing) {
+      if (!existing?.canSend || runtime.grantedPairs.get(senderId) !== pair.id) {
         managed = true
         runtime.grantedPairs.set(senderId, pair.id)
         runtime.metadata.managedPairs[senderId] = pair.id
-        await this.options.host.setWorkspace(pair.id, runtime.root, false)
+        await this.options.host.setWorkspace(pair.id, runtime.root, true)
         check()
         await writeJsonAtomic(join(runtime.directory, 'runtime.json'), runtime.metadata)
       }

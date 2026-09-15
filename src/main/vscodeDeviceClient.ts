@@ -221,7 +221,7 @@ export class VSCodeDeviceClient {
     await this.load()
     const canonical = await this.root(root)
     const peers = this.peers.filter((item) => item.root === canonical && item.invitation.ownerClientId === target.owner.clientId)
-    if (peers.length !== 1) throw new Error('Pair with the exact Agent Host owner in Devices. Git does not grant access.')
+    if (peers.length !== 1) throw new Error('Enable automatic workspace links on both devices and wait for the exact Agent Host owner to connect. Git alone does not grant access.')
     const peer = peers[0]
     if (!peer.enabled || Date.parse(peer.invitation.expiresAt) <= Date.now()) throw new Error('The owner connection is disabled or expired.')
     if (peer.invitation.machineName.toLowerCase() !== target.owner.machineName.toLowerCase()) throw new Error('The Agent Host owner identity does not match the paired device.')
@@ -236,7 +236,7 @@ export class VSCodeDeviceClient {
 
   private async creationPeer(root: string, workerId: string): Promise<Peer> {
     const peer = await this.peer(root, z.uuid().parse(workerId))
-    if (!peer.invitation.ownerClientId) throw new Error('This worker invitation does not identify an Agent Host owner. Pair again with an updated worker.')
+    if (!peer.invitation.ownerClientId) throw new Error('This worker invitation does not identify an Agent Host owner. Update the worker and reconnect through automatic workspace links.')
     if (this.closed || !peer.enabled || Date.parse(peer.invitation.expiresAt) <= Date.now()) throw new Error('The worker connection is disabled or expired. Connect it in Devices.')
     await this.validateRecipient(peer.invitation)
     await this.connecting.get(peer.id)

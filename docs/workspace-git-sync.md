@@ -16,9 +16,15 @@ format; their checker is owned by TaskCon.
 
 Consent covers publishing the public metadata and using immutable Agent Host bindings,
 automatic metadata exchange with signed devices in this shared repository, and
-read-only access to previously owner-confirmed linked sessions. It does not
-permit OS shell access, automatic native session creation, prompts, tool
-approvals, or new authorization receipts from remote binding data.
+read and send access to previously owner-confirmed linked sessions, plus explicit
+native session creation and assignment in this shared workspace. Write access
+includes association; there is no additional per-device session-link permission.
+Existing read-only grants for active enrolled devices are upgraded on reconciliation,
+including after restart. Other workspaces and revoked devices are not granted access.
+Linking does not automatically create a session or send a prompt, grant OS shell
+access, approve tools, or generate owner receipts from remote binding data.
+Manual pairing, identity/invitation file exchange and per-device access switches
+are no longer part of the UI. Pause, disconnect and device revocation remain available.
 
 An unconfigured workspace only reads its documents. Session binding reads and
 writes require enabling the immutable backend; there is no legacy fallback.

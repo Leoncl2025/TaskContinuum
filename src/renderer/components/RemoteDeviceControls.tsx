@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { RemoteVSCodeBridge } from '../../shared/remoteVSCode'
 import { Icon, IconButton } from './Primitives'
-import { WorkspaceGitSyncControls } from './WorkspaceGitSyncControls'
 
 type Device = Awaited<ReturnType<NonNullable<RemoteVSCodeBridge['devices']>['list']>>[number]
-type Recipient = Awaited<ReturnType<NonNullable<RemoteVSCodeBridge['devices']>['recipients']>>[number]
 
 export function RemoteDeviceConnections() {
   const api = window.remoteVSCode?.devices
@@ -30,8 +28,6 @@ export function RemoteDeviceConnections() {
   if (!api) return null
   return <div className="remote-device-controls">
     <h3>Devices</h3>
-    <WorkspaceGitSyncControls />
-    <button type="button" className="secondary-button" disabled={!!busy} onClick={() => { void run('import', () => api.import()) }}><Icon name="import" />Import device invitation</button>
     {error && <p className="copilot-error" role="alert">{error}</p>}
     {devices.map((device) => <div className="remote-vscode-row" key={device.id}>
       <div className="remote-vscode-row-title"><Icon name="device-desktop" /><strong>{device.machineName}</strong><span className="muted">{device.state}</span></div>
@@ -45,43 +41,5 @@ export function RemoteDeviceConnections() {
         <IconButton icon="trash" label={`Forget device ${device.machineName}`} disabled={!!busy} onClick={() => { void run(device.id, () => api.forget(device.id)) }} />
       </div>
     </div>)}
-  </div>
-}
-
-export function RemoteDeviceAccess({ canSend, hosting }: { canSend: boolean; hosting: boolean }) {
-  const api = window.remoteVSCode?.devices
-  const [recipients, setRecipients] = useState<Recipient[]>([])
-  const [selected, setSelected] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState<string>()
-  const [error, setError] = useState<string>()
-  const running = useRef(false)
-  useEffect(() => {
-    let active = true
-    void api?.recipients().then((value) => { if (active) setRecipients(value) }).catch((failure: unknown) => { if (active) setError(failure instanceof Error ? failure.message : 'Paired devices unavailable.') })
-    return () => { active = false }
-  }, [api])
-  async function run(action: () => Promise<unknown>, notice: string) {
-    if (!api || running.current) return
-    running.current = true
-    setBusy(true); setError(undefined); setMessage(undefined)
-    try { const result = await action(); setRecipients(await api.recipients()); if (result !== false) setMessage(notice) }
-    catch (failure) { setError(failure instanceof Error ? failure.message : 'Device access failed.') }
-    finally { running.current = false; setBusy(false) }
-  }
-  if (!api) return null
-  return <div className="remote-device-controls">
-    <h3>Paired devices</h3>
-    <button type="button" className="secondary-button" disabled={busy || !hosting} onClick={() => { void run(() => api.pair(canSend), 'Device invitation saved; linked-session workspace policy enabled.') }}><Icon name="person-add" />Pair device</button>
-    {api.adoptLinks && <button type="button" className="secondary-button" disabled={busy} onClick={() => { void run(() => api.adoptLinks!(), 'Existing Agent Host links confirmed on this device.') }}><Icon name="check" />Confirm existing Agent Host links</button>}
-    <label className="form-field">Recipient device<select aria-label="Paired recipient device" value={selected} disabled={busy} onChange={(event) => setSelected(event.target.value)}><option value="">Select device</option>{recipients.map((recipient) => <option key={recipient.id} value={recipient.id}>{recipient.username} @ {recipient.machineName}</option>)}</select></label>
-    <div className="remote-vscode-actions">
-      <button type="button" className="primary-button" disabled={busy || !selected || !api.workspace} onClick={() => { void run(() => api.workspace!(selected, canSend ? 'send' : 'read'), 'Linked-session workspace access enabled.') }}><Icon name="link" />Enable linked sessions</button>
-      <IconButton icon="circle-slash" label="Disable linked sessions for this workspace" disabled={busy || !selected || !api.workspace} onClick={() => { void run(() => api.workspace!(selected, 'none'), 'Linked-session workspace access disabled.') }} />
-      <IconButton icon="debug-disconnect" label="Revoke paired device" disabled={busy || !selected} onClick={() => { void run(() => api.revoke(selected), 'Device revoked.'); setSelected('') }} />
-    </div>
-    {selected && <p className="muted">Workspace access: {recipients.find((item) => item.id === selected)?.linkedAccess ?? 'none'}</p>}
-    {error && <p className="copilot-error" role="alert">{error}</p>}
-    {message && <p role="status" className="muted">{message}</p>}
   </div>
 }
