@@ -29,7 +29,39 @@
 .status-select select:disabled { opacity: 1; color: inherit; }
 .workspace-empty { min-height: 0; }
 .workspace-empty h1 { font-size: 20px; }
+.workspace-empty > p { max-width: 470px; overflow-wrap: anywhere; }
+.workspace-welcome-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+.repository-setup { width: min(620px, calc(100vw - 40px)); }
+.repository-steps { display: flex; flex-wrap: wrap; gap: 12px 24px; list-style: none; padding: 0; margin: 0 0 22px; color: var(--muted); font-size: 12px; }
+.repository-steps li { display: flex; align-items: center; gap: 8px; }
+.repository-steps li > span { width: 23px; height: 23px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 50%; }
+.repository-steps [aria-current] { color: var(--accent); }
+.repository-steps [aria-current] > span { border-color: var(--accent); }
+.repository-fields { border: 0; margin: 0; padding: 0; min-width: 0; }
+.repository-fields label[for] { margin-bottom: 8px; }
+.repository-path-row { display: flex; gap: 8px; }
+.repository-path-row input { flex: 1; width: 100%; background: var(--input); border: 1px solid #7776; padding: 9px 10px; border-radius: 4px; }
+.repository-path { overflow-wrap: anywhere; font-size: 12px; }
+.repository-created { display: flex; align-items: flex-start; gap: 12px; padding: 14px; background: var(--note); border: 1px solid var(--border); border-radius: 5px; }
+.repository-created > .codicon { color: var(--accent); font-size: 24px; }
+.repository-created > div { display: flex; flex-direction: column; min-width: 0; gap: 6px; }
+.repository-created code { overflow-wrap: anywhere; font-size: 12px; }
+.repository-created span:not(.codicon) { color: var(--muted); font-size: 11px; }
+.repository-github { margin: 18px 0; font-size: 12px; }
+.repository-github pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; background: var(--raised); border: 1px solid var(--border); border-radius: 4px; }
+.repository-visibility { display: flex; flex-direction: column; gap: 14px; min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 5px; }
+.repository-visibility legend { color: var(--muted); font-size: 12px; padding: 0 6px; }
+.repository-visibility label { display: flex; gap: 10px; align-items: flex-start; }
+.repository-visibility strong { font-weight: 500; }
+.repository-visibility small { display: block; margin-top: 5px; line-height: 1.6; color: var(--muted); }
+.repository-warning { border-left: 2px solid #c99b3d; padding-left: 12px; }
+.repository-error { color: var(--text); border: 1px solid #c95151; border-radius: 4px; background: #c9515115; padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.repository-published { margin-top: 20px; }
+.repository-published > .codicon { color: var(--green); font-size: 28px; }
+.repository-setup .dialog-actions { flex-wrap: wrap; }
 @media (max-width: 660px) {
   .workspace-picker { max-width: 100%; }
   .workspace-markdown th, .workspace-markdown td { padding: 6px; }
+  .repository-path-row { flex-direction: column; }
+  .repository-setup .dialog-inner { padding: 18px; }
 }

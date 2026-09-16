@@ -1,11 +1,13 @@
-import { mkdirSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { _electron as electron, expect, test } from '@playwright/test'
 import type { ElectronApplication, Page } from '@playwright/test'
+import { fixtureTasks } from '../test/task-fixture'
 
 let app: ElectronApplication
 let page: Page
 let environment: Record<string, string>
+let fixtureFolder: string
 const errors: string[] = []
 const externalRequests: string[] = []
 
@@ -36,9 +38,18 @@ async function launch(): Promise<void> {
   page.on('pageerror', (error) => errors.push(error.message))
   page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()) })
   page.on('request', (request) => { if (/^(https?|wss?):/.test(request.url())) externalRequests.push(request.url()) })
-  await expect(page.getByRole('heading', { level: 1, name: 'UI based on Electron' })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 1, name: 'Create your task repository' })).toBeVisible()
   await expect(page.locator('.workbench')).toHaveAttribute('aria-busy', 'false')
   await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isVisible())).toBe(true)
+}
+
+async function openFixture(): Promise<void> {
+  await app.evaluate(({ dialog }, root) => {
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [root] })
+  }, fixtureFolder)
+  await page.getByRole('button', { name: 'Open workspace folder', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'T-0002 UI based on Electron', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'T-0002 UI based on Electron', exact: true }).click()
 }
 
 test.beforeAll(async () => {
@@ -46,7 +57,19 @@ test.beforeAll(async () => {
   delete environment.ELECTRON_RUN_AS_NODE
   delete environment.ELECTRON_RENDERER_URL
   delete environment.TASKCONTINUUM_WORKSPACE
-  environment.TASKCONTINUUM_DATA_DIR = resolve('.runtime', `e2e-${Date.now()}`)
+  const runtime = resolve('.runtime', `e2e-${Date.now()}`)
+  environment.TASKCONTINUUM_DATA_DIR = join(runtime, 'profile')
+  fixtureFolder = join(runtime, 'planning-fixture')
+  mkdirSync(join(fixtureFolder, '.agentdesk'), { recursive: true })
+  writeFileSync(join(fixtureFolder, '.agentdesk', 'config.json'), JSON.stringify({ schemaVersion: '1.0', workspace: 'Desktop test workspace' }))
+  for (const task of fixtureTasks) {
+    const directory = join(fixtureFolder, 'tasks', task.id)
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(join(directory, 'task.json'), JSON.stringify({ schemaVersion: '1.0', id: task.id, title: task.title, type: task.kind, status: task.status, priority: task.priority, owner: task.owner, summary: task.summary, relations: { level: task.kind === 'epic' ? 'epic' : 'task', parent: task.parentId ?? null } }))
+    writeFileSync(join(directory, 'RequirementAnalysis.md'), `# What success looks like\n\n${task.goal}\n`)
+    writeFileSync(join(directory, 'Plan.md'), `# A path forward\n\n${task.plan.map((item, index) => `${index + 1}. ${item}`).join('\n')}\n`)
+    writeFileSync(join(directory, 'Checklist.md'), `# Acceptance checklist\n\n${task.checklist.map((item) => `- [${item.done ? 'x' : ' '}] \`${item.id}\` ${item.title}`).join('\n')}\n`)
+  }
   mkdirSync(resolve('artifacts'), { recursive: true })
   await launch()
 })
@@ -54,9 +77,9 @@ test.beforeAll(async () => {
 test.beforeEach(async () => {
   await zoomKey('0')
   await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].setSize(1440, 940) })
-  await page.evaluate(() => localStorage.clear())
+  await page.evaluate(async () => { await window.workspace!.closeWorkspace(); localStorage.clear() })
   await page.reload()
-  await expect(page.getByRole('heading', { level: 1, name: 'UI based on Electron' })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 1, name: 'Create your task repository' })).toBeVisible()
   await expect(page.getByText('Desktop · 0.1.0', { exact: true })).toBeVisible()
   await expect(page.locator('.workbench')).toHaveAttribute('aria-busy', 'false')
 })
@@ -81,23 +104,29 @@ test('launches the production workbench with a sandboxed renderer', async () => 
   expect(surface).toEqual({ require: 'undefined', process: 'undefined', bridge: ['close', 'copyText', 'getInfo', 'minimize', 'toggleMaximize'], retiredBridges: [] })
   await expect(page.getByRole('complementary', { name: 'Task explorer' })).toBeVisible()
   await expect(page.getByRole('complementary', { name: 'Task chat' })).toBeVisible()
-  await expect(page.getByRole('complementary', { name: 'Task chat' })).toContainText('Demo tasks do not start conversations.')
+  await expect(page.getByRole('complementary', { name: 'Task chat' })).toContainText('Select a task to open its Agent Host chat.')
+  await expect(page.getByRole('contentinfo', { name: 'Workbench status' })).toContainText('0 tasks')
+  await expect(page.getByRole('tab')).toHaveCount(0)
+  await expect(page.getByText(/Local demo workspace|Demo data|LOCAL DEMO/)).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Create task repository', exact: true })).toBeVisible()
   await expect(page.getByRole('complementary', { name: 'Task chat' }).getByRole('textbox')).toHaveCount(0)
   await page.screenshot({ path: resolve('artifacts/workbench-dark.png') })
 })
 
-test('filters tasks, opens documents, and updates demo progress', async () => {
+test('filters explicitly opened tasks and keeps real documents read-only', async () => {
+  await openFixture()
   await page.getByRole('textbox', { name: 'Filter tasks' }).fill('backend')
   await page.getByRole('button', { name: 'T-0003 Backend service', exact: true }).click()
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Backend service')
   await page.getByRole('tab', { name: /^Checklist/ }).click()
-  await page.getByRole('checkbox', { name: /Review the Session Host contract/ }).check()
-  await expect(page.getByRole('progressbar')).toHaveAttribute('value', '50')
+  await expect(page.getByRole('checkbox', { name: /Review the Session Host contract/ })).toBeDisabled()
+  await expect(page.getByRole('progressbar')).toHaveAttribute('value', '0')
   await page.getByRole('tab', { name: 'Plan', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'A path forward' })).toBeVisible()
 })
 
 test('supports native dialogs, keyboard shortcuts, and light appearance', async () => {
+  await openFixture()
   await page.keyboard.press('Control+b')
   await expect(page.getByRole('complementary', { name: 'Task explorer' })).toBeHidden()
   await page.keyboard.press('Control+Alt+b')
@@ -276,6 +305,7 @@ test('zooms the whole desktop with VS Code keys and restores its level after res
 })
 
 test('keeps the compact desktop usable without horizontal document overflow', async () => {
+  await openFixture()
   await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].setSize(940, 700) })
   await expect(page.locator('.workbench')).toHaveAttribute('data-compact', 'true')
   await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
@@ -288,7 +318,7 @@ test('keeps the compact desktop usable without horizontal document overflow', as
   await page.getByRole('button', { name: 'Toggle chat panel' }).click()
   const chat = page.getByRole('complementary', { name: 'Task chat' })
   await expect(chat).toBeVisible()
-  await expect(chat).toContainText('Demo tasks do not start conversations.')
+  await expect(chat).toContainText('No Agent Host chat is linked to T-0003.')
   await expect(chat.getByRole('textbox')).toHaveCount(0)
   await expect(chat.getByRole('button', { name: 'Hide chat panel' })).toBeInViewport()
 })

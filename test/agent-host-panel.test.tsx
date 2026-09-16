@@ -5,7 +5,7 @@ import type { ChatState } from '@microsoft/agent-host-protocol'
 import { MessageKind } from '@microsoft/agent-host-protocol'
 import type { AgentHostBridge, AgentHostView } from '../src/shared/agentHost'
 import { AgentHostPanel } from '../src/renderer/components/AgentHostPanel'
-import { demoTasks } from '../src/renderer/data/tasks'
+import { fixtureTasks as demoTasks } from './task-fixture'
 import { modelConfigFixture } from './agent-host-model-fixture'
 
 afterEach(() => { delete window.agentHost; delete window.desktop })

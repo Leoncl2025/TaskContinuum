@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
-import type { WorkspaceDescriptor, WorkspaceSnapshot, WorkspaceState } from '../shared/workspace'
+import type { WorkspaceDescriptor, WorkspaceRepositoryStatus, WorkspaceSnapshot, WorkspaceState } from '../shared/workspace'
 import { readTaskWorkspace } from './workspaceReader'
 import { readRepositorySessionLinks, removeRepositorySessionLink, sessionOwnerSchema, updateRepositoryAgentHostLink } from './repositorySessionLinks'
 import type { SessionLinksSnapshot, SessionOwner } from '../shared/sessionBindings'
@@ -10,6 +10,7 @@ import { readClientIdentity } from './clientIdentity'
 import { recordLocalLink } from './linkedSessionPolicy'
 import type { AgentHostTarget } from '../shared/agentHost'
 import { agentHostChatIdSchema, agentHostIdSchema, agentHostKey, agentHostSessionIdSchema, agentHostTargetSchema } from './agentHostProtocol'
+import { createWorkspaceRepositorySchema, publishWorkspaceRepositorySchema, workspaceRepositoryIdSchema, WorkspaceRepositoryService } from './workspaceRepository'
 
 const descriptorSchema = z.object({ id: z.string().regex(/^[a-f\d]{64}$/), name: z.string().max(300), title: z.string().max(200), root: z.string().min(1).max(4096) })
 const stateSchema = z.object({ currentId: z.string().nullable(), recent: z.array(descriptorSchema).max(10) })
@@ -41,7 +42,7 @@ export class WorkspaceStore {
   private loading?: Promise<void>
   private pending: Promise<unknown> = Promise.resolve()
 
-  constructor(private readonly stateDirectory: string, startupFolder?: string, private readonly verifyAgentHost?: (root: string, target: AgentHostTarget) => Promise<AgentHostTarget>) {
+  constructor(private readonly stateDirectory: string, startupFolder?: string, private readonly verifyAgentHost?: (root: string, target: AgentHostTarget) => Promise<AgentHostTarget>, private readonly repositories = new WorkspaceRepositoryService()) {
     this.stateFile = join(stateDirectory, 'workspaces.json')
     this.startupFolder = startupFolder
   }
@@ -102,6 +103,33 @@ export class WorkspaceStore {
 
   openFolder(root: string): Promise<WorkspaceState> { return this.update(() => this.open(root)) }
 
+  createRepository(value: unknown): Promise<WorkspaceState> {
+    return this.update(async () => {
+      const request = createWorkspaceRepositorySchema.parse(value)
+      const root = await this.repositories.create(request)
+      try { return await this.open(root) } catch (error) {
+        throw new Error(`The repository was created at ${root}, but could not be selected or saved. Use Open existing to recover it. ${error instanceof Error ? error.message : 'Workspace history could not be saved.'}`)
+      }
+    })
+  }
+
+  getRepositoryStatus(value: unknown): Promise<WorkspaceRepositoryStatus> {
+    return this.update(() => this.repositories.status(this.repositoryWorkspace(workspaceRepositoryIdSchema.parse(value))))
+  }
+
+  publishRepository(value: unknown): Promise<{ url: string }> {
+    return this.update(async () => {
+      const request = publishWorkspaceRepositorySchema.parse(value)
+      return this.repositories.publish(this.repositoryWorkspace(request.workspaceId), request.private)
+    })
+  }
+
+  private repositoryWorkspace(workspaceId: string): WorkspaceSnapshot {
+    const workspace = this.state.current
+    if (!workspace || workspace.id !== workspaceId) throw new Error('The active workspace changed. Select the intended repository before publishing.')
+    return workspace
+  }
+
   openRecent(id: unknown): Promise<WorkspaceState> {
     return this.update(async () => {
       const selected = this.state.recent.find((item) => typeof id === 'string' && item.id === id)
@@ -114,7 +142,7 @@ export class WorkspaceStore {
     return this.update(async () => this.state.current ? this.open(this.state.current.root) : structuredClone(this.state))
   }
 
-  useDemo(): Promise<WorkspaceState> {
+  closeWorkspace(): Promise<WorkspaceState> {
     return this.update(async () => {
       const next = { current: null, recent: this.state.recent }
       await this.save(next)

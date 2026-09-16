@@ -147,7 +147,7 @@ describe('workspace-scoped immutable Agent Host links', () => {
     await expect(store.getSessionLinks(root)).rejects.toThrow('active workspace changed')
     await expect(store.updateSessionLink({ ...request, workspaceId: 'a'.repeat(64) })).rejects.toThrow('active workspace changed')
     expect((await store.getSessionLinks(workspace.id)).document.bindings).toEqual({})
-    await store.useDemo()
+    await store.closeWorkspace()
     await expect(store.updateSessionLink(request)).rejects.toThrow('active workspace changed')
     expect((await backend.store.read()).records).toEqual([])
   })

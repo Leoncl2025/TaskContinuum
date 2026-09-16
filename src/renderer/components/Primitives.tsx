@@ -9,7 +9,7 @@ export function IconButton({ icon, label, ...props }: ButtonHTMLAttributes<HTMLB
   return <button type="button" className="icon-button" aria-label={label} title={label} {...props}><Icon name={icon} /></button>
 }
 
-export function Dialog({ title, onClose, children, className = '' }: { title: string; onClose(): void; children: ReactNode; className?: string }) {
+export function Dialog({ title, onClose, children, className = '', closeDisabled = false }: { title: string; onClose(): void; children: ReactNode; className?: string; closeDisabled?: boolean }) {
   const ref = useRef<HTMLDialogElement>(null)
   useEffect(() => {
     const dialog = ref.current
@@ -18,10 +18,10 @@ export function Dialog({ title, onClose, children, className = '' }: { title: st
   }, [])
   return (
     <dialog ref={ref} className={`dialog ${className}`} aria-label={title}
-      onCancel={(event) => { event.preventDefault(); onClose() }}
-      onClick={(event) => { if (event.target === event.currentTarget) onClose() }}>
+      onCancel={(event) => { event.preventDefault(); if (!closeDisabled) onClose() }}
+      onClick={(event) => { if (event.target === event.currentTarget && !closeDisabled) onClose() }}>
       <div className="dialog-inner">
-        <header className="dialog-header"><h2>{title}</h2><IconButton icon="close" label={`Close ${title}`} onClick={onClose} /></header>
+        <header className="dialog-header"><h2>{title}</h2><IconButton icon="close" label={`Close ${title}`} disabled={closeDisabled} onClick={onClose} /></header>
         {children}
       </div>
     </dialog>

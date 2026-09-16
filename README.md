@@ -7,8 +7,8 @@ Familiar VS Code-style navigation, without an editor, extension host, terminal, 
 protocol (AHP) 0.9.0 for session discovery, selection, explicit creation, binding,
 reopening, sending, live streaming, cancellation and model options. Local and
 remote access retain the original Host, session, chat and owner identities.
-AgentDesk workspace folders provide read-only task views; the sample workspace
-remains a separate, network-free demo.
+AgentDesk workspace folders provide read-only task views. New profiles start with
+no workspace, no tasks, and no open task tabs; there is no built-in demo.
 
 Local Copilot SDK execution, CLI resume/import, VS Code journal/Companion sessions,
 shared SDK Hosts, checkpoint continuation and their legacy session IPC are retired.
@@ -22,7 +22,8 @@ key files are not deleted or imported into the new runtime.
 - Parent-first task ordering, hierarchy guides, independent branch folding, and
     ancestor paths retained for filtered matches.
 - Overview, requirements, plan, and acceptance checklist views.
-- Demo-only status/checklist edits, task creation and deterministic replies.
+- First-run guidance to create an empty task/config Git repository and explicitly
+  publish it to GitHub, private by default.
 - Per-task native conversations and drafts, streamed responses, cancellation and
   explicit failure states, without automatic message replay.
 - Markdown assistant replies with GFM tables/task lists, readable code blocks and
@@ -69,7 +70,7 @@ Run commands from this repository's root. Dependencies are pinned in
 | --- | --- |
 | `npm ci` | Install locked dependencies and the Electron runtime. |
 | `npm run dev` | Start the Electron application with renderer hot reload. |
-| `npm run dev:web` | Preview the demo browser UI at http://127.0.0.1:5178; native session operations require Electron. |
+| `npm run dev:web` | Preview the empty browser workbench at http://127.0.0.1:5178; local repository and native session operations require Electron. |
 | `npm run typecheck` | Check main/preload, browser, and test environments separately. |
 | `npm run lint` | Run ESLint with no warnings permitted. |
 | `npm test` | Run unit and React component tests. |
@@ -209,8 +210,8 @@ Single line breaks remain visible. Code blocks show their language and a **Copy
 code** action; long code and tables scroll within the message, including narrow
 Chat panels. User messages and delivery receipts retain their original literal text.
 
-The same renderer handles live Agent Host replies, native snapshots, private
-cached replies and demo output. Updated text is rendered again, including an
+The same renderer handles live Agent Host replies, native snapshots and private
+cached replies. Updated text is rendered again, including an
 unfinished code fence; unchanged replies avoid repeated parsing while composing.
 It does not change source history, native session IDs, or synchronization latency.
 
@@ -244,6 +245,39 @@ Full-size previews use images retained in the current desktop view. Image bytes
 and session history are not published in Git records. Drafts remain in memory and
 follow the existing composer lifetime; restarting the desktop discards unsent drafts.
 
+## Create a task repository
+
+1. On first launch, choose **Create task repository**. The Explorer starts empty;
+   existing profiles still reopen their last selected workspace.
+2. Enter an existing absolute **Parent directory** (or use **Browse**) and a
+   **Repository name**, for example `C:\Tasks` and `my-tasks`. Choose **Create
+   repository** to create `C:\Tasks\my-tasks`, initialize Git on `main`, and commit
+   the initial configuration and empty task folder. Existing folders are never
+   overwritten, and no sample tasks, chats, or device enrollment are created.
+3. The guide advances to **Publish to GitHub**. Review the signed-in GitHub
+   account and repository visibility. **Private** is the default; **Public**
+   requires an explicit selection. Nothing is uploaded until you click
+   **Publish to GitHub**.
+4. Alternatively, choose **Keep local for now**. The repository is already usable
+   and restored after restart. Use the Explorer's **Publish workspace to GitHub**
+   icon to return to the publishing guide, or its **New task repository** icon
+   to create another repository.
+
+Local creation needs Git and a configured Git author name/email; it does not need
+GitHub or a network connection. Publication uses the installed GitHub CLI (`gh`)
+and its own credential storage. If sign-in is missing, run
+`gh auth login --hostname github.com` in a terminal and choose **Check again**.
+Install GitHub CLI from <https://cli.github.com> if necessary, then restart the app
+so its updated `PATH` is available. Task Continuum never asks for a token in the UI.
+
+The repository holds `.agentdesk/config.json` and `tasks/`; the empty task folder
+is retained in Git. Add task files with your existing compatible editor or
+automation and refresh to read them. Task views remain read-only. This guide does
+not automatically enroll remote devices, enable automatic workspace links, or
+upload later edits. Review committed files before publishing; credentials and
+private session history must never be committed. A publication failure is shown
+explicitly and leaves the local repository available for retry.
+
 ## Open a task workspace
 
 1. In the desktop explorer, choose the folder icon labeled **Open workspace folder**.
@@ -251,11 +285,12 @@ follow the existing composer lifetime; restarting the desktop discards unsent dr
 2. Select the workspace root, for example `Q:\src\Projects\TaskContinuum-ad`,
     not its `tasks` subdirectory. The root must contain `.agentdesk/config.json`.
 3. Use the **Workspace** dropdown to switch between recent folders or return to
-    **Local demo workspace**. The selected folder is restored after restart.
+    **No workspace**. Closing a workspace clears its task views but retains recent
+    folders. The selected folder is restored after restart.
 4. Use **Refresh workspace** after editing task files in VS Code or another tool.
 
 Real task views are read-only: task creation, status changes, and checklist toggles
-remain demo-only until a reviewed write-back workflow is implemented. Opening a
+must be performed in an external editor or compatible automation. Opening a
 workspace does not change any planning files or execute instructions found in them.
 Explicit session link and unlink actions write only the relationship metadata
 described below; they do not change task JSON, status, or acceptance documents.
@@ -378,7 +413,7 @@ Chat at least 310, and the central task area keeps at least 400. Smaller windows
 temporarily fit the panels without overwriting their preferred sizes; at 1000
 pixels or less, the existing compact single-panel layout takes over without dividers.
 **Preferences > Reset panel layout** restores both widths while retaining the theme.
-The same sizing applies to Agent Host chat and the local demo.
+The same sizing applies to Agent Host chat and the empty first-run workbench.
 
 ## Keyboard
 
@@ -416,8 +451,7 @@ The same sizing applies to Agent Host chat and the local demo.
 | [src/shared/chat.ts](src/shared/chat.ts) | UI/session adapter contract: task snapshot, history, cancellation, typed stream events. |
 | [src/renderer/App.tsx](src/renderer/App.tsx) | Workbench composition, navigation, dialogs, and shortcuts. |
 | [src/renderer/chat/useTaskChats.ts](src/renderer/chat/useTaskChats.ts) | Per-task draft/message state and request cancellation. |
-| [src/renderer/chat/demoAdapter.ts](src/renderer/chat/demoAdapter.ts) | Deterministic, network-free demo responses, not an LLM. |
-| [src/renderer/data/tasks.ts](src/renderer/data/tasks.ts) | Sample data, not a read of the planning workspace. |
+| [src/renderer/components/RepositorySetup.tsx](src/renderer/components/RepositorySetup.tsx) | Local repository creation and explicit GitHub publication guide. |
 | [e2e/desktop.spec.ts](e2e/desktop.spec.ts) | Production Electron smoke and isolation checks. |
 | [e2e/workspace.spec.ts](e2e/workspace.spec.ts) | Real folder selection, recent-workspace switching, source preservation, and restart recovery. |
 | [e2e/agent-host-desktop.spec.ts](e2e/agent-host-desktop.spec.ts) | Native Host discovery/binding, live state, reconnect and desktop/compact layouts. |
@@ -436,10 +470,11 @@ holds device enrollment, protected keys, owner receipts, delivery recovery state
 configuration outboxes and bounded offline caches. A configuration outbox never
 queues prompts. Session model options and history are not Git settings or records.
 
-Real tasks are read from disk on open or refresh; task fixtures, demo edits/messages
-and drafts remain ephemeral. Detaching changes only the binding, not native history.
+Real tasks are read from disk on open or refresh. Sample task data exists only in
+test fixtures, not in the application bundle. Drafts remain ephemeral.
+Detaching changes only the binding, not native history.
 An unavailable owner is reported explicitly, without a substitute session, runtime
-or demo reply. Native approvals stay on the owner; reconnecting recovers state,
+or fabricated reply. Native approvals stay on the owner; reconnecting recovers state,
 never a queued send. Disconnecting a device or closing its desktop does not stop
 the Agent Host, and revocation cannot undo already accepted work or downloaded data.
 

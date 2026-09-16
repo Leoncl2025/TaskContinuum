@@ -4,7 +4,8 @@ import { useSessionLinks } from '../src/renderer/chat/useSessionLinks'
 import type { SessionBinding } from '../src/renderer/chat/sessionBindings'
 import type { WorkspaceBridge, WorkspaceSnapshot } from '../src/shared/workspace'
 import type { SessionLink, SessionLinksSnapshot, SessionOwner } from '../src/shared/sessionBindings'
-import { demoTasks } from '../src/renderer/data/tasks'
+import { fixtureTasks } from './task-fixture'
+import { workspaceBridgeFixture } from './workspace-ui-fixture'
 import { gitSyncUiFixture } from './remote-config-ui-fixture'
 import { agentHostTargetFixture } from './immutable-bindings-fixture'
 
@@ -24,13 +25,14 @@ function linksSnapshot(bindings: Record<string, SessionLink> = {}, revision: str
   return { document: { schemaVersion: 1, bindings }, revision, localOwner }
 }
 function fixture() {
-  const workspace: WorkspaceSnapshot = { id: 'workspace-one', name: 'TaskContinuum-ad', title: 'Task Continuum', root: 'Q:\\src\\Projects\\TaskContinuum-ad', tasks: [demoTasks[1]], warnings: [], loadedAt: '2026-09-06T00:00:00Z' }
+  const workspace: WorkspaceSnapshot = { id: 'workspace-one', name: 'TaskContinuum-ad', title: 'Task Continuum', root: 'Q:\\src\\Projects\\TaskContinuum-ad', tasks: [fixtureTasks[1]], warnings: [], loadedAt: '2026-09-06T00:00:00Z' }
   let snapshot = linksSnapshot()
   let version = 0
   const bridge: WorkspaceBridge = {
+    ...workspaceBridgeFixture(),
     getState: vi.fn(async () => ({ current: workspace, recent: [workspace] })),
     openFolder: vi.fn(async () => null), openRecent: vi.fn(async () => ({ current: workspace, recent: [workspace] })),
-    refresh: vi.fn(async () => ({ current: workspace, recent: [workspace] })), useDemo: vi.fn(async () => ({ current: null, recent: [workspace] })),
+    refresh: vi.fn(async () => ({ current: workspace, recent: [workspace] })), closeWorkspace: vi.fn(async () => ({ current: null, recent: [workspace] })),
     getSessionLinks: vi.fn(async () => snapshot),
     updateSessionLink: vi.fn(async (request) => {
       if (request.expectedRevision !== snapshot.revision) throw new Error('Session links changed on disk.')

@@ -72,9 +72,13 @@ contextBridge.exposeInMainWorld('remoteVSCode', remoteVSCode)
 const workspace: WorkspaceBridge = {
   getState: () => ipcRenderer.invoke('workspace:state'),
   openFolder: () => ipcRenderer.invoke('workspace:open-folder'),
+  chooseParentFolder: () => ipcRenderer.invoke('workspace:choose-parent-folder'),
+  createRepository: (request) => ipcRenderer.invoke('workspace:create-repository', request),
+  getRepositoryStatus: (id) => ipcRenderer.invoke('workspace:repository-status', id),
+  publishRepository: (request) => ipcRenderer.invoke('workspace:publish-repository', request),
   openRecent: (id) => ipcRenderer.invoke('workspace:open-recent', id),
   refresh: () => ipcRenderer.invoke('workspace:refresh'),
-  useDemo: () => ipcRenderer.invoke('workspace:demo'),
+  closeWorkspace: () => ipcRenderer.invoke('workspace:close'),
   getSessionLinks: (id) => ipcRenderer.invoke('workspace:session-links', id),
   updateSessionLink: (request) => ipcRenderer.invoke('workspace:update-session-link', request),
 }

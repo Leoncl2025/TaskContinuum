@@ -12,7 +12,7 @@ describe('workspace controls', () => {
     const user = userEvent.setup()
     const onOpen = vi.fn()
     const onSelect = vi.fn()
-    render(<WorkspacePicker state={{ current, recent: [current, { ...current, id: 'second', name: 'Another-ad' }] }} busy={false} locked={false} onOpen={onOpen} onSelect={onSelect} onRefresh={vi.fn()} />)
+    render(<WorkspacePicker state={{ current, recent: [current, { ...current, id: 'second', name: 'Another-ad' }] }} busy={false} locked={false} onOpen={onOpen} onSelect={onSelect} onRefresh={vi.fn()} onPublish={vi.fn()} />)
     expect(screen.getByRole('combobox', { name: 'Workspace' })).toHaveValue('first')
     await user.selectOptions(screen.getByRole('combobox', { name: 'Workspace' }), 'second')
     expect(onSelect).toHaveBeenCalledWith('second')
@@ -21,10 +21,11 @@ describe('workspace controls', () => {
   })
 
   it('prevents workspace changes while a response or native operation is active', () => {
-    render(<WorkspacePicker state={{ current, recent: [current] }} busy={false} locked onOpen={vi.fn()} onSelect={vi.fn()} onRefresh={vi.fn()} />)
+    render(<WorkspacePicker state={{ current, recent: [current] }} busy={false} locked onOpen={vi.fn()} onSelect={vi.fn()} onRefresh={vi.fn()} onPublish={vi.fn()} />)
     expect(screen.getByRole('combobox', { name: 'Workspace' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Refresh workspace' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Publish workspace to GitHub' })).toBeDisabled()
   })
 
   it('renders task Markdown as inert content without loading images or navigating links', () => {

@@ -22,12 +22,35 @@ export interface WorkspaceState {
   warning?: string
 }
 
+export interface CreateWorkspaceRepositoryRequest {
+  parentPath: string
+  name: string
+}
+
+export interface PublishWorkspaceRepositoryRequest {
+  workspaceId: string
+  private: boolean
+}
+
+export interface WorkspaceRepositoryStatus {
+  workspaceId: string
+  name: string
+  branch: string | null
+  remoteUrl: string | null
+  published: boolean
+  github: { installed: boolean; authenticated: boolean; login?: string }
+}
+
 export interface WorkspaceBridge {
   getState(): Promise<WorkspaceState>
   openFolder(): Promise<WorkspaceState | null>
+  chooseParentFolder(): Promise<string | null>
+  createRepository(request: CreateWorkspaceRepositoryRequest): Promise<WorkspaceState>
+  getRepositoryStatus(workspaceId: string): Promise<WorkspaceRepositoryStatus>
+  publishRepository(request: PublishWorkspaceRepositoryRequest): Promise<{ url: string }>
   openRecent(id: string): Promise<WorkspaceState>
   refresh(): Promise<WorkspaceState>
-  useDemo(): Promise<WorkspaceState>
+  closeWorkspace(): Promise<WorkspaceState>
   getSessionLinks(workspaceId: string): Promise<SessionLinksSnapshot>
   updateSessionLink(request: UpdateSessionLink): Promise<SessionLinksSnapshot>
 }

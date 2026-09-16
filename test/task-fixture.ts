@@ -1,7 +1,6 @@
-import type { TaskRecord } from '../../shared/tasks'
+import type { TaskRecord } from '../src/shared/tasks'
 
-// Deliberately independent of real planning files and live backend state.
-export const demoTasks: TaskRecord[] = [
+export const fixtureTasks: TaskRecord[] = [
   {
     id: 'T-0001', title: 'Task Continuum MVP', kind: 'epic', status: 'in-progress', priority: 'P1', owner: 'You',
     summary: 'Keep meaningful work moving across tasks, sessions, and people.',
@@ -55,7 +54,7 @@ export const demoTasks: TaskRecord[] = [
     ],
   },
   {
-    id: 'DEMO-01', title: 'Map the first user journey', kind: 'spike', parentId: 'T-0001', status: 'done', priority: 'P3', owner: 'You',
+    id: 'T-0005', title: 'Map the first user journey', kind: 'spike', parentId: 'T-0001', status: 'done', priority: 'P3', owner: 'You',
     summary: 'From finding a task to knowing what to do next.',
     goal: 'Make task navigation, context review, and a first conversation feel like one continuous workflow.',
     nextAction: 'Use this journey as a baseline for usability checks.',

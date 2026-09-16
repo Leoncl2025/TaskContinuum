@@ -2,38 +2,52 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/renderer/App'
+import { taskWorkspaceFixture, workspaceBridgeFixture } from './workspace-ui-fixture'
 
 function explorer() { return within(screen.getByRole('complementary', { name: 'Task explorer' })) }
+async function renderWorkspace() {
+  const current = taskWorkspaceFixture()
+  window.workspace = workspaceBridgeFixture({ current, recent: [current] })
+  const view = render(<App />)
+  await screen.findByRole('heading', { level: 1, name: 'UI based on Electron' })
+  return view
+}
 afterEach(() => {
+  delete window.workspace
   vi.unstubAllGlobals()
   for (const name of ['copilot', 'vscodeChat', 'sharedSessions']) Reflect.deleteProperty(window, name)
 })
 
 describe('workbench', () => {
-  it('renders the required panes with honest task-only demo status', () => {
+  it('starts with empty panes and repository guidance, never sample tasks', () => {
     render(<App />)
     expect(screen.getByRole('navigation', { name: 'Workbench navigation' })).toBeInTheDocument()
     expect(screen.getByRole('complementary', { name: 'Task chat' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('UI based on Electron')
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Create your task repository')
     expect(screen.getByText('No Agent Host linked')).toBeInTheDocument()
-    expect(screen.getByText('LOCAL DEMO')).toBeInTheDocument()
+    expect(screen.getByText('NO WORKSPACE')).toBeInTheDocument()
+    expect(screen.getByRole('contentinfo', { name: 'Workbench status' })).toHaveTextContent('0 tasks')
+    expect(screen.queryByRole('tab')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Local demo|Demo data|local sandbox/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create task repository' })).toBeDisabled()
+    expect(screen.getByText(/Open the desktop app/)).toBeInTheDocument()
     expect(screen.queryByRole('textbox', { name: /Message/ })).not.toBeInTheDocument()
   })
 
   it('filters and selects tasks without starting a conversation', async () => {
     const user = userEvent.setup()
-    render(<App />)
+    await renderWorkspace()
     await user.type(screen.getByRole('textbox', { name: 'Filter tasks' }), 'backend')
     expect(explorer().queryByRole('button', { name: 'T-0002 UI based on Electron' })).not.toBeInTheDocument()
     await user.click(explorer().getByRole('button', { name: 'T-0003 Backend service' }))
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Backend service')
     expect(screen.queryByRole('log')).not.toBeInTheDocument()
-    expect(screen.getByText(/Demo tasks do not start conversations/)).toBeInTheDocument()
+    expect(screen.getByText(/No Agent Host chat is linked to T-0003/)).toBeInTheDocument()
   })
 
   it('shows a recoverable empty search state', async () => {
     const user = userEvent.setup()
-    render(<App />)
+    await renderWorkspace()
     await user.type(screen.getByRole('textbox', { name: 'Filter tasks' }), 'missing-task')
     expect(screen.getByText('No matching tasks')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Clear filters' }))
@@ -42,26 +56,27 @@ describe('workbench', () => {
 
   it('filters by status and collapses the task group', async () => {
     const user = userEvent.setup()
-    render(<App />)
+    await renderWorkspace()
     await user.click(screen.getByRole('button', { name: 'Collapse T-0001' }))
     expect(explorer().queryByRole('button', { name: 'T-0003 Backend service' })).not.toBeInTheDocument()
     await user.click(within(screen.getByRole('group', { name: 'Task status filter' })).getByRole('button', { name: /^Done/ }))
-    expect(explorer().getByRole('button', { name: 'DEMO-01 Map the first user journey' })).toBeInTheDocument()
+    expect(explorer().getByRole('button', { name: 'T-0005 Map the first user journey' })).toBeInTheDocument()
   })
 
-  it('derives progress from local checklist edits', async () => {
+  it('keeps real task statuses and checklist progress read-only', async () => {
     const user = userEvent.setup()
-    render(<App />)
+    await renderWorkspace()
     expect(screen.getByRole('progressbar')).toHaveAttribute('value', '40')
     await user.click(screen.getByRole('checkbox', { name: /Build the task explorer/ }))
-    expect(screen.getByRole('progressbar')).toHaveAttribute('value', '60')
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Task status' }), 'done')
-    expect(screen.getByRole('combobox', { name: 'Task status' })).toHaveValue('done')
+    expect(screen.getByRole('checkbox', { name: /Build the task explorer/ })).toBeDisabled()
+    expect(screen.getByRole('progressbar')).toHaveAttribute('value', '40')
+    expect(screen.getByRole('combobox', { name: 'Task status' })).toBeDisabled()
+    expect(screen.getByRole('combobox', { name: 'Task status' })).toHaveValue('in-progress')
   })
 
   it('supports document tab keyboard navigation', async () => {
     const user = userEvent.setup()
-    render(<App />)
+    await renderWorkspace()
     screen.getByRole('tab', { name: 'Overview' }).focus()
     await user.keyboard('{ArrowRight}')
     expect(screen.getByRole('tab', { name: 'Requirements' })).toHaveAttribute('aria-selected', 'true')
@@ -129,7 +144,7 @@ describe('workbench', () => {
 
   it('opens and searches the quick switcher', async () => {
     const user = userEvent.setup()
-    render(<App />)
+    await renderWorkspace()
     fireEvent.keyDown(window, { key: 'p', ctrlKey: true })
     const dialog = screen.getByRole('dialog', { name: 'Quick open' })
     await user.type(within(dialog).getByRole('textbox', { name: 'Find a task' }), 'T-0004')
@@ -150,22 +165,19 @@ describe('workbench', () => {
     expect(localStorage.getItem('taskcontinuum:layout:v1')).toContain('light')
   })
 
-  it('creates a local-only task and handles an empty selection', async () => {
+  it('handles closing the last task without inventing another selection', async () => {
     const user = userEvent.setup()
-    render(<App />)
-    await user.click(screen.getByRole('button', { name: 'Create demo task' }))
-    await user.type(screen.getByRole('textbox', { name: 'Title' }), 'Explore a new idea')
-    await user.click(screen.getByRole('button', { name: 'Create task' }))
-    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Explore a new idea')
-    expect(screen.getByRole('progressbar')).toHaveAttribute('value', '0')
-    for (const title of ['Explore a new idea', 'UI based on Electron', 'Task Continuum MVP']) await user.click(screen.getByRole('button', { name: `Close ${title}` }))
+    await renderWorkspace()
+    await user.click(screen.getByRole('button', { name: 'Close UI based on Electron' }))
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Make room for meaningful work.')
+    expect(screen.queryByRole('tab')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Create demo task' })).not.toBeInTheDocument()
   })
 
   it('uses a single pane on a compact viewport and returns to the task after selection', async () => {
     vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({ matches: true, media: query, onchange: null, addEventListener: vi.fn(), removeEventListener: vi.fn(), addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: () => true }))
     const user = userEvent.setup()
-    render(<App />)
+    await renderWorkspace()
     expect(screen.queryByRole('separator')).not.toBeInTheDocument()
     expect(screen.queryByRole('complementary')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Tasks' }))
@@ -187,7 +199,6 @@ describe('workbench', () => {
     for (const name of ['copilot', 'vscodeChat', 'sharedSessions']) Object.defineProperty(window, name, { configurable: true, get: legacyAccess })
     const user = userEvent.setup()
     render(<App />)
-    await user.click(explorer().getByRole('button', { name: 'T-0003 Backend service' }))
     await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('Open a task workspace')
     expect(legacyAccess).not.toHaveBeenCalled()

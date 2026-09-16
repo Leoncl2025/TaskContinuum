@@ -26,12 +26,32 @@ describe('native-only preload boundary', () => {
     expect(ipc.expose.mock.calls.map(([name]) => name).sort()).toEqual(['agentHost', 'desktop', 'remoteVSCode', 'workspace'])
     for (const name of ['copilot', 'vscodeChat', 'sharedSessions']) expect(Reflect.has(window, name)).toBe(false)
     expect(window.workspace).not.toHaveProperty('migrateSessionLinks')
+    expect(window.workspace).not.toHaveProperty('useDemo')
     expect(window.remoteVSCode).toBeDefined()
     expect(Object.keys(window.remoteVSCode ?? {}).sort()).toEqual(['devTunnels', 'devices', 'gitSync'])
     for (const name of ['list', 'connect', 'disconnect', 'forget', 'share', 'grants', 'revoke', 'importInvitation', 'exportIdentity']) expect(window.remoteVSCode).not.toHaveProperty(name)
     expect(Object.keys(window.remoteVSCode?.devices ?? {}).sort()).toEqual(['connect', 'disconnect', 'forget', 'list'])
     for (const name of ['share', 'unshare', 'recipients', 'pair', 'workspace', 'adoptLinks', 'import', 'revoke']) expect(window.remoteVSCode?.devices).not.toHaveProperty(name)
     expect(ipc.invoke).not.toHaveBeenCalled()
+  })
+
+  it('forwards only explicit workspace creation, status, publication and close operations', async () => {
+    const bridge = window.workspace
+    if (!bridge) throw new Error('Workspace preload API missing.')
+    const create = { parentPath: 'Q:\\parent', name: 'real-tasks' }
+    const publish = { workspaceId: 'a'.repeat(64), private: true }
+    await bridge.chooseParentFolder()
+    await bridge.createRepository(create)
+    await bridge.getRepositoryStatus(publish.workspaceId)
+    await bridge.publishRepository(publish)
+    await bridge.closeWorkspace()
+    expect(ipc.invoke.mock.calls).toEqual([
+      ['workspace:choose-parent-folder'],
+      ['workspace:create-repository', create],
+      ['workspace:repository-status', publish.workspaceId],
+      ['workspace:publish-repository', publish],
+      ['workspace:close'],
+    ])
   })
 
   it('forwards explicit native send and cancel with the original target and model', async () => {

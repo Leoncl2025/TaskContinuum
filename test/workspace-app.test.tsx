@@ -2,7 +2,8 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/renderer/App'
-import { demoTasks } from '../src/renderer/data/tasks'
+import { fixtureTasks } from './task-fixture'
+import { workspaceBridgeFixture } from './workspace-ui-fixture'
 import type { WorkspaceBridge, WorkspaceSnapshot, WorkspaceState } from '../src/shared/workspace'
 import type { SessionLinksSnapshot } from '../src/shared/sessionBindings'
 import type { AgentHostBridge, AgentHostSession, AgentHostTarget, AgentHostView } from '../src/shared/agentHost'
@@ -13,17 +14,18 @@ import { gitSyncUiFixture } from './remote-config-ui-fixture'
 afterEach(() => { delete window.workspace; delete window.agentHost; delete window.remoteVSCode; vi.unstubAllGlobals() })
 
 function fixtures() {
-  const first: WorkspaceSnapshot = { id: 'workspace-one', name: 'TaskContinuum-ad', title: 'Task Continuum', root: 'Q:\\src\\Projects\\TaskContinuum-ad', tasks: [{ ...demoTasks[1], title: 'Actual UI task', status: 'done', documents: { requirements: '# Actual requirements\n\nSaved in the first workspace.', plan: '# Actual plan\n\nA persisted plan.', checklist: null } }], warnings: [], loadedAt: '2026-09-06T00:00:00Z' }
+  const first: WorkspaceSnapshot = { id: 'workspace-one', name: 'TaskContinuum-ad', title: 'Task Continuum', root: 'Q:\\src\\Projects\\TaskContinuum-ad', tasks: [{ ...fixtureTasks[1], title: 'Actual UI task', status: 'done', documents: { requirements: '# Actual requirements\n\nSaved in the first workspace.', plan: '# Actual plan\n\nA persisted plan.', checklist: null } }], warnings: [], loadedAt: '2026-09-06T00:00:00Z' }
   const second: WorkspaceSnapshot = { ...first, id: 'workspace-two', name: 'Other-ad', root: 'Q:\\src\\Projects\\Other-ad', tasks: [{ ...first.tasks[0], title: 'Different task with same ID', status: 'blocked' }] }
   let state: WorkspaceState = { current: null, recent: [first, second] }
   const repository: Record<string, SessionLinksSnapshot> = {}
   let revision = 0
   const bridge: WorkspaceBridge = {
+    ...workspaceBridgeFixture(),
     getState: vi.fn(async () => state),
     openFolder: vi.fn(async () => { state = { ...state, current: first }; return state }),
     openRecent: vi.fn(async (id) => { state = { ...state, current: id === first.id ? first : second }; return state }),
     refresh: vi.fn(async () => state),
-    useDemo: vi.fn(async () => { state = { ...state, current: null }; return state }),
+    closeWorkspace: vi.fn(async () => { state = { ...state, current: null }; return state }),
     getSessionLinks: vi.fn(async (id) => repository[id] ?? { document: { schemaVersion: 1, bindings: {} }, revision: null }),
     updateSessionLink: vi.fn(async (request) => {
       if (request.expectedRevision !== (repository[request.workspaceId]?.revision ?? null)) throw new Error('Workspace session links changed.')
@@ -255,7 +257,7 @@ describe('workspace switching in the desktop workbench', () => {
     expect(agentHost.cancel).not.toHaveBeenCalled()
   })
 
-  it('opens real tasks and documents, then switches back to the demo', async () => {
+  it('opens real tasks and documents, then closes to an empty workbench', async () => {
     const { first } = fixtures()
     const user = userEvent.setup()
     render(<App />)
@@ -270,9 +272,10 @@ describe('workspace switching in the desktop workbench', () => {
     expect(screen.queryByRole('button', { name: 'Create demo task' })).not.toBeInTheDocument()
     await user.click(screen.getByRole('tab', { name: 'Requirements' }))
     expect(screen.getByText('Saved in the first workspace.')).toBeInTheDocument()
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Workspace' }), 'demo')
-    expect(await screen.findByRole('heading', { level: 1, name: 'UI based on Electron' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Create demo task' })).toBeEnabled()
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Workspace' }), '')
+    expect(await screen.findByRole('heading', { level: 1, name: 'Create your task repository' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create task repository' })).toBeEnabled()
+    expect(screen.queryByRole('tab')).not.toBeInTheDocument()
   })
 
   it('keeps the current workspace and draft if folder selection is cancelled or fails', async () => {

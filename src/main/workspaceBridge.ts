@@ -1,4 +1,5 @@
 import { app, dialog, ipcMain } from 'electron'
+import { dirname } from 'node:path'
 import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import type { WorkspaceState } from '../shared/workspace'
 import { WorkspaceStore } from './workspaceStore'
@@ -20,9 +21,21 @@ export function registerWorkspaceBridge(requireWindow: (event: IpcMainInvokeEven
     if (chosen.canceled || !chosen.filePaths[0]) return null
     return authorize(await store.openFolder(chosen.filePaths[0]))
   })
+  handle('choose-parent-folder', async (window) => {
+    const state = await store.getState()
+    const chosen = await dialog.showOpenDialog(window, {
+      title: 'Choose the parent folder for a new task repository',
+      properties: ['openDirectory'],
+      defaultPath: state.current ? dirname(state.current.root) : process.cwd(),
+    })
+    return chosen.canceled ? null : chosen.filePaths[0] ?? null
+  })
+  handle('create-repository', async (_window, request) => authorize(await store.createRepository(request)))
+  handle('repository-status', async (_window, id) => store.getRepositoryStatus(id))
+  handle('publish-repository', async (_window, request) => store.publishRepository(request))
   handle('open-recent', async (_window, id) => authorize(await store.openRecent(id)))
   handle('refresh', async () => authorize(await store.refresh()))
-  handle('demo', () => store.useDemo())
+  handle('close', () => store.closeWorkspace())
   handle('session-links', async (_window, id) => { await authorize(await store.getState()); return store.getSessionLinks(id) })
   handle('update-session-link', async (_window, request) => { await authorize(await store.getState()); return store.updateSessionLink(request) })
   return { currentRoot: async () => {

@@ -59,9 +59,9 @@ test.beforeEach(async () => {
     window.setMinimumSize(380, 600)
     window.setSize(1440, 940)
   })
-  await page.evaluate(async () => { await window.workspace!.useDemo(); localStorage.clear() })
+  await page.evaluate(async () => { await window.workspace!.closeWorkspace(); localStorage.clear() })
   await page.reload()
-  await expect(page.getByRole('heading', { level: 1, name: 'UI based on Electron' })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 1, name: 'Create your task repository' })).toBeVisible()
 })
 
 test.afterEach(() => { expect(errors).toEqual([]); expect(externalRequests).toEqual([]) })
@@ -82,7 +82,7 @@ test('opens a real folder through the restricted native bridge and reads task do
   await expect(page.getByRole('table')).toContainText('Show this on-disk requirement.')
   expect(await readFile(join(firstRoot, 'tasks', 'T-0002-shared-id', 'Checklist.md'), 'utf8')).toBe(original)
   const keys = await page.evaluate(() => Object.keys(window.workspace!).sort())
-  expect(keys).toEqual(['getSessionLinks', 'getState', 'openFolder', 'openRecent', 'refresh', 'updateSessionLink', 'useDemo'])
+  expect(keys).toEqual(['chooseParentFolder', 'closeWorkspace', 'createRepository', 'getRepositoryStatus', 'getSessionLinks', 'getState', 'openFolder', 'openRecent', 'publishRepository', 'refresh', 'updateSessionLink'])
   await page.screenshot({ path: resolve('artifacts/workspace-documents.png') })
 })
 
