@@ -44,7 +44,7 @@ export function workspaceBridgeFixture(initial: WorkspaceState = { current: null
       published = true
       return { url: `https://github.com/fixture-user/${selected(workspaceId).name}` }
     }),
-    getSessionLinks: vi.fn(async () => ({ document: { schemaVersion: 1, bindings: {} }, revision: null })),
+    getSessionLinks: vi.fn<WorkspaceBridge['getSessionLinks']>(async () => ({ document: { schemaVersion: 1, bindings: {} }, revision: null })),
     updateSessionLink: vi.fn(async () => { throw new Error('Session-link updates are not configured for this fixture.') }),
   }
 }

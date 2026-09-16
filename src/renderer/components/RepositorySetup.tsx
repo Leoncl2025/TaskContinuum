@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { WorkspaceRepositoryStatus, WorkspaceSnapshot } from '../../shared/workspace'
+import { workspaceRepositoryNameLimit } from '../../shared/workspace'
 import type { useWorkspaces } from '../useWorkspaces'
 import { Dialog, Icon } from './Primitives'
 import '../workspace.css'
@@ -93,7 +94,7 @@ export function RepositorySetup({ workspace, workspaces, onClose }: {
             })
           }}><Icon name="folder-opened" />Browse</button>
         </div>
-        <label className="form-field">Repository name<input value={name} onChange={(event) => setName(event.target.value)} required maxLength={100} placeholder="my-tasks" spellCheck={false} autoComplete="off" /></label>
+        <label className="form-field">Repository name<input value={name} onChange={(event) => setName(event.target.value)} required maxLength={workspaceRepositoryNameLimit} placeholder="my-tasks" spellCheck={false} autoComplete="off" /></label>
       </fieldset>
       {target && <p className="repository-path" aria-label="New repository location"><code>{target}</code></p>}
       <p className="dialog-hint">Includes .agentdesk/config.json and an empty tasks folder. No tasks, conversations, or remote device settings are preloaded. GitHub is optional in the next step.</p>

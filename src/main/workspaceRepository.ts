@@ -5,9 +5,10 @@ import { devNull } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { z } from 'zod'
 import { Config } from '../shared/taskDocuments/config'
+import { workspaceRepositoryNameLimit } from '../shared/workspace'
 import type { CreateWorkspaceRepositoryRequest, WorkspaceDescriptor, WorkspaceRepositoryStatus } from '../shared/workspace'
 
-const nameSchema = z.string().min(1).max(60)
+const nameSchema = z.string().min(1).max(workspaceRepositoryNameLimit)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Use a repository name starting with a letter or number, followed by letters, numbers, dots, hyphens or underscores.')
   .refine((name) => !name.endsWith('.') && !name.toLowerCase().endsWith('.git') && !/^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(name), 'Choose a name that is not reserved on Windows and does not end in a dot or .git.')
 export const workspaceRepositoryIdSchema = z.string().regex(/^[a-f\d]{64}$/)

@@ -22,6 +22,8 @@ export interface WorkspaceState {
   warning?: string
 }
 
+export const workspaceRepositoryNameLimit = 60
+
 export interface CreateWorkspaceRepositoryRequest {
   parentPath: string
   name: string

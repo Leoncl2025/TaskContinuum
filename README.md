@@ -278,6 +278,12 @@ upload later edits. Review committed files before publishing; credentials and
 private session history must never be committed. A publication failure is shown
 explicitly and leaves the local repository available for retry.
 
+The guided publisher handles repositories created by Task Continuum. Its local
+retry record stays inside `.git` and is never committed. Existing repositories
+without this record can still be opened, but must be published using GitHub CLI.
+If remote creation loses its acknowledgement, finish recovery with GitHub CLI
+rather than letting the app assume ownership of an unverified repository.
+
 ## Open a task workspace
 
 1. In the desktop explorer, choose the folder icon labeled **Open workspace folder**.
