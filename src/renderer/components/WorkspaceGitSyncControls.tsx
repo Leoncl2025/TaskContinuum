@@ -40,6 +40,7 @@ export function WorkspaceGitSyncControls() {
     <h3>Automatic workspace links</h3>
     <p className="muted">Trusted automatically linked devices can read and send to linked sessions, associate sessions with tasks, and explicitly create new sessions in this shared workspace. No separate per-device enable step is needed. This does not grant arbitrary operating-system permissions; native session approvals still apply. Requests are never sent and sessions are never created automatically.</p>
     <p className="muted">Pull/rebase every 15 seconds. Configuration changes publish immediately; SSH binding notifications apply provisionally until Git catches up.</p>
+    <p className="muted">Synchronization follows the current branch's upstream, not a permanently bound branch. Without an upstream, Git sync pauses and local configuration changes stay pending.</p>
     <div className="remote-vscode-actions">
       <button type="button" className="secondary-button" disabled={busy} onClick={() => { void run(() => status?.enabled ? api.disable() : api.enable()) }}>
         <Icon name={status?.enabled ? 'debug-pause' : 'sync'} />{status?.enabled ? 'Pause automatic links' : 'Enable automatic links'}

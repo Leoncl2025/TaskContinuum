@@ -291,6 +291,12 @@ upstream; no branch or remote is guessed. An unconfigured workspace reads task
 documents only. Binding reads and writes require this backend to be enabled,
 including when devices were paired explicitly. Pause does not enable a fallback.
 
+Each synchronization cycle follows the current branch's configured upstream;
+there is no permanent branch binding or implicit main/master target. Switching
+branches keeps cached configuration, pending edits and device trust. A missing
+upstream pauses Git sync with a visible error, not workspace opening or local
+configuration editing. Repository URL changes still require trust review.
+
 The workspace descriptor is `.taskcontinuum/workspace.json`. The only public
 record types are **device**, **invitation**, **binding** and **setting**:
 

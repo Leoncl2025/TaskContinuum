@@ -33,6 +33,30 @@ canceling the native dialog does not create Git enrollment or publish keys.
 Pause stops automatic synchronization and workspace connections; it does not
 fall back to the archived binding file.
 
+## Switching branches
+
+No local or remote branch is permanently bound to enrollment. Each Git cycle
+uses the **current local branch's configured upstream**, including task branches.
+Neither `main`/`master` nor the remote default branch is selected implicitly.
+Switching back to `main` after merging and deleting a task branch needs no
+reenrollment. The app-owned cache, pending immutable records and device trust
+remain intact and are reconciled with the newly selected upstream.
+Existing published or enrolled workspace IDs are preserved. New workspace IDs
+are derived from the repository URL, not the branch name.
+
+Without an upstream, or with detached HEAD, Git synchronization reports a visible
+error and waits for a tracked branch. The workspace still opens, cached bindings
+remain available, and local configuration edits remain durable and pending.
+Once a valid upstream is available, the next tick or **Sync now** resumes sync.
+The app does not create an upstream branch or configure tracking for the user.
+
+Only branch selection follows the checkout. Changing the remote repository URLs
+still requires explicit trust review. A switch during a running cycle aborts that
+publication; the next cycle captures the new target. Accepted-history checks are
+retained per upstream target, so switching away and back cannot hide a rollback.
+Peers on different upstream branches need not see the same configuration until
+those branches receive the records; task documents always reflect the user checkout.
+
 ## Timing and the A/B/C exchange
 
 - Git synchronization is fixed at **15,000 ms** while enabled.
@@ -129,9 +153,10 @@ without waiting for a successful Git push; network/store failures remain visible
 
 Startup restores every enrolled workspace's authoritative backend before
 exposing saved device grants, including workspaces not selected in the UI.
-Cached restoration does not require contacting Git. A branch/upstream change
-blocks edits/publication until the original enrollment is reviewed; automatic
-refresh never rebases unpublished user commits or stages unrelated files.
+Cached restoration does not require contacting Git or having a tracked branch.
+Branch changes between cycles are allowed; remote repository identity changes
+still block publication. Automatic refresh never rebases unpublished user commits
+or stages unrelated files.
 
 Revocation persists a local denial and closes access independently of public
 record publication. Replayed metadata cannot reinstate a blocked device.
@@ -153,7 +178,7 @@ consistency checking does **not** confer local device trust.
 
 The regression suite includes independent local Git clones, real loopback SSH,
 delayed publication/pull-before-push, duplicate/out-of-order messages, expiry,
-conflicts, restart recovery, paused/revoked asynchronous grants, source-branch
+conflicts, restart recovery, paused/revoked asynchronous grants, dynamic upstream
 fencing and native Electron consent UI. Cloud-account and physical multi-machine
 deployment must be validated in the user's approved environment; local SSH
 fixtures are not represented as a live Dev Tunnel deployment.

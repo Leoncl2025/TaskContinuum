@@ -16,9 +16,10 @@ async function setup() {
 }
 
 describe('local Git enrollment trust', () => {
-  it('derives the same initial workspace identity for concurrent clones of one upstream', () => {
-    expect(initialWorkspaceId('origin', 'main')).toBe(initialWorkspaceId('origin', 'main'))
-    expect(initialWorkspaceId('origin', 'main')).not.toBe(initialWorkspaceId('origin', 'other'))
+  it('derives initial workspace identity from the repository without a branch input', () => {
+    const remote = 'https://example.invalid/team/workspace.git'
+    expect(initialWorkspaceId(remote)).toBe(initialWorkspaceId(remote))
+    expect(initialWorkspaceId(remote)).not.toBe(initialWorkspaceId('https://example.invalid/team/another-workspace.git'))
   })
 
   it('requires explicit local enrollment and pins admitted keys across restarts', async () => {

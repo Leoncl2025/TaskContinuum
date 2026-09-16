@@ -10,6 +10,7 @@ it('requires an explicit enrollment action and exposes immediate synchronization
   window.remoteVSCode = remote
   render(<WorkspaceGitSyncControls />)
   await screen.findByText(/disabled · 0 pending/)
+  expect(screen.getByText(/Synchronization follows the current branch's upstream/)).toBeInTheDocument()
   expect(api.enable).not.toHaveBeenCalled()
   fireEvent.click(screen.getByRole('button', { name: 'Enable automatic links' }))
   await screen.findByRole('button', { name: 'Pause automatic links' })

@@ -52,6 +52,7 @@ async function fixture(count: number) {
   await git(root, 'init', '--bare', '--initial-branch=main', remote)
   const initial = join(root, 'seed')
   await git(root, 'clone', remote, initial)
+  await git(initial, 'config', 'core.autocrlf', 'false')
   await git(initial, 'config', 'user.name', 'Test')
   await git(initial, 'config', 'user.email', 'test@example.invalid')
   await workspace(initial)
@@ -64,6 +65,7 @@ async function fixture(count: number) {
     const name = String.fromCharCode(65 + index)
     const folder = join(root, name)
     await git(root, 'clone', remote, folder)
+    await git(folder, 'config', 'core.autocrlf', 'false')
     const data = join(root, `data-${name}`)
     await mkdir(data)
     const identity = { clientId: randomUUID(), username: 'test', machineName: `Machine-${name}` }
@@ -322,7 +324,7 @@ it('does not start Git enrollment or publication just by opening an unconfigured
   await peer.service.open(peer.folder)
   expect(await peer.service.status(peer.folder)).toMatchObject({ enabled: false, state: 'disabled' })
   expect(await git(peer.folder, 'status', '--porcelain')).toBe('')
-  expect(await readRepositorySessionLinks(peer.folder)).toEqual({ document: { schemaVersion: 1, bindings: {} }, revision: null })
+  await expect(readRepositorySessionLinks(peer.folder)).rejects.toThrow('Enable Automatic workspace links')
 }, 30000)
 
 it('drains a private link grant and removes its permission before pause completes', async () => {
@@ -439,4 +441,65 @@ it('denies and persists revocation even when the canonical configuration becomes
   expect((await new LocalEnrollments(b.data).list())[0].pins[a.identity.clientId].blocked).toBe(true)
   expect(b.activeGrantCount()).toBe(0)
   expect((await b.host.list()).filter((pair) => pair.participant.clientId === a.identity.clientId).every((pair) => !pair.workspaces.length)).toBe(true)
+}, 120000)
+
+it('opens an enrolled workspace without upstream and retains local edits and trust across restart', async () => {
+  const { peers, remote } = await fixture(1)
+  const [peer] = peers
+  await peer.service.enable(peer.folder)
+  await settle(peers)
+  const enrolled = (await new LocalEnrollments(peer.data).list())[0]
+  const before = await git(remote, '--git-dir', remote, 'rev-parse', 'main')
+  await git(peer.folder, 'switch', '-c', 'local-task')
+  await peer.service.open(peer.folder)
+  const status = await peer.service.status(peer.folder)
+  expect(status.state).toBe('error')
+  expect(status.error).toMatch(/upstream|track/i)
+  const target = {
+    hostId: 'local_host_a', sessionId: 'copilotcli:/untracked-session', chatId: 'ahp-chat:/untracked-chat',
+    owner: { clientId: peer.identity.clientId, machineName: peer.identity.machineName },
+  }
+  const current = await readRepositorySessionLinks(peer.folder)
+  await updateRepositoryAgentHostLink(peer.folder, 'T-0001', target, current.revision)
+  const revision = (await peer.service.status(peer.folder)).revision
+  await peer.service.setSettings(peer.folder, revision, { connectTimeoutMs: 15000 })
+  await expect(peer.service.syncNow(peer.folder)).rejects.toThrow(/upstream|track/i)
+  expect(await git(remote, '--git-dir', remote, 'rev-parse', 'main')).toBe(before)
+  const restored = await peer.restart()
+  await restored.restore()
+  await restored.open(peer.folder)
+  expect((await readRepositorySessionLinks(peer.folder)).document.bindings['T-0001']).toEqual({ provider: 'agent-host', ...target })
+  const pending = await restored.status(peer.folder)
+  expect(pending.pending).toBeGreaterThan(0)
+  expect(pending.settings?.connectTimeoutMs).toBe(15000)
+  const after = (await new LocalEnrollments(peer.data).list())[0]
+  expect(after.workspaceId).toBe(enrolled.workspaceId)
+  expect(after.pins[peer.identity.clientId].clientPublicKey).toBe(enrolled.pins[peer.identity.clientId].clientPublicKey)
+  expect(after.pins[peer.identity.clientId].hostPublicKey).toBe(enrolled.pins[peer.identity.clientId].hostPublicKey)
+  await git(peer.folder, 'switch', 'main')
+  restored.startRestored()
+  await restored.open(peer.folder)
+  await restored.syncNow(peer.folder)
+  expect((await restored.status(peer.folder)).pending).toBe(0)
+  expect((await restored.status(peer.folder)).error).toBeUndefined()
+  expect(await git(remote, '--git-dir', remote, 'rev-parse', 'main')).not.toBe(before)
+  expect((await readRepositorySessionLinks(peer.folder)).document.bindings['T-0001']).toEqual({ provider: 'agent-host', ...target })
+
+  const mainHead = await git(remote, '--git-dir', remote, 'rev-parse', 'main')
+  await git(peer.folder, 'switch', '-c', 'tracked-task')
+  await git(peer.folder, 'push', '-u', 'origin', 'tracked-task')
+  await restored.open(peer.folder)
+  await restored.setSettings(peer.folder, (await restored.status(peer.folder)).revision, { connectTimeoutMs: 30000 })
+  await restored.syncNow(peer.folder)
+  expect(await git(remote, '--git-dir', remote, 'rev-parse', 'main')).toBe(mainHead)
+  expect(await git(remote, '--git-dir', remote, 'rev-parse', 'tracked-task')).not.toBe(mainHead)
+  await git(peer.folder, 'switch', 'main')
+  await git(peer.folder, 'merge', '--ff-only', 'tracked-task')
+  await git(peer.folder, 'push', 'origin', 'main')
+  await git(peer.folder, 'push', 'origin', '--delete', 'tracked-task')
+  await git(peer.folder, 'branch', '-d', 'tracked-task')
+  await restored.open(peer.folder)
+  await restored.syncNow(peer.folder)
+  expect((await restored.status(peer.folder)).settings?.connectTimeoutMs).toBe(30000)
+  expect((await restored.status(peer.folder)).workspaceId).toBe(enrolled.workspaceId)
 }, 120000)

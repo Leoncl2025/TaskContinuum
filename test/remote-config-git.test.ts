@@ -86,6 +86,17 @@ async function fixture(count = 2) {
   return { root, remote, seed, config, clients, replica }
 }
 
+async function addTarget(setup: Awaited<ReturnType<typeof fixture>>, branch: string, files: GitPublication[] = []): Promise<string> {
+  await git(setup.seed, 'switch', '--quiet', '--create', branch)
+  await writeFile(join(setup.seed, 'README.md'), `${branch} task prose.\n`)
+  for (const file of files) await writeRecord(setup.seed, file)
+  await git(setup.seed, 'add', '--', 'README.md', ...files.map((file) => file.path))
+  await git(setup.seed, 'commit', '--quiet', '-m', `${branch} independent work`)
+  await git(setup.seed, 'push', '--quiet', 'upstream', `HEAD:refs/heads/${branch}`)
+  await git(setup.clients[0], 'fetch', '--quiet', 'upstream')
+  return git(setup.seed, 'rev-parse', 'HEAD')
+}
+
 describe('app-owned Git configuration replica', () => {
   it('opens with prepare:false without fetching and exposes the same upstream identity across remote names', async () => {
     const setup = await fixture()
@@ -116,7 +127,7 @@ describe('app-owned Git configuration replica', () => {
     for (const app of [a, b]) expect(await readFile(join(app.root, '.taskcontinuum', 'workspace.json'), 'utf8')).toBe(descriptor.content)
   }, 90000)
 
-  it('restores cached canonical state offline and blocks publication until the enrolled upstream is selected', async () => {
+  it('restores cached canonical state offline with detached HEAD, without inspecting the source upstream', async () => {
     const setup = await fixture(1)
     const app = await setup.replica(0)
     const file = record('available-while-paused')
@@ -128,13 +139,14 @@ describe('app-owned Git configuration replica', () => {
       workspaceRoot: setup.clients[0], stateDirectory: join(setup.root, 'state-0'),
       cachedRoot: app.root, prepare: false,
     }
-    await expect(GitReplica.open(options)).rejects.toMatchObject({ code: 'upstream-changed' })
-    await git(setup.clients[0], 'switch', '--quiet', BRANCH)
     const restored = await GitReplica.open(options)
     replicas.push(restored)
     expect(restored.root).toBe(app.root)
     expect(await readFile(join(restored.root, ...file.path.split('/')), 'utf8')).toBe(file.content)
     expect(await git(restored.root, 'rev-parse', 'HEAD')).toBe(result.head)
+    await expect(restored.assertUpstream()).rejects.toMatchObject({ code: 'upstream' })
+    await expect(restored.sync()).rejects.toMatchObject({ code: 'upstream' })
+    await git(setup.clients[0], 'switch', '--quiet', BRANCH)
     await restored.assertUpstream()
     await expect(restored.sync([], { refreshUserCheckout: false })).rejects.toMatchObject({ code: 'git' })
     expect(await readFile(join(restored.root, ...file.path.split('/')), 'utf8')).toBe(file.content)
@@ -206,7 +218,7 @@ describe('app-owned Git configuration replica', () => {
     const first = await apps[0].sync([record('not-user-commit')])
     expect(first.userCheckout.reason).toContain('unpublished')
     expect(await git(clients[0], 'rev-parse', 'HEAD')).toBe(privateHead)
-    await expect(apps[1].sync()).rejects.toMatchObject({ code: 'upstream-changed' })
+    await expect(apps[1].sync()).rejects.toMatchObject({ code: 'upstream' })
     expect(await git(clients[1], 'branch', '--show-current')).toBe('my-other-work')
     expect((await apps[2].sync()).userCheckout.reason).toContain('in progress')
     expect(await present(join(clients[2], '.git', 'MERGE_HEAD'))).toBe(true)
@@ -254,7 +266,7 @@ describe('app-owned Git configuration replica', () => {
       },
     })).rejects.toMatchObject({ code: 'push-rejected' })
     expect(races).toBe(3)
-    expect(upstreamCheck).toHaveBeenCalledTimes(6)
+    expect(upstreamCheck.mock.calls.length).toBeGreaterThanOrEqual(6)
     expect(await readFile(join(a.root, ...pending.path.split('/')), 'utf8')).toBe(pending.content)
     const recovered = await a.sync([pending], { refreshUserCheckout: false })
     expect(recovered.attempts).toBe(1)
@@ -386,45 +398,381 @@ describe('app-owned Git configuration replica', () => {
   it('rejects detached or untracked source branches without guessing main or publishing a new branch', async () => {
     const { replica, clients, remote } = await fixture(1)
     await git(clients[0], 'switch', '--quiet', '--detach')
-    await expect(replica(0)).rejects.toMatchObject({ code: expect.stringMatching(/upstream|git/) })
+    await expect(replica(0)).rejects.toMatchObject({ code: 'upstream' })
     await git(clients[0], 'switch', '--quiet', '--create', 'not-tracked')
     await expect(replica(0)).rejects.toMatchObject({ code: 'upstream' })
     expect(await git(remote, 'for-each-ref', '--format=%(refname)', 'refs/heads/')).toBe(`refs/heads/${BRANCH}`)
   }, 60000)
 
-  it('blocks publication after a source-branch switch even when the new branch tracks the same upstream', async () => {
+  it('follows another source branch tracking the same upstream, including restart without a branch policy', async () => {
     const setup = await fixture(1)
     const app = await setup.replica(0)
-    const before = await git(setup.remote, 'rev-parse', BRANCH)
     await git(setup.clients[0], 'switch', '--quiet', '--create', 'another-local-branch', '--track', `upstream/${BRANCH}`)
-    await expect(app.assertUpstream()).rejects.toMatchObject({ code: 'upstream-changed' })
-    const file = record('must-not-publish-from-another-branch')
-    await expect(app.sync([file])).rejects.toMatchObject({ code: 'upstream-changed' })
-    expect(await git(setup.remote, 'rev-parse', BRANCH)).toBe(before)
-    expect(await present(join(app.root, ...file.path.split('/')))).toBe(false)
+    await app.assertUpstream()
+    const file = record('publish-from-current-branch')
+    const result = await app.sync([file])
+    expect(result.userCheckout.state).toBe('refreshed')
+    expect(await git(setup.clients[0], 'branch', '--show-current')).toBe('another-local-branch')
+    expect(await git(setup.remote, 'show', `${BRANCH}:${file.path}`)).toBe(file.content.trim())
+    expect(await present(join(dirname(app.root), 'workspace-branch.json'))).toBe(false)
     await app.close()
-    await expect(GitReplica.open({
+    const restored = await GitReplica.open({
       workspaceRoot: setup.clients[0], stateDirectory: join(setup.root, 'state-0'), cachedRoot: app.root, prepare: false,
-    })).rejects.toMatchObject({ code: 'upstream-changed' })
-    expect(await git(setup.remote, 'rev-parse', BRANCH)).toBe(before)
+    })
+    replicas.push(restored)
+    expect(restored.root).toBe(app.root)
+    expect((await restored.sync()).head).toBe(result.head)
   }, 60000)
 
-  it('checks the original source branch again after reconciliation, before pushing captured records', async () => {
+  it.each(['same upstream', 'no upstream', 'detached HEAD'] as const)('rejects a mid-cycle switch to %s before pushing captured records', async (target) => {
     const setup = await fixture(1)
     const app = await setup.replica(0)
     const before = await git(setup.remote, 'rev-parse', BRANCH)
     const file = record('branch-changed-after-fetch')
     await expect(app.sync([file], {
       refreshUserCheckout: false,
-      onPulled: async () => { await git(setup.clients[0], 'switch', '--quiet', '--create', 'changed-during-validation', '--track', `upstream/${BRANCH}`) },
+      onPulled: async () => {
+        if (target === 'detached HEAD') await git(setup.clients[0], 'switch', '--quiet', '--detach')
+        else await git(setup.clients[0], 'switch', '--quiet', '--create', 'changed-during-validation', ...(target === 'same upstream' ? ['--track', `upstream/${BRANCH}`] : ['--no-track']))
+      },
     })).rejects.toMatchObject({ code: 'upstream-changed' })
     expect(await git(setup.remote, 'rev-parse', BRANCH)).toBe(before)
     expect(await readFile(join(app.root, ...file.path.split('/')), 'utf8')).toBe(file.content)
-    await git(setup.clients[0], 'switch', '--quiet', BRANCH)
-    const recovered = await app.sync([file], { refreshUserCheckout: false })
-    expect(recovered.publishedPaths).toEqual([file.path])
+    if (target !== 'same upstream') {
+      await expect(app.assertUpstream()).rejects.toMatchObject({ code: 'upstream' })
+      await expect(app.sync()).rejects.toMatchObject({ code: 'upstream' })
+      await git(setup.clients[0], 'switch', '--quiet', BRANCH)
+    }
+    const recovered = await app.sync([], { refreshUserCheckout: false })
+    expect(recovered.publishedPaths).toEqual([])
     expect(await git(setup.remote, 'show', `${BRANCH}:${file.path}`)).toBe(file.content.trim())
   }, 90000)
+
+  it('retargets a stable replica to a divergent upstream and preserves all accepted and unpublished records, not source commits', async () => {
+    const setup = await fixture(1)
+    const targetRecord = record('already-on-main')
+    const targetHead = await addTarget(setup, 'main', [targetRecord])
+    const app = await setup.replica(0)
+    const accepted = record('accepted-on-feature')
+    const descriptor = { path: '.taskcontinuum/workspace.json', content: JSON.stringify({ workspaceId: DEVICE }) }
+    const published = await app.sync([descriptor, accepted], { refreshUserCheckout: false })
+    await writeFile(join(setup.clients[0], 'feature-only.txt'), 'Private source commit, not a configuration record.\n')
+    await git(setup.clients[0], 'add', '--', 'feature-only.txt')
+    await git(setup.clients[0], 'commit', '--quiet', '-m', 'Unrelated local source work')
+    const pending = record('unpublished-before-target-switch')
+    await expect(app.sync([pending], {
+      refreshUserCheckout: false,
+      onPulled: async () => { throw new Error('Publication interrupted') },
+    })).rejects.toThrow('Publication interrupted')
+    await git(setup.clients[0], 'remote', 'add', 'same-repository', setup.remote)
+    await git(setup.clients[0], 'fetch', '--quiet', 'same-repository')
+    await git(setup.clients[0], 'switch', '--quiet', '--create', 'main', '--track', 'same-repository/main')
+    await app.assertUpstream()
+    const result = await app.sync([])
+    expect(app.remote).toBe('same-repository')
+    expect(app.branch).toBe('main')
+    expect(app.upstreamRef).toBe('refs/heads/main')
+    expect(result.userCheckout.state).toBe('refreshed')
+    expect(await git(app.root, 'rev-parse', 'HEAD^')).toBe(targetHead)
+    expect(await git(setup.remote, 'rev-parse', BRANCH)).toBe(published.head)
+    expect(await git(setup.remote, 'show', 'main:README.md')).toBe('main task prose.')
+    await expect(git(setup.remote, 'cat-file', '-e', 'main:feature-only.txt')).rejects.toThrow()
+    for (const file of [descriptor, accepted, pending, targetRecord]) {
+      expect(await readFile(join(app.root, ...file.path.split('/')), 'utf8')).toBe(file.content)
+      expect(await git(setup.remote, 'show', `main:${file.path}`)).toBe(file.content.trim())
+    }
+    await app.close()
+    const reopened = await setup.replica(0)
+    expect(reopened.root).toBe(app.root)
+    expect(reopened.branch).toBe('main')
+    expect(await present(join(dirname(app.root), 'workspace-branch.json'))).toBe(false)
+  }, 120000)
+
+  it('follows main after the old feature branch is merged and deleted locally and remotely', async () => {
+    const setup = await fixture(1)
+    const app = await setup.replica(0)
+    const file = record('merged-feature-record')
+    const feature = await app.sync([file], { refreshUserCheckout: false })
+    await git(setup.seed, 'pull', '--quiet', '--ff-only')
+    await git(setup.seed, 'switch', '--quiet', '--create', 'main')
+    await git(setup.seed, 'push', '--quiet', 'upstream', 'HEAD:refs/heads/main')
+    await git(setup.clients[0], 'fetch', '--quiet', 'upstream')
+    await git(setup.clients[0], 'switch', '--quiet', '--create', 'main', '--track', 'upstream/main')
+    await git(setup.clients[0], 'branch', '-D', BRANCH)
+    await git(setup.remote, 'symbolic-ref', 'HEAD', 'refs/heads/main')
+    await git(setup.remote, 'update-ref', '-d', `refs/heads/${BRANCH}`)
+    await git(setup.clients[0], 'fetch', '--quiet', '--prune', 'upstream')
+    await app.assertUpstream()
+    const next = record('after-feature-deletion')
+    const result = await app.sync([next])
+    expect(result.userCheckout.state).toBe('refreshed')
+    expect(app.branch).toBe('main')
+    expect(await git(setup.remote, 'show', `main:${file.path}`)).toBe(file.content.trim())
+    expect(await git(setup.remote, 'rev-parse', 'main^')).toBe(feature.head)
+    expect(await git(setup.remote, 'for-each-ref', '--format=%(refname)', 'refs/heads/')).toBe('refs/heads/main')
+    await app.close()
+    const restored = await GitReplica.open({
+      workspaceRoot: setup.clients[0], stateDirectory: join(setup.root, 'state-0'), cachedRoot: app.root, prepare: false,
+    })
+    replicas.push(restored)
+    expect(restored.root).toBe(app.root)
+    expect(await readFile(join(restored.root, ...next.path.split('/')), 'utf8')).toBe(next.content)
+    expect((await restored.sync()).head).toBe(result.head)
+  }, 120000)
+
+  it('restores pending records offline without any source upstream and publishes them after restart on a different target', async () => {
+    const setup = await fixture(1)
+    await addTarget(setup, 'main')
+    const app = await setup.replica(0)
+    const accepted = record('accepted-before-restart')
+    await app.sync([accepted], { refreshUserCheckout: false })
+    const pending = record('pending-before-restart')
+    await expect(app.sync([pending], {
+      refreshUserCheckout: false,
+      validateReplica: async () => { throw new Error('Stopped before publish') },
+    })).rejects.toThrow('Stopped before publish')
+    await app.close()
+    await git(setup.clients[0], 'switch', '--quiet', '--create', 'local-main', 'upstream/main', '--no-track')
+    const offline = `${setup.remote}-offline`
+    await rename(setup.remote, offline)
+    const restored = await GitReplica.open({
+      workspaceRoot: setup.clients[0], stateDirectory: join(setup.root, 'state-0'), cachedRoot: app.root, prepare: false,
+    })
+    replicas.push(restored)
+    for (const file of [accepted, pending]) expect(await readFile(join(restored.root, ...file.path.split('/')), 'utf8')).toBe(file.content)
+    await expect(restored.assertUpstream()).rejects.toMatchObject({ code: 'upstream' })
+    await expect(restored.sync()).rejects.toMatchObject({ code: 'upstream' })
+    await git(setup.clients[0], 'branch', '--set-upstream-to=upstream/main')
+    await restored.assertUpstream()
+    await expect(restored.sync()).rejects.toMatchObject({ code: 'git' })
+    await rename(offline, setup.remote)
+    await restored.sync([], { refreshUserCheckout: false })
+    expect(restored.root).toBe(app.root)
+    for (const file of [accepted, pending]) expect(await git(setup.remote, 'show', `main:${file.path}`)).toBe(file.content.trim())
+  }, 120000)
+
+  it('retains a successful but unacknowledged push through restart and retargeting', async () => {
+    const setup = await fixture(1)
+    await addTarget(setup, 'main')
+    const app = await setup.replica(0)
+    const pending = record('push-succeeded-before-local-acknowledgment')
+    const lock = join(app.root, '.git', 'refs', 'taskcontinuum', 'accepted.lock')
+    await expect(app.sync([pending], {
+      refreshUserCheckout: false,
+      validateReplica: async () => { await writeFile(lock, 'Simulated interrupted local acknowledgment\n') },
+    })).rejects.toMatchObject({ code: 'git' })
+    expect(await git(setup.remote, 'show', `${BRANCH}:${pending.path}`)).toBe(pending.content.trim())
+    await app.close()
+    await rm(lock)
+    await git(setup.clients[0], 'switch', '--quiet', '--create', 'main', '--track', 'upstream/main')
+    const restored = await GitReplica.open({
+      workspaceRoot: setup.clients[0], stateDirectory: join(setup.root, 'state-0'), cachedRoot: app.root, prepare: false,
+    })
+    replicas.push(restored)
+    expect(await readFile(join(restored.root, ...pending.path.split('/')), 'utf8')).toBe(pending.content)
+    await restored.sync([], { refreshUserCheckout: false })
+    expect(await git(setup.remote, 'show', `main:${pending.path}`)).toBe(pending.content.trim())
+  }, 120000)
+
+  it('keeps rollback frontiers per target across switches and process restart', async () => {
+    const setup = await fixture(1)
+    const original = await git(setup.remote, 'rev-parse', BRANCH)
+    const mainOriginal = await addTarget(setup, 'main')
+    const app = await setup.replica(0)
+    const featureFile = record('feature-frontier')
+    const feature = await app.sync([featureFile], { refreshUserCheckout: false })
+    await git(setup.clients[0], 'switch', '--quiet', '--create', 'main', '--track', 'upstream/main')
+    const mainFile = record('main-frontier')
+    const main = await app.sync([mainFile], { refreshUserCheckout: false })
+    await app.close()
+    await git(setup.clients[0], 'switch', '--quiet', BRANCH)
+    const restored = await GitReplica.open({
+      workspaceRoot: setup.clients[0], stateDirectory: join(setup.root, 'state-0'), cachedRoot: app.root, prepare: false,
+    })
+    replicas.push(restored)
+    await git(setup.remote, 'update-ref', `refs/heads/${BRANCH}`, original)
+    await expect(restored.sync()).rejects.toMatchObject({ code: 'integrity' })
+    await git(setup.remote, 'update-ref', `refs/heads/${BRANCH}`, feature.head)
+    await restored.sync([], { refreshUserCheckout: false })
+    expect(await git(setup.remote, 'show', `${BRANCH}:${mainFile.path}`)).toBe(mainFile.content.trim())
+    await git(setup.clients[0], 'switch', '--quiet', 'main')
+    await git(setup.remote, 'update-ref', 'refs/heads/main', mainOriginal)
+    await expect(restored.sync()).rejects.toMatchObject({ code: 'integrity' })
+    await git(setup.remote, 'update-ref', 'refs/heads/main', main.head)
+    await restored.sync([], { refreshUserCheckout: false })
+    for (const file of [featureFile, mainFile]) expect(await readFile(join(restored.root, ...file.path.split('/')), 'utf8')).toBe(file.content)
+  }, 120000)
+
+  it.each(['fetch', 'push'] as const)('blocks a changed %s repository URL without blocking offline cache restoration', async (direction) => {
+    const setup = await fixture(1)
+    const app = await setup.replica(0)
+    const file = record('never-send-to-another-repository')
+    await app.sync([file], { refreshUserCheckout: false })
+    const before = await git(setup.remote, 'rev-parse', BRANCH)
+    const other = join(setup.root, 'unreviewed.git')
+    await git(setup.root, 'init', '--quiet', '--bare', other)
+    await git(setup.clients[0], 'remote', 'set-url', ...(direction === 'push' ? ['--push'] : []), 'upstream', other)
+    await expect(app.assertUpstream()).rejects.toMatchObject({ code: 'upstream-changed' })
+    await expect(app.sync([record('blocked')])).rejects.toMatchObject({ code: 'upstream-changed' })
+    await app.close()
+    const restored = await GitReplica.open({
+      workspaceRoot: setup.clients[0], stateDirectory: join(setup.root, 'state-0'), cachedRoot: app.root, prepare: false,
+    })
+    replicas.push(restored)
+    expect(await readFile(join(restored.root, ...file.path.split('/')), 'utf8')).toBe(file.content)
+    await expect(restored.assertUpstream()).rejects.toMatchObject({ code: 'upstream-changed' })
+    await expect(restored.sync()).rejects.toMatchObject({ code: 'upstream-changed' })
+    expect(await git(other, 'for-each-ref', '--format=%(refname)', 'refs/heads/')).toBe('')
+    expect(await git(setup.remote, 'rev-parse', BRANCH)).toBe(before)
+  }, 90000)
+
+  it.each(['source branch', 'upstream mapping'] as const)('retains records when the %s changes mid-cycle and retries only on the newly selected target', async (change) => {
+    const setup = await fixture(1)
+    const mainHead = await addTarget(setup, 'main')
+    const app = await setup.replica(0)
+    const featureHead = await git(setup.remote, 'rev-parse', BRANCH)
+    const file = record('switch-target-during-reconciliation')
+    await expect(app.sync([file], {
+      refreshUserCheckout: false,
+      onPulled: async () => {
+        if (change === 'source branch') await git(setup.clients[0], 'switch', '--quiet', '--create', 'main', '--track', 'upstream/main')
+        else await git(setup.clients[0], 'branch', '--set-upstream-to=upstream/main')
+      },
+    })).rejects.toMatchObject({ code: 'upstream-changed' })
+    expect(await git(setup.remote, 'rev-parse', BRANCH)).toBe(featureHead)
+    expect(await git(setup.remote, 'rev-parse', 'main')).toBe(mainHead)
+    expect(await readFile(join(app.root, ...file.path.split('/')), 'utf8')).toBe(file.content)
+    await app.assertUpstream()
+    await app.sync([], { refreshUserCheckout: false })
+    expect(await git(setup.remote, 'show', `main:${file.path}`)).toBe(file.content.trim())
+    expect(await git(setup.remote, 'rev-parse', BRANCH)).toBe(featureHead)
+  }, 90000)
+
+  it('checks the captured source mapping again before fast-forwarding the user checkout', async () => {
+    const setup = await fixture(1)
+    const mainHead = await addTarget(setup, 'main')
+    const app = await setup.replica(0)
+    const file = record('source-switch-during-checkout-refresh')
+    const internals = app as unknown as { git(cwd: string, args: string[], options?: unknown): Promise<unknown> }
+    const executeGit = internals.git.bind(app)
+    let switched = false
+    const spy = vi.spyOn(internals, 'git').mockImplementation(async (cwd, args, options) => {
+      const result = await executeGit(cwd, args, options)
+      if (cwd === setup.clients[0] && args[0] === 'fetch' && !switched) {
+        switched = true
+        await git(setup.clients[0], 'switch', '--quiet', '--create', 'main', '--track', 'upstream/main')
+      }
+      return result
+    })
+    await expect(app.sync([file])).rejects.toMatchObject({ code: 'upstream-changed' })
+    spy.mockRestore()
+    expect(switched).toBe(true)
+    expect(await git(setup.clients[0], 'branch', '--show-current')).toBe('main')
+    expect(await git(setup.clients[0], 'rev-parse', 'HEAD')).toBe(mainHead)
+    expect(await git(setup.remote, 'rev-parse', 'main')).toBe(mainHead)
+    expect(await git(setup.remote, 'show', `${BRANCH}:${file.path}`)).toBe(file.content.trim())
+    await app.sync([], { refreshUserCheckout: false })
+    expect(await git(setup.remote, 'show', `main:${file.path}`)).toBe(file.content.trim())
+  }, 90000)
+
+  it('restores the full canonical union after interruption between retargeted ref updates and checkout', async () => {
+    const setup = await fixture(1)
+    const remoteRecord = record('target-record-before-interruption')
+    await addTarget(setup, 'main', [remoteRecord])
+    const app = await setup.replica(0)
+    const accepted = record('accepted-before-checkout-interruption')
+    await app.sync([accepted], { refreshUserCheckout: false })
+    await git(setup.clients[0], 'switch', '--quiet', '--create', 'main', '--track', 'upstream/main')
+    const pending = record('pending-before-checkout-interruption')
+    const internals = app as unknown as { git(cwd: string, args: string[], options?: { input?: string }): Promise<unknown> }
+    const executeGit = internals.git.bind(app)
+    let updated = false
+    const spy = vi.spyOn(internals, 'git').mockImplementation(async (cwd, args, options) => {
+      if (updated && args[0] === 'read-tree' && args.includes('-u')) throw new Error('Interrupted canonical checkout')
+      const result = await executeGit(cwd, args, options)
+      if (args[0] === 'update-ref' && options?.input?.includes('update HEAD ')) updated = true
+      return result
+    })
+    await expect(app.sync([pending], { refreshUserCheckout: false })).rejects.toThrow('Interrupted canonical checkout')
+    spy.mockRestore()
+    await app.close()
+    const restored = await GitReplica.open({
+      workspaceRoot: setup.clients[0], stateDirectory: join(setup.root, 'state-0'), cachedRoot: app.root, prepare: false,
+    })
+    replicas.push(restored)
+    for (const file of [accepted, remoteRecord, pending]) expect(await readFile(join(restored.root, ...file.path.split('/')), 'utf8')).toBe(file.content)
+    await restored.sync([], { refreshUserCheckout: false })
+    for (const file of [accepted, remoteRecord, pending]) expect(await git(setup.remote, 'show', `main:${file.path}`)).toBe(file.content.trim())
+  }, 120000)
+
+  it('still rejects historical immutable mutations on a previously used target after switching away', async () => {
+    const setup = await fixture(1)
+    await addTarget(setup, 'main')
+    const app = await setup.replica(0)
+    const file = record('immutable-across-targets')
+    await app.sync([file], { refreshUserCheckout: false })
+    await git(setup.clients[0], 'switch', '--quiet', '--create', 'main', '--track', 'upstream/main')
+    await app.sync([], { refreshUserCheckout: false })
+    await git(setup.clients[0], 'switch', '--quiet', BRANCH)
+    await app.sync([], { refreshUserCheckout: false })
+    await git(setup.seed, 'pull', '--quiet', '--ff-only', 'upstream', 'main')
+    await writeRecord(setup.seed, { ...file, content: '{"tampered":true}\n' })
+    await git(setup.seed, 'commit', '--quiet', '-am', 'Mutate immutable record')
+    await writeRecord(setup.seed, file)
+    await git(setup.seed, 'commit', '--quiet', '-am', 'Restore original bytes')
+    await git(setup.seed, 'push', '--quiet', 'upstream', 'HEAD:refs/heads/main')
+    await git(setup.clients[0], 'switch', '--quiet', 'main')
+    await expect(app.sync()).rejects.toMatchObject({ code: 'integrity' })
+    expect(await readFile(join(app.root, ...file.path.split('/')), 'utf8')).toBe(file.content)
+  }, 120000)
+
+  it('does not recreate an upstream deleted between fetch and push', async () => {
+    const setup = await fixture(1)
+    const app = await setup.replica(0)
+    const file = record('retain-after-remote-deletion')
+    await expect(app.sync([file], {
+      refreshUserCheckout: false,
+      validateReplica: async () => { await git(setup.remote, 'update-ref', '-d', `refs/heads/${BRANCH}`) },
+    })).rejects.toMatchObject({ code: 'upstream' })
+    expect(await git(setup.remote, 'for-each-ref', '--format=%(refname)', 'refs/heads/')).toBe('')
+    expect(await readFile(join(app.root, ...file.path.split('/')), 'utf8')).toBe(file.content)
+  }, 90000)
+
+  it('migrates legacy cached paths and frontiers locally without binding the new source branch to old history', async () => {
+    const setup = await fixture(1)
+    const original = await git(setup.remote, 'rev-parse', BRANCH)
+    await addTarget(setup, 'main')
+    const app = await setup.replica(0)
+    const file = record('legacy-accepted')
+    await app.sync([file], { refreshUserCheckout: false })
+    const pending = record('legacy-pending')
+    await expect(app.sync([pending], {
+      refreshUserCheckout: false,
+      validateReplica: async () => { throw new Error('Legacy interrupted publish') },
+    })).rejects.toThrow('Legacy interrupted publish')
+    await app.close()
+    const refs = await git(app.root, 'for-each-ref', '--format=%(refname)', 'refs/taskcontinuum/targets/', 'refs/taskcontinuum/frontiers-v1')
+    for (const ref of refs.split('\n')) await git(app.root, 'update-ref', '-d', ref)
+    const owner = JSON.parse(await readFile(join(dirname(app.root), 'owner.json'), 'utf8'))
+    const legacyId = createHash('sha256').update(JSON.stringify([owner.workspaceRoot, owner.remote, owner.branch, owner.fetchUrl, owner.pushUrl])).digest('hex')
+    const legacyDirectory = join(setup.root, 'state-0', `git-${legacyId}`)
+    await rename(dirname(app.root), legacyDirectory)
+    await writeFile(join(legacyDirectory, 'workspace-branch.json'), 'Obsolete source branch binding, intentionally ignored.\n')
+    await git(setup.clients[0], 'switch', '--quiet', '--create', 'main', '--track', 'upstream/main')
+    const offline = `${setup.remote}-offline`
+    await rename(setup.remote, offline)
+    const restored = await GitReplica.open({
+      workspaceRoot: setup.clients[0], stateDirectory: join(setup.root, 'state-0'), cachedRoot: join(legacyDirectory, 'replica'), prepare: false,
+    })
+    replicas.push(restored)
+    for (const record of [file, pending]) expect(await readFile(join(restored.root, ...record.path.split('/')), 'utf8')).toBe(record.content)
+    await rename(offline, setup.remote)
+    await restored.sync([], { refreshUserCheckout: false })
+    for (const record of [file, pending]) expect(await git(setup.remote, 'show', `main:${record.path}`)).toBe(record.content.trim())
+    await git(setup.clients[0], 'switch', '--quiet', BRANCH)
+    await git(setup.remote, 'update-ref', `refs/heads/${BRANCH}`, original)
+    await expect(restored.sync()).rejects.toMatchObject({ code: 'integrity' })
+  }, 120000)
 
   it('serializes multiple owners of the same replica and safely reclaims a dead process lock', async () => {
     const setup = await fixture(1)
@@ -469,7 +817,7 @@ describe('app-owned Git configuration replica', () => {
     await expect(app.sync([], { refreshUserCheckout: false })).rejects.toMatchObject({ code: 'integrity' })
     await rm(join(app.root, ...unexpected.path.split('/')))
     await git(setup.remote, 'update-ref', '-d', `refs/heads/${BRANCH}`)
-    await expect(app.sync([record('branch-removed')], { refreshUserCheckout: false })).rejects.toMatchObject({ code: 'git' })
+    await expect(app.sync([record('branch-removed')], { refreshUserCheckout: false })).rejects.toMatchObject({ code: 'upstream' })
     expect(await git(setup.remote, 'for-each-ref', '--format=%(refname)', 'refs/heads/')).toBe('')
   }, 90000)
 

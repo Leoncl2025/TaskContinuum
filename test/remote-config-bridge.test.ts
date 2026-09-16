@@ -45,6 +45,8 @@ describe('Git synchronization IPC boundary', () => {
     expect(await invoke('enable')).toBe(false)
     expect(service.enable).not.toHaveBeenCalled()
     const detail = mocks.consent.mock.calls[0]?.[1]?.detail
+    expect(detail).toContain('no branch is permanently bound and main/master is not assumed')
+    expect(detail).toContain('Without an upstream, Git synchronization pauses')
     expect(detail).toContain('Legacy session files and browser bindings are not imported')
     expect(detail).toContain('automatically receive read and send access')
     expect(detail).toContain('permission to explicitly create Agent Host sessions')

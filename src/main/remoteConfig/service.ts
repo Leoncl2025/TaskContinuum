@@ -19,6 +19,7 @@ import { LocalEnrollments, initialWorkspaceId } from './enrollment'
 import type { WorkspaceEnrollment } from './enrollment'
 import { WorkspaceGitReplica as GitReplica } from './workspaceGit'
 import type { WorkspaceGitOptions as GitReplicaOptions } from './workspaceGit'
+import { GitSyncError } from './git'
 import { BindingOverlay } from './overlay'
 import { PeerLinks } from './peers'
 import type { PublicPeer, PublicPeerGrant } from './peers'
@@ -122,6 +123,13 @@ export class WorkspaceSyncService {
     runtime.status.state = 'error'
     if (changed) this.options.onChange(runtime.root)
   }
+  private async checkUpstream(runtime: Runtime, opening = false): Promise<void> {
+    try { await runtime.replica?.assertUpstream() } catch (error) {
+      if (!(error instanceof GitSyncError) || error.code !== 'upstream' && !(opening && error.code === 'upstream-changed')) throw error
+      // Missing upstream pauses Git, not cached configuration access or durable local edits.
+      this.error(runtime, error)
+    }
+  }
   private track(runtime: Runtime, work: Promise<void>): void {
     const observed = work.catch((error: unknown) => {
       if (runtime.closed || !this.networkAllowed(runtime) && error instanceof PeerControlError && error.code === 'aborted') return
@@ -190,7 +198,7 @@ export class WorkspaceSyncService {
 
   async open(root: string): Promise<void> {
     const runtime = await this.ensure(root, false)
-    if (runtime?.replica) await runtime.replica.assertUpstream()
+    if (runtime) await this.checkUpstream(runtime, true)
   }
 
   async restore(): Promise<void> {
@@ -281,7 +289,7 @@ export class WorkspaceSyncService {
       if (!enable && !enrollment?.enabled) throw new Error('The paused workspace has no local synced configuration. Reenable to recover it.')
       replica = await (this.options.createReplica ?? GitReplica.open)({ workspaceRoot: root, stateDirectory: directory })
       const published = await this.descriptor(replica.root)
-      const workspaceId = published?.workspaceId ?? enrollment?.workspaceId ?? initialWorkspaceId(replica.upstreamUrl, replica.branch)
+      const workspaceId = published?.workspaceId ?? enrollment?.workspaceId ?? initialWorkspaceId(replica.upstreamUrl)
       if (enrollment && enrollment.workspaceId !== workspaceId) throw new Error('The upstream workspace identity differs from its local enrollment.')
       enrollment = await this.enrollments.enable(root, workspaceId, true)
       metadata = { schemaVersion: 1, workspaceId, recordsRoot: replica.root, managedPairs: {} }
@@ -351,7 +359,7 @@ export class WorkspaceSyncService {
         const generation = runtime.generation
         if (!this.networkAllowed(runtime, generation) || !runtime.enrollment.pins[senderId]
           || runtime.enrollment.pins[senderId].blocked || runtime.enrollment.pins[senderId].clientPublicKey !== publicKey) return false
-        await runtime.replica?.assertUpstream()
+        await this.checkUpstream(runtime)
         return this.networkAllowed(runtime, generation) && !runtime.enrollment.pins[senderId].blocked
       },
       onLink: (senderId, signal) => this.linkInvitation(runtime, senderId, signal),
@@ -424,7 +432,7 @@ export class WorkspaceSyncService {
       },
       apply: async (revision, changes, frontier) => {
         for (let attempt = 0; attempt < 3; attempt++) {
-          await runtime.replica?.assertUpstream()
+          await this.checkUpstream(runtime)
           const before = await config.read()
           if (frontier) {
             for (const key of ['autoLink', 'tunnelEnabled', 'connectTimeoutMs'] as const) {
@@ -462,16 +470,16 @@ export class WorkspaceSyncService {
       runtime.disposeBackend = await registerRepositorySessionLinksBackend(root, {
         read: () => config.read(),
         writeBinding: async (taskId, target, revision, beforeWrite) => {
-          await runtime.replica?.assertUpstream()
+          await this.checkUpstream(runtime)
           return config.writeBinding(taskId, target, revision, async () => {
-            await runtime.replica?.assertUpstream()
+            await this.checkUpstream(runtime)
             await beforeWrite?.()
           })
         },
         update: async (revision, transform, beforeWrite) => {
-          await runtime.replica?.assertUpstream()
+          await this.checkUpstream(runtime)
           return config.update(revision, transform, async () => {
-            await runtime.replica?.assertUpstream()
+            await this.checkUpstream(runtime)
             await beforeWrite?.()
           })
         },
@@ -514,7 +522,7 @@ export class WorkspaceSyncService {
   async setSettings(root: string, expectedRevision: string | null, changes: RemoteSettingChanges): Promise<void> {
     const runtime = await this.ensure(root, false)
     if (!runtime?.enrollment.enabled) throw new Error('Enable automatic workspace links before changing remote configuration.')
-    await runtime.replica?.assertUpstream()
+    await this.checkUpstream(runtime)
     await runtime.store.updateSettings(expectedRevision, changes, { scope: 'device', deviceId: runtime.local.clientId })
     await this.refresh(runtime)
     await runtime.settings.refresh()
