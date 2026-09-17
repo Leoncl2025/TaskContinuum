@@ -17,6 +17,9 @@ function fixture() {
   let watchId = ''
   const bridge: AgentHostBridge = {
     list: vi.fn(async () => ({ sessions: [], warnings: [] })),
+    localCreationHosts: vi.fn(async () => []), localCreations: vi.fn(async () => []),
+    createLocal: vi.fn(async () => { throw new Error('No local creation in this fixture.') }),
+    localCreationStatus: vi.fn(async () => { throw new Error('No local creation in this fixture.') }),
     creationWorkers: vi.fn(async () => []), creations: vi.fn(async () => []),
     create: vi.fn(async () => { throw new Error('The chat panel must not create a session.') }),
     creationStatus: vi.fn(async () => { throw new Error('No creation operation in the chat panel.') }),

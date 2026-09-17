@@ -69,6 +69,11 @@ kbd { font-family: inherit; font-size: 10px; color: var(--muted); border: 1px so
 .panel-header { display: flex; justify-content: space-between; align-items: center; height: 43px; min-height: 43px; padding: 0 14px 0 19px; font-size: 11px; letter-spacing: .7px; color: var(--muted); }
 .header-actions { display: flex; align-items: center; gap: 1px; }
 .sidebar { display: flex; flex-direction: column; width: var(--sidebar-width, 258px); flex-shrink: 0; min-width: 0; min-height: 0; border-right: 1px solid var(--border); background: var(--panel); }
+.sidebar-repository-action { gap: 5px; padding: 4px 6px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.sidebar-task-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 0 13px 12px; }
+.sidebar-task-actions .secondary-button { min-width: 0; min-height: 32px; gap: 6px; padding: 6px 4px; font-size: 12px; line-height: 16px; }
+.sidebar-task-actions .codicon { flex-shrink: 0; }
+.sidebar-task-actions button > span:last-child { overflow-wrap: anywhere; }
 .workspace-heading { padding: 15px 18px 22px; display: flex; align-items: center; gap: 11px; }
 .workspace-mark { width: 33px; height: 33px; display: grid; place-items: center; background: #3984c01a; border: 1px solid #3984c038; border-radius: 7px; color: var(--accent); }
 .workspace-mark .codicon { font-size: 20px; }

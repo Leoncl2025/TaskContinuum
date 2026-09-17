@@ -11,6 +11,9 @@ import { recordLocalLink } from './linkedSessionPolicy'
 import type { AgentHostTarget } from '../shared/agentHost'
 import { agentHostChatIdSchema, agentHostIdSchema, agentHostKey, agentHostSessionIdSchema, agentHostTargetSchema } from './agentHostProtocol'
 import { createWorkspaceRepositorySchema, repositoryPushRequestSchema, workspaceRepositoryIdSchema, WorkspaceRepositoryService } from './workspaceRepository'
+import { createTaskDocuments, getTaskCreationContext } from './taskDocuments/create'
+import type { CreateWorkspaceTaskResult, WorkspaceTaskCreationContext } from '../shared/taskCreation'
+import { createWorkspaceTaskRequestSchema, taskAgentInstructions, taskAgentInstructionsRequestSchema } from './workspaceTaskCreation'
 
 const descriptorSchema = z.object({ id: z.string().regex(/^[a-f\d]{64}$/), name: z.string().max(300), title: z.string().max(200), root: z.string().min(1).max(4096) })
 const stateSchema = z.object({ currentId: z.string().nullable(), recent: z.array(descriptorSchema).max(10) })
@@ -117,6 +120,34 @@ export class WorkspaceStore {
     return this.update(() => this.repositories.status(this.repositoryWorkspace(workspaceRepositoryIdSchema.parse(value))))
   }
 
+  getTaskCreationContext(value: unknown): Promise<WorkspaceTaskCreationContext> {
+    return this.update(async () => {
+      const workspace = this.repositoryWorkspace(workspaceRepositoryIdSchema.parse(value))
+      return { workspaceId: workspace.id, ...getTaskCreationContext(workspace.root) }
+    })
+  }
+
+  createTask(value: unknown): Promise<CreateWorkspaceTaskResult> {
+    return this.update(async () => {
+      const request = createWorkspaceTaskRequestSchema.parse(value)
+      const workspace = this.repositoryWorkspace(request.workspaceId)
+      const created = createTaskDocuments(workspace.root, request.draft, { source: 'ui' })
+      try {
+        return { state: await this.open(workspace.root), taskId: created.taskId }
+      } catch (error) {
+        throw new Error(`Task ${created.taskId} was created at ${created.directory}, but the workspace could not be refreshed. Use Refresh workspace instead of creating it again. ${error instanceof Error ? error.message : 'Workspace history could not be saved.'}`)
+      }
+    })
+  }
+
+  getTaskAgentInstructions(value: unknown, cliPath?: string): Promise<string> {
+    return this.update(async () => {
+      const request = taskAgentInstructionsRequestSchema.parse(value)
+      const workspace = this.repositoryWorkspace(request.workspaceId)
+      return taskAgentInstructions(getTaskCreationContext(workspace.root), request, cliPath)
+    })
+  }
+
   getRepositoryCreationUrl(value: unknown): Promise<string> {
     return this.update(async () => this.repositories.creationUrl(this.repositoryWorkspace(workspaceRepositoryIdSchema.parse(value))))
   }
@@ -137,7 +168,7 @@ export class WorkspaceStore {
 
   private repositoryWorkspace(workspaceId: string): WorkspaceSnapshot {
     const workspace = this.state.current
-    if (!workspace || workspace.id !== workspaceId) throw new Error('The active workspace changed. Select the intended repository before publishing.')
+    if (!workspace || workspace.id !== workspaceId) throw new Error('The active workspace changed. Select the intended workspace before continuing.')
     return workspace
   }
 

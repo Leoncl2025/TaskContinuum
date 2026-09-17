@@ -1,7 +1,8 @@
 import type { ChatState, ModelSelection, SessionModelInfo, TerminalState } from '@microsoft/agent-host-protocol'
 import type { ChatImageAttachment } from './chatAttachments'
 import type { SessionOwner } from './sessionBindings'
-import type { AgentHostCreateRequest, AgentHostCreation, AgentHostWorker } from './agentHostCreation'
+import type { AgentHostCreateRequest, AgentHostCreation, AgentHostCreationHost, AgentHostWorker } from './agentHostCreation'
+import type { LocalAgentHostCreateRequest, LocalAgentHostCreation } from './localAgentHostCreation'
 
 export interface AgentHostTarget {
   hostId: string
@@ -30,6 +31,10 @@ export interface AgentHostView {
 
 export interface AgentHostBridge {
   list(): Promise<{ sessions: AgentHostSession[]; warnings: string[] }>
+  localCreationHosts(): Promise<AgentHostCreationHost[]>
+  localCreations(): Promise<LocalAgentHostCreation[]>
+  createLocal(request: LocalAgentHostCreateRequest): Promise<LocalAgentHostCreation>
+  localCreationStatus(operationId: string): Promise<LocalAgentHostCreation>
   creationWorkers(taskId: string): Promise<AgentHostWorker[]>
   creations(taskId: string): Promise<AgentHostCreation[]>
   create(request: AgentHostCreateRequest): Promise<AgentHostCreation>

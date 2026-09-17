@@ -6,6 +6,7 @@ import { TaskSidebar } from '../src/renderer/components/TaskSidebar'
 import { TaskTree } from '../src/renderer/components/TaskTree'
 import { buildTaskTree } from '../src/shared/taskTree'
 import type { TaskRecord } from '../src/shared/tasks'
+import { taskWorkspaceFixture } from './workspace-ui-fixture'
 
 function task(id: string, title: string, parentId?: string): TaskRecord {
   return { id, title, parentId, kind: 'feature', status: 'backlog', priority: 'P2', owner: 'Owner', summary: '', goal: '', nextAction: '', requirements: [], plan: [], checklist: [] }
@@ -16,10 +17,37 @@ const nodes = buildTaskTree(tasks)
 
 function Sidebar() {
   const [query, setQuery] = useState('')
-  return <TaskSidebar tasks={tasks} selectedId={null} query={query} onQuery={setQuery} onSelect={vi.fn()} onCreate={vi.fn()} onClose={vi.fn()} />
+  return <TaskSidebar tasks={tasks} selectedId={null} query={query} onQuery={setQuery} onSelect={vi.fn()} onCreate={vi.fn()} onCreateTask={vi.fn()} onClose={vi.fn()} />
 }
 
 describe('task explorer tree', () => {
+  it('distinguishes labeled task actions from repository creation and keeps their routes separate', async () => {
+    const user = userEvent.setup()
+    const onCreate = vi.fn()
+    const onCreateTask = vi.fn()
+    render(<TaskSidebar tasks={tasks} selectedId={null} query="" onQuery={vi.fn()} onSelect={vi.fn()} onCreate={onCreate} onCreateTask={onCreateTask} onClose={vi.fn()} workspace={taskWorkspaceFixture()} />)
+    const actions = screen.getByRole('group', { name: 'Task creation actions' })
+    const manual = within(actions).getByRole('button', { name: 'New task' })
+    const agent = within(actions).getByRole('button', { name: 'Create task with agent' })
+    const repository = screen.getByRole('button', { name: 'New task repository' })
+    expect(manual).toHaveTextContent('New task')
+    expect(manual).toHaveAttribute('title', 'New task (Ctrl+N)')
+    expect(manual.querySelector('.codicon-new-file')).toBeInTheDocument()
+    expect(agent).toHaveTextContent('With agent')
+    expect(agent).toHaveAttribute('title', 'Create tasks with an agent in the chat panel')
+    expect(agent.querySelector('.codicon-copilot')).toBeInTheDocument()
+    expect(repository).toHaveTextContent('New repo')
+    expect(repository.querySelector('.codicon-repo')).toBeInTheDocument()
+    expect(actions).not.toContainElement(repository)
+    await user.click(manual)
+    expect(onCreateTask).toHaveBeenCalledExactlyOnceWith('form')
+    await user.click(agent)
+    expect(onCreateTask).toHaveBeenLastCalledWith('agent')
+    expect(onCreate).not.toHaveBeenCalled()
+    await user.click(repository)
+    expect(onCreate).toHaveBeenCalledOnce()
+  })
+
   it('renders ordered nested groups with true levels and no disclosure on leaves', () => {
     render(<TaskTree nodes={nodes} selectedId="T-0002" onSelect={vi.fn()} />)
     const tree = screen.getByRole('tree', { name: 'Tasks' })

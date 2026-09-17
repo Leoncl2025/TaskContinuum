@@ -18,6 +18,10 @@ contextBridge.exposeInMainWorld('desktop', bridge)
 
 const agentHost: AgentHostBridge = {
   list: () => ipcRenderer.invoke('agent-host:list'),
+  localCreationHosts: () => ipcRenderer.invoke('agent-host:local-creation-hosts'),
+  localCreations: () => ipcRenderer.invoke('agent-host:local-creations'),
+  createLocal: (request) => ipcRenderer.invoke('agent-host:create-local', request),
+  localCreationStatus: (operationId) => ipcRenderer.invoke('agent-host:local-creation-status', operationId),
   creationWorkers: (taskId) => ipcRenderer.invoke('agent-host:creation-workers', taskId),
   creations: (taskId) => ipcRenderer.invoke('agent-host:creations', taskId),
   create: (request) => ipcRenderer.invoke('agent-host:create', request),
@@ -74,6 +78,9 @@ const workspace: WorkspaceBridge = {
   openFolder: () => ipcRenderer.invoke('workspace:open-folder'),
   chooseParentFolder: () => ipcRenderer.invoke('workspace:choose-parent-folder'),
   createRepository: (request) => ipcRenderer.invoke('workspace:create-repository', request),
+  getTaskCreationContext: (id) => ipcRenderer.invoke('workspace:task-creation-context', id),
+  createTask: (request) => ipcRenderer.invoke('workspace:create-task', request),
+  getTaskAgentInstructions: (request) => ipcRenderer.invoke('workspace:task-agent-instructions', request),
   getRepositoryStatus: (id) => ipcRenderer.invoke('workspace:repository-status', id),
   openRepositoryCreation: (id) => ipcRenderer.invoke('workspace:open-repository-creation', id),
   getRepositoryPushPlan: (request) => ipcRenderer.invoke('workspace:repository-push-plan', request),

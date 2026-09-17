@@ -6,13 +6,19 @@ import { IndexFile } from '../../shared/taskDocuments/indexFile.js'
 import { DocumentFiles } from './files.js'
 import { buildIndex } from './indexer.js'
 import { scanDocuments, validateDocuments, type DocumentDiagnostic } from './validation.js'
+import { createTaskDocuments, readTaskCreationDraft, taskCreationDraftSchema } from './create.js'
 
 export function run(args: string[], cwd: string): number {
   const [command, ...options] = args
   if (!command || command === '--help') {
-    console.log('task-documents validate [T-0001] | scan --all | check | reindex | schema:gen [--check]; all accept --root <directory>')
+    console.log([
+      'task-documents validate [T-0001] | scan --all | check | reindex | schema:gen [--check]; all accept --root <directory>',
+      'task-documents create --title <title> [--description <text>] [--parent T-0001] [--owner <member>] [--level <level>] [--type <type>] [--priority <priority>] [--slug <slug>] [--acceptance <line> ...] [--actor <actor>] --root <directory>',
+      'task-documents create --draft <workspace-contained JSON file> [--actor <actor>] --root <directory>',
+    ].join('\n'))
     return command ? 0 : 2
   }
+  if (command === 'create') return runCreate(options, cwd)
   if (!['validate', 'scan', 'check', 'reindex', 'schema:gen'].includes(command)) throw new Error(`Unknown command: ${command}`)
   let root = cwd
   let only: string | undefined
@@ -70,6 +76,47 @@ export function run(args: string[], cwd: string): number {
     console.log('Rebuilt .agentdesk/index.json; canonical documents unchanged.')
   }
   return errors ? 1 : 0
+}
+
+function runCreate(args: string[], cwd: string): number {
+  let root = cwd
+  let draftFile: string | undefined
+  let actor: string | undefined
+  const draft: Record<string, unknown> = {}
+  const acceptance: string[] = []
+  const seen = new Set<string>()
+  const fields: Record<string, string> = {
+    '--title': 'title', '--description': 'description', '--parent': 'parentId',
+    '--owner': 'owner', '--level': 'level', '--type': 'type',
+    '--priority': 'priority', '--slug': 'slug',
+  }
+  for (let i = 0; i < args.length; i++) {
+    const option = args[i]
+    if (!Object.hasOwn(fields, option) && !['--root', '--draft', '--actor', '--acceptance'].includes(option)) {
+      throw new Error(`Unsupported create argument: ${option}`)
+    }
+    if (seen.has(option) && option !== '--acceptance') throw new Error(`Duplicate create argument: ${option}`)
+    seen.add(option)
+    const value = args[++i]
+    if (value === undefined || value.startsWith('--')) throw new Error(`${option} requires a value.`)
+    if (option === '--root') {
+      if (!value.trim()) throw new Error('--root requires a directory.')
+      root = path.resolve(cwd, value)
+    } else if (option === '--draft') {
+      if (!value.trim()) throw new Error('--draft requires a JSON file.')
+      draftFile = value
+    } else if (option === '--actor') actor = value
+    else if (option === '--acceptance') acceptance.push(value)
+    else draft[fields[option]] = value
+  }
+  if (acceptance.length) draft.acceptance = acceptance
+  if (draftFile !== undefined && Object.keys(draft).length) {
+    throw new Error('--draft cannot be combined with title, description, parent, owner, level, type, priority, slug, or acceptance overrides.')
+  }
+  const parsed = draftFile === undefined ? taskCreationDraftSchema.parse(draft) : readTaskCreationDraft(root, draftFile)
+  const result = createTaskDocuments(root, parsed, { actor, source: 'agent' })
+  console.log(JSON.stringify(result))
+  return 0
 }
 
 function writeOwnedFile(files: DocumentFiles, target: string, content: string): void {

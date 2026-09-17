@@ -19,6 +19,9 @@ function fixture() {
   const saved = new Map<string, AgentHostCreation>()
   const bridge: AgentHostBridge = {
     list: vi.fn(async () => ({ sessions: [], warnings: [] })),
+    localCreationHosts: vi.fn(async () => []), localCreations: vi.fn(async () => []),
+    createLocal: vi.fn(async () => { throw new Error('No local creation in this fixture.') }),
+    localCreationStatus: vi.fn(async () => { throw new Error('No local creation in this fixture.') }),
     creationWorkers: vi.fn(async () => [worker]),
     creations: vi.fn(async (taskId) => [...saved.values()].filter((operation) => operation.taskId === taskId)),
     create: vi.fn(async (request) => {

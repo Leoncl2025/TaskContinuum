@@ -88,6 +88,21 @@
 .message-markdown th { background: var(--raised); font-weight: 600; }
 .remote-vscode-dialog { width: min(620px, calc(100vw - 24px)); }
 .remote-vscode-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.workspace-links-controls { min-width: 0; margin-bottom: 16px; padding-block: 4px 20px; border-bottom: 1px solid var(--border); }
+.workspace-links-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; }
+.workspace-links-header h3 { min-width: 0; margin: 0; font-size: 13px; line-height: 20px; font-weight: 600; overflow-wrap: anywhere; }
+.workspace-links-description { margin: 8px 0 0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.workspace-links-enable { padding-inline: 12px; font-weight: 500; }
+.workspace-links-enable:disabled:hover { background: var(--blue); }
+.workspace-links-actions { margin-top: 14px; }
+.workspace-links-actions > button { min-height: 34px; max-width: 100%; }
+.workspace-links-actions > button > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.workspace-links-status { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; color: var(--muted); font-size: 11px; line-height: 20px; }
+.workspace-links-status-dot { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--subtle); }
+.workspace-links-status.is-enabled .workspace-links-status-dot { background: var(--accent); }
+.workspace-links-meta { margin: 10px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.remote-connections > h3 { margin: 0 0 10px; font-size: 13px; line-height: 20px; font-weight: 600; }
+.remote-device-empty { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 12px; line-height: 20px; color: var(--muted); }
 .remote-vscode-import { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; margin-block: 18px; }
 .remote-vscode-import .form-field { flex: 1; min-width: 160px; margin: 0; }
 .remote-vscode-list { max-height: 50vh; overflow: auto; }

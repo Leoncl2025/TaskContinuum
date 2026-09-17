@@ -73,6 +73,38 @@ describe('native-only preload boundary', () => {
     ])
   })
 
+  it('exposes root-scoped local creation without caller-selected paths, tasks, or remote workers', async () => {
+    const bridge = window.agentHost
+    if (!bridge) throw new Error('Agent Host preload API missing.')
+    const request = { operationId: crypto.randomUUID(), hostId: 'local-host-123' }
+    await bridge.localCreationHosts()
+    await bridge.localCreations()
+    await bridge.createLocal(request)
+    await bridge.localCreationStatus(request.operationId)
+    expect(ipc.invoke.mock.calls).toEqual([
+      ['agent-host:local-creation-hosts'],
+      ['agent-host:local-creations'],
+      ['agent-host:create-local', request],
+      ['agent-host:local-creation-status', request.operationId],
+    ])
+  })
+
+  it('exposes explicit task creation and agent instructions without opening or sending to Agent Host', async () => {
+    const bridge = window.workspace
+    if (!bridge) throw new Error('Workspace preload API missing.')
+    const workspaceId = 'a'.repeat(64)
+    const create = { workspaceId, draft: { title: 'First task' } }
+    const agent = { workspaceId, goal: 'Create a sign-in task', parentId: null }
+    await bridge.getTaskCreationContext(workspaceId)
+    await bridge.createTask(create)
+    await bridge.getTaskAgentInstructions(agent)
+    expect(ipc.invoke.mock.calls).toEqual([
+      ['workspace:task-creation-context', workspaceId],
+      ['workspace:create-task', create],
+      ['workspace:task-agent-instructions', agent],
+    ])
+  })
+
   it('retains device connections, automatic revocation, Dev Tunnel controls and binding notification cleanup', async () => {
     const bridge = window.remoteVSCode
     if (!bridge?.devices || !bridge.devTunnels || !bridge.gitSync) throw new Error('Remote device preload APIs missing.')

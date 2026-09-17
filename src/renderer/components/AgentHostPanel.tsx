@@ -4,6 +4,7 @@ import type { ResponsePart, TerminalState, Turn, ActiveTurn } from '@microsoft/a
 import { agentHostKey } from '../../shared/agentHost'
 import type { AgentHostBridge, AgentHostTarget, AgentHostView } from '../../shared/agentHost'
 import type { TaskRecord } from '../../shared/tasks'
+import type { WorkspaceSnapshot } from '../../shared/workspace'
 import { CHAT_IMAGE_TYPES } from '../../shared/chatAttachments'
 import type { ChatImageAttachment } from '../../shared/chatAttachments'
 import { ChatMarkdown } from './ChatMarkdown'
@@ -41,11 +42,22 @@ function imagesFor(turn: Turn | ActiveTurn): ChatImageAttachment[] {
     ? [{ id: String(attachment._meta?.taskcontinuumImageId ?? `${turn.id}:${index}`), name: attachment.label, mimeType: attachment.contentType as ChatImageAttachment['mimeType'], data: attachment.data }] : [])
 }
 
-export function AgentHostPanel({ task, target, onDetach, onClose, onDevices, onBusy }: { task: TaskRecord; target: AgentHostTarget; onDetach(): void; onClose(): void; onDevices?(): void; onBusy?(busy: boolean): void }) {
+type AgentHostPanelProps = {
+  target: AgentHostTarget
+  onClose(): void
+  onDevices?(): void
+  onBusy?(busy: boolean): void
+  beforeReconnect?(): Promise<void>
+  prepareFirstMessage?(text: string): Promise<string>
+} & ({ task: TaskRecord; workspace?: never; onDetach(): void } | { task?: never; workspace: Pick<WorkspaceSnapshot, 'id' | 'name'>; onDetach?: never })
+
+export function AgentHostPanel({ task, workspace, target, onDetach, onClose, onDevices, onBusy, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
   const bridge = window.agentHost
   const { hostId, sessionId, chatId } = target
   const { clientId, machineName } = target.owner
   const key = agentHostKey(target)
+  const contextId = task ? task.id : workspace.id
+  const contextLabel = task ? task.id : workspace.name
   const [view, setView] = useState<AgentHostView>()
   const [error, setError] = useState<string>()
   const [draft, setDraft] = useState('')
@@ -65,8 +77,9 @@ export function AgentHostPanel({ task, target, onDetach, onClose, onDevices, onB
   const mounted = useRef(false)
   const following = useRef(true)
   const log = useRef<HTMLDivElement>(null)
-  const attempted = useRef<{ id: string; text: string; images: ChatImageAttachment[] } | undefined>(undefined)
-  const imageInput = useChatImageInput(`${task.id}:${key}`, images, setImages, busy)
+  const attempted = useRef<{ id: string; text: string; draft: string; images: ChatImageAttachment[] } | undefined>(undefined)
+  const firstMessageSent = useRef(false)
+  const imageInput = useChatImageInput(`${contextId}:${key}`, images, setImages, busy)
   useEffect(() => {
     mounted.current = true
     return () => { mounted.current = false }
@@ -92,9 +105,10 @@ export function AgentHostPanel({ task, target, onDetach, onClose, onDevices, onB
   const pending = Boolean(view?.pendingTurn)
   useEffect(() => { onBusy?.(busy || pending || responding); return () => onBusy?.(false) }, [busy, pending, responding, onBusy])
   useEffect(() => { if (following.current && log.current) log.current.scrollTop = log.current.scrollHeight }, [view])
-  function confirm(command: { id: string; text: string; images: ChatImageAttachment[] }): void {
+  function confirm(command: { id: string; text: string; draft: string; images: ChatImageAttachment[] }): void {
     if (attempted.current?.id !== command.id) return
-    setDraft((current) => current.trim() === command.text ? '' : current)
+    firstMessageSent.current = true
+    setDraft((current) => current.trim() === command.draft ? '' : current)
     setImages((current) => current.filter((image) => !command.images.some((sent) => sent.id === image.id)))
     attempted.current = undefined
     setError(undefined)
@@ -110,9 +124,11 @@ export function AgentHostPanel({ task, target, onDetach, onClose, onDevices, onB
     operating.current = true
     setBusy(true)
     setError(undefined)
-    const command = { id: crypto.randomUUID(), text: draft.trim(), images }
+    const command = { id: crypto.randomUUID(), text: draft.trim(), draft: draft.trim(), images }
     attempted.current = command
     try {
+      if (prepareFirstMessage && !firstMessageSent.current && !view?.chat?.turns.length) command.text = await prepareFirstMessage(command.draft)
+      if (!mounted.current) return
       await bridge.send(target, command.id, command.text, command.images.length ? command.images : undefined, { id: modelId, ...(Object.keys(config).length ? { config } : {}) })
       if (mounted.current) { confirm(command); following.current = true }
     } catch (failure) { if (mounted.current && attempted.current?.id === command.id) setError(failure instanceof Error ? failure.message : 'Delivery was not confirmed. Inspect the original before retrying.') }
@@ -125,15 +141,27 @@ export function AgentHostPanel({ task, target, onDetach, onClose, onDevices, onB
     try { await bridge.cancel(target, activeTurn.id) } catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : 'The original turn could not be cancelled.') }
     finally { operating.current = false; if (mounted.current) setBusy(false) }
   }
+  async function reconnect(): Promise<void> {
+    if (operating.current) return
+    operating.current = true
+    setBusy(true)
+    setError(undefined)
+    try {
+      await beforeReconnect?.()
+      if (mounted.current) setRevision((value) => value + 1)
+    } catch (failure) {
+      if (mounted.current) setCatalog({ key, revision, models: [], error: failure instanceof Error ? failure.message : 'The original session could not be verified. Reconnect to retry.' })
+    } finally { operating.current = false; if (mounted.current) setBusy(false) }
+  }
   const turns = [...view?.chat?.turns ?? [], ...activeTurn ? [activeTurn] : []]
   const stateLabel = !bridge ? 'Desktop update required' : !view || view.state === 'connecting' ? 'Connecting...' : view.state === 'offline' ? 'Offline history' : pending ? 'Delivery pending' : activeTurn ? 'Agent responding' : view.readOnly ? 'Read only' : 'Connected'
   const modelStatus = !bridge ? 'Desktop update required.' : !currentCatalog ? 'Loading models from the owner Host...' : currentCatalog.error ? undefined : !modelId ? 'Choose a model below to enable sending.' : !modelReady ? 'The selected model is unavailable. Choose another model or retry loading models.' : undefined
-  return <aside className="chat-panel ahp-panel" aria-label="Agent Host task chat">
-    <header className="panel-header"><span>AGENT HOST</span><div className="header-actions">{onDevices && <IconButton icon="remote" label="Manage devices" onClick={onDevices} />}<IconButton icon="refresh" label="Reconnect Agent Host" disabled={busy} onClick={() => { setError(undefined); setRevision((value) => value + 1) }} /><IconButton icon="debug-disconnect" label="Detach conversation" disabled={busy || pending} onClick={onDetach} /><IconButton icon="layout-sidebar-right-off" label="Hide chat panel" onClick={onClose} /></div></header>
-    <div className="chat-context"><Icon name="copilot" /><div><strong>{view?.chat?.title || 'Original Host chat'}</strong><span title={sessionId}>{sessionId}</span></div><span className="context-badge">{task.id}</span></div>
+  return <aside className="chat-panel ahp-panel" aria-label={workspace ? 'Agent Host task creation chat' : 'Agent Host task chat'}>
+    <header className="panel-header"><span>AGENT HOST</span><div className="header-actions">{onDevices && <IconButton icon="remote" label="Manage devices" onClick={onDevices} />}<IconButton icon="refresh" label="Reconnect Agent Host" disabled={busy} onClick={() => { void reconnect() }} />{onDetach && <IconButton icon="debug-disconnect" label="Detach conversation" disabled={busy || pending} onClick={onDetach} />}{!workspace && <IconButton icon="layout-sidebar-right-off" label="Hide chat panel" onClick={onClose} />}</div></header>
+    <div className="chat-context"><Icon name="copilot" /><div><strong>{view?.chat?.title || 'Original Host chat'}</strong><span title={sessionId}>{sessionId}</span></div><span className="context-badge">{contextLabel}</span></div>
     <div className="session-toolbar"><span role="status">{stateLabel}</span><span className="muted">AHP 0.9.0</span></div>
     <div className="vscode-execution-identity"><Icon name="server" /><span>Copilot @ {machineName}</span></div>
-    <div className="chat-log" ref={log} role="log" aria-label={`Agent Host conversation for ${task.id}`} aria-live="polite" onScroll={() => { if (log.current) following.current = log.current.scrollHeight - log.current.scrollTop - log.current.clientHeight < 60 }}>
+    <div className="chat-log" ref={log} role="log" aria-label={`Agent Host conversation for ${contextLabel}`} aria-live="polite" onScroll={() => { if (log.current) following.current = log.current.scrollHeight - log.current.scrollTop - log.current.clientHeight < 60 }}>
       {!turns.length && <p className="muted">{view?.state === 'connected' ? 'No messages.' : 'Waiting for original history...'}</p>}
       {turns.map((turn) => {
         const actor = turn.message._meta?.taskcontinuumActor as { username?: string; machineName?: string } | undefined
@@ -149,7 +177,7 @@ export function AgentHostPanel({ task, target, onDetach, onClose, onDevices, onB
       {modelStatus && <p className="message-notice" role="status">{modelStatus}</p>}
       <div className="ahp-model-controls">
         <label>Model<select aria-label="Agent Host model" value={modelId} disabled={busy || pending || responding || view?.readOnly || !models.length} onChange={(event) => setSelection({ key, id: event.target.value })}><option value="">{!currentCatalog ? 'Loading models...' : !models.length ? 'Models unavailable' : 'Choose a model'}</option>{modelId && !modelReady && <option value={modelId} disabled>{modelId} (unavailable)</option>}{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
-        <IconButton icon="refresh" label="Retry loading models" disabled={!bridge || busy || !currentCatalog} onClick={() => setRevision((value) => value + 1)} />
+        <IconButton icon="refresh" label="Retry loading models" disabled={!bridge || busy || !currentCatalog} onClick={() => { void reconnect() }} />
       </div>
       {selectedModel && <AgentHostModelConfig schema={selectedModel.configSchema} config={config} disabled={busy || pending || responding || Boolean(view?.readOnly)} onChange={(config) => setSelection({ key, id: modelId, config })} />}
       {configErrors.map((message) => <p key={message} className="copilot-error message-notice" role="alert">{message}</p>)}

@@ -47,7 +47,7 @@ describe('native Agent Host remote device controls', () => {
     expect(screen.getByRole('region', { name: 'Workspace Git synchronization' })).toBeInTheDocument()
     await screen.findByRole('button', { name: 'Disconnect device Machine-B' })
     expect(screen.getByText('linked', { exact: true })).toBeInTheDocument()
-    expect(screen.getByText(/Trusted automatically linked devices can read and send to linked sessions, associate sessions with tasks, and explicitly create new sessions in this shared workspace/)).toHaveTextContent('No separate per-device enable step is needed. This does not grant arbitrary operating-system permissions; native session approvals still apply. Requests are never sent and sessions are never created automatically.')
+    expect(screen.getByText(/Trusted devices can access linked sessions/)).toHaveTextContent('Native approvals still apply; no automatic messages or new sessions.')
     for (const name of [
       'Pair device', 'Import device invitation', 'Export device identity', 'Confirm existing Agent Host links',
       'Enable linked sessions', 'Disable linked sessions for this workspace', 'Revoke paired device',
@@ -116,6 +116,7 @@ describe('native Agent Host remote device controls', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Forget device Machine-B' }))
     await waitFor(() => expect(devices.forget).toHaveBeenCalledWith('device-b'))
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Disconnect device Machine-B' })).not.toBeInTheDocument())
+    expect(await screen.findByText('No linked devices')).toBeInTheDocument()
   })
 
   it('surfaces device discovery failures', async () => {
@@ -123,6 +124,7 @@ describe('native Agent Host remote device controls', () => {
     vi.mocked(devices.list).mockRejectedValueOnce(new Error('Device discovery unavailable.'))
     render(<RemoteDevicesDialog onClose={vi.fn()} />)
     expect(await screen.findByRole('alert')).toHaveTextContent('Device discovery unavailable.')
+    expect(screen.queryByText('No linked devices')).not.toBeInTheDocument()
   })
 
   it('surfaces connection failures and keeps disconnect available while another connection is pending', async () => {

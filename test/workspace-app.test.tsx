@@ -52,6 +52,9 @@ function creationFixture() {
   const listeners = new Set<Parameters<AgentHostBridge['onView']>[0]>()
   const watched = new Map<string, AgentHostView>()
   const agentHost: AgentHostBridge = {
+    localCreationHosts: vi.fn(async () => []), localCreations: vi.fn(async () => []),
+    createLocal: vi.fn(async () => { throw new Error('No local creation in this fixture.') }),
+    localCreationStatus: vi.fn(async () => { throw new Error('No local creation in this fixture.') }),
     list: vi.fn(async () => ({ sessions: [], warnings: [] })), creationWorkers: vi.fn(async () => [worker]),
     creations: vi.fn(async (taskId) => [...saved.values()].filter((operation) => operation.taskId === taskId)),
     create: vi.fn(async (request) => {

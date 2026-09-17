@@ -7,7 +7,7 @@ import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { WebSocketServer } from 'ws'
 import { chatReducer } from '@microsoft/agent-host-protocol'
-import type { ActionEnvelope, ChatState, CreateSessionParams, ResolveSessionConfigResult, SessionState } from '@microsoft/agent-host-protocol'
+import type { ChatState, CreateSessionParams, ResolveSessionConfigResult, RootState, SessionState } from '@microsoft/agent-host-protocol'
 import type { AgentHostEndpoint } from '../src/main/agentHostProtocol'
 import { AgentHostRegistry } from '../src/main/agentHostRegistry'
 import { VSCodeDeviceHost } from '../src/main/vscodeDeviceHost'
@@ -40,9 +40,11 @@ export async function startAgentHostCreationFixture() {
   const calls: { method: string; params?: Record<string, unknown> }[] = []
   const creations: CreateSessionParams[] = []
   const sessions = new Map<string, { session: SessionState; chat: ChatState }>()
+  const deletedSessions = new Set<string>()
   const subscriptions = new Map<import('ws').WebSocket, Set<string>>()
   let sequence = 1
   let provider = 'copilotcli', protocolVersion = '0.9.0'
+  let models: RootState['agents'][number]['models'] = []
   let lifecycle: SessionState['lifecycle'] = 'ready' as SessionState['lifecycle']
   let loseAcknowledgement = false, omitCreatedSession = false
   let prepareWait: ReturnType<typeof deferred> | undefined
@@ -56,6 +58,16 @@ export async function startAgentHostCreationFixture() {
     mode: { type: 'string', title: 'Mode', enum: ['interactive', 'autopilot'] },
   } }, values: { isolation: 'folder', autoApprove: 'default', mode: 'interactive' } }
   let editCreated: ((value: { session: SessionState; chat: ChatState }) => void) | undefined
+  function action(sessionId: string, value: Record<string, unknown>): void {
+    const entry = sessions.get(sessionId)
+    if (!entry) throw new Error('The fixture has no such session.')
+    const envelope = { channel: entry.chat.resource, serverSeq: ++sequence, action: value }
+    entry.chat = chatReducer(entry.chat, value as unknown as Parameters<typeof chatReducer>[1])
+    if (value.type === 'chat/turnStarted') entry.session.lifecycle = 'ready' as SessionState['lifecycle']
+    for (const [subscriber, channels] of subscriptions) if (channels.has(envelope.channel) && subscriber.readyState === subscriber.OPEN) {
+      subscriber.send(JSON.stringify({ jsonrpc: '2.0', method: 'action', params: envelope }))
+    }
+  }
   sockets.on('connection', (socket) => {
     subscriptions.set(socket, new Set())
     socket.on('close', () => subscriptions.delete(socket))
@@ -64,7 +76,7 @@ export async function startAgentHostCreationFixture() {
         const message = JSON.parse(data.toString())
         calls.push({ method: message.method, params: message.params })
         let result: unknown = {}
-        const missing = () => { if (message.id !== undefined && socket.readyState === socket.OPEN) socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32001, message: 'The fixture has no such resource.' } })) }
+        const missing = () => { if (message.id !== undefined && socket.readyState === socket.OPEN) socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32001, message: deletedSessions.has(message.params?.channel) ? `Session was explicitly deleted: ${message.params.channel}` : 'The fixture has no such resource.' } })) }
         if (message.method === 'initialize') result = { protocolVersion, serverSeq: sequence, snapshots: [] }
         else if (message.method === 'resolveSessionConfig') {
           await prepareWait?.promise
@@ -88,7 +100,7 @@ export async function startAgentHostCreationFixture() {
         } else if (message.method === 'subscribe') {
           const channel = message.params.channel
           if (channel.startsWith('copilotcli:/')) await sessionReadWait?.promise
-          if (channel === 'ahp-root://') result = { snapshot: { resource: channel, fromSeq: sequence, state: { agents: [{ provider, displayName: 'Copilot', description: '', models: [] }], activeSessions: sessions.size } } }
+          if (channel === 'ahp-root://') result = { snapshot: { resource: channel, fromSeq: sequence, state: { agents: [{ provider, displayName: 'Copilot', description: '', models }], activeSessions: sessions.size } } }
           else if (sessions.has(channel)) result = { snapshot: { resource: channel, fromSeq: sequence, state: structuredClone(sessions.get(channel)!.session) } }
           else {
             const value = [...sessions.values()].find((value) => value.session.chats.some((chat) => chat.resource === channel))
@@ -98,14 +110,9 @@ export async function startAgentHostCreationFixture() {
           subscriptions.get(socket)?.add(channel)
         } else if (message.method === 'unsubscribe') subscriptions.get(socket)?.delete(message.params.channel)
         else if (message.method === 'dispatchAction') {
-          const value = [...sessions.values()].find((value) => value.chat.resource === message.params.channel)
-          if (!value) { missing(); return }
-          const envelope = { channel: value.chat.resource, serverSeq: ++sequence, origin: undefined, action: message.params.action } as ActionEnvelope
-          value.chat = chatReducer(value.chat, envelope.action as Parameters<typeof chatReducer>[1])
-          if (message.params.action.type === 'chat/turnStarted') value.session.lifecycle = 'ready' as SessionState['lifecycle']
-          for (const [subscriber, channels] of subscriptions) if (channels.has(envelope.channel) && subscriber.readyState === subscriber.OPEN) {
-            subscriber.send(JSON.stringify({ jsonrpc: '2.0', method: 'action', params: envelope }))
-          }
+          const entry = [...sessions].find(([, value]) => value.chat.resource === message.params.channel)
+          if (!entry) { missing(); return }
+          action(entry[0], message.params.action)
         } else if (message.method === 'listSessions') {
           result = { items: [...sessions].map(([resource, value]) => ({ resource, ...value.session, createdAt: value.chat.modifiedAt, modifiedAt: value.chat.modifiedAt })) }
         } else if (!['ping', 'shutdown'].includes(message.method)) { missing(); return }
@@ -118,7 +125,9 @@ export async function startAgentHostCreationFixture() {
   const endpoint: AgentHostEndpoint = { schemaVersion: 2, type: 'standalone', pid: process.pid, instanceId: hostId, connectionToken: randomUUID(), protocolVersion: '0.9.0',
     endpoint: { type: 'tcp', host: '127.0.0.1', port: (server.address() as { port: number }).port } }
   return {
-    endpoint, hostId, calls, creations, sessions,
+    endpoint, hostId, calls, creations, sessions, action,
+    deleteSession: (sessionId: string) => { if (sessions.delete(sessionId)) deletedSessions.add(sessionId) },
+    setModels: (value: typeof models) => { models = value },
     setProvider: (value: string) => { provider = value },
     setProtocol: (value: string) => { protocolVersion = value },
     setConfig: (value: ResolveSessionConfigResult, honorFolderSelection = false) => { config = value; resolveFolderSelection = honorFolderSelection },

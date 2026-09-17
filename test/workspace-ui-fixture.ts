@@ -1,6 +1,7 @@
 import { vi } from 'vitest'
 import type { WorkspaceBridge, WorkspaceSnapshot, WorkspaceState } from '../src/shared/workspace'
 import { fixtureTasks } from './task-fixture'
+import type { TaskRecord } from '../src/shared/tasks'
 
 export function taskWorkspaceFixture(): WorkspaceSnapshot {
   return {
@@ -35,6 +36,32 @@ export function workspaceBridgeFixture(initial: WorkspaceState = { current: null
       const current: WorkspaceSnapshot = { id: 'created-workspace', name, title: name, root: `${parentPath}\\${name}`, tasks: [], warnings: [], loadedAt: '2026-09-16T00:00:00Z' }
       state = { current, recent: [current, ...state.recent] }
       return state
+    }),
+    getTaskCreationContext: vi.fn<WorkspaceBridge['getTaskCreationContext']>(async (id) => ({
+      workspaceId: id, root: selected(id).root,
+      members: [{ id: 'fixture-user', name: 'Fixture User' }],
+      levels: [{ id: 'epic', title: 'Epic', rank: 0 }, { id: 'task', title: 'Task', rank: 1 }, { id: 'subtask', title: 'Subtask', rank: 2 }],
+      parents: selected(id).tasks.map((task) => ({ id: task.id, title: task.title, level: task.kind === 'epic' ? 'epic' : 'task' })),
+      types: ['feature', 'bug', 'chore', 'spike', 'doc', 'ops'], priorities: ['P0', 'P1', 'P2', 'P3'],
+      defaults: { owner: 'fixture-user', level: 'task', type: 'feature', priority: 'P2' },
+    })),
+    createTask: vi.fn<WorkspaceBridge['createTask']>(async ({ workspaceId, draft }) => {
+      const current = selected(workspaceId)
+      const number = Math.max(0, ...current.tasks.map((task) => Number(task.id.slice(2)))) + 1
+      const taskId = `T-${String(number).padStart(4, '0')}`
+      const task: TaskRecord = {
+        id: taskId, title: draft.title, kind: draft.level ?? 'task', status: 'backlog', priority: draft.priority ?? 'P2',
+        owner: draft.owner ?? 'fixture-user', summary: draft.description ?? '', goal: draft.description ?? '',
+        nextAction: 'Review requirements', requirements: [], plan: [],
+        checklist: (draft.acceptance ?? []).map((title, index) => ({ id: `CL-${String(index + 1).padStart(3, '0')}`, title, done: false })),
+        ...(draft.parentId ? { parentId: draft.parentId } : {}),
+      }
+      state = { ...state, current: { ...current, tasks: [...current.tasks, task] } }
+      return { state, taskId }
+    }),
+    getTaskAgentInstructions: vi.fn<WorkspaceBridge['getTaskAgentInstructions']>(async (request) => {
+      const current = selected(request.workspaceId)
+      return `Create task files in ${current.root} using task-documents create.\nRequest: ${request.goal}`
     }),
     getRepositoryStatus: vi.fn<WorkspaceBridge['getRepositoryStatus']>(async (id) => ({
       workspaceId: id, name: selected(id).name, branch: 'main', remoteUrl, credentialHelper: 'gcm',

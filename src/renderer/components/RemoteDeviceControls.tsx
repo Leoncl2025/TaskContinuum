@@ -6,7 +6,7 @@ type Device = Awaited<ReturnType<NonNullable<RemoteVSCodeBridge['devices']>['lis
 
 export function RemoteDeviceConnections() {
   const api = window.remoteVSCode?.devices
-  const [devices, setDevices] = useState<Device[]>([])
+  const [devices, setDevices] = useState<Device[]>()
   const [error, setError] = useState<string>()
   const [busy, setBusy] = useState<string>()
   const running = useRef(false)
@@ -26,10 +26,12 @@ export function RemoteDeviceConnections() {
     finally { running.current = false; setBusy(undefined) }
   }
   if (!api) return null
-  return <div className="remote-device-controls">
+  return <div className="remote-device-controls remote-connections">
     <h3>Devices</h3>
     {error && <p className="copilot-error" role="alert">{error}</p>}
-    {devices.map((device) => <div className="remote-vscode-row" key={device.id}>
+    {!devices && !error && <p className="remote-device-empty" role="status">Loading devices...</p>}
+    {devices?.length === 0 && !error && <p className="remote-device-empty"><Icon name="device-desktop" />No linked devices</p>}
+    {devices?.map((device) => <div className="remote-vscode-row" key={device.id}>
       <div className="remote-vscode-row-title"><Icon name="device-desktop" /><strong>{device.machineName}</strong><span className="muted">{device.state}</span></div>
       {device.error && <p className="copilot-error">{device.error}</p>}
       <div className="remote-vscode-actions">

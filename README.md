@@ -7,7 +7,8 @@ Familiar VS Code-style navigation, without an editor, extension host, terminal, 
 protocol (AHP) 0.9.0 for session discovery, selection, explicit creation, binding,
 reopening, sending, live streaming, cancellation and model options. Local and
 remote access retain the original Host, session, chat and owner identities.
-AgentDesk workspace folders provide read-only task views. New profiles start with
+AgentDesk workspace folders provide canonical task files, quick UI creation and
+an agent/CLI creation path. Existing task views remain read-only. New profiles start with
 no workspace, no tasks, and no open task tabs; there is no built-in demo.
 
 Local Copilot SDK execution, CLI resume/import, VS Code journal/Companion sessions,
@@ -18,6 +19,8 @@ key files are not deleted or imported into the new runtime.
 ## What works
 
 - Activity bar, task explorer, open-task tabs, task viewer, chat, and status bar.
+- Quick task creation from the Explorer or empty state, plus direct local Agent
+  Host conversations, JSON draft review and the shared task-creation CLI.
 - Search by task ID, title, or owner; filter by status; navigate a multilevel task tree.
 - Parent-first task ordering, hierarchy guides, independent branch folding, and
     ancestor paths retained for filtered matches.
@@ -291,8 +294,8 @@ both on GitHub. Enterprise policy remains authoritative; see
 [managed-user repository restrictions](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-iam/understanding-iam-for-enterprises/abilities-and-restrictions-of-managed-user-accounts#repository-management).
 
 The repository holds `.agentdesk/config.json` and `tasks/`; the empty task folder
-is retained in Git. Add task files with your existing compatible editor or
-automation and refresh to read them. Task views remain read-only. This guide does
+is retained in Git. Create tasks from the Explorer, or use a compatible agent/CLI
+and refresh to read them. Existing task views remain read-only. This guide does
 not automatically enroll remote devices, enable automatic workspace links, or
 upload later edits. Review committed files before publishing; credentials and
 private session history must never be committed. A publication failure is shown
@@ -305,6 +308,43 @@ remote commit. Browser creation and terminal push failures never cause automatic
 recreation, retries that write remote state, or force pushes. Existing local
 onboarding records remain local to `.git` and are not uploaded.
 
+## Create tasks quickly
+
+Open a real task workspace, then use either entry:
+
+1. **UI:** select **New task** (`+`, or Ctrl/Cmd+N) in the Explorer, or **Create
+   first task** in an empty task list. Only a title is required. Add a description
+   or parent, and optionally choose owner, priority, type, hierarchy level, folder
+   slug and acceptance criteria. Workspace defaults are used otherwise.
+   **Create task** allocates a unique `T-XXXX`, writes the canonical task folder
+   and lifecycle documents, refreshes the tree and selects the new task.
+2. **Agent:** select **Create task with agent** to open the right-hand chat panel
+   with a local native Agent Host session in the selected repository, including
+   an empty workspace. A single
+   available Host is selected automatically; with multiple Hosts, choose one
+   explicitly. Select a model, describe the goal, and chat directly in the app.
+   The first message includes task-creation guidance and the source CLI location
+   when available. After the agent creates files, **Refresh created tasks** loads
+   them without closing the conversation. Alternatively, choose **Review agent
+   draft** in the chat panel to open the JSON review form and confirm creation.
+
+The local Host and signed-in Copilot provider must already be running. Entering
+agent mode creates a session, but does not send a prompt until you submit one.
+Reopening the chat panel resumes the same workspace conversation. Task creation
+chat stays alongside the task tree and viewer; only quick creation and JSON draft
+review use dialogs. **Show task conversation** returns to the selected task's chat.
+Creation identity and access are recorded privately on this device, not in Git or task bindings;
+this does not grant remote devices access or require Automatic workspace links.
+An uncertain creation is inspected rather than replayed. Native approvals remain
+on the local Host. The draft-review path also works when no Host is available or
+the installed application does not include the source CLI.
+
+UI and CLI creation share the same writer. IDs include existing and archived
+tasks, configured members/hierarchy are checked, and a complete new directory is
+published without overwriting another task. Existing parent files, statuses,
+session links and Git state are not changed. No commit or push occurs.
+See [task creation CLI](docs/task-documents.md#task-creation) for agent automation.
+
 ## Open a task workspace
 
 1. In the desktop explorer, choose the folder icon labeled **Open workspace folder**.
@@ -316,8 +356,9 @@ onboarding records remain local to `.git` and are not uploaded.
     folders. The selected folder is restored after restart.
 4. Use **Refresh workspace** after editing task files in VS Code or another tool.
 
-Real task views are read-only: task creation, status changes, and checklist toggles
-must be performed in an external editor or compatible automation. Opening a
+New tasks can be created through the UI or agent/CLI entry above. Existing-task
+status changes and checklist toggles still require an external editor or compatible
+automation; their viewers remain read-only. Opening a
 workspace does not change any planning files or execute instructions found in them.
 Explicit session link and unlink actions write only the relationship metadata
 described below; they do not change task JSON, status, or acceptance documents.

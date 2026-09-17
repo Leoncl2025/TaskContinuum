@@ -66,6 +66,7 @@ test.beforeEach(async () => {
     GIT_AUTHOR_NAME: 'Onboarding test', GIT_AUTHOR_EMAIL: 'onboarding@example.test',
     GIT_COMMITTER_NAME: 'Onboarding test', GIT_COMMITTER_EMAIL: 'onboarding@example.test',
     TASKCONTINUUM_DATA_DIR: join(runtime, 'profile'), TASKCONTINUUM_VSCODE_USER_DATA_DIR: join(runtime, 'vscode'),
+    TASKCONTINUUM_AGENT_HOST_DISCOVERY: join(runtime, 'no-agent-hosts'),
   })
   await launch()
 })
@@ -195,4 +196,48 @@ test('guides an EMU user through browser creation and terminal commands without 
   await expect(publishing.getByRole('heading', { name: 'Repository is on GitHub' })).toBeVisible()
   await publishing.getByRole('button', { name: 'Done' }).click()
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('No tasks in this workspace')
+})
+
+test('creates tasks from the quick form and a reviewed agent draft without a session or Git publication', async () => {
+  test.setTimeout(90_000)
+  await page.getByRole('button', { name: 'Create task repository', exact: true }).click()
+  await chooseParent()
+  await page.getByRole('textbox', { name: 'Repository name' }).fill('task-notes')
+  await page.getByRole('button', { name: 'Create repository', exact: true }).click()
+  await page.getByRole('button', { name: 'Keep local for now' }).click()
+  const root = join(parent, 'task-notes')
+  const initialHead = await git(root, 'rev-parse', 'HEAD')
+  await page.getByRole('button', { name: 'Create first task', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Create task', exact: true })
+  await dialog.getByRole('textbox', { name: 'Task title', exact: true }).fill('Implement sign-in')
+  await dialog.getByRole('textbox', { name: 'Description (optional)' }).fill('Support the managed account flow.')
+  await dialog.getByRole('button', { name: 'Create task', exact: true }).click()
+  await expect(page.getByRole('heading', { level: 1, name: 'Implement sign-in' })).toBeVisible()
+  expect((await page.evaluate(() => window.workspace!.getState())).current?.tasks.map((task) => task.id)).toEqual(['T-0001'])
+  const folder = (await readdir(join(root, 'tasks'))).find((name) => name.startsWith('T-0001-'))!
+  const task = JSON.parse(await readFile(join(root, 'tasks', folder, 'task.json'), 'utf8'))
+  expect(task.status).toBe('backlog')
+  expect(await readFile(join(root, 'tasks', folder, 'RequirementAnalysis.md'), 'utf8')).toContain('Support the managed account flow.')
+  expect(await git(root, 'rev-parse', 'HEAD')).toBe(initialHead)
+  expect(await git(root, 'remote')).toBe('')
+
+  await page.getByRole('button', { name: 'Create task with agent', exact: true }).click()
+  const planning = page.getByRole('region', { name: 'Task creation', exact: true })
+  await expect(planning.getByText(/No supported local Agent Host is available/)).toBeVisible()
+  await expect(dialog).not.toBeVisible()
+  const copied: string[] = await app.evaluate(() => Reflect.get(globalThis, 'onboardingCopiedCommands'))
+  expect(copied).toEqual([])
+  expect((await page.evaluate(() => window.workspace!.getState())).current?.tasks).toHaveLength(1)
+  await planning.getByRole('button', { name: 'Review agent draft' }).click()
+  await dialog.getByRole('textbox', { name: 'Agent task draft (JSON)' }).fill(JSON.stringify({
+    title: 'Document sign-in', description: 'Explain managed account login.', parentId: 'T-0001', type: 'doc',
+  }))
+  await dialog.getByRole('button', { name: 'Review draft' }).click()
+  await expect(dialog.getByRole('textbox', { name: 'Task title', exact: true })).toHaveValue('Document sign-in')
+  expect((await page.evaluate(() => window.workspace!.getState())).current?.tasks).toHaveLength(1)
+  await dialog.getByRole('button', { name: 'Create task', exact: true }).click()
+  await expect(page.getByRole('heading', { level: 1, name: 'Document sign-in' })).toBeVisible()
+  expect((await page.evaluate(() => window.workspace!.getState())).current?.tasks).toHaveLength(2)
+  expect(await git(root, 'rev-parse', 'HEAD')).toBe(initialHead)
+  expect(await git(root, 'remote')).toBe('')
 })

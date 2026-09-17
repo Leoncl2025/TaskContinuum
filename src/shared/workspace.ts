@@ -1,6 +1,7 @@
 import type { TaskRecord } from './tasks'
 import type { SessionLinksSnapshot, UpdateSessionLink } from './sessionBindings'
 import type { Issue } from './taskDocuments/common'
+import type { CreateWorkspaceTaskRequest, CreateWorkspaceTaskResult, TaskAgentInstructionsRequest, WorkspaceTaskCreationContext } from './taskCreation'
 
 export interface WorkspaceDescriptor {
   id: string
@@ -59,6 +60,9 @@ export interface WorkspaceBridge {
   openFolder(): Promise<WorkspaceState | null>
   chooseParentFolder(): Promise<string | null>
   createRepository(request: CreateWorkspaceRepositoryRequest): Promise<WorkspaceState>
+  getTaskCreationContext(workspaceId: string): Promise<WorkspaceTaskCreationContext>
+  createTask(request: CreateWorkspaceTaskRequest): Promise<CreateWorkspaceTaskResult>
+  getTaskAgentInstructions(request: TaskAgentInstructionsRequest): Promise<string>
   getRepositoryStatus(workspaceId: string): Promise<WorkspaceRepositoryStatus>
   openRepositoryCreation(workspaceId: string): Promise<void>
   getRepositoryPushPlan(request: RepositoryPushRequest): Promise<WorkspaceRepositoryPushPlan>

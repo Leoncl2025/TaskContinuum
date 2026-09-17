@@ -82,7 +82,7 @@ test('opens a real folder through the restricted native bridge and reads task do
   await expect(page.getByRole('table')).toContainText('Show this on-disk requirement.')
   expect(await readFile(join(firstRoot, 'tasks', 'T-0002-shared-id', 'Checklist.md'), 'utf8')).toBe(original)
   const keys = await page.evaluate(() => Object.keys(window.workspace!).sort())
-  expect(keys).toEqual(['chooseParentFolder', 'closeWorkspace', 'createRepository', 'getRepositoryPushPlan', 'getRepositoryStatus', 'getSessionLinks', 'getState', 'openFolder', 'openRecent', 'openRepositoryCreation', 'refresh', 'updateSessionLink', 'verifyRepositoryPublication'])
+  expect(keys).toEqual(['chooseParentFolder', 'closeWorkspace', 'createRepository', 'createTask', 'getRepositoryPushPlan', 'getRepositoryStatus', 'getSessionLinks', 'getState', 'getTaskAgentInstructions', 'getTaskCreationContext', 'openFolder', 'openRecent', 'openRepositoryCreation', 'refresh', 'updateSessionLink', 'verifyRepositoryPublication'])
   await page.screenshot({ path: resolve('artifacts/workspace-documents.png') })
 })
 

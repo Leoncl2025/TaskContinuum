@@ -21,6 +21,9 @@ const mocks = vi.hoisted(() => {
       refresh: vi.fn(async () => state),
       closeWorkspace: vi.fn(async () => ({ current: null, recent: state.recent })),
       createRepository: vi.fn(async () => state),
+      getTaskCreationContext: vi.fn(async () => ({ workspaceId: state.current!.id })),
+      createTask: vi.fn(async () => ({ state, taskId: 'T-0001' })),
+      getTaskAgentInstructions: vi.fn(async () => 'Task creation instructions'),
       getRepositoryStatus: vi.fn(async () => ({ workspaceId: state.current!.id })),
       getRepositoryCreationUrl: vi.fn(async () => 'https://github.com/new?name=tasks'),
       getRepositoryPushPlan: vi.fn(async () => ({ commands: 'git push' })),
@@ -32,7 +35,7 @@ const mocks = vi.hoisted(() => {
 })
 
 vi.mock('electron', () => ({
-  app: { getPath: () => 'Q:\\profile' },
+  app: { getPath: () => 'Q:\\profile', getAppPath: () => 'Q:\\TaskContinuum' },
   ipcMain: { handle: (name: string, handler: (event: unknown, value?: unknown) => Promise<unknown>) => { mocks.handlers.set(name, handler) } },
   dialog: { showOpenDialog: mocks.choose },
   shell: { openExternal: mocks.openExternal },
@@ -104,10 +107,25 @@ describe('workspace repository IPC boundary', () => {
   it('rejects untrusted windows before any repository, chooser or authorization operation', async () => {
     const { invoke, requireWindow, authorize } = setup()
     requireWindow.mockImplementation(() => { throw new Error('Untrusted window') })
-    for (const channel of ['choose-parent-folder', 'create-repository', 'repository-status', 'open-repository-creation', 'repository-push-plan', 'verify-repository-publication', 'close', 'session-links', 'update-session-link']) await expect(invoke(channel, {})).rejects.toThrow('Untrusted window')
+    for (const channel of ['choose-parent-folder', 'create-repository', 'task-creation-context', 'create-task', 'task-agent-instructions', 'repository-status', 'open-repository-creation', 'repository-push-plan', 'verify-repository-publication', 'close', 'session-links', 'update-session-link']) await expect(invoke(channel, {})).rejects.toThrow('Untrusted window')
     expect(mocks.choose).not.toHaveBeenCalled()
     expect(mocks.openExternal).not.toHaveBeenCalled()
     for (const method of Object.values(mocks.store)) expect(method).not.toHaveBeenCalled()
+    expect(authorize).not.toHaveBeenCalled()
+  })
+
+  it('forwards task creation and agent handoff without opening a browser or authorizing a session', async () => {
+    const { invoke, authorize } = setup()
+    const workspaceId = mocks.state.current!.id
+    const create = { workspaceId, draft: { title: 'First task' } }
+    const agent = { workspaceId, goal: 'Plan sign-in', parentId: null }
+    await invoke('task-creation-context', workspaceId)
+    await invoke('create-task', create)
+    await invoke('task-agent-instructions', agent)
+    expect(mocks.store.getTaskCreationContext).toHaveBeenCalledExactlyOnceWith(workspaceId)
+    expect(mocks.store.createTask).toHaveBeenCalledExactlyOnceWith(create)
+    expect(mocks.store.getTaskAgentInstructions).toHaveBeenCalledExactlyOnceWith(agent, 'Q:\\TaskContinuum\\scripts\\task-documents.mjs')
+    expect(mocks.openExternal).not.toHaveBeenCalled()
     expect(authorize).not.toHaveBeenCalled()
   })
 

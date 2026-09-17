@@ -9,11 +9,13 @@ it('requires an explicit enrollment action and exposes immediate synchronization
   const { api, remote } = gitSyncUiFixture()
   window.remoteVSCode = remote
   render(<WorkspaceGitSyncControls />)
-  await screen.findByText(/disabled · 0 pending/)
-  expect(screen.getByText(/Synchronization follows the current branch's upstream/)).toBeInTheDocument()
+  expect(await screen.findByRole('status')).toHaveTextContent('Off')
+  expect(screen.getByText(/Trusted devices can access linked sessions/)).toHaveTextContent('Native approvals still apply; no automatic messages or new sessions.')
   expect(api.enable).not.toHaveBeenCalled()
-  fireEvent.click(screen.getByRole('button', { name: 'Enable automatic links' }))
-  await screen.findByRole('button', { name: 'Pause automatic links' })
+  const enable = screen.getByRole('button', { name: 'Enable automatic links' })
+  expect(enable).toHaveClass('primary-button')
+  fireEvent.click(enable)
+  expect(await screen.findByRole('button', { name: 'Pause automatic links' })).toHaveClass('secondary-button')
   expect(api.enable).toHaveBeenCalledOnce()
   fireEvent.click(screen.getByRole('button', { name: 'Sync now' }))
   await waitFor(() => expect(api.syncNow).toHaveBeenCalledOnce())
@@ -27,7 +29,7 @@ it('shows provisional and conflict states on notification without waiting for po
   const fixture = gitSyncUiFixture()
   window.remoteVSCode = fixture.remote
   render(<WorkspaceGitSyncControls />)
-  await screen.findByText(/disabled · 0 pending/)
+  expect(await screen.findByRole('status')).toHaveTextContent('Off')
   fixture.setStatus({
     enabled: true, intervalMs: 15000, state: 'error', pending: 1, revision: 'a'.repeat(64),
     provisionalTasks: ['T-0009'], conflicts: ['T-0010'], peers: [], error: 'Push rejected. Pending changes retained.',

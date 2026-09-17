@@ -16,6 +16,7 @@ node Q:\src\Projects\TaskContinuum\scripts\task-documents.mjs check --root .
 node Q:\src\Projects\TaskContinuum\scripts\task-documents.mjs reindex --root .
 node Q:\src\Projects\TaskContinuum\scripts\task-documents.mjs schema:gen --root .
 node Q:\src\Projects\TaskContinuum\scripts\task-documents.mjs schema:gen --check --root .
+node Q:\src\Projects\TaskContinuum\scripts\task-documents.mjs create --title "Implement sign-in" --root .
 ```
 
 `--root` defaults to the caller's current directory, never the product directory.
@@ -40,9 +41,69 @@ extensionless imports and parameter properties. Neither a build nor `tsx` is req
   still produce a nonzero exit status. Never advances cursors or changes tasks.
 - `schema:gen`: writes four deterministic files in `.agentdesk/schema`.
   `--check` is read-only and fails on drift or missing files; CRLF/LF is accepted.
+- `create`: creates one complete canonical task directory using the same
+  exclusive creation gate as the UI. It never updates another task or invokes Git.
 
 Errors produce exit status 1; warnings and informational issues do not.
 No command invokes Git, AgentDesk, a server, Electron, or a sibling checkout.
+
+## Task creation
+
+In the desktop app, **Create with agent** opens a local native Agent Host
+conversation in the right-hand chat panel, not a popup, even when the selected
+workspace has no tasks. The first message includes these CLI instructions;
+choose a model and send your requirements
+directly, without copying a prompt to another application. Reopening verifies
+the same privately recorded local session with its original Host before resuming
+it. Use **Refresh created tasks** after
+the agent finishes writing files. A running compatible Host and signed-in Copilot
+provider are required; native tool approvals remain on that Host.
+
+If the Host explicitly reports that the original session was deleted, choose
+**Create local agent session** to start a new conversation. **Reconnect Agent
+Host** and **Retry loading models** also check the original session while its
+chat is open. Temporary connection failures or an unverified missing session
+never trigger replacement or message replay.
+
+Only a title is required. Optional arguments are `--description`, `--parent`,
+`--owner`, `--level`, `--type`, `--priority`, `--slug`, repeatable `--acceptance`
+and `--actor`. The configured workspace supplies valid owners and hierarchy.
+Task IDs are allocated by the creator, not supplied by the caller.
+
+From the Task Continuum source checkout:
+
+```powershell
+npm run task-documents -- create --root "Q:\Tasks\my-workspace" --title "Implement sign-in" --description "Support the managed account flow" --acceptance "A managed user can sign in" --actor copilot
+npm run task-documents -- create --root "Q:\Tasks\my-workspace" --draft ".agentdesk\cache\new-task-draft.json" --actor copilot
+```
+
+Draft files must be inside the selected workspace, bounded JSON objects, and
+must not be combined with conflicting field overrides. A draft uses this shape:
+
+```json
+{
+  "title": "Implement sign-in",
+  "description": "Support the managed account flow",
+  "parentId": null,
+  "type": "feature",
+  "priority": "P2",
+  "acceptance": ["A managed user can sign in"]
+}
+```
+
+Optional `owner`, `level` and `slug` are also accepted. Do not include `id`,
+`status`, derived fields or arbitrary paths. The CLI returns JSON containing the
+allocated `taskId` and `directory`; do not retry a successful operation blindly.
+For UI review, choose **Review agent draft** in the task-creation chat panel and
+paste the same object in the review dialog. Reviewing a draft does not create
+any files until the user confirms **Create task**.
+
+Creation writes `task.json`, `skill.md`, requirement/plan/checklist/reference
+documents and design/reference directories. It respects existing and archived
+IDs, configured parents and members, and uses a workspace-scoped exclusive lock.
+A busy or stale lock is an explicit error, not permission to delete another
+process's state. Existing task directories and parent documents are never
+overwritten. No index, Git commit, push, enrollment or session action is implied.
 
 ## Runtime and compatibility
 
@@ -69,8 +130,10 @@ It requires the expected content hash, applies an explicit field allow-list,
 validates a full workspace overlay, and rechecks the hash before replacing only
 the owning `task.json`. Existing field order, unknown fields, history and EOL are
 preserved; changes append history. Source cursors, identity and derived fields
-cannot be patched. Future acceptance/write endpoints must use this boundary;
-the application currently has no canonical task-document write IPC endpoint.
+cannot be patched. Future field-edit/acceptance endpoints must use this boundary.
+The separate `createTaskDocuments` gate is shared by the restricted task-creation
+IPC and CLI; it only publishes a complete new task directory, not arbitrary
+field edits. Agent drafts use the same creation schema as the form.
 Front matter uses the locked safe YAML engine in `@11ty/gray-matter`; JavaScript
 front matter and YAML JavaScript tags are rejected without execution.
 The parser's process-global content cache is disabled, so successive document

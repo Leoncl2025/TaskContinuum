@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CreateWorkspaceRepositoryRequest, WorkspaceState } from '../shared/workspace'
+import type { CreateWorkspaceTaskRequest } from '../shared/taskCreation'
 
 export function useWorkspaces() {
   const bridge = window.workspace
@@ -22,14 +23,15 @@ export function useWorkspaces() {
     return () => { mounted.current = false }
   }, [bridge])
 
-  async function change<Result extends WorkspaceState | null>(action: () => Promise<Result>): Promise<Result> {
+  async function change<Result>(action: () => Promise<Result>, snapshot: (result: Result) => WorkspaceState | null): Promise<Result> {
     if (pending.current) throw new Error('Another workspace operation is still in progress.')
     pending.current = true
     setBusy(true)
     setError(null)
     try {
       const value = await action()
-      if (mounted.current && value) { setState(value); setError(value.warning ?? null) }
+      const next = snapshot(value)
+      if (mounted.current && next) { setState(next); setError(next.warning ?? null) }
       return value
     } finally {
       pending.current = false
@@ -38,7 +40,7 @@ export function useWorkspaces() {
   }
 
   async function run(action: () => Promise<WorkspaceState | null>): Promise<void> {
-    try { await change(action) } catch (failure) {
+    try { await change(action, (value) => value) } catch (failure) {
       if (mounted.current) setError(failure instanceof Error ? failure.message : 'The workspace could not be opened.')
     }
   }
@@ -54,6 +56,8 @@ export function useWorkspaces() {
     openRecent: (id: string) => run(() => nativeBridge().openRecent(id)),
     refresh: () => run(() => nativeBridge().refresh()),
     closeWorkspace: () => run(() => nativeBridge().closeWorkspace()),
-    createRepository: (request: CreateWorkspaceRepositoryRequest) => change(() => nativeBridge().createRepository(request)),
+    createRepository: (request: CreateWorkspaceRepositoryRequest) => change(() => nativeBridge().createRepository(request), (value) => value),
+    createTask: (request: CreateWorkspaceTaskRequest) => change(() => nativeBridge().createTask(request), (value) => value.state),
+    refreshCreatedTasks: () => change(() => nativeBridge().refresh(), (value) => value),
   }
 }

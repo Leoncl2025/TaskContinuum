@@ -36,19 +36,26 @@ export function WorkspaceGitSyncControls() {
   }
 
   if (!api) return null
-  return <section className="remote-device-controls" aria-label="Workspace Git synchronization">
-    <h3>Automatic workspace links</h3>
-    <p className="muted">Trusted automatically linked devices can read and send to linked sessions, associate sessions with tasks, and explicitly create new sessions in this shared workspace. No separate per-device enable step is needed. This does not grant arbitrary operating-system permissions; native session approvals still apply. Requests are never sent and sessions are never created automatically.</p>
-    <p className="muted">Pull/rebase every 15 seconds. Configuration changes publish immediately; SSH binding notifications apply provisionally until Git catches up.</p>
-    <p className="muted">Synchronization follows the current branch's upstream, not a permanently bound branch. Without an upstream, Git sync pauses and local configuration changes stay pending.</p>
-    <div className="remote-vscode-actions">
-      <button type="button" className="secondary-button" disabled={busy} onClick={() => { void run(() => status?.enabled ? api.disable() : api.enable()) }}>
-        <Icon name={status?.enabled ? 'debug-pause' : 'sync'} />{status?.enabled ? 'Pause automatic links' : 'Enable automatic links'}
-      </button>
-      {status?.enabled && <button type="button" className="secondary-button" disabled={busy} onClick={() => { void run(() => api.syncNow()) }}>Sync now</button>}
-      {status?.settingsFile && <button type="button" className="secondary-button" disabled={busy} onClick={() => { void run(() => api.openSettings()) }}>Edit local configuration</button>}
+  const enabled = status?.enabled === true
+  return <section className="remote-device-controls workspace-links-controls" aria-label="Workspace Git synchronization">
+    <div className="workspace-links-header">
+      <h3>Automatic workspace links</h3>
+      {status && <span role="status" className={`workspace-links-status${enabled ? ' is-enabled' : ''}`}>
+        <span className="workspace-links-status-dot" aria-hidden="true" />
+        <span>{enabled ? (status.state === 'idle' ? 'On' : status.state) : 'Off'}</span>
+      </span>}
     </div>
-    {status && <p role="status">{status.state} · {status.pending} pending{status.lastSyncedAt ? ` · Last synced ${new Date(status.lastSyncedAt).toLocaleTimeString()}` : ''}</p>}
+    <p className="muted workspace-links-description">Trusted devices can access linked sessions. Native approvals still apply; no automatic messages or new sessions.</p>
+    <div className="remote-vscode-actions workspace-links-actions">
+      <button type="button" className={enabled ? 'secondary-button' : 'primary-button workspace-links-enable'} disabled={busy} onClick={() => { void run(() => enabled ? api.disable() : api.enable()) }}>
+        <Icon name={enabled ? 'debug-pause' : 'sync'} /><span>{enabled ? 'Pause automatic links' : 'Enable automatic links'}</span>
+      </button>
+      {enabled && <button type="button" className="secondary-button" disabled={busy} onClick={() => { void run(() => api.syncNow()) }}><Icon name="sync" />Sync now</button>}
+      {status?.settingsFile && <button type="button" className="secondary-button" disabled={busy} onClick={() => { void run(() => api.openSettings()) }}><Icon name="settings-gear" />Edit local configuration</button>}
+    </div>
+    {status && (status.pending > 0 || status.lastSyncedAt) && <p role="status" className="workspace-links-meta">
+      {status.pending > 0 && `${status.pending} pending`}{status.pending > 0 && status.lastSyncedAt && ' · '}{status.lastSyncedAt && `Last synced ${new Date(status.lastSyncedAt).toLocaleTimeString()}`}
+    </p>}
     {status?.enabled && status.settings && <div className="form-field">
       <label><input type="checkbox" checked={status.settings.autoLink} disabled={busy} onChange={(event) => { void run(() => api.setSetting('autoLink', event.target.checked, status.revision)) }} />Automatically link enrolled peers</label>
       <label><input type="checkbox" checked={status.settings.tunnelEnabled} disabled={busy} onChange={(event) => { void run(() => api.setSetting('tunnelEnabled', event.target.checked, status.revision)) }} />Enable this workspace's SSH connections</label>

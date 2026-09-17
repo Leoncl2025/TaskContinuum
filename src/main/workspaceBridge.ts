@@ -1,5 +1,5 @@
 import { app, dialog, ipcMain, shell } from 'electron'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import type { WorkspaceState } from '../shared/workspace'
 import { WorkspaceStore } from './workspaceStore'
@@ -31,6 +31,9 @@ export function registerWorkspaceBridge(requireWindow: (event: IpcMainInvokeEven
     return chosen.canceled ? null : chosen.filePaths[0] ?? null
   })
   handle('create-repository', async (_window, request) => authorize(await store.createRepository(request)))
+  handle('task-creation-context', async (_window, id) => store.getTaskCreationContext(id))
+  handle('create-task', async (_window, request) => store.createTask(request))
+  handle('task-agent-instructions', async (_window, request) => store.getTaskAgentInstructions(request, join(app.getAppPath(), 'scripts', 'task-documents.mjs')))
   handle('repository-status', async (_window, id) => store.getRepositoryStatus(id))
   handle('open-repository-creation', async (_window, id) => { await shell.openExternal(await store.getRepositoryCreationUrl(id)) })
   handle('repository-push-plan', async (_window, request) => store.getRepositoryPushPlan(request))

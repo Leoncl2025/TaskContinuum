@@ -11,14 +11,17 @@ import { canonicalPolicyRoot, locallyLinkedAgentHostSessions } from './linkedSes
 import { readRepositorySessionLinks } from './repositorySessionLinks'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 import { AgentHostCreationClient } from './agentHostCreationClient'
+import { LocalAgentHostCreationService } from './localAgentHostCreationService'
 
 export class AgentHostManager {
   private readonly remote = new Map<string, AgentHostConnection>()
   private consentWrite: Promise<void> = Promise.resolve()
   readonly creations: AgentHostCreationClient
+  readonly localCreations: LocalAgentHostCreationService
 
   constructor(private readonly directory: string, readonly local: AgentHostRegistry, private readonly devices: VSCodeDeviceClient, private readonly owner: () => Promise<SessionOwner>) {
     this.creations = new AgentHostCreationClient(directory, devices)
+    this.localCreations = new LocalAgentHostCreationService(directory, local)
   }
 
   private async consents(): Promise<string[]> {
@@ -57,9 +60,10 @@ export class AgentHostManager {
 
   async authorize(root: string, value: AgentHostTarget): Promise<void> {
     const target = agentHostTargetSchema.parse(value)
+    const owner = await this.owner()
+    if (target.owner.clientId === owner.clientId && await this.localCreations.authorizes(root, target)) return
     const { document } = await readRepositorySessionLinks(root)
     if (!Object.values(document.bindings).some((link) => link.provider === 'agent-host' && agentHostKey(link) === agentHostKey(target))) throw new Error('The task no longer links this exact Agent Host chat.')
-    const owner = await this.owner()
     if (target.owner.clientId === owner.clientId && !(await locallyLinkedAgentHostSessions(this.directory, root, owner)).some((link) => agentHostKey(link) === agentHostKey(target))) throw new Error('A Git-only edit cannot grant local Agent Host access. Confirm the link on its owner.')
   }
 
@@ -81,5 +85,5 @@ export class AgentHostManager {
     return connection
   }
 
-  async close(): Promise<void> { await this.creations.close(); await Promise.all([...this.remote.values()].map((connection) => connection.close())); await this.local.close(); await this.consentWrite; this.remote.clear() }
+  async close(): Promise<void> { await this.localCreations.close(); await this.creations.close(); await Promise.all([...this.remote.values()].map((connection) => connection.close())); await this.local.close(); await this.consentWrite; this.remote.clear() }
 }

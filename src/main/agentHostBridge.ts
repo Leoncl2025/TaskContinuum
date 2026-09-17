@@ -8,6 +8,7 @@ import { agentHostModelSelectionSchema, agentHostTargetSchema } from './agentHos
 import type { AgentHostManager } from './agentHostManager'
 import { readClientIdentity } from './clientIdentity'
 import { agentHostCreateRequestSchema, creationTaskIdSchema } from './agentHostCreationProtocol'
+import { localAgentHostCreateRequestSchema } from './localAgentHostCreationService'
 
 export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>, manager: AgentHostManager) {
   const watches = new Map<string, { window: BrowserWindow; close(): void }>()
@@ -38,6 +39,34 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     const taskId = creationTaskIdSchema.parse(value)
     await current(event, window, root)
     const result = await manager.creations.workers(root, taskId)
+    await current(event, window, root)
+    return result
+  })
+  for (const [channel, method] of [['local-creation-hosts', 'hosts'], ['local-creations', 'list']] as const) {
+    ipcMain.handle(`agent-host:${channel}`, async (event) => {
+      const window = requireWindow(event)
+      const root = await currentRoot()
+      await current(event, window, root)
+      const result = await manager.localCreations[method](root, () => current(event, window, root))
+      await current(event, window, root)
+      return result
+    })
+  }
+  ipcMain.handle('agent-host:create-local', async (event, value: unknown) => {
+    const window = requireWindow(event)
+    const root = await currentRoot()
+    const request = localAgentHostCreateRequestSchema.parse(value)
+    await current(event, window, root)
+    const result = await manager.localCreations.create(root, request, () => current(event, window, root))
+    await current(event, window, root)
+    return result
+  })
+  ipcMain.handle('agent-host:local-creation-status', async (event, value: unknown) => {
+    const window = requireWindow(event)
+    const root = await currentRoot()
+    const operationId = z.uuid().parse(value)
+    await current(event, window, root)
+    const result = await manager.localCreations.status(root, operationId, () => current(event, window, root))
     await current(event, window, root)
     return result
   })
