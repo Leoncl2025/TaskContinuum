@@ -35,23 +35,28 @@ describe('native-only preload boundary', () => {
     expect(ipc.invoke).not.toHaveBeenCalled()
   })
 
-  it('forwards only explicit workspace creation, status, publication and close operations', async () => {
+  it('forwards only explicit creation, browser, terminal planning and read-only verification operations', async () => {
     const bridge = window.workspace
     if (!bridge) throw new Error('Workspace preload API missing.')
     const create = { parentPath: 'Q:\\parent', name: 'real-tasks' }
-    const publish = { workspaceId: 'a'.repeat(64), private: true }
+    const push = { workspaceId: 'a'.repeat(64), remoteUrl: 'https://github.com/fixture_emu/real-tasks.git' }
     await bridge.chooseParentFolder()
     await bridge.createRepository(create)
-    await bridge.getRepositoryStatus(publish.workspaceId)
-    await bridge.publishRepository(publish)
+    await bridge.getRepositoryStatus(push.workspaceId)
+    await bridge.openRepositoryCreation(push.workspaceId)
+    await bridge.getRepositoryPushPlan(push)
+    await bridge.verifyRepositoryPublication(push)
     await bridge.closeWorkspace()
     expect(ipc.invoke.mock.calls).toEqual([
       ['workspace:choose-parent-folder'],
       ['workspace:create-repository', create],
-      ['workspace:repository-status', publish.workspaceId],
-      ['workspace:publish-repository', publish],
+      ['workspace:repository-status', push.workspaceId],
+      ['workspace:open-repository-creation', push.workspaceId],
+      ['workspace:repository-push-plan', push],
+      ['workspace:verify-repository-publication', push],
       ['workspace:close'],
     ])
+    expect(bridge).not.toHaveProperty('publishRepository')
   })
 
   it('forwards explicit native send and cancel with the original target and model', async () => {

@@ -1,4 +1,4 @@
-import { app, dialog, ipcMain } from 'electron'
+import { app, dialog, ipcMain, shell } from 'electron'
 import { dirname } from 'node:path'
 import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import type { WorkspaceState } from '../shared/workspace'
@@ -32,7 +32,9 @@ export function registerWorkspaceBridge(requireWindow: (event: IpcMainInvokeEven
   })
   handle('create-repository', async (_window, request) => authorize(await store.createRepository(request)))
   handle('repository-status', async (_window, id) => store.getRepositoryStatus(id))
-  handle('publish-repository', async (_window, request) => store.publishRepository(request))
+  handle('open-repository-creation', async (_window, id) => { await shell.openExternal(await store.getRepositoryCreationUrl(id)) })
+  handle('repository-push-plan', async (_window, request) => store.getRepositoryPushPlan(request))
+  handle('verify-repository-publication', async (_window, request) => store.verifyRepositoryPublication(request))
   handle('open-recent', async (_window, id) => authorize(await store.openRecent(id)))
   handle('refresh', async () => authorize(await store.refresh()))
   handle('close', () => store.closeWorkspace())

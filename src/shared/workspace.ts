@@ -29,9 +29,21 @@ export interface CreateWorkspaceRepositoryRequest {
   name: string
 }
 
-export interface PublishWorkspaceRepositoryRequest {
+export interface RepositoryPushRequest {
   workspaceId: string
-  private: boolean
+  remoteUrl: string
+}
+
+export type RepositoryCredentialHelper = 'gcm' | 'configured' | 'none'
+
+export interface WorkspaceRepositoryPushPlan {
+  workspaceId: string
+  branch: string
+  head: string
+  remoteUrl: string
+  repositoryUrl: string
+  shell: 'powershell' | 'posix'
+  commands: string
 }
 
 export interface WorkspaceRepositoryStatus {
@@ -39,8 +51,7 @@ export interface WorkspaceRepositoryStatus {
   name: string
   branch: string | null
   remoteUrl: string | null
-  published: boolean
-  github: { installed: boolean; authenticated: boolean; login?: string }
+  credentialHelper: RepositoryCredentialHelper
 }
 
 export interface WorkspaceBridge {
@@ -49,7 +60,9 @@ export interface WorkspaceBridge {
   chooseParentFolder(): Promise<string | null>
   createRepository(request: CreateWorkspaceRepositoryRequest): Promise<WorkspaceState>
   getRepositoryStatus(workspaceId: string): Promise<WorkspaceRepositoryStatus>
-  publishRepository(request: PublishWorkspaceRepositoryRequest): Promise<{ url: string }>
+  openRepositoryCreation(workspaceId: string): Promise<void>
+  getRepositoryPushPlan(request: RepositoryPushRequest): Promise<WorkspaceRepositoryPushPlan>
+  verifyRepositoryPublication(request: RepositoryPushRequest): Promise<{ url: string }>
   openRecent(id: string): Promise<WorkspaceState>
   refresh(): Promise<WorkspaceState>
   closeWorkspace(): Promise<WorkspaceState>

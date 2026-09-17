@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => {
     state,
     handlers: new Map<string, (event: unknown, value?: unknown) => Promise<unknown>>(),
     choose: vi.fn(async () => ({ canceled: false, filePaths: ['Q:\\chosen-parent'] })),
+    openExternal: vi.fn<(url: string) => Promise<void>>(async () => {}),
     constructor: vi.fn(),
     store: {
       getState: vi.fn(async () => state),
@@ -21,7 +22,9 @@ const mocks = vi.hoisted(() => {
       closeWorkspace: vi.fn(async () => ({ current: null, recent: state.recent })),
       createRepository: vi.fn(async () => state),
       getRepositoryStatus: vi.fn(async () => ({ workspaceId: state.current!.id })),
-      publishRepository: vi.fn(async () => ({ url: 'https://github.com/owner/tasks' })),
+      getRepositoryCreationUrl: vi.fn(async () => 'https://github.com/new?name=tasks'),
+      getRepositoryPushPlan: vi.fn(async () => ({ commands: 'git push' })),
+      verifyRepositoryPublication: vi.fn(async () => ({ url: 'https://github.com/fixture_emu/tasks' })),
       getSessionLinks: vi.fn(async () => ({ document: {}, revision: null })),
       updateSessionLink: vi.fn(async () => ({ document: {}, revision: null })),
     },
@@ -32,6 +35,7 @@ vi.mock('electron', () => ({
   app: { getPath: () => 'Q:\\profile' },
   ipcMain: { handle: (name: string, handler: (event: unknown, value?: unknown) => Promise<unknown>) => { mocks.handlers.set(name, handler) } },
   dialog: { showOpenDialog: mocks.choose },
+  shell: { openExternal: mocks.openExternal },
 }))
 vi.mock('../src/main/workspaceStore', () => ({
   WorkspaceStore: class {
@@ -74,17 +78,23 @@ describe('workspace repository IPC boundary', () => {
     expect(await invoke('choose-parent-folder')).toBeNull()
   })
 
-  it('passes exact creation/status/publish requests to the store and authorizes newly opened roots', async () => {
+  it('uses only the server-generated browser URL and forwards exact terminal planning and verification requests', async () => {
     const { invoke, authorize, verify } = setup()
     const create = { parentPath: 'Q:\\chosen-parent', name: 'tasks' }
-    const publish = { workspaceId: mocks.state.current!.id, private: false }
+    const push = { workspaceId: mocks.state.current!.id, remoteUrl: 'https://github.com/fixture_emu/tasks.git' }
     expect(await invoke('create-repository', create)).toBe(mocks.state)
     expect(mocks.store.createRepository).toHaveBeenCalledExactlyOnceWith(create)
     expect(authorize).toHaveBeenCalledExactlyOnceWith(mocks.state.current!.root)
-    await invoke('repository-status', publish.workspaceId)
-    await invoke('publish-repository', publish)
-    expect(mocks.store.getRepositoryStatus).toHaveBeenCalledExactlyOnceWith(publish.workspaceId)
-    expect(mocks.store.publishRepository).toHaveBeenCalledExactlyOnceWith(publish)
+    await invoke('repository-status', push.workspaceId)
+    await invoke('open-repository-creation', push.workspaceId)
+    await invoke('repository-push-plan', push)
+    await invoke('verify-repository-publication', push)
+    expect(mocks.store.getRepositoryStatus).toHaveBeenCalledExactlyOnceWith(push.workspaceId)
+    expect(mocks.store.getRepositoryCreationUrl).toHaveBeenCalledExactlyOnceWith(push.workspaceId)
+    expect(mocks.openExternal).toHaveBeenCalledExactlyOnceWith('https://github.com/new?name=tasks')
+    expect(mocks.store.getRepositoryPushPlan).toHaveBeenCalledExactlyOnceWith(push)
+    expect(mocks.store.verifyRepositoryPublication).toHaveBeenCalledExactlyOnceWith(push)
+    expect(mocks.handlers.has('workspace:publish-repository')).toBe(false)
     expect(mocks.constructor.mock.calls[0]?.[2]).toBe(verify)
     expect(mocks.handlers.has('workspace:demo')).toBe(false)
     expect(await invoke('close')).toEqual({ current: null, recent: [] })
@@ -94,10 +104,20 @@ describe('workspace repository IPC boundary', () => {
   it('rejects untrusted windows before any repository, chooser or authorization operation', async () => {
     const { invoke, requireWindow, authorize } = setup()
     requireWindow.mockImplementation(() => { throw new Error('Untrusted window') })
-    for (const channel of ['choose-parent-folder', 'create-repository', 'repository-status', 'publish-repository', 'close', 'session-links', 'update-session-link']) await expect(invoke(channel, {})).rejects.toThrow('Untrusted window')
+    for (const channel of ['choose-parent-folder', 'create-repository', 'repository-status', 'open-repository-creation', 'repository-push-plan', 'verify-repository-publication', 'close', 'session-links', 'update-session-link']) await expect(invoke(channel, {})).rejects.toThrow('Untrusted window')
     expect(mocks.choose).not.toHaveBeenCalled()
+    expect(mocks.openExternal).not.toHaveBeenCalled()
     for (const method of Object.values(mocks.store)) expect(method).not.toHaveBeenCalled()
     expect(authorize).not.toHaveBeenCalled()
+  })
+
+  it('does not open a browser for rejected workspace IDs and surfaces native browser errors', async () => {
+    const { invoke } = setup()
+    mocks.store.getRepositoryCreationUrl.mockRejectedValueOnce(new Error('The active workspace changed.'))
+    await expect(invoke('open-repository-creation', 'https://untrusted.invalid')).rejects.toThrow('active workspace changed')
+    expect(mocks.openExternal).not.toHaveBeenCalled()
+    mocks.openExternal.mockRejectedValueOnce(new Error('No browser is available.'))
+    await expect(invoke('open-repository-creation', mocks.state.current!.id)).rejects.toThrow('No browser')
   })
 
   it('preserves existing authorization before session-link access and surfaces native save failures', async () => {

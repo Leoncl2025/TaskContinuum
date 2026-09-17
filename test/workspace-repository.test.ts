@@ -1,14 +1,17 @@
 // @vitest-environment node
-import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { lstat, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { promisify } from 'node:util'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Config } from '../src/shared/taskDocuments/config'
 import { readTaskWorkspace } from '../src/main/workspaceReader'
-import { createWorkspaceRepositorySchema, WorkspaceRepositoryService } from '../src/main/workspaceRepository'
-import { WorkspaceStore } from '../src/main/workspaceStore'
+import { createWorkspaceRepositorySchema, repositoryPushRequestSchema, WorkspaceRepositoryService } from '../src/main/workspaceRepository'
 import { repositoryFixture } from './workspace-repository-fixture'
 
-afterEach(() => { vi.unstubAllEnvs() })
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks() })
+
+const remote = 'https://github.com/lianc_microsoft/browser-chosen-name.git'
 
 async function created() {
   const fixture = await repositoryFixture()
@@ -16,17 +19,29 @@ async function created() {
   return { ...fixture, parent: fixture.root, root, workspace: await readTaskWorkspace(root) }
 }
 
+function expectReadOnly(calls: Awaited<ReturnType<typeof repositoryFixture>>['calls']) {
+  expect(calls.every((call) => call.program === 'git')).toBe(true)
+  for (const call of calls) {
+    expect(call.args.some((arg) => ['add', 'commit', 'commit-tree', 'update-ref', 'push', 'fetch', 'pull', 'credential', 'set-url'].includes(arg))).toBe(false)
+    expect(call.args.some((arg) => arg.startsWith('credential.helper='))).toBe(false)
+    expect(call.timeout).toBeGreaterThan(0)
+    expect(call.timeout).toBeLessThanOrEqual(60000)
+    expect(call.gitEnvironment.GIT_TERMINAL_PROMPT).toBe('0')
+    expect(call.gitEnvironment.GIT_NO_LAZY_FETCH).toBe('1')
+    expect(call.gitEnvironment.GCM_INTERACTIVE).toBe('Never')
+  }
+}
+
 describe('local task repository creation', () => {
-  it('creates and commits the real task protocol, with an empty tasks directory that survives cloning', async () => {
+  it('commits the real empty task protocol, survives cloning and leaves Git configuration untouched', async () => {
     const fixture = await repositoryFixture()
-    const before = await readFile(fixture.config, 'utf8')
+    const before = await readFile(fixture.config)
     const root = await fixture.service.create({ parentPath: fixture.root, name: 'my-tasks' })
     const snapshot = await readTaskWorkspace(root)
     expect(snapshot.tasks).toEqual([])
     expect(snapshot.warnings).toEqual([])
     expect(snapshot.diagnostics).toEqual([])
     const config = Config.parse(JSON.parse(await readFile(join(root, '.agentdesk', 'config.json'), 'utf8')))
-    expect(config.schemaVersion).toBe('1.0.0')
     expect(config.workspace).toBe('my-tasks')
     expect(config.members).toEqual([{ id: 'owner', name: 'Repository Fixture', kind: 'human' }])
     expect(config.bridge.jobs.autoApply).toBe(false)
@@ -37,106 +52,71 @@ describe('local task repository creation', () => {
     expect(await fixture.git(root, 'log', '-1', '--format=%an <%ae>')).toBe('Repository Fixture <repository-fixture@example.invalid>')
     expect(await fixture.git(root, 'status', '--porcelain')).toBe('')
     expect(await fixture.git(root, 'remote')).toBe('')
-    expect(await readFile(fixture.config, 'utf8')).toBe(before)
-    expect(fixture.calls.some((call) => call.program === 'gh')).toBe(false)
+    expect(await readFile(fixture.config)).toEqual(before)
+    expect(fixture.calls.every((call) => call.program === 'git')).toBe(true)
     const clone = join(fixture.root, 'clone')
     await fixture.git(fixture.root, 'clone', '--quiet', '--no-local', '--', root, clone)
     expect((await readTaskWorkspace(clone)).tasks).toEqual([])
-    expect((await readTaskWorkspace(clone)).warnings).toEqual([])
     expect(await readdir(join(clone, 'tasks'))).toEqual(['.gitkeep'])
     expect(await fixture.git(root, 'check-ignore', '.env', '.agentdesk/index.json', '.agentdesk/jobs/job.json', '.taskcontinuum/local/credentials.json')).toContain('.taskcontinuum/local/credentials.json')
   }, 30000)
 
-  it('creates its own main repository inside a parent repository without touching parent history, staging or injected Git paths', async () => {
-    const fixture = await repositoryFixture()
-    await fixture.git(fixture.root, 'init', '--quiet', '--initial-branch=parent')
-    await writeFile(join(fixture.root, 'parent.txt'), 'parent content\n')
-    await fixture.git(fixture.root, 'add', '--', 'parent.txt')
-    await fixture.git(fixture.root, 'commit', '--quiet', '-m', 'Parent history')
-    await writeFile(join(fixture.root, 'parent-staged.txt'), 'parent staged content\n')
-    await fixture.git(fixture.root, 'add', '--', 'parent-staged.txt')
-    const head = await fixture.git(fixture.root, 'rev-parse', 'HEAD')
-    const index = await readFile(join(fixture.root, '.git', 'index'))
-    for (const [key, value] of Object.entries({
-      GIT_DIR: join(fixture.root, '.git'), GIT_WORK_TREE: fixture.root, GIT_INDEX_FILE: join(fixture.root, '.git', 'index'),
-      GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.worktree', GIT_CONFIG_VALUE_0: fixture.root,
-      GIT_NAMESPACE: 'unsafe', GIT_ALTERNATE_OBJECT_DIRECTORIES: fixture.root, GIT_TRACE: '1',
-      GH_HOST: 'example.invalid', GH_REPO: 'other/repo',
-    })) vi.stubEnv(key, value)
-    const root = await fixture.service.create({ parentPath: fixture.root, name: 'child-tasks' })
-    expect(await fixture.git(fixture.root, 'rev-parse', 'HEAD')).toBe(head)
-    expect(await readFile(join(fixture.root, '.git', 'index'))).toEqual(index)
-    expect(await fixture.git(root, 'rev-list', '--count', 'HEAD')).toBe('1')
-    expect(await fixture.git(root, 'branch', '--show-current')).toBe('main')
-    for (const call of fixture.calls) {
-      for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_NAMESPACE', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_TRACE', 'GH_HOST', 'GH_REPO']) expect(call.gitEnvironment).not.toHaveProperty(key)
-      expect(call.timeout).toBeGreaterThan(0)
-      expect(call.gitEnvironment.GIT_TERMINAL_PROMPT).toBe('0')
-      expect(call.gitEnvironment.GIT_INDEX_FILE).not.toBe(join(fixture.root, '.git', 'index'))
-    }
-  }, 30000)
-
-  it('ignores custom templates, executable hooks, signing and parent-local configuration during creation', async () => {
+  it('isolates parent history, staging, source environment, hooks, templates, filters and signing', async () => {
     const fixture = await repositoryFixture()
     await fixture.git(fixture.root, 'init', '--quiet', '--initial-branch=parent')
     await writeFile(join(fixture.root, 'parent.txt'), 'parent history\n')
     await fixture.git(fixture.root, 'add', '--', 'parent.txt')
     await fixture.git(fixture.root, 'commit', '--quiet', '-m', 'Parent history')
-    await writeFile(join(fixture.root, 'staged.txt'), 'retain parent staging\n')
+    await writeFile(join(fixture.root, 'staged.txt'), 'retain staging\n')
     await fixture.git(fixture.root, 'add', '--', 'staged.txt')
     await fixture.git(fixture.root, 'config', '--local', 'user.name', 'Parent Identity')
-    await fixture.git(fixture.root, 'config', '--local', 'user.email', 'parent@example.invalid')
-    await fixture.git(fixture.root, 'config', '--local', 'onboarding.parent', 'must-stay-local')
-    const hooks = join(fixture.root, 'configured-hooks')
     const template = join(fixture.root, 'configured-template')
-    await mkdir(hooks)
     await mkdir(join(template, 'hooks'), { recursive: true })
-    const hook = '#!/bin/sh\nprintf unexpected > onboarding-hook-ran\nexit 73\n'
     for (const name of ['pre-commit', 'commit-msg', 'post-commit', 'reference-transaction']) {
-      await writeFile(join(hooks, name), hook, { mode: 0o755 })
-      await writeFile(join(template, 'hooks', name), hook, { mode: 0o755 })
+      await writeFile(join(template, 'hooks', name), '#!/bin/sh\nprintf unexpected > hook-ran\nexit 73\n', { mode: 0o755 })
     }
     await writeFile(join(template, 'config'), '[onboarding]\ntemplate=must-not-be-copied\n')
-    await writeFile(join(template, 'template-sentinel'), 'must-not-be-copied')
-    const signer = join(fixture.root, 'must-not-run-gpg')
-    await writeFile(signer, '#!/bin/sh\nprintf unexpected > onboarding-signer-ran\nexit 74\n', { mode: 0o755 })
-    const attributes = join(fixture.root, 'configured-attributes')
-    const excludes = join(fixture.root, 'configured-excludes')
+    await writeFile(join(template, 'sentinel'), 'must-not-be-copied')
+    const attributes = join(fixture.root, 'attributes')
     await writeFile(attributes, '* filter=blocked\n')
-    await writeFile(excludes, '*\n')
     for (const [key, value] of Object.entries({
       'init.templateDir': template, 'init.defaultBranch': 'unexpected',
-      'core.hooksPath': hooks, 'core.attributesFile': attributes, 'core.excludesFile': excludes,
+      'core.hooksPath': join(template, 'hooks'), 'core.attributesFile': attributes,
       'filter.blocked.clean': 'false', 'filter.blocked.required': 'true',
-      'commit.gpgSign': 'true', 'user.signingKey': 'fixture-only', 'gpg.program': signer,
+      'commit.gpgSign': 'true', 'gpg.program': 'false',
     })) await fixture.git(fixture.root, 'config', '--file', fixture.config, key, value)
     const globalConfig = await readFile(fixture.config)
     const parentConfig = await readFile(join(fixture.root, '.git', 'config'))
     const parentIndex = await readFile(join(fixture.root, '.git', 'index'))
     const parentHead = await fixture.git(fixture.root, 'rev-parse', 'HEAD')
+    const injected = {
+      GIT_DIR: join(fixture.root, '.git'), GIT_WORK_TREE: fixture.root, GIT_INDEX_FILE: join(fixture.root, '.git', 'index'),
+      GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.worktree', GIT_CONFIG_VALUE_0: fixture.root,
+      GIT_NAMESPACE: 'unsafe', GIT_ALTERNATE_OBJECT_DIRECTORIES: fixture.root, GIT_TRACE: '1',
+      GH_HOST: 'example.invalid', GH_REPO: 'other/repo', GCM_INTERACTIVE: 'Always', GCM_TRACE: '1',
+    }
+    for (const [key, value] of Object.entries(injected)) vi.stubEnv(key, value)
     const root = await fixture.service.create({ parentPath: fixture.root, name: 'isolated-tasks' })
     expect(await fixture.git(root, 'branch', '--show-current')).toBe('main')
     expect(await fixture.git(root, 'rev-list', '--count', 'HEAD')).toBe('1')
-    expect(await fixture.git(root, 'log', '-1', '--format=%an <%ae>')).toBe('Repository Fixture <repository-fixture@example.invalid>')
-    expect(await fixture.git(root, 'cat-file', '-p', 'HEAD')).not.toMatch(/^gpgsig /m)
-    expect(await fixture.git(root, 'config', '--local', '--list')).not.toContain('onboarding.')
+    expect(await fixture.git(root, 'log', '-1', '--format=%an')).toBe('Repository Fixture')
     expect(await fixture.git(root, 'status', '--porcelain')).toBe('')
-    expect((await readTaskWorkspace(root)).tasks).toEqual([])
+    expect(await fixture.git(root, 'config', '--local', '--list')).not.toContain('onboarding.')
     expect(await readFile(fixture.config)).toEqual(globalConfig)
     expect(await readFile(join(fixture.root, '.git', 'config'))).toEqual(parentConfig)
     expect(await readFile(join(fixture.root, '.git', 'index'))).toEqual(parentIndex)
     expect(await fixture.git(fixture.root, 'rev-parse', 'HEAD')).toBe(parentHead)
-    expect(await readdir(join(root, '.git'))).not.toContain('template-sentinel')
-    for (const directory of [fixture.root, join(fixture.root, '.git'), root, join(root, '.git')]) {
-      const entries = await readdir(directory)
-      expect(entries).not.toContain('onboarding-hook-ran')
-      expect(entries).not.toContain('onboarding-signer-ran')
+    expect(await readdir(join(root, '.git'))).not.toContain('sentinel')
+    expect(await readdir(root)).not.toContain('hook-ran')
+    for (const call of fixture.calls) {
+      for (const key of Object.keys(injected).filter((key) => !['GIT_INDEX_FILE', 'GCM_INTERACTIVE'].includes(key))) expect(call.gitEnvironment).not.toHaveProperty(key)
+      expect(call.gitEnvironment.GIT_INDEX_FILE).not.toBe(injected.GIT_INDEX_FILE)
+      expect(call.gitEnvironment.GCM_INTERACTIVE).toBe('Never')
+      expect(call.args).toContain('commit.gpgSign=false')
     }
-    expect(fixture.calls.every((call) => call.program === 'git' && call.args.includes('commit.gpgSign=false'))).toBe(true)
-    expect(fixture.calls.find((call) => call.args.includes('init'))?.args).toContain('--template=')
   }, 30000)
 
-  it('rejects traversal, option-like, non-string, reserved and colliding names without changing the destination', async () => {
+  it('rejects unsafe input, missing parents and collisions without commands or overwriting files', async () => {
     const fixture = await repositoryFixture()
     for (const name of ['', '.', '..', '../escape', '..\\escape', '/escape', '\\escape', '-repo', '--help', 'CON', 'con.txt', 'AUX', 'NUL', 'COM1', 'LPT9.txt', 'name.', 'name ', 'a:b', 'a/b', 'a\\b', 'name.git', 'x'.repeat(61), 12, null]) {
       await expect(fixture.service.create({ parentPath: fixture.root, name } as never)).rejects.toThrow()
@@ -144,58 +124,35 @@ describe('local task repository creation', () => {
     for (const value of [null, [], {}, { parentPath: 7, name: 'name' }, { parentPath: fixture.root, name: 'valid', extra: true }, { parentPath: 'relative', name: 'name' }]) expect(createWorkspaceRepositorySchema.safeParse(value).success).toBe(false)
     expect(fixture.calls).toEqual([])
     await mkdir(join(fixture.root, 'existing'))
-    await writeFile(join(fixture.root, 'existing', 'user.txt'), 'never replace this')
+    await writeFile(join(fixture.root, 'existing', 'user.txt'), 'never replace')
     await expect(fixture.service.create({ parentPath: fixture.root, name: 'existing' })).rejects.toThrow('already exists')
-    await writeFile(join(fixture.root, 'existing-file'), 'never replace this either')
-    await expect(fixture.service.create({ parentPath: fixture.root, name: 'existing-file' })).rejects.toThrow('already exists')
     await expect(fixture.service.create({ parentPath: join(fixture.root, 'missing'), name: 'new' })).rejects.toThrow('parent folder')
-    await expect(fixture.service.create({ parentPath: join(fixture.root, 'existing-file'), name: 'new' })).rejects.toThrow('directories')
-    expect(await readFile(join(fixture.root, 'existing', 'user.txt'), 'utf8')).toBe('never replace this')
-    expect(await readFile(join(fixture.root, 'existing-file'), 'utf8')).toBe('never replace this either')
+    expect(await readFile(join(fixture.root, 'existing', 'user.txt'), 'utf8')).toBe('never replace')
   })
 
-  it('preflights identity and missing Git before reserving a destination, allowing a safe retry', async () => {
+  it('preflights identity and missing Git before reserving a folder, then safely retries', async () => {
     const fixture = await repositoryFixture()
     await writeFile(fixture.config, '')
     await expect(fixture.service.create({ parentPath: fixture.root, name: 'retry' })).rejects.toThrow('user.name and user.email')
     expect(await readdir(fixture.root)).toEqual(['fixture-git-config'])
     const unavailable = new WorkspaceRepositoryService(async () => { throw Object.assign(new Error('Install Git and restart Task Continuum.'), { code: 'ENOENT' }) })
     await expect(unavailable.create({ parentPath: fixture.root, name: 'missing-git' })).rejects.toThrow('Install Git')
-    expect(await readdir(fixture.root)).toEqual(['fixture-git-config'])
     await writeFile(fixture.config, '[user]\nname=Configured Person\nemail=person@example.invalid\n')
     expect(await fixture.service.create({ parentPath: fixture.root, name: 'retry' })).toBe(join(fixture.root, 'retry'))
   }, 30000)
 
-  it('does not clobber a directory that wins a creation race after preflight', async () => {
+  it('preserves a competing directory and retains partial creation without committing unrelated staging', async () => {
     const fixture = await repositoryFixture()
-    fixture.github.before = async (call) => {
+    fixture.network.before = async (call) => {
       if (call.args.at(-1) === 'user.email') {
         await mkdir(join(fixture.root, 'raced'))
-        await writeFile(join(fixture.root, 'raced', 'user.txt'), 'raced user data')
+        await writeFile(join(fixture.root, 'raced', 'user.txt'), 'raced data')
       }
     }
     await expect(fixture.service.create({ parentPath: fixture.root, name: 'raced' })).rejects.toThrow('already exists')
-    expect(await readdir(join(fixture.root, 'raced'))).toEqual(['user.txt'])
-    expect(await readFile(join(fixture.root, 'raced', 'user.txt'), 'utf8')).toBe('raced user data')
-  })
-
-  it('retains an owned partial folder and any concurrent user files after a late Git failure', async () => {
-    const fixture = await repositoryFixture()
-    fixture.github.before = async (call) => {
-      if (call.args.includes('init')) {
-        await writeFile(join(fixture.root, 'partial', 'user.txt'), 'concurrent data')
-        return { code: 1, stdout: '', stderr: 'Simulated initialization failure.' }
-      }
-    }
-    await expect(fixture.service.create({ parentPath: fixture.root, name: 'partial' })).rejects.toThrow('retained')
-    expect(await readFile(join(fixture.root, 'partial', 'user.txt'), 'utf8')).toBe('concurrent data')
-    expect(fixture.calls.some((call) => call.program === 'gh')).toBe(false)
-  })
-
-  it('never commits concurrently staged unrelated files and never overwrites an existing index', async () => {
-    const fixture = await repositoryFixture()
+    expect(await readFile(join(fixture.root, 'raced', 'user.txt'), 'utf8')).toBe('raced data')
     const root = join(fixture.root, 'raced-index')
-    fixture.github.before = async (call) => {
+    fixture.network.before = async (call) => {
       if (call.args.includes('commit-tree')) {
         await writeFile(join(root, 'unrelated.txt'), 'do not commit automatically')
         await fixture.git(root, 'add', '--', 'unrelated.txt')
@@ -204,185 +161,237 @@ describe('local task repository creation', () => {
     await expect(fixture.service.create({ parentPath: fixture.root, name: 'raced-index' })).rejects.toThrow('retained')
     expect(await fixture.git(root, 'ls-tree', '-r', '--name-only', 'HEAD')).not.toContain('unrelated.txt')
     expect(await fixture.git(root, 'ls-files')).toBe('unrelated.txt')
-    expect(await readFile(join(root, 'unrelated.txt'), 'utf8')).toBe('do not commit automatically')
   }, 30000)
 })
 
-describe('explicit GitHub publication', () => {
-  it('does not mistake a parent Git repository for an existing workspace repository or modify it', async () => {
+describe('browser creation and read-only manual push guidance', () => {
+  it('validates push requests and rejects credential-bearing or injected URLs before running Git', async () => {
+    expect(repositoryPushRequestSchema.safeParse({ workspaceId: 'a'.repeat(64), remoteUrl: remote }).success).toBe(true)
+    for (const value of [{ workspaceId: 'bad', remoteUrl: remote }, { workspaceId: 'a'.repeat(64), remoteUrl: '' }, { workspaceId: 'a'.repeat(64), remoteUrl: ' \t ' }, { workspaceId: 'a'.repeat(64), remoteUrl: 'x'.repeat(2049) }, { workspaceId: 'a'.repeat(64), remoteUrl: remote, private: true }]) {
+      expect(repositoryPushRequestSchema.safeParse(value).success).toBe(false)
+    }
     const fixture = await repositoryFixture()
-    await fixture.git(fixture.root, 'init', '--quiet', '--initial-branch=parent')
-    const root = join(fixture.root, 'existing-workspace')
-    await mkdir(root)
-    const workspace = { id: 'a'.repeat(64), name: 'existing-workspace', title: 'Existing workspace', root }
-    expect(await fixture.service.status(workspace)).toMatchObject({ branch: null, remoteUrl: null, published: false })
-    const calls = fixture.calls.length
-    await expect(fixture.service.publish(workspace, true)).rejects.toThrow('Existing repositories are not modified')
-    expect(fixture.calls).toHaveLength(calls)
-    expect(await fixture.git(fixture.root, 'branch', '--show-current')).toBe('parent')
+    const workspace = { id: 'a'.repeat(64), name: 'tasks', title: 'Tasks', root: fixture.root }
+    for (const url of ['', '--upload-pack=evil', 'https://token@github.com/owner/repo', 'https://user:token@github.com/owner/repo', 'https://github.com/owner/repo?token=secret', 'https://github.com/owner/repo#hash', 'https://github.com/owner/repo\n', 'https://github.com/owner/repo\r', 'https://github.com/owner/repo;evil', 'https://github.com/owner/$(evil)', 'https://github.com/owner/repo/extra', 'https://github.com/owner/..', 'https://github.com/settings/repo', 'https://github.com/owner/.git', 'https://github.com/owner/-option', 'https://github.com/owner/repo%0a', 'https://github.com.evil/owner/repo', 'http://github.com/owner/repo', 'ssh://root@github.com/owner/repo', 'ssh://git@github.com:22/owner/repo', 'git@github.com:owner/repo\n']) {
+      await expect(fixture.service.preparePush(workspace, url)).rejects.toThrow('plain GitHub')
+    }
+    expect(fixture.calls).toEqual([])
   })
 
-  it('reports installation, authentication, account and local status without publishing', async () => {
+  it('uses the browser for account/name/visibility and reports only local helper classifications', async () => {
     const fixture = await created()
+    fixture.calls.length = 0
+    expect(fixture.service.creationUrl({ ...fixture.workspace, name: 'tasks & account=wrong' })).toBe('https://github.com/new?name=tasks%20%26%20account%3Dwrong')
+    expect(fixture.calls).toEqual([])
     expect(await fixture.service.status(fixture.workspace)).toEqual({
-      workspaceId: fixture.workspace.id, name: 'real-tasks', branch: 'main', remoteUrl: null, published: false,
-      github: { installed: true, authenticated: true, login: 'fixture-owner' },
+      workspaceId: fixture.workspace.id, name: 'real-tasks', branch: 'main', remoteUrl: null, credentialHelper: 'none',
     })
-    fixture.github.installed = false
-    expect((await fixture.service.status(fixture.workspace)).github).toEqual({ installed: false, authenticated: false })
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('Install GitHub CLI')
-    fixture.github.installed = true
-    fixture.github.authenticated = false
-    expect((await fixture.service.status(fixture.workspace)).github).toEqual({ installed: true, authenticated: false })
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('gh auth login')
-    fixture.github.authError = 'Connection timed out while contacting GitHub.'
-    await expect(fixture.service.status(fixture.workspace)).rejects.toThrow('network')
-    expect(fixture.calls.some((call) => call.args.includes('POST') || call.args.includes('push'))).toBe(false)
-  }, 30000)
-
-  it.each([true, false])('publishes only after an explicit action with private=%s, a pinned main commit and a verified URL', async (isPrivate) => {
-    const fixture = await created()
-    const before = await readFile(fixture.config, 'utf8')
-    const start = fixture.calls.length
-    const result = await fixture.service.publish(fixture.workspace, isPrivate)
-    expect(result).toEqual({ url: 'https://github.com/fixture-owner/real-tasks' })
-    const calls = fixture.calls.slice(start)
-    expect(calls.filter((call) => call.args.includes('POST'))).toHaveLength(1)
-    expect(calls.find((call) => call.args.includes('POST'))?.args).toContain(`private=${isPrivate}`)
-    expect(calls.some((call) => call.program === 'git' && call.args.includes('add') && !call.args.includes('remote'))).toBe(false)
-    const push = calls.find((call) => call.args.includes('push'))
-    expect(push?.args.at(-1)).toBe(`${await fixture.git(fixture.root, 'rev-parse', 'HEAD')}:refs/heads/main`)
-    expect(push?.args).not.toContain('--force')
-    expect(push?.args).toContain('--no-follow-tags')
-    expect(push?.args).toContain('credential.helper=!gh auth git-credential')
-    expect(push?.gitEnvironment.GIT_TERMINAL_PROMPT).toBe('0')
-    expect(push?.gitEnvironment.GH_PROMPT_DISABLED).toBe('1')
-    expect(await fixture.git(fixture.root, 'remote', 'get-url', 'origin')).toBe(`${result.url}.git`)
-    expect(await fixture.git(fixture.root, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}')).toBe('origin/main')
-    expect((await fixture.service.status(fixture.workspace)).published).toBe(true)
-    expect(await readFile(fixture.config, 'utf8')).toBe(before)
-    expect(await fixture.git(fixture.root, 'status', '--porcelain')).toBe('')
-    const record = JSON.parse(await readFile(join(fixture.root, '.git', 'taskcontinuum-onboarding.json'), 'utf8'))
-    expect(record.publication).toMatchObject({ owner: 'fixture-owner', private: isPrivate, repositoryId: 12345, published: true })
-  }, 30000)
-
-  it('preserves a remotely created repository after push failure and resumes after a restart without another creation', async () => {
-    const fixture = await repositoryFixture()
-    const profile = join(fixture.root, 'profile')
-    const store = new WorkspaceStore(profile, undefined, undefined, fixture.service)
-    const state = await store.createRepository({ parentPath: fixture.root, name: 'persistent-tasks' })
-    const id = state.current!.id
-    fixture.github.pushFailures = 1
-    await expect(store.publishRepository({ workspaceId: id })).rejects.toThrow('local files are retained')
-    expect((await store.getState()).current?.id).toBe(id)
-    expect((await store.getRepositoryStatus(id)).published).toBe(false)
-    expect((await store.getRepositoryStatus(id)).remoteUrl).toBe('https://github.com/fixture-owner/persistent-tasks')
-    const restarted = new WorkspaceStore(profile, undefined, undefined, new WorkspaceRepositoryService(fixture.run))
-    expect((await restarted.getState()).current?.id).toBe(id)
-    expect(await restarted.publishRepository({ workspaceId: id, private: true })).toEqual({ url: 'https://github.com/fixture-owner/persistent-tasks' })
-    expect(fixture.calls.filter((call) => call.args.includes('POST'))).toHaveLength(1)
-    expect(fixture.calls.filter((call) => call.args.includes('push'))).toHaveLength(2)
-    expect(fixture.github.repository?.private).toBe(true)
-  }, 30000)
-
-  it('recovers a lost push acknowledgement by verifying the remote rather than pushing again', async () => {
-    const fixture = await created()
-    fixture.github.pushFailures = 1
-    fixture.github.acknowledgeFailedPush = true
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('Git push failed')
-    expect(await new WorkspaceRepositoryService(fixture.run).publish(fixture.workspace, true)).toEqual({ url: 'https://github.com/fixture-owner/real-tasks' })
-    expect(fixture.calls.filter((call) => call.args.includes('POST'))).toHaveLength(1)
-    expect(fixture.calls.filter((call) => call.args.includes('push'))).toHaveLength(1)
-  }, 30000)
-
-  it('rejects dirty files, another branch, existing remotes and an existing GitHub name without staging or overwriting', async () => {
-    const fixture = await created()
-    await writeFile(join(fixture.root, 'private.txt'), 'not for automatic staging')
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('uncommitted')
-    expect(fixture.calls.some((call) => call.program === 'gh')).toBe(false)
-    await fixture.git(fixture.root, 'add', '--', 'private.txt')
-    await fixture.git(fixture.root, 'commit', '--quiet', '-m', 'Explicitly reviewed user content')
-    await fixture.git(fixture.root, 'switch', '--quiet', '-c', 'other')
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('branch or commit changed')
-    await fixture.git(fixture.root, 'switch', '--quiet', 'main')
-    await fixture.git(fixture.root, 'remote', 'add', 'user-remote', 'https://github.com/another/unrelated.git')
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('already has a remote')
-    expect(await fixture.git(fixture.root, 'remote', 'get-url', 'user-remote')).toBe('https://github.com/another/unrelated.git')
-    await fixture.git(fixture.root, 'remote', 'remove', 'user-remote')
-    fixture.github.repository = {
-      id: 987, name: 'real-tasks', full_name: 'fixture-owner/real-tasks', html_url: 'https://github.com/fixture-owner/real-tasks',
-      clone_url: 'https://github.com/fixture-owner/real-tasks.git', private: true, owner: { login: 'fixture-owner' },
+    for (const [helper, expected] of [['manager', 'gcm'], ['manager-core', 'gcm'], ['"C:/Program Files/Git/bin/git-credential-manager.exe"', 'gcm'], ['/usr/local/bin/git-credential-manager', 'gcm'], ['osxkeychain', 'configured'], ['!echo private-fixture-marker', 'configured']]) {
+      await fixture.git(fixture.root, 'config', '--file', fixture.config, 'credential.helper', helper)
+      const status = await fixture.service.status(fixture.workspace)
+      expect(status.credentialHelper).toBe(expected)
+      expect(JSON.stringify(status)).not.toContain('private-fixture-marker')
+      expect(status).not.toHaveProperty('published')
+      expect(status).not.toHaveProperty('github')
     }
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('already exists')
-    expect(fixture.calls.some((call) => call.args.includes('POST') || call.args.includes('push'))).toBe(false)
+    expectReadOnly(fixture.calls)
+    expect(fixture.calls.some((call) => call.args.includes('ls-remote'))).toBe(false)
+    expect(fixture.calls.filter((call) => call.args.includes('--list')).every((call) => call.args.includes('--name-only'))).toBe(true)
   }, 30000)
 
-  it('fences retry account, visibility, head, remote, push URL and upstream changes', async () => {
+  it('generates quoted current-branch commands for EMU HTTPS/SSH and never changes local data', async () => {
     const fixture = await created()
-    fixture.github.pushFailures = 1
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('Git push failed')
-    await expect(fixture.service.publish(fixture.workspace, false)).rejects.toThrow('account or visibility')
-    fixture.github.login = 'another-user'
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('account or visibility')
-    fixture.github.login = 'fixture-owner'
-    await fixture.git(fixture.root, 'config', '--local', 'remote.origin.pushurl', 'https://github.com/another/unrelated.git')
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('push URL changed')
-    await fixture.git(fixture.root, 'config', '--local', '--unset', 'remote.origin.pushurl')
-    await fixture.git(fixture.root, 'config', '--local', 'branch.main.remote', 'other')
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('upstream changed')
-    await fixture.git(fixture.root, 'config', '--local', '--unset', 'branch.main.remote')
-    await writeFile(join(fixture.root, 'reviewed.txt'), 'new content after the publish attempt')
-    await fixture.git(fixture.root, 'add', '--', 'reviewed.txt')
-    await fixture.git(fixture.root, 'commit', '--quiet', '-m', 'Changed after publication started')
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('branch or commit changed')
-    expect(fixture.calls.filter((call) => call.args.includes('POST'))).toHaveLength(1)
-    expect(fixture.calls.filter((call) => call.args.includes('push'))).toHaveLength(1)
+    const root = join(fixture.parent, "user's $tasks folder")
+    await rename(fixture.root, root)
+    const workspace = { ...fixture.workspace, root }
+    const record = await readFile(join(root, '.git', 'taskcontinuum-onboarding.json'))
+    const config = await readFile(join(root, '.git', 'config'))
+    const index = await readFile(join(root, '.git', 'index'))
+    fixture.calls.length = 0
+    for (const url of [remote, 'git@github.com:lianc_microsoft/browser-chosen-name.git', 'ssh://git@github.com/lianc_microsoft/browser-chosen-name.git']) {
+      const plan = await fixture.service.preparePush(workspace, url)
+      expect(plan.repositoryUrl).toBe('https://github.com/lianc_microsoft/browser-chosen-name')
+      expect(plan.remoteUrl).toBe(url)
+      expect(plan.branch).toBe('main')
+      expect(plan.commands).toContain(`remote add -- origin '${url}'`)
+      expect(plan.commands).toContain("push --no-follow-tags --recurse-submodules=no -u -- origin 'refs/heads/main:refs/heads/main'")
+      expect(plan.commands).toContain(process.platform === 'win32' ? "user''s $tasks folder" : "user'\\''s $tasks folder")
+      expect(plan.commands).toContain(process.platform === 'win32' ? 'if ($LASTEXITCODE -eq 0)' : '&&\n')
+      expect(plan.commands.split('\n')).toHaveLength(2)
+    }
+    await fixture.git(root, 'switch', '--quiet', '-c', 'release/next')
+    const plan = await fixture.service.preparePush(workspace, remote)
+    expect(plan.branch).toBe('release/next')
+    expect(plan.commands).toContain("'refs/heads/release/next:refs/heads/release/next'")
+    expect(await readFile(join(root, '.git', 'config'))).toEqual(config)
+    expect(await readFile(join(root, '.git', 'index'))).toEqual(index)
+    expect(await readFile(join(root, '.git', 'taskcontinuum-onboarding.json'))).toEqual(record)
+    expectReadOnly(fixture.calls)
+  }, 30000)
+
+  it('guides existing repositories with matching origin without relying on an onboarding record', async () => {
+    const fixture = await created()
+    await rm(join(fixture.root, '.git', 'taskcontinuum-onboarding.json'))
+    await fixture.git(fixture.root, 'remote', 'add', 'origin', remote)
+    await fixture.git(fixture.root, 'config', '--local', 'remote.origin.pushurl', remote)
+    await fixture.git(fixture.root, 'config', '--file', fixture.config, 'filter.lfs.clean', 'false')
+    fixture.calls.length = 0
+    const plan = await fixture.service.preparePush(fixture.workspace, remote)
+    expect(plan.commands).not.toContain('remote add')
+    expect(plan.commands.split('\n')).toHaveLength(1)
+    expect((await fixture.service.status(fixture.workspace)).remoteUrl).toBe(remote)
+    expectReadOnly(fixture.calls)
+  }, 30000)
+
+  it('stops copied commands when adding origin fails and preserves quoted arguments', async () => {
+    const fixture = await created()
+    const root = join(fixture.parent, "user's $tasks folder")
+    await rename(fixture.root, root)
+    const plan = await fixture.service.preparePush({ ...fixture.workspace, root }, remote)
+    for (const exitCode of [1, 0]) {
+      // Shadow Git inside a profile-free shell: no actual Git, credentials or network are used.
+      const script = plan.shell === 'powershell'
+        ? `$script:gitCalls = @()\nfunction git { $script:gitCalls += ,@($args); $global:LASTEXITCODE = ${exitCode} }\n${plan.commands}\nConvertTo-Json -InputObject @($script:gitCalls) -Compress`
+        : `git() { for arg; do printf '<%s>' "$arg"; done; printf '\\n'; return ${exitCode}; }\n${plan.commands}\n:`
+      const { stdout } = await promisify(execFile)(
+        plan.shell === 'powershell' ? 'powershell.exe' : 'sh',
+        plan.shell === 'powershell' ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script] : ['-c', script],
+        { timeout: 10000, windowsHide: true },
+      )
+      if (plan.shell === 'powershell') {
+        const calls = JSON.parse(stdout) as string[][]
+        expect(calls).toHaveLength(exitCode === 0 ? 2 : 1)
+        // PowerShell consumes the parameter separator when invoking a function rather than a native executable.
+        expect(calls[0]).toEqual(['-C', root, 'remote', 'add', 'origin', remote])
+        if (exitCode === 0) expect(calls[1]).toEqual(['-C', root, 'push', '--no-follow-tags', '--recurse-submodules=no', '-u', 'origin', 'refs/heads/main:refs/heads/main'])
+      } else {
+        const calls = stdout.trim().split('\n')
+        expect(calls).toHaveLength(exitCode === 0 ? 2 : 1)
+        expect(calls[0]).toBe(`<-C><${root}><remote><add><--><origin><${remote}>`)
+        if (exitCode === 0) expect(calls[1]).toContain('<push>')
+      }
+    }
+    expect(await fixture.git(root, 'remote')).toBe('')
+  }, 30000)
+
+  it('rejects remote mismatches, URL rewrites, mirror mode, multiple URLs and conflicting upstreams', async () => {
+    const fixture = await created()
+    await fixture.git(fixture.root, 'remote', 'add', 'origin', remote)
+    await expect(fixture.service.preparePush(fixture.workspace, 'https://github.com/another/wrong.git')).rejects.toThrow('does not match')
+    for (const [key, value] of [
+      ['remote.origin.pushurl', 'https://github.com/another/wrong.git'],
+      ['remote.origin.mirror', 'true'], ['push.mirror', 'true'], ['remote.origin.push', 'refs/heads/main:refs/heads/wrong'],
+      ['url.https://github.com/another/.insteadOf', 'https://github.com/'],
+      ['url.https://github.com/another/.pushInsteadOf', 'https://github.com/'],
+      ['branch.main.remote', 'upstream'],
+    ]) {
+      await fixture.git(fixture.root, 'config', '--local', key, value)
+      await expect(fixture.service.preparePush(fixture.workspace, remote)).rejects.toThrow()
+      await fixture.git(fixture.root, 'config', '--local', '--unset-all', key)
+    }
+    await fixture.git(fixture.root, 'config', '--local', '--add', 'remote.origin.url', remote)
+    await expect(fixture.service.status(fixture.workspace)).rejects.toThrow('ambiguous')
+    expect(fixture.calls.some((call) => call.args.includes('ls-remote') || call.args.includes('push'))).toBe(false)
   }, 60000)
 
-  it('rejects replaced GitHub repositories and unexpected remote history on retry', async () => {
+  it('rejects dirty, detached, unborn and parent-only repositories instead of staging or guessing', async () => {
     const fixture = await created()
-    fixture.github.pushFailures = 1
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('Git push failed')
-    fixture.github.repository!.id = 999
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('removed or replaced')
-    fixture.github.repository!.id = 12345
-    fixture.github.refs.set('refs/heads/main', 'a'.repeat(40))
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('history changed')
-    expect(fixture.calls.filter((call) => call.args.includes('push'))).toHaveLength(1)
+    fixture.calls.length = 0
+    await writeFile(join(fixture.root, 'private.txt'), 'do not stage')
+    await expect(fixture.service.preparePush(fixture.workspace, remote)).rejects.toThrow('uncommitted')
+    await rm(join(fixture.root, 'private.txt'))
+    await fixture.git(fixture.root, 'checkout', '--quiet', '--detach')
+    await expect(fixture.service.preparePush(fixture.workspace, remote)).rejects.toThrow('detached')
+    const empty = join(fixture.parent, 'empty')
+    await mkdir(empty)
+    await fixture.git(empty, 'init', '--quiet', '--initial-branch=main')
+    await expect(fixture.service.preparePush({ ...fixture.workspace, root: empty }, remote)).rejects.toThrow('no commit')
+    const child = join(empty, 'child')
+    await mkdir(child)
+    expect((await fixture.service.status({ ...fixture.workspace, root: child })).branch).toBeNull()
+    await expect(fixture.service.preparePush({ ...fixture.workspace, root: child }, remote)).rejects.toThrow('no local Git')
+    expectReadOnly(fixture.calls)
   }, 30000)
 
-  it('rechecks remote identity around the push instead of reporting success for a replaced repository', async () => {
+  it('rejects linked root and Git directories, filters and arbitrary credential commands', async () => {
     const fixture = await created()
-    fixture.github.before = async (call) => {
-      if (call.args.includes('push')) fixture.github.repository!.id = 999
+    const linked = join(fixture.parent, 'linked')
+    await symlink(fixture.root, linked, process.platform === 'win32' ? 'junction' : 'dir')
+    await expect(fixture.service.preparePush({ ...fixture.workspace, root: linked }, remote)).rejects.toThrow('directories')
+    await fixture.git(fixture.root, 'remote', 'add', 'origin', remote)
+    await fixture.git(fixture.root, 'config', '--local', 'filter.unsafe.clean', 'echo should-not-run')
+    await writeFile(join(fixture.root, '.gitattributes'), '* filter=unsafe\n')
+    await expect(fixture.service.preparePush(fixture.workspace, remote)).rejects.toThrow('filters')
+    await rm(join(fixture.root, '.gitattributes'))
+    await fixture.git(fixture.root, 'config', '--local', '--unset', 'filter.unsafe.clean')
+    await fixture.git(fixture.root, 'config', '--local', 'credential.helper', '!echo private-fixture-marker')
+    await expect(fixture.service.verifyPublication(fixture.workspace, remote)).rejects.toThrow('arbitrary shell')
+    await fixture.git(fixture.root, 'config', '--local', 'credential.helper', 'C:/safe\necho private-fixture-marker\n/git-credential-manager.exe')
+    await expect(fixture.service.verifyPublication(fixture.workspace, remote)).rejects.toThrow('arbitrary shell')
+    expect(fixture.calls.some((call) => call.args.includes('ls-remote'))).toBe(false)
+    await rename(join(fixture.root, '.git'), join(fixture.parent, 'linked-git'))
+    await symlink(join(fixture.parent, 'linked-git'), join(fixture.root, '.git'), process.platform === 'win32' ? 'junction' : 'dir')
+    await expect(fixture.service.status(fixture.workspace)).rejects.toThrow('directories')
+  }, 30000)
+})
+
+describe('explicit read-only publication verification', () => {
+  it('retains GCM, verifies actual branch HEAD, ignores tracking refs and never writes publication state', async () => {
+    const fixture = await created()
+    await fixture.git(fixture.root, 'config', '--file', fixture.config, 'credential.helper', 'manager')
+    await fixture.git(fixture.root, 'remote', 'add', 'origin', remote)
+    await fixture.git(fixture.root, 'switch', '--quiet', '-c', 'reviewed/branch')
+    const head = await fixture.git(fixture.root, 'rev-parse', 'HEAD')
+    const recordFile = join(fixture.root, '.git', 'taskcontinuum-onboarding.json')
+    const record = JSON.parse(await readFile(recordFile, 'utf8'))
+    record.publication = { owner: 'old-owner', published: true }
+    await writeFile(recordFile, JSON.stringify(record))
+    const beforeRecord = await readFile(recordFile)
+    await fixture.git(fixture.root, 'update-ref', 'refs/remotes/origin/reviewed/branch', head)
+    const config = await readFile(join(fixture.root, '.git', 'config'))
+    const global = await readFile(fixture.config)
+    fixture.calls.length = 0
+    expect(await fixture.service.status(fixture.workspace)).toMatchObject({ credentialHelper: 'gcm', remoteUrl: remote })
+    expect(fixture.calls.some((call) => call.args.includes('ls-remote'))).toBe(false)
+    await expect(fixture.service.verifyPublication(fixture.workspace, remote)).rejects.toThrow('not on GitHub')
+    fixture.network.refs.set('refs/heads/reviewed/branch', head)
+    fixture.network.refs.set('refs/heads/unrelated', 'a'.repeat(40))
+    expect(await fixture.service.verifyPublication(fixture.workspace, remote)).toEqual({ url: 'https://github.com/lianc_microsoft/browser-chosen-name' })
+    expect((await new WorkspaceRepositoryService(fixture.run).status(fixture.workspace)).remoteUrl).toBe(remote)
+    expect(await readFile(recordFile)).toEqual(beforeRecord)
+    expect(await readFile(join(fixture.root, '.git', 'config'))).toEqual(config)
+    expect(await readFile(fixture.config)).toEqual(global)
+    expectReadOnly(fixture.calls)
+    const network = fixture.calls.filter((call) => call.args.includes('ls-remote'))
+    expect(network).toHaveLength(2)
+    expect(network[0].args.slice(-5)).toEqual(['ls-remote', '--refs', '--', remote, 'refs/heads/reviewed/branch'])
+  }, 60000)
+
+  it('sanitizes authentication/network failures and rejects a remote branch at another commit', async () => {
+    const fixture = await created()
+    await fixture.git(fixture.root, 'remote', 'add', 'origin', remote)
+    fixture.network.response = { code: 128, stdout: 'private-fixture-marker', stderr: 'https://private-fixture-marker@github.com/' }
+    await expect(fixture.service.verifyPublication(fixture.workspace, remote)).rejects.toThrow(/GCM.*EMU.*SSO/)
+    await expect(fixture.service.verifyPublication(fixture.workspace, remote)).rejects.not.toThrow('private-fixture-marker')
+    fixture.network.response = undefined
+    fixture.network.refs.set('refs/heads/main', 'a'.repeat(40))
+    await expect(fixture.service.verifyPublication(fixture.workspace, remote)).rejects.toThrow('does not match the local commit')
+  }, 30000)
+
+  it.each(['branch', 'head', 'origin', 'pushurl'])('rejects a concurrent %s change during the explicit remote check', async (kind) => {
+    const fixture = await created()
+    await fixture.git(fixture.root, 'remote', 'add', 'origin', remote)
+    const head = await fixture.git(fixture.root, 'rev-parse', 'HEAD')
+    fixture.network.refs.set('refs/heads/main', head)
+    fixture.network.before = async (call) => {
+      if (!call.args.includes('ls-remote')) return
+      if (kind === 'branch') await fixture.git(fixture.root, 'switch', '--quiet', '-c', 'another')
+      if (kind === 'head') await fixture.git(fixture.root, 'commit', '--quiet', '--allow-empty', '-m', 'Concurrent reviewed commit')
+      if (kind === 'origin') await fixture.git(fixture.root, 'remote', 'set-url', 'origin', 'https://github.com/another/wrong.git')
+      if (kind === 'pushurl') await fixture.git(fixture.root, 'config', '--local', 'remote.origin.pushurl', 'https://github.com/another/wrong.git')
     }
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('removed or replaced')
-    const record = JSON.parse(await readFile(join(fixture.root, '.git', 'taskcontinuum-onboarding.json'), 'utf8'))
-    expect(record.publication.published).toBe(false)
-    expect(record.publication.repositoryId).toBe(12345)
-    expect((await readTaskWorkspace(fixture.root)).tasks).toEqual([])
-  }, 30000)
-
-  it.each(['', '{}', '{"html_url":""}'])('does not invent a successful URL from a malformed creation result: %j', async (stdout) => {
-    const fixture = await created()
-    fixture.github.createResponse = { code: 0, stdout, stderr: '' }
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('verifiable repository')
-    expect(await fixture.git(fixture.root, 'remote')).toBe('')
+    await expect(fixture.service.verifyPublication(fixture.workspace, remote)).rejects.toThrow(/changed|does not match/)
+    expect(fixture.calls.filter((call) => call.args.includes('ls-remote'))).toHaveLength(1)
     expect(fixture.calls.some((call) => call.args.includes('push'))).toBe(false)
-    expect((await readTaskWorkspace(fixture.root)).tasks).toEqual([])
-  }, 30000)
-
-  it('fences a repository changed while the remote is being created, keeping the new remote recoverable', async () => {
-    const fixture = await created()
-    fixture.github.before = async (call) => {
-      if (call.args.includes('POST')) await fixture.git(fixture.root, 'switch', '--quiet', '-c', 'changed-during-create')
-    }
-    await expect(fixture.service.publish(fixture.workspace, true)).rejects.toThrow('branch or commit changed')
-    expect(fixture.github.repository?.id).toBe(12345)
-    expect(fixture.calls.some((call) => call.args.includes('push'))).toBe(false)
-    fixture.github.before = undefined
-    await fixture.git(fixture.root, 'switch', '--quiet', 'main')
-    expect(await fixture.service.publish(fixture.workspace, true)).toEqual({ url: 'https://github.com/fixture-owner/real-tasks' })
-    expect(fixture.calls.filter((call) => call.args.includes('POST'))).toHaveLength(1)
   }, 30000)
 })

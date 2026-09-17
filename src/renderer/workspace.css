@@ -48,12 +48,11 @@
 .repository-created code { overflow-wrap: anywhere; font-size: 12px; }
 .repository-created span:not(.codicon) { color: var(--muted); font-size: 11px; }
 .repository-github { margin: 18px 0; font-size: 12px; }
-.repository-github pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; background: var(--raised); border: 1px solid var(--border); border-radius: 4px; }
-.repository-visibility { display: flex; flex-direction: column; gap: 14px; min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 5px; }
-.repository-visibility legend { color: var(--muted); font-size: 12px; padding: 0 6px; }
-.repository-visibility label { display: flex; gap: 10px; align-items: flex-start; }
-.repository-visibility strong { font-weight: 500; }
-.repository-visibility small { display: block; margin-top: 5px; line-height: 1.6; color: var(--muted); }
+.repository-web-step, .repository-terminal { margin: 18px 0; padding: 14px; border: 1px solid var(--border); border-radius: 5px; }
+.repository-web-step h3, .repository-terminal h3 { margin-top: 0; font-size: 14px; }
+.repository-web-step p, .repository-terminal p { font-size: 12px; line-height: 1.6; }
+.repository-terminal pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; background: var(--raised); border: 1px solid var(--border); border-radius: 4px; font-size: 12px; user-select: text; }
+.repository-push-form { margin: 18px 0; }
 .repository-warning { border-left: 2px solid #c99b3d; padding-left: 12px; }
 .repository-error { color: var(--text); border: 1px solid #c95151; border-radius: 4px; background: #c9515115; padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .repository-published { margin-top: 20px; }

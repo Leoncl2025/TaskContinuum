@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
-import type { WorkspaceDescriptor, WorkspaceRepositoryStatus, WorkspaceSnapshot, WorkspaceState } from '../shared/workspace'
+import type { WorkspaceDescriptor, WorkspaceRepositoryPushPlan, WorkspaceRepositoryStatus, WorkspaceSnapshot, WorkspaceState } from '../shared/workspace'
 import { readTaskWorkspace } from './workspaceReader'
 import { readRepositorySessionLinks, removeRepositorySessionLink, sessionOwnerSchema, updateRepositoryAgentHostLink } from './repositorySessionLinks'
 import type { SessionLinksSnapshot, SessionOwner } from '../shared/sessionBindings'
@@ -10,7 +10,7 @@ import { readClientIdentity } from './clientIdentity'
 import { recordLocalLink } from './linkedSessionPolicy'
 import type { AgentHostTarget } from '../shared/agentHost'
 import { agentHostChatIdSchema, agentHostIdSchema, agentHostKey, agentHostSessionIdSchema, agentHostTargetSchema } from './agentHostProtocol'
-import { createWorkspaceRepositorySchema, publishWorkspaceRepositorySchema, workspaceRepositoryIdSchema, WorkspaceRepositoryService } from './workspaceRepository'
+import { createWorkspaceRepositorySchema, repositoryPushRequestSchema, workspaceRepositoryIdSchema, WorkspaceRepositoryService } from './workspaceRepository'
 
 const descriptorSchema = z.object({ id: z.string().regex(/^[a-f\d]{64}$/), name: z.string().max(300), title: z.string().max(200), root: z.string().min(1).max(4096) })
 const stateSchema = z.object({ currentId: z.string().nullable(), recent: z.array(descriptorSchema).max(10) })
@@ -117,10 +117,21 @@ export class WorkspaceStore {
     return this.update(() => this.repositories.status(this.repositoryWorkspace(workspaceRepositoryIdSchema.parse(value))))
   }
 
-  publishRepository(value: unknown): Promise<{ url: string }> {
+  getRepositoryCreationUrl(value: unknown): Promise<string> {
+    return this.update(async () => this.repositories.creationUrl(this.repositoryWorkspace(workspaceRepositoryIdSchema.parse(value))))
+  }
+
+  getRepositoryPushPlan(value: unknown): Promise<WorkspaceRepositoryPushPlan> {
     return this.update(async () => {
-      const request = publishWorkspaceRepositorySchema.parse(value)
-      return this.repositories.publish(this.repositoryWorkspace(request.workspaceId), request.private)
+      const request = repositoryPushRequestSchema.parse(value)
+      return this.repositories.preparePush(this.repositoryWorkspace(request.workspaceId), request.remoteUrl)
+    })
+  }
+
+  verifyRepositoryPublication(value: unknown): Promise<{ url: string }> {
+    return this.update(async () => {
+      const request = repositoryPushRequestSchema.parse(value)
+      return this.repositories.verifyPublication(this.repositoryWorkspace(request.workspaceId), request.remoteUrl)
     })
   }
 

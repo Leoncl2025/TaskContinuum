@@ -254,21 +254,41 @@ follow the existing composer lifetime; restarting the desktop discards unsent dr
    repository** to create `C:\Tasks\my-tasks`, initialize Git on `main`, and commit
    the initial configuration and empty task folder. Existing folders are never
    overwritten, and no sample tasks, chats, or device enrollment are created.
-3. The guide advances to **Publish to GitHub**. Review the signed-in GitHub
-   account and repository visibility. **Private** is the default; **Public**
-   requires an explicit selection. Nothing is uploaded until you click
-   **Publish to GitHub**.
-4. Alternatively, choose **Keep local for now**. The repository is already usable
+3. The guide advances to **GitHub website**. Choose **Create on GitHub** to open
+   `https://github.com/new` with the repository name prefilled. Sign in with your
+   Enterprise Managed User (EMU) account, select an owner allowed by your
+   enterprise, and confirm the name and visibility on GitHub. EMU personal
+   repositories must be **Private**; enterprise organizations may allow
+   **Private** or **Internal**, subject to policy. Create an **empty** repository:
+   do not initialize a README, `.gitignore`, or license.
+4. Paste its HTTPS or SSH repository URL into the guide and choose **Get push
+   commands**. EMU owner names such as `yourname_enterprise` are supported, and the
+   GitHub repository name can differ from the local folder. Review and copy the
+   commands, then run them in your terminal (PowerShell on Windows). They select
+   the exact local repository, add `origin` only if absent, and push the current
+   branch. Existing remote destinations are never silently replaced.
+5. Choose **I've pushed - Check** to verify the remote branch against the current
+   local commit. This explicit check is read-only; opening the guide or preparing
+   commands does not contact GitHub, create a remote, or push anything.
+6. Alternatively, choose **Keep local for now**. The repository is already usable
    and restored after restart. Use the Explorer's **Publish workspace to GitHub**
    icon to return to the publishing guide, or its **New task repository** icon
    to create another repository.
 
 Local creation needs Git and a configured Git author name/email; it does not need
-GitHub or a network connection. Publication uses the installed GitHub CLI (`gh`)
-and its own credential storage. If sign-in is missing, run
-`gh auth login --hostname github.com` in a terminal and choose **Check again**.
-Install GitHub CLI from <https://cli.github.com> if necessary, then restart the app
-so its updated `PATH` is available. Task Continuum never asks for a token in the UI.
+GitHub or a network connection. **GitHub CLI (`gh`) is not required.** If your
+terminal can already push to GitHub, reuse that setup. HTTPS Git can use your
+existing Git Credential Manager (GCM) credentials; if it prompts, finish the
+browser/enterprise SSO sign-in using the intended EMU account. A GitHub website
+login is not by itself a terminal Git login. Existing SSH authentication is also
+supported. The guide detects configured helpers without reading credentials,
+does not replace them, and never asks you to paste a token.
+
+Verification uses the configured Git credentials noninteractively. If credentials
+are missing or expired, finish `git push` in the terminal and retry the check.
+It cannot infer your EMU identity or repository visibility from a URL, so confirm
+both on GitHub. Enterprise policy remains authoritative; see
+[managed-user repository restrictions](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-iam/understanding-iam-for-enterprises/abilities-and-restrictions-of-managed-user-accounts#repository-management).
 
 The repository holds `.agentdesk/config.json` and `tasks/`; the empty task folder
 is retained in Git. Add task files with your existing compatible editor or
@@ -278,11 +298,12 @@ upload later edits. Review committed files before publishing; credentials and
 private session history must never be committed. A publication failure is shown
 explicitly and leaves the local repository available for retry.
 
-The guided publisher handles repositories created by Task Continuum. Its local
-retry record stays inside `.git` and is never committed. Existing repositories
-without this record can still be opened, but must be published using GitHub CLI.
-If remote creation loses its acknowledgement, finish recovery with GitHub CLI
-rather than letting the app assume ownership of an unverified repository.
+The guide can also prepare commands and verify an existing GitHub remote without
+claiming ownership of it. Reopening the guide shows local Git configuration, not
+an assumed successful publication; choose the explicit check to confirm the
+remote commit. Browser creation and terminal push failures never cause automatic
+recreation, retries that write remote state, or force pushes. Existing local
+onboarding records remain local to `.git` and are not uploaded.
 
 ## Open a task workspace
 

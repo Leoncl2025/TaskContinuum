@@ -35,8 +35,8 @@ describe('repository command exit codes', () => {
 
   it('rejects missing executables with an actionable installation error', async () => {
     result(Object.assign(new Error('Command not found.'), { code: 'ENOENT' }))
-    await expect(executeRepositoryCommand('gh', ['--version'], options)).rejects.toMatchObject({
-      code: 'ENOENT', message: 'Install GitHub CLI (gh) and restart Task Continuum.',
+    await expect(executeRepositoryCommand('git', ['--version'], options)).rejects.toMatchObject({
+      code: 'ENOENT', message: 'Install Git and restart Task Continuum.',
     })
   })
 

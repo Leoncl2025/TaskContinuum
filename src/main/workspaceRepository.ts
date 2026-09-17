@@ -1,12 +1,12 @@
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { link, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { link, lstat, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { devNull } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { z } from 'zod'
 import { Config } from '../shared/taskDocuments/config'
 import { workspaceRepositoryNameLimit } from '../shared/workspace'
-import type { CreateWorkspaceRepositoryRequest, WorkspaceDescriptor, WorkspaceRepositoryStatus } from '../shared/workspace'
+import type { CreateWorkspaceRepositoryRequest, RepositoryCredentialHelper, WorkspaceDescriptor, WorkspaceRepositoryPushPlan, WorkspaceRepositoryStatus } from '../shared/workspace'
 
 const nameSchema = z.string().min(1).max(workspaceRepositoryNameLimit)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Use a repository name starting with a letter or number, followed by letters, numbers, dots, hyphens or underscores.')
@@ -16,22 +16,13 @@ export const createWorkspaceRepositorySchema = z.object({
   parentPath: z.string().min(1).max(4096).refine((path) => isAbsolute(path) && ![...path].some((character) => character.charCodeAt(0) < 32) && !/^\\\\[?.]\\/.test(path), 'Choose an existing absolute parent folder.'),
   name: nameSchema,
 }).strict()
-export const publishWorkspaceRepositorySchema = z.object({
+export const repositoryPushRequestSchema = z.object({
   workspaceId: workspaceRepositoryIdSchema,
-  private: z.boolean().default(true),
+  remoteUrl: z.string().min(1).max(2048).refine((value) => value.trim().length > 0, 'Enter a GitHub repository URL.'),
 }).strict()
 
 const oidSchema = z.string().regex(/^(?:[a-f\d]{40}|[a-f\d]{64})$/)
-const loginSchema = z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/)
 const identitySchema = z.object({ dev: z.string(), ino: z.string() }).strict()
-const publicationSchema = z.object({
-  owner: loginSchema,
-  private: z.boolean(),
-  head: oidSchema,
-  repositoryId: z.number().int().positive().optional(),
-  url: z.string().optional(),
-  published: z.boolean().default(false),
-}).strict()
 const recordSchema = z.object({
   version: z.literal(1),
   root: z.string(),
@@ -39,21 +30,9 @@ const recordSchema = z.object({
   branch: z.literal('main'),
   git: identitySchema,
   initialHead: oidSchema,
-  publication: publicationSchema.optional(),
 }).strict()
 type RepositoryRecord = z.infer<typeof recordSchema>
 type FileIdentity = z.infer<typeof identitySchema>
-
-const githubRepositorySchema = z.object({
-  id: z.number().int().positive(),
-  name: z.string(),
-  full_name: z.string(),
-  html_url: z.string(),
-  clone_url: z.string(),
-  private: z.boolean(),
-  owner: z.object({ login: loginSchema }),
-})
-type GitHubRepository = z.infer<typeof githubRepositorySchema>
 
 export interface RepositoryCommandOptions {
   cwd: string
@@ -61,14 +40,14 @@ export interface RepositoryCommandOptions {
   timeout: number
 }
 export interface RepositoryCommandResult { code: number; stdout: string; stderr: string }
-export type RepositoryCommand = (program: 'git' | 'gh', args: string[], options: RepositoryCommandOptions) => Promise<RepositoryCommandResult>
+export type RepositoryCommand = (program: 'git', args: string[], options: RepositoryCommandOptions) => Promise<RepositoryCommandResult>
 
 export const executeRepositoryCommand: RepositoryCommand = (program, args, options) => new Promise((resolveCommand, reject) => {
   const child = execFile(program, args, { ...options, encoding: 'utf8', windowsHide: true, shell: false, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
     const code = error ? error.code : 0
     if (typeof code !== 'number') {
-      if (code === 'ENOENT') reject(Object.assign(new Error(`Install ${program === 'git' ? 'Git' : 'GitHub CLI (gh)'} and restart Task Continuum.`), { code: 'ENOENT' }))
-      else reject(new Error(`${program === 'git' ? 'Git' : 'GitHub CLI'} did not finish within its execution or output limit. Check connectivity and retry; local files are retained.`))
+      if (code === 'ENOENT') reject(Object.assign(new Error('Install Git and restart Task Continuum.'), { code: 'ENOENT' }))
+      else reject(new Error('Git did not finish within its execution or output limit. Check connectivity and retry; local files are retained.'))
       return
     }
     resolveCommand({ code, stdout: stdout.trim(), stderr: stderr.trim() })
@@ -80,14 +59,18 @@ function environment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const env = { ...process.env }
   for (const key of Object.keys(env)) if (/^GIT_|^GH_(?:HOST|REPO|DEBUG|PROMPT_DISABLED)$|^GCM_(?:TRACE.*|INTERACTIVE)$/i.test(key)) delete env[key]
   return {
-    ...env, GIT_TERMINAL_PROMPT: '0', GIT_EDITOR: 'false', GIT_SEQUENCE_EDITOR: 'false',
-    GCM_INTERACTIVE: 'Never', GH_PROMPT_DISABLED: '1', GH_PAGER: '', PAGER: '',
+    ...env, GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1', GIT_EDITOR: 'false', GIT_SEQUENCE_EDITOR: 'false',
+    GCM_INTERACTIVE: 'Never', PAGER: '',
     LC_ALL: 'C', ...extra,
   }
 }
 
 function samePath(left: string, right: string): boolean {
   return process.platform === 'win32' ? resolve(left).toLowerCase() === resolve(right).toLowerCase() : resolve(left) === resolve(right)
+}
+
+function hasControlCharacters(value: string): boolean {
+  return [...value].some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -110,32 +93,11 @@ async function assertDirectory(path: string, expected: FileIdentity): Promise<vo
 
 function recordPath(root: string): string { return join(root, '.git', 'taskcontinuum-onboarding.json') }
 
-async function readRecord(root: string): Promise<RepositoryRecord | null> {
-  const file = recordPath(root)
-  if (!await exists(file)) return null
-  const stat = await lstat(file)
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 16384) throw new Error('The local repository onboarding record is unsafe. Review the repository before publishing with GitHub CLI.')
-  const record = recordSchema.parse(JSON.parse(await readFile(file, 'utf8')))
-  if (!samePath(record.root, root)) throw new Error('The repository onboarding record belongs to another folder.')
-  await assertDirectory(join(root, '.git'), record.git)
-  return record
-}
-
-async function saveRecord(record: RepositoryRecord, create = false): Promise<void> {
+async function saveRecord(record: RepositoryRecord): Promise<void> {
   await assertDirectory(join(record.root, '.git'), record.git)
   const content = JSON.stringify(recordSchema.parse(record), null, 2) + '\n'
   const file = recordPath(record.root)
-  if (create) {
-    await writeFile(file, content, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
-    return
-  }
-  await readRecord(record.root)
-  const staging = `${file}.${randomUUID()}.staging`
-  try {
-    await writeFile(staging, content, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
-    await assertDirectory(join(record.root, '.git'), record.git)
-    await rename(staging, file)
-  } finally { await rm(staging, { force: true }) }
+  await writeFile(file, content, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
 }
 
 function skeleton(name: string, owner: string): Record<string, string> {
@@ -162,25 +124,40 @@ function skeleton(name: string, owner: string): Record<string, string> {
   }
 }
 
-function githubUrl(value: string): string {
-  const match = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(value)
-  if (!match || !loginSchema.safeParse(match[1]).success || !nameSchema.safeParse(match[2]).success) throw new Error('The remote is not a plain GitHub repository URL. Review its credentials and upstream before publishing.')
-  return `https://github.com/${match[1]}/${match[2]}`
+function githubUrl(value: string): { repositoryUrl: string; identity: string } {
+  const match = /^(https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9](?:[A-Za-z0-9_-]{0,37}[A-Za-z0-9])?)\/([A-Za-z0-9._-]{1,104})$/.exec(value)
+  const name = match?.[3].replace(/\.git$/, '')
+  if (value.length > 2048 || hasControlCharacters(value) || !match || !name || name.length > 100 || /^[-.]/.test(name) || name.endsWith('.') || name.toLowerCase().endsWith('.git')
+    || /^(?:settings|new|login|logout|signup|organizations|orgs|users|account|marketplace|features|topics|collections|events|sponsors|security|about|contact|pricing|apps|codespaces|notifications|pulls|issues|explore|search)$/i.test(match[2])) {
+    throw new Error('Use a plain GitHub.com HTTPS or SSH repository URL, without credentials, query strings or extra paths. Copy the clone URL from your GitHub repository.')
+  }
+  const repositoryUrl = `https://github.com/${match[2]}/${name}`
+  return { repositoryUrl, identity: `${match[1].startsWith('https:') ? 'https' : 'ssh'}:${repositoryUrl.toLowerCase()}` }
 }
 
-function checkedGitHubRepository(value: string, owner: string, name: string, isPrivate: boolean): GitHubRepository {
-  let json: unknown
-  try { json = JSON.parse(value) } catch { throw new Error('GitHub did not return a verifiable repository. No push was attempted; retry after checking GitHub CLI.') }
-  const parsed = githubRepositorySchema.safeParse(json)
-  if (!parsed.success) throw new Error('GitHub did not return a verifiable repository. No push was attempted; retry after checking GitHub CLI.')
-  const repo = parsed.data
-  const expected = `${owner}/${name}`.toLowerCase()
-  if (repo.full_name.toLowerCase() !== expected || repo.owner.login.toLowerCase() !== owner.toLowerCase() || repo.name.toLowerCase() !== name.toLowerCase()
-    || repo.private !== isPrivate || repo.html_url.toLowerCase() !== `https://github.com/${expected}`
-    || repo.clone_url.toLowerCase() !== `https://github.com/${expected}.git`) {
-    throw new Error('The GitHub repository account, name, URL or visibility changed. No push was attempted; review it before retrying.')
-  }
-  return repo
+type GitConfig = Array<{ key: string; value: string }>
+
+function values(config: GitConfig, key: string): string[] {
+  return config.filter((entry) => entry.key === key).map((entry) => entry.value)
+}
+
+function credentialHelper(config: GitConfig): RepositoryCredentialHelper {
+  const helpers = config.filter(({ key }) => /^credential(?:\..+)?\.helper$/.test(key)).map(({ value }) => value)
+  const effective = helpers.slice(helpers.lastIndexOf('') + 1)
+  if (!effective.length) return 'none'
+  return effective.some(isGcm) ? 'gcm' : 'configured'
+}
+
+function isGcm(helper: string): boolean {
+  if (/^manager(?:-core)?$/.test(helper)) return true
+  const quoted = helper.startsWith('"') && helper.endsWith('"')
+  const path = quoted ? helper.slice(1, -1) : helper
+  return /^(?:[A-Za-z]:[\\/]|\/)[A-Za-z0-9 _./\\:-]*[\\/]git-credential-manager(?:-core)?(?:\.exe)?$/.test(path)
+    && (quoted || !path.includes(' '))
+}
+
+function quote(value: string, shell: WorkspaceRepositoryPushPlan['shell']): string {
+  return `'${value.replace(/'/g, shell === 'powershell' ? "''" : "'\\''")}'`
 }
 
 export class WorkspaceRepositoryService {
@@ -193,11 +170,14 @@ export class WorkspaceRepositoryService {
       '-c', `core.hooksPath=${devNull}`, '-c', 'core.fsmonitor=false', '-c', 'core.longpaths=true',
       '-c', `core.attributesFile=${devNull}`, '-c', `core.excludesFile=${devNull}`,
       '-c', 'commit.gpgSign=false', '-c', 'user.useConfigOnly=true', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false',
-      '-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always',
-      ...(options.network ? ['-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential', '-c', 'credential.interactive=false'] : []),
+      '-c', 'protocol.allow=never', '-c', `protocol.https.allow=${options.network ? 'always' : 'never'}`,
+      '-c', `protocol.ssh.allow=${options.network ? 'always' : 'never'}`,
+      ...(options.network ? ['-c', 'credential.interactive=false', '-c', 'http.followRedirects=false', '-c', `core.sshCommand=ssh -F ${devNull} -o BatchMode=yes -o StrictHostKeyChecking=yes`] : []),
       ...args,
     ], { cwd: options.cwd ?? root, env: environment(options.env), timeout: options.network ? 60000 : 15000 })
-    if (result.code !== 0 && !options.allowFailure) throw new Error(`Git ${args[0]} failed. Check repository permissions${options.network ? ', network access and gh auth login' : ' and Git installation'}; local files are retained.`)
+    if (result.code !== 0 && !options.allowFailure) throw new Error(options.network
+      ? 'Git could not verify GitHub. Check network access and the repository URL, then authenticate in terminal Git with your existing GCM/credential helper (or SSH key). For enterprise managed users, select your EMU account and complete organization SSO. Retry verification after a successful terminal push; local files are retained.'
+      : `Git ${args[0]} failed. Check repository permissions and Git installation; local files are retained.`)
     return result
   }
 
@@ -255,172 +235,138 @@ export class WorkspaceRepositoryService {
         await this.git(root, ['update-ref', 'refs/heads/main', head, '0'.repeat(head.length)])
         await link(index, join(root, '.git', 'index'))
       } finally { await rm(index, { force: true }) }
-      await saveRecord({ version: 1, root, name: request.name, branch: 'main', git: gitIdentity, initialHead: head }, true)
+      await saveRecord({ version: 1, root, name: request.name, branch: 'main', git: gitIdentity, initialHead: head })
       return root
     } catch (error) {
       throw new Error(`${error instanceof Error ? error.message : 'Repository initialization failed.'} The newly created folder was retained at ${root}. Inspect it before retrying with a new name; no existing repository was changed.`)
     }
   }
 
-  private async github(): Promise<WorkspaceRepositoryStatus['github']> {
-    const options = { cwd: process.cwd(), env: environment(), timeout: 15000 }
-    let version: RepositoryCommandResult
-    try { version = await this.run('gh', ['--version'], options) } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { installed: false, authenticated: false }
-      throw error
-    }
-    if (version.code !== 0) throw new Error('GitHub CLI could not start. Reinstall gh and restart Task Continuum.')
-    const auth = await this.run('gh', ['auth', 'status', '--hostname', 'github.com'], options)
-    if (auth.code !== 0) {
-      if (/not logged|no accounts|authentication|token.*(?:invalid|expired)|failed to log in|gh auth login/i.test(auth.stdout + auth.stderr)) return { installed: true, authenticated: false }
-      throw new Error('GitHub authentication could not be checked. Check your network and run gh auth status or gh auth login.')
-    }
-    const user = await this.run('gh', ['api', '--hostname', 'github.com', 'user', '--jq', '.login'], options)
-    if (user.code !== 0) throw new Error('The current GitHub account could not be verified. Check your network and run gh auth login.')
-    const parsed = loginSchema.safeParse(user.stdout)
-    if (!parsed.success) throw new Error('GitHub CLI returned an invalid account name. Run gh auth status and retry.')
-    return { installed: true, authenticated: true, login: parsed.data }
+  private async configuration(root: string): Promise<GitConfig> {
+    const names = (await this.git(root, ['config', '--null', '--list', '--name-only'])).stdout.split('\0').filter(Boolean)
+    // Never dump unrelated config values: headers, cookies and proxy URLs can contain credentials.
+    const result = await this.git(root, ['config', '--null', '--get-regexp', '^(core\\.bare|remote\\.origin\\.(url|pushurl|mirror)|push\\.mirror|branch\\..*\\.(remote|merge)|credential(\\..+)?\\.helper)$'], { allowFailure: true })
+    if (result.code !== 0 && result.code !== 1) throw new Error('Git configuration could not be read. Review repository settings in terminal Git.')
+    const selected = result.stdout.split('\0').filter(Boolean).map((entry) => {
+      const separator = entry.indexOf('\n')
+      return { key: separator < 0 ? entry : entry.slice(0, separator), value: separator < 0 ? '' : entry.slice(separator + 1) }
+    })
+    return [...names.filter((key) => !selected.some((entry) => entry.key === key)).map((key) => ({ key, value: '' })), ...selected]
   }
 
   private async local(root: string) {
-    await directoryIdentity(join(root, '.git'))
+    if (!isAbsolute(root) || hasControlCharacters(root)) throw new Error('Choose an ordinary absolute repository folder without control characters.')
+    const rootIdentity = await directoryIdentity(root)
+    await assertDirectory(root, rootIdentity)
+    const gitIdentity = await directoryIdentity(join(root, '.git'))
+    await assertDirectory(join(root, '.git'), gitIdentity)
+    if (await exists(join(root, '.git', 'commondir'))) throw new Error('Linked or shared Git directories require manual terminal Git review.')
+    const configFile = await lstat(join(root, '.git', 'config'))
+    if (!configFile.isFile() || configFile.isSymbolicLink() || configFile.nlink !== 1) throw new Error('Linked Git configuration requires manual terminal Git review.')
+    const config = await this.configuration(root)
+    if (config.some(({ key }) => /^url\..*\.(?:insteadof|pushinsteadof)$|^core\.(?:worktree|bare|gitproxy)$|^remote\..*\.(?:vcs|uploadpack|receivepack)$/.test(key)
+      && !(key === 'core.bare' && values(config, key).every((value) => value === 'false')))) {
+      throw new Error('Unsafe or redirected Git configuration detected. Review URL rewrites, repository paths and remote commands in terminal Git; no configuration was changed.')
+    }
     const top = (await this.git(root, ['rev-parse', '--show-toplevel'])).stdout
-    if (!samePath(root, top)) throw new Error('This workspace does not have its own Git repository. Parent repositories and linked worktrees cannot be published here.')
-    const branch = await this.git(root, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { allowFailure: true })
-    if (branch.code !== 0 && branch.code !== 1) throw new Error('The repository branch could not be read.')
-    const head = await this.git(root, ['rev-parse', '--verify', 'HEAD'], { allowFailure: true })
-    if (head.code !== 0 && head.code !== 128 && head.code !== 1) throw new Error('The repository commit could not be read.')
-    const remotes = (await this.git(root, ['remote'])).stdout.split(/\r?\n/).filter(Boolean)
-    return { branch: branch.code === 0 ? branch.stdout : null, head: head.code === 0 ? oidSchema.parse(head.stdout) : null, remotes }
+    if (!samePath(root, top)) throw new Error('This workspace must have its own ordinary Git repository, not a parent repository or linked worktree.')
+    const branchResult = await this.git(root, ['symbolic-ref', '--quiet', 'HEAD'], { allowFailure: true })
+    if (branchResult.code !== 0 && branchResult.code !== 1) throw new Error('The repository branch could not be read.')
+    const branch = branchResult.code === 0 && branchResult.stdout.startsWith('refs/heads/') ? branchResult.stdout.slice(11) : null
+    if (branch && ((await this.git(root, ['check-ref-format', `refs/heads/${branch}`], { allowFailure: true })).code !== 0 || hasControlCharacters(branch))) throw new Error('The repository branch is unsafe. Select a valid branch in terminal Git.')
+    const headResult = await this.git(root, ['rev-parse', '--verify', 'HEAD'], { allowFailure: true })
+    if (![0, 1, 128].includes(headResult.code)) throw new Error('The repository commit could not be read.')
+    const head = headResult.code === 0 ? oidSchema.parse(headResult.stdout) : null
+    const origin = values(config, 'remote.origin.url')
+    const pushUrls = values(config, 'remote.origin.pushurl')
+    if (origin.length > 1 || pushUrls.length > 1 || (!origin.length && config.some(({ key }) => key.startsWith('remote.origin.')))) {
+      throw new Error('The origin remote has ambiguous fetch or push URLs. Review origin in terminal Git; existing remotes are never overwritten.')
+    }
+    let remoteUrl: string | null = null
+    if (origin.length) {
+      remoteUrl = origin[0]
+      const expected = githubUrl(remoteUrl).identity
+      const fetch = (await this.git(root, ['remote', 'get-url', '--all', '--', 'origin'])).stdout
+      const push = (await this.git(root, ['remote', 'get-url', '--push', '--all', '--', 'origin'])).stdout
+      if (githubUrl(fetch).identity !== expected || githubUrl(push).identity !== expected || (pushUrls.length && githubUrl(pushUrls[0]).identity !== expected)) {
+        throw new Error('The origin fetch or push URL does not match. Review origin in terminal Git; existing remotes are never overwritten.')
+      }
+    }
+    if (config.some(({ key, value }) => key === 'remote.origin.push' || (key === 'remote.origin.mirror' && value !== 'false') || (key === 'push.mirror' && value !== 'false'))) {
+      throw new Error('Custom push refspecs or mirror configuration require manual terminal Git review. No remote was changed.')
+    }
+    await assertDirectory(root, rootIdentity)
+    await assertDirectory(join(root, '.git'), gitIdentity)
+    return { branch, head, remoteUrl, config, rootIdentity, gitIdentity }
   }
 
   async status(workspace: WorkspaceDescriptor): Promise<WorkspaceRepositoryStatus> {
-    let branch: string | null = null
-    let remoteUrl: string | null = null
-    let published = false
-    if (await exists(join(workspace.root, '.git'))) {
-      const local = await this.local(workspace.root)
-      branch = local.branch
-      const remote = local.remotes.includes('origin') ? 'origin' : local.remotes.length === 1 ? local.remotes[0] : null
-      if (remote) {
-        const urls = (await this.git(workspace.root, ['remote', 'get-url', '--all', '--', remote])).stdout
-        remoteUrl = githubUrl(urls)
-      }
-      const record = await readRecord(workspace.root)
-      published = !!record?.publication?.published && record.branch === branch && record.publication.url === remoteUrl
-      if (!record && remote && branch && remoteUrl) {
-        const tracking = await this.git(workspace.root, ['for-each-ref', '--format=%(upstream)', `refs/heads/${branch}`])
-        if (tracking.stdout) {
-          const known = await this.git(workspace.root, ['rev-parse', '--verify', tracking.stdout], { allowFailure: true })
-          published = known.code === 0
-        }
-      }
+    if (!await exists(join(workspace.root, '.git'))) {
+      return { workspaceId: workspace.id, name: workspace.name, branch: null, remoteUrl: null, credentialHelper: 'none' }
     }
-    return { workspaceId: workspace.id, name: workspace.name, branch, remoteUrl, published, github: await this.github() }
+    const local = await this.local(workspace.root)
+    return { workspaceId: workspace.id, name: workspace.name, branch: local.branch, remoteUrl: local.remoteUrl, credentialHelper: credentialHelper(local.config) }
   }
 
-  private async assertPublishable(record: RepositoryRecord, head: string): Promise<void> {
-    await assertDirectory(join(record.root, '.git'), record.git)
-    const local = await this.local(record.root)
-    if (local.branch !== record.branch || local.head !== head) throw new Error('The repository branch or commit changed. Switch back to the intended branch and commit before retrying publication.')
-    const roots = (await this.git(record.root, ['rev-list', '--max-parents=0', head])).stdout
-    if (roots !== record.initialHead) throw new Error('The repository history changed or contains unrelated history. Review it and publish manually with GitHub CLI.')
-    if ((await this.git(record.root, ['status', '--porcelain=v1', '--untracked-files=all'])).stdout) throw new Error('The repository has uncommitted files. Review and commit them with Git before publishing; Task Continuum will not stage your files.')
-    if (local.remotes.length) {
-      if (!record.publication?.repositoryId || local.remotes.length !== 1 || local.remotes[0] !== 'origin' || !record.publication.url) throw new Error('The repository already has a remote or its remote changed. Existing remotes are never overwritten.')
-      const expected = `${record.publication.url}.git`
-      for (const args of [['remote', 'get-url', '--all', '--', 'origin'], ['remote', 'get-url', '--push', '--all', '--', 'origin']]) {
-        if ((await this.git(record.root, args)).stdout !== expected) throw new Error('The repository remote or push URL changed. Restore the intended GitHub remote before retrying.')
-      }
-      if (await this.config(record.root, 'remote.origin.mirror') || await this.config(record.root, 'remote.origin.push')
-        || await this.config(record.root, 'remote.origin.pushurl')
-        || await this.config(record.root, 'remote.origin.fetch') !== '+refs/heads/*:refs/remotes/origin/*') {
-        throw new Error('The repository remote configuration changed. Review its fetch and push settings before retrying.')
-      }
-    }
-    const upstreamRemote = await this.config(record.root, 'branch.main.remote')
-    const upstreamBranch = await this.config(record.root, 'branch.main.merge')
-    if ((upstreamRemote !== null || upstreamBranch !== null) && (upstreamRemote !== 'origin' || upstreamBranch !== 'refs/heads/main' || !record.publication?.repositoryId)) {
-      throw new Error('The repository upstream changed. Restore the intended main branch upstream before retrying.')
-    }
+  creationUrl(workspace: WorkspaceDescriptor): string {
+    return `https://github.com/new?name=${encodeURIComponent(workspace.name)}`
   }
 
-  private async remoteRepository(record: RepositoryRecord): Promise<GitHubRepository | null> {
-    const publication = record.publication!
-    const result = await this.run('gh', ['api', '--hostname', 'github.com', `repos/${publication.owner}/${record.name}`], { cwd: record.root, env: environment(), timeout: 30000 })
-    if (result.code !== 0) {
-      if (/HTTP 404\b/.test(result.stderr)) return null
-      throw new Error('GitHub repository access failed. Check your network, account and gh auth login; the local repository is intact.')
+  private async ready(workspace: WorkspaceDescriptor, remoteUrl: string) {
+    const intended = githubUrl(remoteUrl)
+    if (!await exists(join(workspace.root, '.git'))) throw new Error('This workspace has no local Git repository. Initialize and commit it in terminal Git first.')
+    const local = await this.local(workspace.root)
+    if (!local.branch) throw new Error('The repository has a detached HEAD. Check out the intended branch in terminal Git before continuing.')
+    if (!local.head) throw new Error('The repository has no commit. Review and commit files in terminal Git first; Task Continuum will not stage your files.')
+    if (local.remoteUrl && githubUrl(local.remoteUrl).identity !== intended.identity) throw new Error('The existing origin does not match the intended GitHub repository. Check the URL in terminal Git; existing remotes are never overwritten.')
+    // Listing index entries does not run filters or descend into submodule repositories.
+    const entries = (await this.git(workspace.root, ['ls-files', '--stage', '--cached', '--others', '--full-name', '-z'])).stdout.split('\0').filter(Boolean)
+    if (entries.some((entry) => entry.startsWith('160000 '))) {
+      throw new Error('Repositories with submodules require manual terminal Git review before publication verification.')
     }
-    return checkedGitHubRepository(result.stdout, publication.owner, record.name, publication.private)
+    const attributes = entries.some((entry) => /(?:^|[/\t])\.gitattributes$/i.test(entry)) || await exists(join(workspace.root, '.git', 'info', 'attributes'))
+    if (attributes && local.config.some(({ key }) => /^filter\..+\.(?:clean|smudge|process|required)$/.test(key))) {
+      throw new Error('Configured Git filters require manual terminal Git review. No filters or shell commands were executed.')
+    }
+    const upstream = values(local.config, `branch.${local.branch}.remote`)
+    const merge = values(local.config, `branch.${local.branch}.merge`)
+    if ((upstream.length || merge.length) && (upstream.length !== 1 || merge.length !== 1 || upstream[0] !== 'origin' || merge[0] !== `refs/heads/${local.branch}`)) {
+      throw new Error('The branch has a different or ambiguous upstream. Review its upstream in terminal Git before preparing a push.')
+    }
+    if ((await this.git(workspace.root, ['status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=none'])).stdout) {
+      throw new Error('The repository has uncommitted files. Review and commit them in terminal Git first; Task Continuum will not stage your files.')
+    }
+    return { ...local, branch: local.branch, head: local.head, intended }
   }
 
-  private async publishedHead(record: RepositoryRecord): Promise<boolean> {
-    const result = await this.git(record.root, ['ls-remote', '--refs', 'origin'], { network: true })
-    const lines = result.stdout.split(/\r?\n/).filter(Boolean)
-    if (lines.length === 0) return false
-    if (lines.length !== 1 || lines[0] !== `${record.publication!.head}\trefs/heads/main`) throw new Error('The GitHub repository history changed. No force push will be attempted; review the remote before retrying.')
-    return true
+  async preparePush(workspace: WorkspaceDescriptor, remoteUrl: string): Promise<WorkspaceRepositoryPushPlan> {
+    const local = await this.ready(workspace, remoteUrl)
+    const shell = process.platform === 'win32' ? 'powershell' : 'posix'
+    const git = `git -C ${quote(workspace.root, shell)}`
+    const push = `${git} push --no-follow-tags --recurse-submodules=no -u -- origin ${quote(`refs/heads/${local.branch}:refs/heads/${local.branch}`, shell)}`
+    const add = `${git} remote add -- origin ${quote(remoteUrl, shell)}`
+    const commands = local.remoteUrl ? push : shell === 'powershell'
+      ? `${add}\nif ($LASTEXITCODE -eq 0) { ${push} }`
+      : `${add} &&\n${push}`
+    return { workspaceId: workspace.id, branch: local.branch, head: local.head, remoteUrl: local.remoteUrl ?? remoteUrl, repositoryUrl: local.intended.repositoryUrl, shell, commands }
   }
 
-  private async confirmRemote(record: RepositoryRecord): Promise<GitHubRepository> {
-    const remote = await this.remoteRepository(record)
-    if (!remote || remote.id !== record.publication!.repositoryId || remote.html_url !== record.publication!.url) throw new Error('The GitHub repository was removed or replaced. No further push was attempted; review it before retrying.')
-    return remote
-  }
-
-  async publish(workspace: WorkspaceDescriptor, isPrivate: boolean): Promise<{ url: string }> {
-    const record = await readRecord(workspace.root)
-    if (!record) throw new Error('Only repositories created by Task Continuum can be published here. Existing repositories are not modified; publish them explicitly with GitHub CLI.')
-    if (record.name !== workspace.name) throw new Error('The repository name changed. Review it before publishing with GitHub CLI.')
-    const local = await this.local(record.root)
-    const head = record.publication?.head ?? local.head
-    if (!head) throw new Error('The repository has no initial commit. Configure your Git identity and create a task repository first.')
-    await this.assertPublishable(record, head)
-    const account = await this.github()
-    if (!account.installed) throw new Error('Install GitHub CLI (gh), restart Task Continuum, then run gh auth login before publishing.')
-    if (!account.authenticated || !account.login) throw new Error('Sign in with gh auth login, then retry publishing. Local creation does not require GitHub.')
-    if (record.publication && (record.publication.owner !== account.login || record.publication.private !== isPrivate)) {
-      throw new Error('A previous publish attempt used a different GitHub account or visibility. Retry with that account and visibility; no existing remote will be replaced.')
+  async verifyPublication(workspace: WorkspaceDescriptor, remoteUrl: string): Promise<{ url: string }> {
+    const before = await this.ready(workspace, remoteUrl)
+    if (!before.remoteUrl) throw new Error('No origin remote exists yet. Run the reviewed terminal commands to add origin and push, then retry verification.')
+    if (before.config.some(({ key, value }) => /^core\.sshcommand$|^ssh\.variant$|^http(?:\..+)?\.(?:extraheader|cookiefile|savecookies|proxy|sslverify)$/.test(key)
+      || (/^credential(?:\..+)?\.helper$/.test(key) && value !== '' && !isGcm(value) && !/^(?:cache(?: --timeout=\d+)?|store|osxkeychain|wincred|libsecret)$/.test(value)))) {
+      throw new Error('Custom transport or credential commands require manual terminal Git verification. Use standard Git/GCM configuration; Task Continuum will not run arbitrary shell commands.')
     }
-    const retry = !!record.publication
-    record.publication ??= { owner: account.login, private: isPrivate, head, published: false }
-    let remote = await this.remoteRepository(record)
-    if (record.publication.repositoryId) {
-      if (!remote || remote.id !== record.publication.repositoryId || remote.html_url !== record.publication.url) throw new Error('The GitHub repository was removed or replaced. No push was attempted; review it before retrying.')
-    } else {
-      if (remote) throw new Error(retry
-        ? 'A GitHub repository exists, but the previous creation result could not be verified. Inspect it with GitHub CLI before retrying; the local repository is intact.'
-        : 'A repository with this name already exists on your GitHub account. It will not be overwritten; choose another local repository name.')
-      await this.assertPublishable(record, head)
-      await saveRecord(record)
-      // gh owns authentication; this creates only the remote, never stages files or changes Git/account configuration.
-      const created = await this.run('gh', ['api', '--hostname', 'github.com', 'user/repos', '--method', 'POST', '--raw-field', `name=${record.name}`, '--field', `private=${isPrivate}`], { cwd: record.root, env: environment(), timeout: 60000 })
-      if (created.code !== 0) throw new Error('GitHub repository creation failed or could not be confirmed. Check the account, network and gh auth login, then retry; the local repository is intact.')
-      remote = checkedGitHubRepository(created.stdout, account.login, record.name, isPrivate)
-      record.publication.repositoryId = remote.id
-      record.publication.url = remote.html_url
-      await saveRecord(record)
-    }
-    await this.assertPublishable(record, head)
-    if ((await this.local(record.root)).remotes.length === 0) await this.git(record.root, ['remote', 'add', 'origin', remote.clone_url])
-    await this.confirmRemote(record)
-    await this.assertPublishable(record, head)
-    if (!await this.publishedHead(record)) {
-      await this.assertPublishable(record, head)
-      await this.git(record.root, ['push', '--porcelain', '--no-follow-tags', '--recurse-submodules=no', 'origin', `${head}:refs/heads/main`], { network: true })
-      if (!await this.publishedHead(record)) throw new Error('GitHub did not confirm the published main branch. Retry to verify it; the local repository is intact.')
-    }
-    remote = await this.confirmRemote(record)
-    await this.assertPublishable(record, head)
-    const tracking = await this.git(record.root, ['rev-parse', '--verify', 'refs/remotes/origin/main'], { allowFailure: true })
-    if (tracking.code === 0 && tracking.stdout !== head) throw new Error('The local remote-tracking branch changed. Review it before finishing publication.')
-    if (tracking.code !== 0 && tracking.code !== 128 && tracking.code !== 1) throw new Error('The local remote-tracking branch could not be verified.')
-    if (tracking.code !== 0) await this.git(record.root, ['update-ref', 'refs/remotes/origin/main', head, '0'.repeat(head.length)])
-    await this.git(record.root, ['branch', '--set-upstream-to=origin/main', 'main'])
-    await this.assertPublishable(record, head)
-    record.publication.published = true
-    await saveRecord(record)
-    return { url: remote.html_url }
+    const ref = `refs/heads/${before.branch}`
+    // Use the validated URL, not the mutable remote name. A second local snapshot fences concurrent changes.
+    const result = await this.git(workspace.root, ['ls-remote', '--refs', '--', before.remoteUrl, ref], { network: true })
+    const after = await this.ready(workspace, remoteUrl)
+    if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error('The local branch, commit, origin or Git configuration changed during verification. Review it and explicitly retry.')
+    const refs = result.stdout.split(/\r?\n/).filter(Boolean).map((line) => line.split('\t'))
+    const matches = refs.filter((entry) => entry.length === 2 && entry[1] === ref)
+    if (!matches.length) throw new Error('The current branch is not on GitHub yet. Run the reviewed terminal push with your Git/GCM account and complete EMU organization SSO, then retry verification.')
+    if (matches.length !== 1 || matches[0][0] !== before.head) throw new Error('The GitHub branch does not match the local commit. Review terminal Git status and push the intended branch, then retry; do not force-push without reviewing remote history.')
+    return { url: before.intended.repositoryUrl }
   }
 }

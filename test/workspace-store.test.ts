@@ -96,7 +96,7 @@ describe('selected and recent workspaces', () => {
     expect(created.current?.tasks).toEqual([])
     expect(created.recent.map((entry) => entry.name)).toEqual(['created-tasks'])
     expect((await new WorkspaceStore(profile).getState()).current?.id).toBe(created.current?.id)
-    expect(setup.calls.some((call) => call.program === 'gh')).toBe(false)
+    expect(setup.calls.every((call) => call.program === 'git' && !call.args.includes('ls-remote'))).toBe(true)
   }, 30000)
 
   it('surfaces selection save failures without deleting a successfully created repository or replacing current state', async () => {
@@ -109,60 +109,80 @@ describe('selected and recent workspaces', () => {
     await expect(store.createRepository({ parentPath: setup.root, name: 'recoverable-tasks' })).rejects.toThrow('Use Open existing to recover')
     expect((await store.getState()).current?.id).toBe(before.current?.id)
     expect((await readTaskWorkspace(join(setup.root, 'recoverable-tasks'))).tasks).toEqual([])
-    expect(setup.calls.some((call) => call.program === 'gh')).toBe(false)
+    expect(setup.calls.every((call) => call.program === 'git' && !call.args.includes('ls-remote'))).toBe(true)
     await rm(join(profile, 'workspaces.json'), { recursive: true })
     expect((await store.openFolder(join(setup.root, 'recoverable-tasks'))).current?.name).toBe('recoverable-tasks')
   }, 30000)
 
-  it('validates untrusted repository inputs and fences status and publish to the selected workspace', async () => {
+  it('validates repository inputs and fences status, browser, command planning and verification to the selected workspace', async () => {
     const { first, second, profile } = await fixture()
     const setup = await repositoryFixture()
     const status = vi.spyOn(setup.service, 'status')
-    const publish = vi.spyOn(setup.service, 'publish').mockResolvedValue({ url: 'https://github.com/fixture-owner/tasks' })
+    const remoteUrl = 'https://github.com/fixture_emu/tasks.git'
+    const verify = vi.spyOn(setup.service, 'verifyPublication').mockResolvedValue({ url: 'https://github.com/fixture_emu/tasks' })
+    const creation = vi.spyOn(setup.service, 'creationUrl').mockReturnValue('https://github.com/new?name=tasks')
+    const prepare = vi.spyOn(setup.service, 'preparePush').mockImplementation(async (workspace) => ({
+      workspaceId: workspace.id, branch: 'main', head: 'a'.repeat(40), remoteUrl, repositoryUrl: 'https://github.com/fixture_emu/tasks',
+      shell: 'powershell', commands: 'git push',
+    }))
     const store = new WorkspaceStore(profile, undefined, undefined, setup.service)
     const initial = await store.openFolder(first)
     for (const id of [null, first, 'a'.repeat(64)]) {
       await expect(store.getRepositoryStatus(id)).rejects.toThrow()
-      await expect(store.publishRepository({ workspaceId: id, private: true })).rejects.toThrow()
+      await expect(store.getRepositoryCreationUrl(id)).rejects.toThrow()
+      await expect(store.getRepositoryPushPlan({ workspaceId: id, remoteUrl })).rejects.toThrow()
+      await expect(store.verifyRepositoryPublication({ workspaceId: id, remoteUrl })).rejects.toThrow()
     }
-    for (const value of [null, {}, { workspaceId: initial.current!.id, private: 'false' }, { workspaceId: initial.current!.id, private: false, remote: 'untrusted' }]) await expect(store.publishRepository(value)).rejects.toThrow()
+    for (const value of [null, {}, { workspaceId: initial.current!.id, remoteUrl: 1 }, { workspaceId: initial.current!.id, remoteUrl, extra: 'untrusted' }]) {
+      await expect(store.getRepositoryPushPlan(value)).rejects.toThrow()
+      await expect(store.verifyRepositoryPublication(value)).rejects.toThrow()
+    }
     for (const value of [null, {}, { parentPath: setup.root, name: '../escape' }, { parentPath: 1, name: 'valid' }]) await expect(store.createRepository(value)).rejects.toThrow()
     expect(status).not.toHaveBeenCalled()
-    expect(publish).not.toHaveBeenCalled()
-    await store.publishRepository({ workspaceId: initial.current!.id })
-    expect(publish).toHaveBeenCalledExactlyOnceWith(initial.current, true)
+    expect(verify).not.toHaveBeenCalled()
+    expect(prepare).not.toHaveBeenCalled()
+    expect(creation).not.toHaveBeenCalled()
+    await store.getRepositoryCreationUrl(initial.current!.id)
+    await store.getRepositoryPushPlan({ workspaceId: initial.current!.id, remoteUrl })
+    await store.verifyRepositoryPublication({ workspaceId: initial.current!.id, remoteUrl })
+    expect(creation).toHaveBeenCalledExactlyOnceWith(initial.current)
+    expect(prepare).toHaveBeenCalledExactlyOnceWith(initial.current, remoteUrl)
+    expect(verify).toHaveBeenCalledExactlyOnceWith(initial.current, remoteUrl)
     await store.openFolder(second)
-    await expect(store.publishRepository({ workspaceId: initial.current!.id, private: false })).rejects.toThrow('active workspace changed')
+    await expect(store.getRepositoryCreationUrl(initial.current!.id)).rejects.toThrow('active workspace changed')
+    await expect(store.getRepositoryPushPlan({ workspaceId: initial.current!.id, remoteUrl })).rejects.toThrow('active workspace changed')
+    await expect(store.verifyRepositoryPublication({ workspaceId: initial.current!.id, remoteUrl })).rejects.toThrow('active workspace changed')
     await expect(store.getRepositoryStatus(initial.current!.id)).rejects.toThrow('active workspace changed')
-    expect(publish).toHaveBeenCalledTimes(1)
+    expect(verify).toHaveBeenCalledTimes(1)
     await store.closeWorkspace()
     await expect(store.getRepositoryStatus(initial.current!.id)).rejects.toThrow('active workspace changed')
   })
 
-  it('serializes publication with workspace switching and rejects stale requests after the switch', async () => {
+  it('serializes read-only verification with workspace switching and rejects stale requests after the switch', async () => {
     const { first, second, profile } = await fixture()
     const setup = await repositoryFixture()
     let release!: () => void
     let started!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
     const entered = new Promise<void>((resolve) => { started = resolve })
-    const publish = vi.spyOn(setup.service, 'publish').mockImplementation(async () => {
+    const verify = vi.spyOn(setup.service, 'verifyPublication').mockImplementation(async () => {
       started()
       await gate
       return { url: 'https://github.com/fixture-owner/tasks' }
     })
     const store = new WorkspaceStore(profile, undefined, undefined, setup.service)
     const initial = await store.openFolder(first)
-    const publishing = store.publishRepository({ workspaceId: initial.current!.id, private: true })
+    const request = { workspaceId: initial.current!.id, remoteUrl: 'https://github.com/fixture_emu/tasks.git' }
+    const verifying = store.verifyRepositoryPublication(request)
     await entered
     let switched = false
     const switching = store.openFolder(second).then((state) => { switched = true; return state })
     await Promise.resolve()
     expect(switched).toBe(false)
     release()
-    await publishing
+    await verifying
     expect((await switching).current?.root).toBe(second)
-    await expect(store.publishRepository({ workspaceId: initial.current!.id, private: true })).rejects.toThrow('active workspace changed')
-    expect(publish).toHaveBeenCalledTimes(1)
+    await expect(store.verifyRepositoryPublication(request)).rejects.toThrow('active workspace changed')
+    expect(verify).toHaveBeenCalledTimes(1)
   })
 })

@@ -21,20 +21,21 @@ async function git(root: string, ...args: string[]): Promise<string> {
 
 async function launch(): Promise<void> {
   app = await electron.launch({ args: [resolve('.')], cwd: resolve('.'), env: environment })
-  // Keep GitHub operations offline while exercising the actual local creation IPC.
-  await app.evaluate(({ ipcMain }) => {
-    ipcMain.removeHandler('workspace:repository-status')
-    ipcMain.handle('workspace:repository-status', (_event, workspaceId: string) => ({
-      workspaceId, name: 'task-notes', branch: 'main', remoteUrl: null, published: false,
-      github: { installed: false, authenticated: false },
-    }))
-    ipcMain.removeHandler('workspace:publish-repository')
-    ipcMain.handle('workspace:publish-repository', () => { throw new Error('External publication is disabled in this offline test.') })
-  })
   page = await app.firstWindow()
   page.on('pageerror', (error) => errors.push(error.message))
   page.on('request', (request) => { if (/^(https?|wss?):/.test(request.url())) externalRequests.push(request.url()) })
   await expect(page.locator('.workbench')).toHaveAttribute('aria-busy', 'false')
+  // Exercise real local status and command planning without opening browsers or contacting GitHub.
+  await app.evaluate(({ ipcMain, shell, clipboard }) => {
+    const urls: string[] = []
+    const copied: string[] = []
+    Reflect.set(globalThis, 'onboardingOpenedUrls', urls)
+    Reflect.set(globalThis, 'onboardingCopiedCommands', copied)
+    shell.openExternal = async (url: string) => { urls.push(url) }
+    clipboard.writeText = async (text: string) => { copied.push(text) }
+    ipcMain.removeHandler('workspace:verify-repository-publication')
+    ipcMain.handle('workspace:verify-repository-publication', () => { throw new Error('Finish git push in your terminal, then check again. Offline fixture did not contact GitHub.') })
+  })
 }
 
 async function chooseParent(): Promise<void> {
@@ -89,9 +90,10 @@ test('starts empty, creates a separate task Git repository, and restores it afte
   await page.getByRole('button', { name: 'Create repository', exact: true }).click()
   const publishing = page.getByRole('dialog', { name: 'Publish task repository' })
   await expect(publishing).toBeVisible()
-  await expect(publishing.getByRole('radio', { name: /Private/ })).toBeChecked()
-  await expect(publishing.getByText(/GitHub CLI \(gh\) is not installed/)).toBeVisible()
-  await expect(publishing.getByRole('button', { name: 'Publish to GitHub', exact: true })).toBeDisabled()
+  await expect(publishing.getByText(/No GitHub CLI or separate app sign-in is needed/)).toBeVisible()
+  await expect(publishing.getByText(/Personal EMU repositories must be private/)).toBeVisible()
+  await expect(publishing.getByRole('button', { name: 'Get push commands', exact: true })).toBeDisabled()
+  await expect(publishing.getByRole('radio')).toHaveCount(0)
   await page.screenshot({ path: resolve('artifacts', 'repository-publish.png') })
   await publishing.getByRole('button', { name: 'Keep local for now' }).click()
 
@@ -147,4 +149,50 @@ test('rejects unsafe names and existing folders without replacing files or selec
   expect(await readFile(join(existing, 'keep.txt'), 'utf8')).toBe('Keep the original bytes.')
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Create your task repository')
+})
+
+test('guides an EMU user through browser creation and terminal commands without invoking gh or pushing', async () => {
+  test.setTimeout(90_000)
+  await page.getByRole('button', { name: 'Create task repository', exact: true }).click()
+  await chooseParent()
+  await page.getByRole('textbox', { name: 'Repository name' }).fill('task-notes')
+  await page.getByRole('button', { name: 'Create repository', exact: true }).click()
+  const publishing = page.getByRole('dialog', { name: 'Publish task repository' })
+  await expect(publishing.getByText(/No GitHub CLI or separate app sign-in/)).toBeVisible()
+  await publishing.getByRole('button', { name: 'Create on GitHub', exact: true }).click()
+  expect(await app.evaluate(() => Reflect.get(globalThis, 'onboardingOpenedUrls'))).toEqual(['https://github.com/new?name=task-notes'])
+  await publishing.getByRole('textbox', { name: 'GitHub repository URL' }).fill('https://github.com/fixture_emu/task-notes.git')
+  await publishing.getByRole('button', { name: 'Get push commands' }).click()
+  const commands = publishing.getByLabel('Git push commands')
+  await expect(commands).toContainText('https://github.com/fixture_emu/task-notes.git')
+  await expect(commands).toContainText('push')
+  await publishing.getByRole('button', { name: 'Copy commands' }).click()
+  await expect(publishing.getByRole('button', { name: 'Copied', exact: true })).toBeVisible()
+  expect(await app.evaluate(() => Reflect.get(globalThis, 'onboardingCopiedCommands'))).toEqual([await commands.textContent()])
+  await expect(publishing.getByRole('alert')).toHaveCount(0)
+  await expect(publishing.getByText(/Task Continuum does not run them or push files for you/)).toBeVisible()
+  const root = join(parent, 'task-notes')
+  expect(await git(root, 'remote')).toBe('')
+  expect(await git(root, 'rev-list', '--count', 'HEAD')).toBe('1')
+  expect(await git(root, 'status', '--porcelain')).toBe('')
+  await publishing.getByRole('button', { name: "I've pushed - Check" }).click()
+  await expect(publishing.getByRole('alert')).toContainText('Finish git push in your terminal')
+  await expect(publishing.getByRole('heading', { name: 'Repository is on GitHub' })).toHaveCount(0)
+  await expect(commands).toContainText('push')
+  await app.evaluate(({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows()[0]
+    window.setMinimumSize(380, 600)
+    window.setSize(420, 760)
+  })
+  await commands.scrollIntoViewIfNeeded()
+  expect(await publishing.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+  await page.screenshot({ path: resolve('artifacts', 'repository-gcm-terminal-narrow.png') })
+  await app.evaluate(({ ipcMain }) => {
+    ipcMain.removeHandler('workspace:verify-repository-publication')
+    ipcMain.handle('workspace:verify-repository-publication', () => ({ url: 'https://github.com/fixture_emu/task-notes' }))
+  })
+  await publishing.getByRole('button', { name: "I've pushed - Check" }).click()
+  await expect(publishing.getByRole('heading', { name: 'Repository is on GitHub' })).toBeVisible()
+  await publishing.getByRole('button', { name: 'Done' }).click()
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('No tasks in this workspace')
 })

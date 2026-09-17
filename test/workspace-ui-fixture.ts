@@ -19,7 +19,7 @@ export function taskWorkspaceFixture(): WorkspaceSnapshot {
 
 export function workspaceBridgeFixture(initial: WorkspaceState = { current: null, recent: [] }): WorkspaceBridge {
   let state = structuredClone(initial)
-  let published = false
+  let remoteUrl: string | null = null
   function selected(id: string): WorkspaceSnapshot {
     if (!state.current || state.current.id !== id) throw new Error('The active workspace changed.')
     return state.current
@@ -36,13 +36,21 @@ export function workspaceBridgeFixture(initial: WorkspaceState = { current: null
       state = { current, recent: [current, ...state.recent] }
       return state
     }),
-    getRepositoryStatus: vi.fn(async (id) => ({
-      workspaceId: id, name: selected(id).name, branch: 'main', remoteUrl: published ? `https://github.com/fixture-user/${selected(id).name}` : null,
-      published, github: { installed: true, authenticated: true, login: 'fixture-user' },
+    getRepositoryStatus: vi.fn<WorkspaceBridge['getRepositoryStatus']>(async (id) => ({
+      workspaceId: id, name: selected(id).name, branch: 'main', remoteUrl, credentialHelper: 'gcm',
     })),
-    publishRepository: vi.fn(async ({ workspaceId }) => {
-      published = true
-      return { url: `https://github.com/fixture-user/${selected(workspaceId).name}` }
+    openRepositoryCreation: vi.fn<WorkspaceBridge['openRepositoryCreation']>(async (id) => { selected(id) }),
+    getRepositoryPushPlan: vi.fn<WorkspaceBridge['getRepositoryPushPlan']>(async ({ workspaceId, remoteUrl }) => {
+      const workspace = selected(workspaceId)
+      return {
+        workspaceId, branch: 'main', head: 'a'.repeat(40), remoteUrl, repositoryUrl: remoteUrl.replace(/\.git$/, ''), shell: 'powershell',
+        commands: `git -C '${workspace.root}' remote add origin '${remoteUrl}'\ngit -C '${workspace.root}' push --set-upstream origin 'main:refs/heads/main'`,
+      }
+    }),
+    verifyRepositoryPublication: vi.fn<WorkspaceBridge['verifyRepositoryPublication']>(async (request) => {
+      selected(request.workspaceId)
+      remoteUrl = request.remoteUrl
+      return { url: remoteUrl.replace(/\.git$/, '') }
     }),
     getSessionLinks: vi.fn<WorkspaceBridge['getSessionLinks']>(async () => ({ document: { schemaVersion: 1, bindings: {} }, revision: null })),
     updateSessionLink: vi.fn(async () => { throw new Error('Session-link updates are not configured for this fixture.') }),
