@@ -141,11 +141,13 @@ persisted before dispatch; uncertain outcomes survive desktop restart and are ne
 resent automatically. Busy/queued/owner-draft states block sends. Offline history
 comes from a bounded private cache, not Git, and never grants control.
 
-The immutable binding pins a running Host instance. Desktop or network restart can
-reconnect to that same Host. A replaced Host instance requires explicit re-verification
-of its existing session rather than a hostname-based substitute. Legacy Local chats
-are not Agent Host chats: starting a Host does not make their original runtime
-available through AHP. No Local migration or automatic relinking is performed.
+Reconnection prefers the Host instance recorded in the immutable binding. If that
+instance is no longer discoverable, the owner verifies the same `copilotcli`
+session and chat on current trusted local Hosts and reconnects only when exactly
+one Host matches. No match or multiple matches fail closed. This does not rewrite
+bindings or receipts, bypass owner/workspace authorization, or replay messages.
+Legacy Local chats are not Agent Host chats: starting a Host does not make their
+original runtime available through AHP. No Local migration is performed.
 
 Native VS Code Copilot session resources use `copilotcli:/<id>` and a default
 `ahp-chat://default/<encoded-session>` chat, not the PoC's manually chosen

@@ -251,6 +251,27 @@ export class AgentHostRegistry {
     return { sessions, warnings }
   }
 
+  private async restoredEndpoint(target: AgentHostTarget, endpoints: AgentHostEndpoint[], signal: AbortSignal): Promise<AgentHostEndpoint> {
+    const candidates = await Promise.all(endpoints.map(async (endpoint) => {
+      try {
+        const probe = await this.creationClient(endpoint.instanceId, signal, endpoint)
+        try {
+          const { snapshot } = await probe.client.request('subscribe', { channel: target.sessionId })
+          const session = snapshot?.state as SessionState | undefined
+          if (snapshot?.resource !== target.sessionId || session?.provider !== 'copilotcli'
+            || !session.chats?.some((chat) => chat.resource === target.chatId && chat.interactivity !== 'hidden')) return undefined
+          const chat = await probe.client.request('subscribe', { channel: target.chatId })
+          return chat.snapshot?.resource === target.chatId ? endpoint : undefined
+        } finally { await probe.close() }
+      } catch { return undefined }
+    }))
+    signal.throwIfAborted()
+    const matches = candidates.filter((endpoint) => endpoint !== undefined)
+    if (matches.length !== 1) throw new Error(matches.length ? 'The original chat is available on multiple local Agent Hosts. Explicitly confirm its Host before reconnecting.'
+      : 'The original chat is unavailable on the current local Agent Hosts. No replacement session was selected.')
+    return matches[0]
+  }
+
   async connection(value: AgentHostTarget): Promise<AgentHostConnection> {
     const target = agentHostTargetSchema.parse(value)
     if (target.owner.clientId !== (await this.owner()).clientId) throw new Error('The Agent Host belongs to a different execution device.')
@@ -259,8 +280,8 @@ export class AgentHostRegistry {
     if (!connection) {
       if (this.connections.size >= 64) throw new Error('Agent Host connection limit reached.')
       connection = new AgentHostConnection(target, this.directory, async (signal) => {
-        const endpoint = (await discoverAgentHosts(this.discovery)).find((item) => item.instanceId === target.hostId)
-        if (!endpoint) throw new Error('The exact original Agent Host is not running. No replacement Host was selected.')
+        const endpoints = await discoverAgentHosts(this.discovery)
+        const endpoint = endpoints.find((item) => item.instanceId === target.hostId) ?? await this.restoredEndpoint(target, endpoints, signal)
         return connectLocalAgentHost(endpoint, signal)
       })
       this.connections.set(key, connection)
