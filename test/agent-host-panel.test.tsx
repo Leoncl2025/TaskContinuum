@@ -5,6 +5,7 @@ import type { ChatState } from '@microsoft/agent-host-protocol'
 import { MessageKind } from '@microsoft/agent-host-protocol'
 import type { AgentHostBridge, AgentHostView } from '../src/shared/agentHost'
 import { AgentHostPanel } from '../src/renderer/components/AgentHostPanel'
+import { readModelPreference, saveModelPreference } from '../src/renderer/chat/modelPreferences'
 import { fixtureTasks as demoTasks } from './task-fixture'
 import { modelConfigFixture } from './agent-host-model-fixture'
 
@@ -34,6 +35,132 @@ function fixture() {
 }
 
 describe('Agent Host chat UI', () => {
+  it('remembers the explicit model and options when reopening another task chat on the same owner', async () => {
+    const setup = fixture()
+    vi.mocked(setup.bridge.models).mockResolvedValue([{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli', configSchema: modelConfigFixture }])
+    const user = userEvent.setup()
+    const rendered = render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Agent Host model' }), await screen.findByRole('option', { name: 'GPT-6' }))
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Thinking Level' }), screen.getByRole('option', { name: 'Max' }))
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Context Size' }), screen.getByRole('option', { name: '872K' }))
+    rendered.unmount()
+    const target = { ...setup.target, sessionId: 'ahp-session:/another', chatId: 'ahp-chat:/another/main' }
+    setup.view.target = target
+    setup.view.chat!.resource = target.chatId
+    render(<AgentHostPanel task={demoTasks[2]} target={target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByRole('combobox', { name: 'Thinking Level' })
+    expect(screen.getByRole('combobox', { name: 'Agent Host model' })).toHaveValue('gpt-6')
+    expect(screen.getByRole('combobox', { name: 'Thinking Level' })).toHaveDisplayValue('Max')
+    expect(screen.getByRole('combobox', { name: 'Context Size' })).toHaveDisplayValue('872K')
+    expect(screen.queryByText('Choose a model below to enable sending.')).not.toBeInTheDocument()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+    expect(setup.bridge.create).not.toHaveBeenCalled()
+    expect(setup.bridge.createLocal).not.toHaveBeenCalled()
+    await user.type(screen.getByRole('textbox'), 'Use the remembered choice')
+    await user.click(screen.getByRole('button', { name: 'Send to Agent Host' }))
+    expect(setup.bridge.send).toHaveBeenCalledExactlyOnceWith(target, expect.any(String), 'Use the remembered choice', undefined, { id: 'gpt-6', config: { thinkingLevel: 'max', contextSize: 872000 } })
+  })
+
+  it.each(['owner', 'provider'])('does not borrow another %s preference, even for the same model ID', async (scope) => {
+    const setup = fixture()
+    saveModelPreference(setup.target.owner.clientId, 'copilotcli', { id: 'gpt-6' })
+    if (scope === 'owner') setup.target.owner.clientId = crypto.randomUUID()
+    else vi.mocked(setup.bridge.models).mockResolvedValue([{ id: 'gpt-6', name: 'GPT-6', provider: 'another-provider' }])
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByRole('option', { name: 'GPT-6' })
+    expect(screen.getByRole('combobox', { name: 'Agent Host model' })).toHaveValue('')
+    expect(screen.getByText('Choose a model below to enable sending.')).toBeInTheDocument()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+  })
+
+  it('keeps an unavailable saved model until it returns instead of falling back or auto-sending', async () => {
+    const setup = fixture()
+    saveModelPreference(setup.target.owner.clientId, 'copilotcli', { id: 'saved-model' })
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByRole('option', { name: 'saved-model (unavailable)' })
+    expect(screen.getByRole('combobox')).toHaveValue('saved-model')
+    await user.type(screen.getByRole('textbox'), 'Wait for my model')
+    expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
+    vi.mocked(setup.bridge.models).mockResolvedValue([{ id: 'saved-model', name: 'Saved model', provider: 'copilotcli' }])
+    await user.click(screen.getByRole('button', { name: 'Retry loading models' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeEnabled())
+    expect(screen.getByRole('textbox')).toHaveValue('Wait for my model')
+    expect(readModelPreference(setup.target.owner.clientId, 'copilotcli')).toEqual({ model: { id: 'saved-model' } })
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+  })
+
+  it('validates restored options against the current schema and remembers an explicit reset', async () => {
+    const setup = fixture()
+    saveModelPreference(setup.target.owner.clientId, 'copilotcli', { id: 'gpt-6', config: { thinkingLevel: 'max' } })
+    vi.mocked(setup.bridge.models).mockResolvedValue([{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli', configSchema: {
+      type: 'object', properties: { thinkingLevel: { type: 'string', title: 'Thinking Level', enum: ['low'], default: 'low' } },
+    } }])
+    const user = userEvent.setup()
+    const rendered = render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('unsupported value')
+    await user.type(screen.getByRole('textbox'), 'Keep this draft')
+    expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Reset model options to defaults' }))
+    expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeEnabled()
+    expect(screen.getByRole('textbox')).toHaveValue('Keep this draft')
+    rendered.unmount()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    expect(await screen.findByRole('combobox', { name: 'Thinking Level' })).toHaveValue('')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Agent Host model' })).toHaveValue('gpt-6')
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+  })
+
+  it('clears a remembered choice explicitly and does not restore it on reconnect or reopen', async () => {
+    const setup = fixture()
+    saveModelPreference(setup.target.owner.clientId, 'copilotcli', { id: 'gpt-6' })
+    const user = userEvent.setup()
+    const rendered = render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByRole('option', { name: 'GPT-6' })
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Agent Host model' }), '')
+    expect(readModelPreference(setup.target.owner.clientId, 'copilotcli')).toEqual({})
+    await user.click(screen.getByRole('button', { name: 'Reconnect Agent Host' }))
+    await screen.findByRole('option', { name: 'GPT-6' })
+    expect(screen.getByRole('combobox')).toHaveValue('')
+    rendered.unmount()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByRole('option', { name: 'GPT-6' })
+    expect(screen.getByRole('combobox')).toHaveValue('')
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+  })
+
+  it('reports invalid saved data and replaces it only after an explicit choice', async () => {
+    const setup = fixture()
+    const stored = vi.spyOn(Storage.prototype, 'getItem').mockReturnValue('{')
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('saved model preference is invalid')
+    expect(screen.getByRole('combobox')).toHaveValue('')
+    stored.mockRestore()
+    await user.selectOptions(screen.getByRole('combobox'), 'gpt-6')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(readModelPreference(setup.target.owner.clientId, 'copilotcli')).toEqual({ model: { id: 'gpt-6' } })
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+  })
+
+  it('reports a save failure while allowing the current explicit selection and a later retry', async () => {
+    const setup = fixture()
+    const save = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('Quota exceeded') })
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await user.selectOptions(screen.getByRole('combobox'), await screen.findByRole('option', { name: 'GPT-6' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not be saved')
+    expect(screen.getByRole('combobox')).toHaveValue('gpt-6')
+    await user.type(screen.getByRole('textbox'), 'Only send when I ask')
+    expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeEnabled()
+    save.mockRestore()
+    await user.selectOptions(screen.getByRole('combobox'), 'gpt-6')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(readModelPreference(setup.target.owner.clientId, 'copilotcli')).toEqual({ model: { id: 'gpt-6' } })
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+  })
+
   it('renders Host config options, preserves typed values on reconnect, and sends them explicitly', async () => {
     const setup = fixture()
     vi.mocked(setup.bridge.models).mockResolvedValue([{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli', configSchema: modelConfigFixture }])
@@ -103,6 +230,7 @@ describe('Agent Host chat UI', () => {
     expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
     await user.selectOptions(screen.getByRole('combobox', { name: 'Agent Host model' }), 'gpt-6')
     act(() => setup.emit())
+    saveModelPreference(setup.target.owner.clientId, 'copilotcli', { id: 'changed-in-another-chat' })
     await user.click(screen.getByRole('button', { name: 'Reconnect Agent Host' }))
     await waitFor(() => expect(setup.bridge.models).toHaveBeenCalledTimes(2))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeEnabled())
@@ -122,21 +250,24 @@ describe('Agent Host chat UI', () => {
     expect(setup.bridge.send).not.toHaveBeenCalled()
   })
 
-  it('recovers model loading beside the composer without losing or automatically sending the draft', async () => {
+  it.each([false, true])('recovers model loading without losing or auto-sending the draft (saved choice: %s)', async (remembered) => {
     const setup = fixture()
-    vi.mocked(setup.bridge.models).mockRejectedValueOnce(new Error('The owner model catalog is unavailable.'))
+    if (remembered) saveModelPreference(setup.target.owner.clientId, 'copilotcli', { id: 'gpt-6' })
+    vi.mocked(setup.bridge.models).mockRejectedValue(new Error('The owner model catalog is unavailable.'))
     const user = userEvent.setup()
     render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
     const alert = await screen.findByRole('alert')
     expect(alert.closest('form')).toBe(screen.getByRole('textbox').closest('form'))
     expect(screen.getByRole('option', { name: 'Models unavailable' })).toBeInTheDocument()
     await user.type(screen.getByRole('textbox'), 'Keep the draft while retrying')
+    vi.mocked(setup.bridge.models).mockResolvedValue([{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }])
     await user.click(screen.getByRole('button', { name: 'Retry loading models' }))
     await screen.findByRole('option', { name: 'GPT-6' })
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.getByRole('textbox')).toHaveValue('Keep the draft while retrying')
     expect(setup.bridge.send).not.toHaveBeenCalled()
-    await user.selectOptions(screen.getByRole('combobox'), 'gpt-6')
+    expect(screen.getByRole('combobox')).toHaveValue(remembered ? 'gpt-6' : '')
+    if (!remembered) await user.selectOptions(screen.getByRole('combobox'), 'gpt-6')
     expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeEnabled()
     await user.click(screen.getByRole('button', { name: 'Send to Agent Host' }))
     expect(setup.bridge.send).toHaveBeenCalledExactlyOnceWith(setup.target, expect.any(String), 'Keep the draft while retrying', undefined, { id: 'gpt-6' })

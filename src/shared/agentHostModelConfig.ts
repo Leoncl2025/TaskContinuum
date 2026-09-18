@@ -2,6 +2,11 @@ import { z } from 'zod'
 import type { ConfigPropertySchema, ConfigSchema, ModelSelection } from '@microsoft/agent-host-protocol'
 
 export const modelConfigValueSchema = z.union([z.string().max(2000), z.number().finite(), z.boolean(), z.null()])
+export const agentHostModelSelectionSchema = z.object({
+  id: z.string().trim().min(1).max(512),
+  config: z.record(z.string().min(1).max(200), modelConfigValueSchema).refine((config) => Object.keys(config).length <= 32, 'Too many model configuration values.').optional(),
+}).strict()
+
 const propertySchema = z.object({
   type: z.enum(['string', 'number', 'boolean', 'array', 'object']),
   title: z.string().max(512),

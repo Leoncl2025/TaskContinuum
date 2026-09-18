@@ -10,6 +10,7 @@ import type { ChatImageAttachment } from '../../shared/chatAttachments'
 import { ChatMarkdown } from './ChatMarkdown'
 import { ChatImagePicker, ChatImages, ChatImageStatus } from './ChatImages'
 import { useChatImageInput } from '../chat/useChatImageInput'
+import { readModelPreference, saveModelPreference } from '../chat/modelPreferences'
 import { Icon, IconButton } from './Primitives'
 import { AgentHostModelConfig } from './AgentHostModelConfig'
 import { modelConfigErrors } from '../../shared/agentHostModelConfig'
@@ -68,14 +69,15 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const [revision, setRevision] = useState(0)
   const catalogKey = `${key}:${revision}:${connectionRevision}`
   const [catalog, setCatalog] = useState<{ key: string; models: Awaited<ReturnType<AgentHostBridge['models']>>; error?: string }>()
-  const [selection, setSelection] = useState<{ key: string; id: string; config?: ModelConfig }>()
+  const [selection, setSelection] = useState<{ key: string; provider: string; id: string; config?: ModelConfig; preferenceError?: string }>()
   const currentCatalog = catalog?.key === catalogKey ? catalog : undefined
   const models = currentCatalog?.models ?? []
   const modelId = selection?.key === key ? selection.id : ''
-  const selectedModel = models.find((model) => model.id === modelId)
+  const selectedModel = models.find((model) => model.id === modelId && model.provider === selection?.provider)
   const modelReady = Boolean(selectedModel)
   const config = selection?.key === key ? selection.config ?? {} : {}
   const configErrors = selectedModel ? modelConfigErrors(selectedModel.configSchema, config) : []
+  const preferenceError = selection?.key === key ? selection.preferenceError : undefined
   const operating = useRef(false)
   const mounted = useRef(false)
   const following = useRef(true)
@@ -103,7 +105,16 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       let failed = false
       void bridge.models(selected).then((models) => {
         loadedModels = true
-        if (active) setCatalog({ key: catalogKey, models, ...(!models.length ? { error: 'No available models. Check model access on the owner device, then reconnect.' } : {}) })
+        if (active) {
+          setCatalog({ key: catalogKey, models, ...(!models.length ? { error: 'No available models. Check model access on the owner device, then reconnect.' } : {}) })
+          const provider = models[0]?.provider
+          if (provider) {
+            const saved = readModelPreference(clientId, provider)
+            setSelection((current) => current?.key === key && current.provider === provider ? current : {
+              key, provider, id: saved.model?.id ?? '', config: saved.model?.config, preferenceError: saved.error,
+            })
+          }
+        }
       }).catch((failure: unknown) => {
         failed = true
         loadedModels = false
@@ -127,7 +138,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     loadModels()
     void bridge.watch(selected).then((id) => { if (active) { watchId = id; setError(undefined) } else void bridge.unwatch(id).catch(() => undefined) }).catch((failure: unknown) => { if (active) setError(failure instanceof Error ? failure.message : 'Agent Host access is unavailable.') })
     return () => { active = false; unlisten(); if (watchId) void bridge.unwatch(watchId).catch(() => undefined) }
-  }, [bridge, sessionId, chatId, clientId, machineName, catalogKey])
+  }, [bridge, sessionId, chatId, clientId, machineName, catalogKey, key])
   const activeTurn = view?.chat?.activeTurn
   const responding = Boolean(activeTurn)
   const pending = Boolean(view?.pendingTurn)
@@ -147,6 +158,15 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     if (command && (view?.chat?.activeTurn?.id === command.id || view?.chat?.turns.some((turn) => turn.id === command.id))) confirmed()
   }, [view])
   const canSend = Boolean(bridge && modelReady && !configErrors.length && !busy && !pending && !activeTurn && !view?.readOnly && (view?.canSend || view?.state === 'offline'))
+  function chooseModel(id: string, config?: ModelConfig): void {
+    const provider = models[0]?.provider
+    if (!provider) {
+      setError('Reload the model catalog before changing the model selection.')
+      return
+    }
+    const preferenceError = saveModelPreference(clientId, provider, id ? { id, ...(config ? { config } : {}) } : undefined)
+    setSelection({ key, provider, id, config, preferenceError })
+  }
   async function send(): Promise<void> {
     if (!canSend || !bridge || operating.current || imageInput.isReading() || !draft.trim() && !images.length) return
     operating.current = true
@@ -204,11 +224,12 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       {currentCatalog?.error && <p className="copilot-error vscode-chat-notice" role="alert">{currentCatalog.error}</p>}
       {onSessions && !view && (error || currentCatalog?.error) && <button type="button" className="text-button" disabled={busy} onClick={onSessions}><Icon name="link" />Review session link</button>}
       {modelStatus && <p className="message-notice" role="status">{modelStatus}</p>}
+      {preferenceError && <p className="copilot-error message-notice" role="alert">{preferenceError}</p>}
       <div className="ahp-model-controls">
-        <label>Model<select aria-label="Agent Host model" value={modelId} disabled={busy || pending || responding || view?.readOnly || !models.length} onChange={(event) => setSelection({ key, id: event.target.value })}><option value="">{!currentCatalog ? 'Loading models...' : !models.length ? 'Models unavailable' : 'Choose a model'}</option>{modelId && !modelReady && <option value={modelId} disabled>{modelId} (unavailable)</option>}{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
+        <label title="Your model and options are remembered on this device for this Agent Host provider.">Model<select aria-label="Agent Host model" value={modelId} disabled={busy || pending || responding || view?.readOnly || !models.length} onChange={(event) => chooseModel(event.target.value)}><option value="">{!currentCatalog ? 'Loading models...' : !models.length ? 'Models unavailable' : 'Choose a model'}</option>{modelId && !modelReady && <option value={modelId} disabled>{modelId} (unavailable)</option>}{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
         <IconButton icon="refresh" label="Retry loading models" disabled={!bridge || busy || !currentCatalog} onClick={() => { void reconnect() }} />
       </div>
-      {selectedModel && <AgentHostModelConfig schema={selectedModel.configSchema} config={config} disabled={busy || pending || responding || Boolean(view?.readOnly)} onChange={(config) => setSelection({ key, id: modelId, config })} />}
+      {selectedModel && <AgentHostModelConfig schema={selectedModel.configSchema} config={config} disabled={busy || pending || responding || Boolean(view?.readOnly)} onChange={(config) => chooseModel(modelId, config)} />}
       {configErrors.map((message) => <p key={message} className="copilot-error message-notice" role="alert">{message}</p>)}
       <div className="composer"><ChatImages images={images} onRemove={imageInput.remove} disabled={busy} /><textarea id="chat-composer" aria-label="Message Agent Host" placeholder="Message original Agent" rows={3} maxLength={4000} value={draft} onChange={(event) => setDraft(event.target.value)} onPaste={imageInput.paste} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} /><div className="composer-toolbar"><ChatImagePicker onFiles={imageInput.add} disabled={busy || imageInput.reading} /><span className="vscode-composer-identity"><Icon name="link" />Original chat</span>{activeTurn ? <IconButton icon="debug-stop" label="Stop Agent Host response" disabled={busy || view?.readOnly || view?.state !== 'connected'} onClick={() => { void cancel() }} /> : <button className="send-button" type="submit" aria-label="Send to Agent Host" title="Send to Agent Host" disabled={!canSend || imageInput.reading || !draft.trim() && !images.length}><Icon name="arrow-up" /></button>}</div></div>
     </form>

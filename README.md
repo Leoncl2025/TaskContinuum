@@ -125,7 +125,13 @@ remain on B. Recovery obtains authoritative snapshots; it never replays a send.
 An unknown delivery blocks further sends until its original turn is observed.
 Read-only participants cannot send or cancel.
 
-Choose **Model** immediately above the Agent Host message input before sending.
+Choose **Model** immediately above the Agent Host message input once. Task Continuum
+remembers your last explicit model and options in this device's local profile,
+separately for each Agent Host owner and provider. Reopening a chat, switching tasks,
+starting another chat on the same owner/provider, or restarting the app restores
+that preference after loading the current model catalog. Selecting **Choose a model**
+clears the remembered choice. Preferences are not written to workspace files,
+synced to other devices, or inferred from native chat history.
 The picker stays beside the composer rather than at the top of the chat panel.
 Loading errors and the **Retry loading models** button appear there too; retrying
 preserves your draft and never sends it automatically. The list comes from the
@@ -149,8 +155,11 @@ Switching models clears overrides; reconnecting retains them, but changed or
 removed options block sending until corrected or reset to defaults. Read-only
 options cannot be changed. Configuration is checked again against the current
 catalog before dispatch. Update both desktops for remote configuration support.
-Each turn records its requested config for inspection. Options are retained only
-while the panel stays open, not across application restarts.
+Each turn records its requested config for inspection. Restored options are validated
+against the current Host schema; unavailable models or changed options block sending
+until corrected, rather than silently changing your choice. Remembering a model never
+sends a message or creates a session. Local preference read/write failures are shown
+beside the composer; an explicit selection can still be used in the current chat.
 
 Binding documents use **schema v2**. Each binding requires `provider: "agent-host"`,
 `sessionId`, `chatId` and an owner (`clientId`, plus the display `machineName`).

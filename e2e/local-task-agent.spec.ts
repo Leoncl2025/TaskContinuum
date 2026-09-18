@@ -107,6 +107,7 @@ test('creates a local workspace conversation, chats natively, and resumes withou
     await page!.getByRole('button', { name: 'Create task with agent', exact: true }).click()
     const reopened = page!.getByRole('region', { name: 'Task creation', exact: true })
     await expect(reopened.getByRole('heading', { name: 'Local planning reply' })).toBeVisible()
+    await expect(reopened.getByRole('combobox', { name: 'Agent Host model' })).toHaveValue('local-model')
     expect(native.creations).toHaveLength(1)
 
     // Simulate the native agent invoking the documented CLI, without a model account or external traffic.
@@ -140,7 +141,7 @@ test('creates a local workspace conversation, chats natively, and resumes withou
     expect(recoveredSessionId).not.toBe(sessionId)
     expect(native.sessions.get(recoveredSessionId)!.chat.activeTurn).toBeUndefined()
     expect(native.sessions.get(recoveredSessionId)!.chat.turns).toEqual([])
-    await reopened.getByRole('combobox', { name: 'Agent Host model' }).selectOption('local-model')
+    await expect(reopened.getByRole('combobox', { name: 'Agent Host model' })).toHaveValue('local-model')
     await reopened.getByRole('textbox', { name: 'Message Agent Host' }).fill('Plan the follow-up documentation task.')
     await reopened.getByRole('button', { name: 'Send to Agent Host' }).click()
     await expect.poll(() => native.sessions.get(recoveredSessionId)?.chat.activeTurn?.message.text).toContain('Plan the follow-up documentation task.')
