@@ -33,7 +33,8 @@ key files are not deleted or imported into the new runtime.
   explicit code-text copying.
 - Clipboard screenshots and image files with previews, removal, image-only
   messages and authenticated native local/remote delivery.
-- Independent desktop sidebar/chat toggles, compact single-pane navigation,
+- Chat-first layout with Explorer on the left, conversation in the middle, and
+  collapsible task details on the right; compact single-pane navigation,
   keyboard quick-open, and dark/light appearance.
 - Sandboxed Electron renderer with a minimal typed preload bridge.
 - Native Host discovery, exact task/session binding and reopening, explicit native
@@ -321,7 +322,7 @@ Open a real task workspace, then use either entry:
    slug and acceptance criteria. Workspace defaults are used otherwise.
    **Create task** allocates a unique `T-XXXX`, writes the canonical task folder
    and lifecycle documents, refreshes the tree and selects the new task.
-2. **Agent:** select **Create task with agent** to open the right-hand chat panel
+2. **Agent:** select **Create task with agent** to open the central chat pane
    with a local native Agent Host session in the selected repository, including
    an empty workspace. A single
    available Host is selected automatically; with multiple Hosts, choose one
@@ -483,21 +484,35 @@ Task Continuum additionally accepts the main keyboard's Ctrl/Command+0 for reset
 Zoom is saved in the local desktop profile's `window-zoom.json` and restored on
 reload or restart. It does not change the zoom or settings of a remote VS Code
 Agent, and it does not overwrite preferred panel widths. Zooming into the compact
-layout keeps the currently focused Explorer or Chat panel available. Browser-only
+layout keeps the currently focused Explorer, Chat, or Details pane available. Browser-only
 preview continues to use the browser's own zoom controls.
 
-## Resize panels
+## Workbench layout
 
-Drag the divider on the Explorer's right edge or Chat's left edge to adjust its
+Explorer stays on the left, chat fills the center, and task details sit on the
+right. Open-task tabs remain above the conversation and details, including when
+details are hidden. Toggle either side panel to give the conversation more room;
+hiding chat expands task details instead, so a content pane is always available.
+
+At 1000 pixels or less, **Tasks**, **Chat**, and **Details** switch between
+full-width panes. Selecting a task opens its chat; first-run repository guidance
+remains in Details. Switching panes retains the current chat draft, model selection,
+and document tab without sending or creating a conversation.
+
+### Resize panels
+
+Drag the divider on the Explorer's right edge or Details' left edge to adjust its
 width. The divider highlights on hover or keyboard focus. Double-click it to
 restore that panel's default width, or press Escape during a drag to cancel it.
 
 Widths are saved in the local desktop profile across restarts and workspace
 switches. Hiding a panel retains its size. Explorer stays at least 220 pixels wide,
-Chat at least 310, and the central task area keeps at least 400. Smaller windows
+Details at least 320, and the central chat area keeps at least 400. Smaller windows
 temporarily fit the panels without overwriting their preferred sizes; at 1000
-pixels or less, the existing compact single-panel layout takes over without dividers.
+pixels or less, the compact single-panel layout takes over without dividers.
 **Preferences > Reset panel layout** restores both widths while retaining the theme.
+Existing layout preferences retain the theme and Explorer size; the former
+right-hand Chat width becomes the Details width. The legacy preferences stay intact.
 The same sizing applies to Agent Host chat and the empty first-run workbench.
 
 ## Keyboard
@@ -507,6 +522,7 @@ The same sizing applies to Agent Host chat and the empty first-run workbench.
 | Ctrl/Command+P | Quick-open a task. |
 | Ctrl/Command+B | Toggle the task sidebar. |
 | Ctrl/Command+Alt+B | Toggle chat. |
+| Ctrl/Command+Alt+D | Toggle task details. |
 | Ctrl/Command+= or Ctrl/Command+Shift+= | Zoom in the entire desktop window. |
 | Ctrl/Command+- | Zoom out the entire desktop window. |
 | Ctrl/Command+0 | Reset window zoom to 100%. |
@@ -520,7 +536,7 @@ The same sizing applies to Agent Host chat and the empty first-run workbench.
 | Enter on a panel divider | Restore the controlled panel's default width. |
 | Enter in chat | Send a message (except during IME composition). |
 | Shift+Enter in chat | Insert a new line. |
-| Escape | Cancel an active panel resize, close a dialog, or leave a compact panel. |
+| Escape | Cancel an active panel resize, close a dialog, or return to compact chat (Details if no task is selected). |
 
 ## Source boundaries
 

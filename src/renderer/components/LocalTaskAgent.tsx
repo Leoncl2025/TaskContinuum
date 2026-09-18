@@ -124,7 +124,7 @@ export function LocalTaskAgent({ workspace, workspaces, onCreated, onReviewDraft
   return <section className="chat-panel task-creation-chat" aria-label="Task creation">
     <header className="panel-header"><span>CREATE TASKS</span><div className="header-actions">
       {onTaskChat && <IconButton icon="comment-discussion" label="Show task conversation" disabled={locked} onClick={onTaskChat} />}
-      <IconButton icon="layout-sidebar-right-off" label="Hide chat panel" onClick={onClose} />
+      <IconButton icon="close" label="Hide chat panel" onClick={onClose} />
     </div></header>
     <div className="local-task-actions">
       <button type="button" className="secondary-button" disabled={locked} onClick={() => { void refreshTasks() }}>{refreshing ? 'Refreshing...' : 'Refresh created tasks'}</button>

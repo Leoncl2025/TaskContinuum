@@ -50,7 +50,7 @@ No command invokes Git, AgentDesk, a server, Electron, or a sibling checkout.
 ## Task creation
 
 In the desktop app, **Create with agent** opens a local native Agent Host
-conversation in the right-hand chat panel, not a popup, even when the selected
+conversation in the central chat pane, not a popup, even when the selected
 workspace has no tasks. The first message includes these CLI instructions;
 choose a model and send your requirements
 directly, without copying a prompt to another application. Reopening verifies

@@ -105,8 +105,8 @@ describe('quick task creation', () => {
     const { workspace, bridge, copyText, user, dialog, agent, target } = await setup('agent')
     await within(dialog).findByRole('complementary', { name: 'Agent Host task creation chat' })
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-    expect(dialog.parentElement).toHaveClass('workbench-body')
-    expect(dialog.previousElementSibling).toHaveAttribute('aria-label', 'Resize Chat')
+    expect(dialog.parentElement).toHaveClass('active-task')
+    expect(dialog.nextElementSibling).toHaveAttribute('aria-label', 'Resize task details')
     expect(screen.getByRole('main', { name: 'Task workspace' })).toBeInTheDocument()
     expect(agent.createLocal).toHaveBeenCalledExactlyOnceWith({ operationId: expect.any(String), hostId: 'local-host' })
     expect(agent.send).not.toHaveBeenCalled()
@@ -129,6 +129,22 @@ describe('quick task creation', () => {
     expect(agent.create).not.toHaveBeenCalled()
     expect(agent.bindCreation).not.toHaveBeenCalled()
     expect(within(dialog).queryByRole('button', { name: 'Detach conversation' })).not.toBeInTheDocument()
+  })
+
+  it('retains the creation draft and model while hiding and restoring central chat', async () => {
+    const { user, dialog, agent } = await setup('agent')
+    const input = await within(dialog).findByRole('textbox', { name: 'Message Agent Host' })
+    await user.type(input, 'Keep this unsent task request.')
+    await user.selectOptions(within(dialog).getByRole('combobox', { name: 'Agent Host model' }), await within(dialog).findByRole('option', { name: 'Local model' }))
+    await user.click(screen.getByRole('button', { name: 'Toggle chat panel' }))
+    expect(screen.queryByRole('region', { name: 'Task creation' })).not.toBeInTheDocument()
+    expect(screen.getByRole('complementary', { name: 'Task details' })).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Toggle chat panel' }))
+    await within(dialog).findByText('Connected', { exact: true })
+    expect(within(dialog).getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Keep this unsent task request.')
+    expect(within(dialog).getByRole('combobox', { name: 'Agent Host model' })).toHaveValue('local-model')
+    expect(agent.createLocal).toHaveBeenCalledOnce()
+    expect(agent.send).not.toHaveBeenCalled()
   })
 
   it('requires human review and confirmation before creating an agent-provided JSON draft', async () => {
@@ -213,13 +229,13 @@ describe('quick task creation', () => {
     expect(agent.send).not.toHaveBeenCalled()
   })
 
-  it('moves from quick create to the right chat panel without nesting chat in a dialog', async () => {
+  it('moves from quick create to the central chat pane without nesting chat in a dialog', async () => {
     const { user, dialog, agent } = await setup()
     await user.click(within(dialog).getByRole('button', { name: 'Create with agent in the chat panel' }))
     const panel = await screen.findByRole('region', { name: 'Task creation' })
     await within(panel).findByRole('complementary', { name: 'Agent Host task creation chat' })
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-    expect(panel.parentElement).toHaveClass('workbench-body')
+    expect(panel.parentElement).toHaveClass('active-task')
     expect(agent.createLocal).toHaveBeenCalledOnce()
   })
 

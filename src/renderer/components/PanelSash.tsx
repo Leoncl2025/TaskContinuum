@@ -13,7 +13,7 @@ export function PanelSash({ panel, width, min, max, onResize, onReset }: {
   const drag = useRef<{ pointerId: number; startX: number; width: number } | undefined>(undefined)
   const [dragging, setDragging] = useState(false)
   const direction = panel === 'sidebar' ? 1 : -1
-  const label = panel === 'sidebar' ? 'Resize Explorer' : 'Resize Chat'
+  const label = panel === 'sidebar' ? 'Resize Explorer' : 'Resize task details'
   const clamp = (value: number) => Math.max(min, Math.min(max, Math.round(value)))
 
   useEffect(() => {
