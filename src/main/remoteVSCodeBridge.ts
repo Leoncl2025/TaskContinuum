@@ -26,6 +26,10 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     (invitation, signal) => tunnels.connect(invitation.devTunnel, invitation.id, invitation.port, signal),
     async (invitation) => {
       if (JSON.stringify(invitation.participant) !== JSON.stringify(await clientIdentity()) || invitation.devTunnel.clientPublicKey !== (await keys.get('client')).publicKey) throw new Error('This invitation belongs to a different device identity.')
+    },
+    async (root): Promise<void> => {
+      await recovery
+      await gitSync.whenConnectionsSettled(root)
     })
   const discovery = !app.isPackaged && process.env.TASKCONTINUUM_AGENT_HOST_DISCOVERY ? [process.env.TASKCONTINUUM_AGENT_HOST_DISCOVERY]
     : ['Code', 'Code - Insiders'].map((name) => join(app.getPath('appData'), name, 'agent-host', 'local-endpoint', 'entries'))

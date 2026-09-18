@@ -211,9 +211,9 @@ export class WorkspaceSyncService {
             this.blockedBackends.get(enrollment.root)?.()
             this.blockedBackends.set(enrollment.root, await registerRepositorySessionLinksBackend(enrollment.root, { read: fail, update: fail }))
           } catch (registrationError) {
-            console.error('Cannot register the unavailable workspace:', registrationError instanceof Error ? registrationError.message : 'Invalid workspace')
+            if ((registrationError as NodeJS.ErrnoException).code !== 'ENOENT') console.error(`Cannot register the unavailable workspace (${enrollment.root}):`, registrationError instanceof Error ? registrationError.message : 'Invalid workspace')
           }
-          console.error('Workspace synchronization restoration failed:', error instanceof Error ? error.message : 'Invalid enrollment')
+          console.error(`Workspace synchronization restoration failed (${enrollment.root}):`, error instanceof Error ? error.message : 'Invalid enrollment')
         }
       }
     } finally { this.restoring = false }
@@ -224,6 +224,14 @@ export class WorkspaceSyncService {
       this.reconcilePeers(runtime)
       runtime.scheduler.start()
     }
+  }
+
+  async whenConnectionsSettled(root: string): Promise<void> {
+    const runtime = await this.ensure(root, false)
+    if (!runtime) return
+    await runtime.peerWork
+    await runtime.scheduler.whenIdle()
+    await runtime.peerWork
   }
 
   async restoreControlGrants(): Promise<void> {

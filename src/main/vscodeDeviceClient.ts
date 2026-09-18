@@ -35,7 +35,8 @@ export class VSCodeDeviceClient {
 
   constructor(private readonly directory: string, private readonly protector: DeviceProtector,
     private readonly transport: (invitation: DeviceInvitation, signal: AbortSignal) => Promise<Connection>,
-    private readonly validateRecipient: (invitation: DeviceInvitation) => Promise<void>) {}
+    private readonly validateRecipient: (invitation: DeviceInvitation) => Promise<void>,
+    private readonly waitForWorkspaceRecovery?: (root: string) => Promise<void>) {}
 
   private async load(): Promise<void> {
     this.loading ??= (async () => {
@@ -220,6 +221,24 @@ export class VSCodeDeviceClient {
     const target = agentHostTargetSchema.parse(value)
     await this.load()
     const canonical = await this.root(root)
+    if (this.waitForWorkspaceRecovery && !await this.ownerConnected(canonical, target.owner.clientId)) {
+      signal.throwIfAborted()
+      const cancellation = AbortSignal.any([signal, AbortSignal.timeout(45000)])
+      await new Promise<void>((resolve, reject) => {
+        const cancelled = () => reject(new Error(cancellation.reason?.name === 'TimeoutError'
+          ? 'Automatic workspace connections are still restoring. Retry after workspace synchronization completes.'
+          : 'Agent Host connection was cancelled.'))
+        cancellation.addEventListener('abort', cancelled, { once: true })
+        void this.waitForWorkspaceRecovery!(canonical).then(() => {
+          cancellation.removeEventListener('abort', cancelled)
+          resolve()
+        }, (error: unknown) => {
+          cancellation.removeEventListener('abort', cancelled)
+          reject(error)
+        })
+      })
+      signal.throwIfAborted()
+    }
     const peers = this.peers.filter((item) => item.root === canonical && item.invitation.ownerClientId === target.owner.clientId)
     if (peers.length !== 1) throw new Error('Enable automatic workspace links on both devices and wait for the exact Agent Host owner to connect. Git alone does not grant access.')
     const peer = peers[0]
