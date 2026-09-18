@@ -89,6 +89,24 @@ describe('fixed remote configuration synchronization scheduler', () => {
     expect(events.filter((event) => event.state === 'error')).toHaveLength(2)
   })
 
+  it('does not let overlapping timer ticks keep a slow synchronization permanently busy', async () => {
+    vi.useFakeTimers()
+    const gate = deferred()
+    const cycle = vi.fn(async () => { if (cycle.mock.calls.length === 1) await gate.promise })
+    const scheduler = new RemoteSyncScheduler({ cycle })
+    schedulers.push(scheduler)
+    scheduler.start()
+    await Promise.resolve()
+    await vi.advanceTimersByTimeAsync(60000)
+    expect(cycle).toHaveBeenCalledTimes(1)
+    gate.resolve()
+    await scheduler.whenIdle()
+    expect(cycle).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(15000)
+    await scheduler.whenIdle()
+    expect(cycle).toHaveBeenCalledTimes(2)
+  })
+
   it('aborts and awaits active work, discards queued ticks, and can restart after stopping', async () => {
     vi.useFakeTimers()
     const gate = deferred()

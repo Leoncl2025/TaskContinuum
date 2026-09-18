@@ -11,6 +11,7 @@ import {
 import { devTunnelIdSchema, sshFingerprint, sshPublicKeySchema } from '../devTunnel/protocol'
 import { sessionLinkKey, sessionLinkSchema, sessionLinkTaskIdSchema } from '../sessionLinkSchema'
 import { remoteClientSchema, remoteMachineSchema } from '../vscodeRemoteProtocol'
+import { matchesGitText } from '../shared/gitText'
 
 export class RemoteConfigError extends Error {
   constructor(readonly code: string, message: string, readonly entityKey?: string, readonly operationId?: string) {
@@ -550,7 +551,7 @@ export async function readRecords(root: string, trust?: RecordTrust): Promise<Re
         try { input = JSON.parse(content.toString('utf8')) } catch { throw new RemoteConfigError('invalid-json', 'An immutable operation file is not valid JSON.') }
         const record = trust ? await verifyRecord(input, trust) : parseRecord(input)
         if (relative(await realpath(root), file) !== recordPath(record)) throw new RemoteConfigError('invalid-path', 'The immutable operation filename, entity path and payload disagree.', entityKey(record), record.operationId)
-        if (!content.equals(Buffer.from(serializeRecord(record)))) throw new RemoteConfigError('noncanonical-record', 'Immutable operation bytes must use canonical JSON with one trailing newline.', entityKey(record), record.operationId)
+        if (!matchesGitText(content, serializeRecord(record))) throw new RemoteConfigError('noncanonical-record', 'Immutable operation bytes must use canonical JSON with one trailing LF or CRLF newline.', entityKey(record), record.operationId)
         result.push(record)
       }
     }
@@ -569,7 +570,7 @@ export async function appendRecord(root: string, input: RemoteRecord, trust?: Re
   const content = Buffer.from(serializeRecord(record))
   async function existing() {
     const before = await readCheckedFile(root, file, remoteConfigLimits.recordBytes)
-    if (!before.equals(content)) throw new RemoteConfigError('id-collision', 'An immutable operation already exists with different bytes.', entityKey(record), record.operationId)
+    if (!matchesGitText(before, content.toString('utf8'))) throw new RemoteConfigError('id-collision', 'An immutable operation already exists with different bytes beyond LF/CRLF line endings.', entityKey(record), record.operationId)
     return { created: false, path }
   }
   try { return await existing() } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }

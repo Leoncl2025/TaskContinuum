@@ -31,6 +31,7 @@ export class RemoteSyncScheduler {
 
   request(reason = 'change'): void {
     if (!this.enabled) return
+    if (reason === 'interval' && this.work) return
     if (this.due.size < 31) this.due.add(reason.slice(0, 128))
     else this.due.add('coalesced')
     if (this.work) return

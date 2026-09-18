@@ -320,7 +320,7 @@ export function createTaskDocuments(
   root: string,
   input: TaskCreationDraft,
   options: { actor?: string; source?: 'ui' | 'agent' } = {},
-): { taskId: string; directory: string } {
+): { taskId: string; directory: string; files: string[] } {
   const draft = taskCreationDraftSchema.parse(input)
   const settings = creationOptions.parse(options)
   const files = openFiles(root)
@@ -417,7 +417,8 @@ export function createTaskDocuments(
     if (fs.existsSync(files.contained(destination))) throw new Error('The task destination is already occupied.')
     fs.renameSync(files.contained(stagedTask), files.contained(destination))
     published = true
-    return { taskId, directory: path.relative(files.root, destination).split(path.sep).join('/') }
+    const directory = path.relative(files.root, destination).split(path.sep).join('/')
+    return { taskId, directory, files: [...documents.keys()].map((name) => `${directory}/${name}`) }
   } finally {
     try {
       for (const entry of owned) {

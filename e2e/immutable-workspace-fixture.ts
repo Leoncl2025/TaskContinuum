@@ -92,6 +92,8 @@ export async function enableAutomaticLinks(app: ElectronApplication, page: Page,
     const prompts = await consent.evaluate((probe) => probe.prompts)
     expect(prompts).toHaveLength(1)
     expect(prompts[0]).toContain('Legacy session files and browser bindings are not imported')
+    expect(prompts[0]).toContain('No separate AD clone or worktree is created')
+    expect(prompts[0]).toContain('unpublished user commits pause synchronization')
   } finally {
     await consent.evaluate((probe) => probe.restore())
     await consent.dispose()

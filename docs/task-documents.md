@@ -103,7 +103,11 @@ documents and design/reference directories. It respects existing and archived
 IDs, configured parents and members, and uses a workspace-scoped exclusive lock.
 A busy or stale lock is an explicit error, not permission to delete another
 process's state. Existing task directories and parent documents are never
-overwritten. No index, Git commit, push, enrollment or session action is implied.
+overwritten. CLI creation does not commit, push, enroll devices or create sessions.
+The desktop **Create task** confirmation additionally commits only the generated
+task files and pushes to the current upstream when the checkout is otherwise
+clean and up to date. Publication errors retain the task locally and display a
+warning; do not recreate a task just because its Git push failed.
 
 ## Runtime and compatibility
 

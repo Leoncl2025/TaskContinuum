@@ -14,6 +14,7 @@ import { createWorkspaceRepositorySchema, repositoryPushRequestSchema, workspace
 import { createTaskDocuments, getTaskCreationContext } from './taskDocuments/create'
 import type { CreateWorkspaceTaskResult, WorkspaceTaskCreationContext } from '../shared/taskCreation'
 import { createWorkspaceTaskRequestSchema, taskAgentInstructions, taskAgentInstructionsRequestSchema } from './workspaceTaskCreation'
+import { GitReplica } from './remoteConfig/git'
 
 const descriptorSchema = z.object({ id: z.string().regex(/^[a-f\d]{64}$/), name: z.string().max(300), title: z.string().max(200), root: z.string().min(1).max(4096) })
 const stateSchema = z.object({ currentId: z.string().nullable(), recent: z.array(descriptorSchema).max(10) })
@@ -132,8 +133,23 @@ export class WorkspaceStore {
       const request = createWorkspaceTaskRequestSchema.parse(value)
       const workspace = this.repositoryWorkspace(request.workspaceId)
       const created = createTaskDocuments(workspace.root, request.draft, { source: 'ui' })
+      let publicationError: string | undefined
       try {
-        return { state: await this.open(workspace.root), taskId: created.taskId }
+        const git = await GitReplica.open({
+          workspaceRoot: workspace.root, stateDirectory: join(this.stateDirectory, 'task-publication', workspace.id), prepare: false,
+        })
+        try { await git.publishCreatedTask(created.taskId, created.directory, created.files) }
+        finally { await git.close() }
+      } catch (error) {
+        publicationError = `Task ${created.taskId} was created locally, but automatic Git publication did not complete. ${error instanceof Error ? error.message : 'Check repository access and publish the task in terminal Git.'} Do not create the task again.`
+      }
+      try {
+        const state = await this.open(workspace.root)
+        if (publicationError) {
+          state.warning = publicationError
+          this.state.warning = publicationError
+        }
+        return { state, taskId: created.taskId }
       } catch (error) {
         throw new Error(`Task ${created.taskId} was created at ${created.directory}, but the workspace could not be refreshed. Use Refresh workspace instead of creating it again. ${error instanceof Error ? error.message : 'Workspace history could not be saved.'}`)
       }

@@ -399,7 +399,9 @@ a new local owner receipt, silently transfer ownership or bypass device trust.
 
 Private desktop app data holds protected SSH keys, device invitations, enrollment
 pins, owner receipts, delivery recovery state, configuration outboxes/overlays,
-generated configuration editor state, an isolated Git replica and bounded caches.
+generated configuration editor state and bounded metadata-only caches. Git
+synchronization uses the user's selected workspace checkout, not another clone
+or worktree; app data contains no second copy of the AD task documents.
 Generated views are not a second Git authority. Private invitations and all native
 history, attachments, session model options and tokens remain outside version control
 and unapproved cloud sharing.

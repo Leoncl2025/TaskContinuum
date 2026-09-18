@@ -29,7 +29,7 @@ import { LocalSettingsFile } from './settingsFile'
 import type { RemoteSettingChanges, RemoteSettings } from './settingsFile'
 import { RemoteConfigStore } from './store'
 import {
-  canonicalJson, parseRecord, readCheckedFile, readRecords, recordClosure, recordPath, RemoteConfigError, resolveRecords, serializeRecord, unionRecords, verifyRecordSignature,
+  appendRecord, canonicalJson, parseRecord, readCheckedFile, readRecords, recordClosure, recordPath, RemoteConfigError, resolveRecords, serializeRecord, unionRecords, verifyRecordSignature,
 } from './records'
 import type { RecordTrust } from './records'
 
@@ -38,7 +38,7 @@ const descriptorSchema = z.object({
   remoteConfigFormat: z.literal('immutable-operations-v1'),
 }).strict()
 const runtimeSchema = z.object({
-  schemaVersion: z.literal(1), workspaceId: z.uuid(), recordsRoot: z.string().min(1),
+  schemaVersion: z.literal(2), workspaceId: z.uuid(), recordsRoot: z.string().min(1),
   controlPort: z.number().int().min(1024).max(65535).optional(),
   managedPairs: z.record(z.uuid(), z.uuid()).default({}),
 }).strict()
@@ -110,11 +110,18 @@ export class WorkspaceSyncService {
   }
   private async saved(directory: string): Promise<RuntimeMetadata | undefined> {
     try {
-      const value = runtimeSchema.parse(await readJsonBounded(join(directory, 'runtime.json'), 8192))
+      const parsed = runtimeSchema.safeParse(await readJsonBounded(join(directory, 'runtime.json'), 8192))
+      if (!parsed.success) throw new Error('Unsupported workspace sync state. This version requires single-checkout configuration; old replicas are not migrated. Use a fresh Task Continuum data directory and enable automatic links again. Existing files were not changed.')
+      const value = parsed.data
       const child = relative(directory, value.recordsRoot)
-      if (isAbsolute(child) || child === '..' || child.startsWith(`..${sep}`)) throw new Error('The saved replica path escapes its app-owned state directory.')
+      if (!child || isAbsolute(child) || child === '..' || child.startsWith(`..${sep}`)) throw new Error('The saved configuration path escapes its app-owned state directory.')
+      if (value.recordsRoot !== join(directory, 'records-cache')) throw new Error('The saved configuration cache path is invalid.')
       return value
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
+  }
+  private async cacheRecords(records: readonly RemoteRecord[], destination: string): Promise<void> {
+    await mkdir(destination, { recursive: true })
+    for (const record of records) await appendRecord(destination, record)
   }
   private error(runtime: Runtime, error: unknown): void {
     const message = error instanceof Error ? error.message : 'Workspace synchronization failed.'
@@ -291,22 +298,25 @@ export class WorkspaceSyncService {
     if (!enrollment && !enable) return undefined
     const directory = this.directory(root)
     await mkdir(directory, { recursive: true })
-    let metadata = await this.saved(directory)
+    const saved = await this.saved(directory)
+    let metadata: RuntimeMetadata
     let replica: Replica | undefined
-    if (!metadata) {
+    if (!saved) {
       if (!enable && !enrollment?.enabled) throw new Error('The paused workspace has no local synced configuration. Reenable to recover it.')
       replica = await (this.options.createReplica ?? GitReplica.open)({ workspaceRoot: root, stateDirectory: directory })
       const published = await this.descriptor(replica.root)
       const workspaceId = published?.workspaceId ?? enrollment?.workspaceId ?? initialWorkspaceId(replica.upstreamUrl)
       if (enrollment && enrollment.workspaceId !== workspaceId) throw new Error('The upstream workspace identity differs from its local enrollment.')
       enrollment = await this.enrollments.enable(root, workspaceId, true)
-      metadata = { schemaVersion: 1, workspaceId, recordsRoot: replica.root, managedPairs: {} }
+      metadata = { schemaVersion: 2, workspaceId, recordsRoot: join(directory, 'records-cache'), managedPairs: {} }
+      await this.cacheRecords(await readRecords(replica.root), metadata.recordsRoot)
       await writeJsonAtomic(join(directory, 'runtime.json'), metadata)
     } else {
-      replica = await (this.options.createReplica ?? GitReplica.open)({ workspaceRoot: root, stateDirectory: directory, prepare: false, cachedRoot: metadata.recordsRoot })
-      if (replica.root !== metadata.recordsRoot) throw new Error('The workspace upstream changed. Review its existing enrollment before publishing.')
+      replica = await (this.options.createReplica ?? GitReplica.open)({ workspaceRoot: root, stateDirectory: directory, prepare: false })
+      metadata = saved
     }
-    if (!enrollment || enrollment.workspaceId !== metadata.workspaceId) throw new Error('The saved replica does not match this local enrollment.')
+    if (await canonicalPolicyRoot(replica.root) !== root) throw new Error('Git synchronization must use the selected workspace, not a separate checkout.')
+    if (!enrollment || enrollment.workspaceId !== metadata.workspaceId) throw new Error('The saved configuration does not match this local enrollment.')
     if (enable && !enrollment.enabled) enrollment = await this.enrollments.enable(root, metadata.workspaceId, true)
     const local = await (this.options.identity?.() ?? readClientIdentity(this.options.directory))
     const [client, hostKey] = await Promise.all([this.options.keys.get('client'), this.options.keys.get('host')])
@@ -552,7 +562,7 @@ export class WorkspaceSyncService {
     if (!runtime.enrollment.enabled || runtime.closed) return
     for (const [id, pin] of Object.entries(runtime.enrollment.pins)) if (pin.blocked) await this.enrollments.revoke(runtime.root, id, pin.acceptedOperations ?? [])
     runtime.replica ??= await (this.options.createReplica ?? GitReplica.open)({ workspaceRoot: runtime.root, stateDirectory: runtime.directory })
-    if (runtime.replica.root !== runtime.metadata.recordsRoot) throw new Error('The selected upstream changed. Review the existing enrollment before switching repositories.')
+    if (await canonicalPolicyRoot(runtime.replica.root) !== runtime.root) throw new Error('Git synchronization must use the selected workspace, not a separate checkout.')
     const canonical = await readRecords(runtime.metadata.recordsRoot)
     const pending = await runtime.store.getPendingRecords()
     const known = new Set(canonical.map((record) => record.operationId))
@@ -561,20 +571,24 @@ export class WorkspaceSyncService {
       && record.payload.deviceId === runtime.local.clientId && record.payload.identity.clientKeyId === runtime.store.options.actor.keyId)
     // Other peers must receive the signing identity in the same batch as its first operations.
     const publishable = ownIdentity && !snapshot.resolution.blocked ? pending : []
-    const publication = publishable.filter((record) => !known.has(record.operationId)).map((record) => ({ path: recordPath(record).split(sep).join('/'), content: serializeRecord(record) }))
+    const publication = unionRecords(canonical, publishable).map((record) => ({ path: recordPath(record).split(sep).join('/'), content: serializeRecord(record) }))
     publication.unshift({ path: '.taskcontinuum/workspace.json', content: `${JSON.stringify(descriptorSchema.parse({ schemaVersion: 1, kind: 'taskcontinuum-workspace', workspaceId: runtime.enrollment.workspaceId, remoteConfigFormat: 'immutable-operations-v1' }), null, 2)}\n` })
+    let publishedRecords: RemoteRecord[] | undefined
     await runtime.replica.sync(publication, {
-      signal, refreshUserCheckout: true,
+      signal,
       validateReplica: async (root) => {
         const descriptor = await this.descriptor(root)
         if (descriptor && descriptor.workspaceId !== runtime.enrollment.workspaceId) throw new Error('The remote workspace identity changed. No records were accepted.')
-        const records = unionRecords(await readRecords(root), await runtime.store.getPendingRecords())
+        publishedRecords = await readRecords(root)
+        const records = unionRecords(publishedRecords, canonical, await runtime.store.getPendingRecords())
         await this.admitRecords(runtime, records)
         const resolved = await resolveRecords(records, runtime.store.options.trust)
         if (resolved.blocked) throw new Error(resolved.diagnostics.map((issue) => issue.message).join('; ').slice(0, 2000))
       },
     })
     signal.throwIfAborted()
+    if (!publishedRecords) throw new Error('Git synchronization completed without validating its records. No configuration was accepted.')
+    await this.cacheRecords(publishedRecords, runtime.metadata.recordsRoot)
     runtime.status.lastSyncedAt = new Date().toISOString()
     runtime.status.error = undefined
     await this.refresh(runtime)

@@ -115,7 +115,7 @@ function runCreate(args: string[], cwd: string): number {
   }
   const parsed = draftFile === undefined ? taskCreationDraftSchema.parse(draft) : readTaskCreationDraft(root, draftFile)
   const result = createTaskDocuments(root, parsed, { actor, source: 'agent' })
-  console.log(JSON.stringify(result))
+  console.log(JSON.stringify({ taskId: result.taskId, directory: result.directory }))
   return 0
 }
 

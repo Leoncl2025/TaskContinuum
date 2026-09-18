@@ -9,6 +9,7 @@ import { DocumentFiles } from './files.js'
 import { buildGraph } from './graph.js'
 import { loadWorkspace } from './workspace.js'
 import { scan, type Finding } from './scan.js'
+import { matchesGitText } from '../shared/gitText.js'
 
 export interface DocumentDiagnostic {
   severity: 'error' | 'warn' | 'info'
@@ -159,7 +160,7 @@ function validateRemoteDocuments(files: DocumentFiles): Issue[] {
           if (!/^[a-f0-9]{64}\.json$/.test(entry.name)) throw new RemoteConfigError('invalid-path', 'Record files must be named by their operation hash.')
           const record = parseRecord(JSON.parse(text))
           if (path.normalize(recordPath(record)) !== path.normalize(file)) throw new RemoteConfigError('invalid-path', 'Record filename, entity path and payload do not match.')
-          if (text !== serializeRecord(record)) throw new RemoteConfigError('noncanonical-record', 'Record bytes must use canonical JSON followed by one newline.')
+          if (!matchesGitText(Buffer.from(text), serializeRecord(record))) throw new RemoteConfigError('noncanonical-record', 'Record bytes must use canonical JSON followed by one LF or CRLF newline.')
           if (workspaceId && record.workspaceId !== workspaceId) throw new RemoteConfigError('workspace-mismatch', 'Record workspaceId does not match the public descriptor.')
           if (records.has(record.operationId)) throw new RemoteConfigError('duplicate-operation', 'The operation ID appears more than once.')
           records.set(record.operationId, { record, file })

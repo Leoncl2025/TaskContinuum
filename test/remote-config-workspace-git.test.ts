@@ -1,8 +1,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { afterEach, expect, it } from 'vitest'
 import { WorkspaceGitReplica } from '../src/main/remoteConfig/workspaceGit'
@@ -18,7 +17,8 @@ async function git(root: string, ...args: string[]) {
   return (await exec('git', ['--no-pager', '-c', 'core.autocrlf=false', '-c', 'commit.gpgSign=false', ...args], { cwd: root, timeout: 30000 })).stdout.trim()
 }
 async function fixture(initialDescriptor?: string) {
-  const root = await mkdtemp(join(tmpdir(), 'taskcon-upstream-guard-'))
+  const root = resolve('.runtime', 'taskcon-upstream-guard', randomUUID())
+  await mkdir(root, { recursive: true })
   directories.push(root)
   const remote = join(root, 'remote.git')
   const workspaceRoot = join(root, 'checkout')
@@ -71,15 +71,13 @@ it('checks the branch again after asynchronous validation and before publication
   expect(await git(remote, '--git-dir', remote, 'rev-parse', 'refs/heads/main')).toBe(before)
 }, 30000)
 
-it('ignores old source-branch enrollment and restores cached configuration without an upstream', async () => {
+it('restores selected-checkout configuration without an upstream', async () => {
   const { replica, options, workspaceRoot, remote } = await fixture()
   const files = descriptor()
   await replica.sync(files)
-  const cachedRoot = replica.root
-  await writeFile(join(dirname(cachedRoot), 'workspace-branch.json'), JSON.stringify({ sourceBranch: 'refs/heads/deleted-task', trackingRef: 'refs/remotes/origin/deleted-task' }))
   await replica.close()
   await git(workspaceRoot, 'switch', '-c', 'without-upstream')
-  const restored = await WorkspaceGitReplica.open({ ...options, cachedRoot, prepare: false })
+  const restored = await WorkspaceGitReplica.open({ ...options, prepare: false })
   replicas.push(restored)
   expect(await readFile(join(restored.root, '.taskcontinuum', 'workspace.json'), 'utf8')).toBe(files[0].content)
   const before = await git(remote, '--git-dir', remote, 'rev-parse', 'main')
@@ -87,18 +85,17 @@ it('ignores old source-branch enrollment and restores cached configuration witho
   expect(await git(remote, '--git-dir', remote, 'rev-parse', 'main')).toBe(before)
   await git(workspaceRoot, 'branch', '--set-upstream-to', 'origin/main')
   await restored.sync()
-  expect(restored.root).toBe(cachedRoot)
+  expect(restored.root).toBe(replica.root)
 }, 30000)
 
 it('restores cached configuration without contacting an unavailable remote', async () => {
   const { replica, options, remote } = await fixture()
-  const cachedRoot = replica.root
   await replica.sync(descriptor())
   await replica.close()
   await rename(remote, `${remote}.offline`)
-  const restored = await WorkspaceGitReplica.open({ ...options, cachedRoot, prepare: false })
+  const restored = await WorkspaceGitReplica.open({ ...options, prepare: false })
   replicas.push(restored)
-  expect(restored.root).toBe(cachedRoot)
+  expect(restored.root).toBe(replica.root)
   await restored.assertUpstream()
   await expect(restored.sync()).rejects.toThrow()
 }, 30000)

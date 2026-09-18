@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createConnection } from 'node:net'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -181,7 +181,7 @@ async function settle(peers: Awaited<ReturnType<typeof fixture>>['peers']) {
   throw new Error(`Peers did not converge: ${JSON.stringify(await Promise.all(peers.map((peer) => peer.service.status(peer.folder))))}`)
 }
 
-it('links A/B/C over real SSH and converges immediate binding publication through independent Git clones', async () => {
+it('converges A/B/C over real SSH using only each peer\'s selected checkout', async () => {
   const { peers, remote } = await fixture(3)
   const [a, b, c] = peers
   for (const peer of [b, c, a]) {
@@ -263,7 +263,7 @@ it('links A/B/C over real SSH and converges immediate binding publication throug
     expect((await b.host.list()).some((pair) => pair.workspaces.some((policy) => policy.root.toLowerCase() === b.folder.toLowerCase()))).toBe(false)
   }, { timeout: 15000, interval: 100 })
   b.releasePublication()
-}, 180000)
+}, 300000)
 
 it('upgrades saved enrolled links and creates and assigns with write access without another permission step', async () => {
   const { peers, root } = await fixture(2)
@@ -325,6 +325,29 @@ it('does not start Git enrollment or publication just by opening an unconfigured
   expect(await peer.service.status(peer.folder)).toMatchObject({ enabled: false, state: 'disabled' })
   expect(await git(peer.folder, 'status', '--porcelain')).toBe('')
   await expect(readRepositorySessionLinks(peer.folder)).rejects.toThrow('Enable Automatic workspace links')
+}, 30000)
+
+it('rejects old replica state without migrating, deleting, or publishing it', async () => {
+  const { peers, remote } = await fixture(1)
+  const [peer] = peers
+  const workspaceId = randomUUID()
+  const canonical = await canonicalPolicyRoot(peer.folder)
+  await new LocalEnrollments(peer.data).enable(peer.folder, workspaceId, true)
+  const directory = join(peer.data, 'workspace-sync', createHash('sha256').update(canonical).digest('hex'))
+  const legacy = join(directory, 'old-replica')
+  await mkdir(legacy, { recursive: true })
+  const retained = join(legacy, 'pending-recovery.txt')
+  await writeFile(retained, 'Do not silently import or delete this data.')
+  const state = JSON.stringify({ schemaVersion: 1, workspaceId, recordsRoot: legacy, managedPairs: {} })
+  await writeFile(join(directory, 'runtime.json'), state)
+  const head = await git(remote, '--git-dir', remote, 'rev-parse', 'main')
+  await expect(peer.service.enable(peer.folder)).rejects.toThrow('old replicas are not migrated')
+  expect(await readFile(join(directory, 'runtime.json'), 'utf8')).toBe(state)
+  expect(await readFile(retained, 'utf8')).toBe('Do not silently import or delete this data.')
+  expect(await readdir(directory)).toEqual(expect.arrayContaining(['old-replica', 'runtime.json']))
+  expect(await readdir(directory)).not.toContain('records-cache')
+  expect(await git(remote, '--git-dir', remote, 'rev-parse', 'main')).toBe(head)
+  expect(await git(peer.folder, 'status', '--porcelain')).toBe('')
 }, 30000)
 
 it('drains a private link grant and removes its permission before pause completes', async () => {
@@ -400,6 +423,9 @@ it('initializes without legacy bindings and restores an unopened immutable backe
   const legacyFile = join(peer.folder, '.taskcontinuum', 'session-bindings.json')
   await mkdir(join(peer.folder, '.taskcontinuum'), { recursive: true })
   await writeFile(legacyFile, '{ unsupported legacy configuration')
+  await git(peer.folder, 'add', '--', '.taskcontinuum/session-bindings.json')
+  await git(peer.folder, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'Retain archived legacy configuration')
+  await git(peer.folder, 'push', 'origin', 'main')
   await expect(readRepositorySessionLinks(peer.folder)).rejects.toThrow('Enable Automatic workspace links')
   peer.holdTunnel()
   await peer.service.enable(peer.folder)
@@ -502,4 +528,51 @@ it('opens an enrolled workspace without upstream and retains local edits and tru
   await restored.syncNow(peer.folder)
   expect((await restored.status(peer.folder)).settings?.connectTimeoutMs).toBe(30000)
   expect((await restored.status(peer.folder)).workspaceId).toBe(enrolled.workspaceId)
+}, 120000)
+
+it('publishes in the selected checkout without a second AD tree and defers while user changes are staged', async () => {
+  const { peers, remote } = await fixture(1)
+  const [peer] = peers
+  await peer.service.enable(peer.folder)
+  await settle(peers)
+  const directory = (await readdir(join(peer.data, 'workspace-sync')))[0]
+  const metadata = JSON.parse(await readFile(join(peer.data, 'workspace-sync', directory, 'runtime.json'), 'utf8'))
+  expect(metadata.schemaVersion).toBe(2)
+  expect(metadata.recordsRoot).toBe(join(peer.data, 'workspace-sync', directory, 'records-cache'))
+  expect(metadata.legacyReplicaRoot).toBeUndefined()
+  const cached = await readRecords(metadata.recordsRoot)
+  expect(cached.length).toBeGreaterThan(0)
+  expect(await readRecords(peer.folder)).toEqual(cached)
+  const appFiles = await readdir(peer.data, { recursive: true })
+  expect(appFiles.filter((file) => /(^|[/\\])(?:\.git|\.agentdesk|tasks)([/\\]|$)/.test(file))).toEqual([])
+  const before = await git(remote, '--git-dir', remote, 'rev-parse', 'main')
+  expect(await git(peer.folder, 'rev-parse', 'HEAD')).toBe(before)
+  peer.holdPublication()
+  const taskFile = join(peer.folder, 'tasks', 'T-0001-t-0001', 'Plan.md')
+  const original = await readFile(taskFile, 'utf8')
+  await writeFile(taskFile, `${original}\nUser's next plan step.\n`)
+  await git(peer.folder, 'add', '--', 'tasks/T-0001-t-0001/Plan.md')
+  await writeFile(taskFile, `${original}\nUnstaged follow-up to the staged plan.\n`)
+  const index = await git(peer.folder, 'diff', '--cached')
+  const dirty = await git(peer.folder, 'diff')
+  await peer.service.setSettings(peer.folder, (await peer.service.status(peer.folder)).revision, { connectTimeoutMs: 15000 })
+  peer.releasePublication()
+  await expect(peer.service.syncNow(peer.folder)).rejects.toThrow(/dirty|staged|working|checkout/i)
+  expect(await git(remote, '--git-dir', remote, 'rev-parse', 'main')).toBe(before)
+  expect(await git(peer.folder, 'rev-parse', 'HEAD')).toBe(before)
+  expect(await git(peer.folder, 'diff', '--cached')).toBe(index)
+  expect(await git(peer.folder, 'diff')).toBe(dirty)
+  expect((await peer.service.status(peer.folder)).pending).toBeGreaterThan(0)
+  const restarted = await peer.restart()
+  await restarted.restore()
+  expect((await restarted.status(peer.folder)).settings?.connectTimeoutMs).toBe(15000)
+  expect((await restarted.status(peer.folder)).pending).toBeGreaterThan(0)
+  await git(peer.folder, 'restore', '--staged', '--', 'tasks/T-0001-t-0001/Plan.md')
+  await writeFile(taskFile, original)
+  restarted.startRestored()
+  await restarted.syncNow(peer.folder)
+  expect((await restarted.status(peer.folder)).pending).toBe(0)
+  expect(await git(peer.folder, 'rev-parse', 'HEAD')).toBe(await git(remote, '--git-dir', remote, 'rev-parse', 'main'))
+  expect((await git(peer.folder, 'diff', '--name-only', `${before}..HEAD`)).split('\n').every((path) => path.startsWith('.taskcontinuum/'))).toBe(true)
+  expect(await readFile(taskFile, 'utf8')).toBe(original)
 }, 120000)

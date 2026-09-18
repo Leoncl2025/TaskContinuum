@@ -101,7 +101,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
         const root = await realpath(repository)
         for (const local of [this.options.stateDirectory, this.options.outboxRoot]) {
           const child = relative(root, await realpath(local))
-          if (child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child)) throw new RemoteConfigError('unsafe-path', 'Local state and the durable outbox must be outside both the Git replica and the user checkout.')
+          if (child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child)) throw new RemoteConfigError('unsafe-path', 'Local state and the durable outbox must be outside both the accepted-record cache and the user checkout.')
         }
       }
       const lockFile = join(this.options.stateDirectory, 'store.lock')
@@ -238,7 +238,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     })
   }
 
-  /** Reconcile only against the validated on-disk Git replica, never against an SSH-provided snapshot. */
+  /** Reconcile only against accepted Git records, never against an SSH-provided snapshot. */
   reconcileSynced(): Promise<RemoteConfigSnapshot> { return this.read() }
 
   private async ensureRevision(state: StoreState, expected: string | null): Promise<RemoteConfigSnapshot> {

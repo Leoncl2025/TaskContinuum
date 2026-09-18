@@ -131,8 +131,8 @@ export function TaskCreationDialog({ workspace, workspaces, initialMode, onCreat
           <label className="form-field">Acceptance criteria (one per line)<textarea value={acceptance} onChange={(event) => setAcceptance(event.target.value)} maxLength={15030} rows={3} /></label>
         </details>
       </fieldset>
-      <p className="muted">Creates a new task folder with a unique ID, task.json and lifecycle documents. Existing tasks stay untouched. Nothing is committed or pushed.</p>
-      <div className="dialog-actions"><button type="button" className="secondary-button" disabled={busy !== null} onClick={onClose}>Cancel</button><button type="submit" className="primary-button" disabled={!context || !title.trim() || busy !== null || changed}>{busy === 'creating' ? 'Creating task...' : 'Create task'}</button></div>
+      <p className="muted">Creates the task, commits only its generated files, and pushes to the current branch's upstream. Other changes are never included. If Git is unavailable or busy, the task stays local and an error explains how to publish it.</p>
+      <div className="dialog-actions"><button type="button" className="secondary-button" disabled={busy !== null} onClick={onClose}>Cancel</button><button type="submit" className="primary-button" disabled={!context || !title.trim() || busy !== null || changed}>{busy === 'creating' ? 'Creating and publishing...' : 'Create task'}</button></div>
     </form> : <div className="task-create-draft">
         <p>The agent can return a draft rather than writing files. Review it here, then create it using the same safe UI path.</p>
         <label className="form-field">Agent task draft (JSON)<textarea value={draftText} onChange={(event) => setDraftText(event.target.value)} maxLength={32768} rows={6} spellCheck={false} /></label>

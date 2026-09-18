@@ -121,8 +121,8 @@ and desktop tests, then `npm run dist:win` and `npm run test:packaged`.
 Set `TASKCONTINUUM_PACKAGED_EXECUTABLE` to an absolute executable path to test a
 separately extracted ZIP. Tests use isolated temporary profiles and workspaces.
 
-The Task Continuum icon uses the supplied AgentDesk task/session logo: a coral
-task node connected to three blue session cards. The approved source is
+The Task Continuum icon uses three stacked outlined layers: the top and bottom
+layers are blue, and the middle layer is red, on a transparent background. The source is
 [build/icon.svg](build/icon.svg); checked-in
 [build/icon.ico](build/icon.ico) contains 16, 24, 32, 48, 64, 128 and 256 pixel
 images, while [build/icon.png](build/icon.png) supplies the window icon.
@@ -379,7 +379,11 @@ Open a real task workspace, then use either entry:
    or parent, and optionally choose owner, priority, type, hierarchy level, folder
    slug and acceptance criteria. Workspace defaults are used otherwise.
    **Create task** allocates a unique `T-XXXX`, writes the canonical task folder
-   and lifecycle documents, refreshes the tree and selects the new task.
+   and lifecycle documents, commits only those generated files, and pushes to
+   the current branch's configured upstream before selecting the new task.
+   Other local changes or a branch that differs from upstream stop publication.
+   If commit/push fails, the task remains available locally with a visible warning;
+   publish the existing task in terminal Git instead of creating it again.
 2. **Agent:** select **Create task with agent** to open the central chat pane
    with a local native Agent Host session in the selected repository, including
    an empty workspace. A single
@@ -404,7 +408,9 @@ the installed application does not include the source CLI.
 UI and CLI creation share the same writer. IDs include existing and archived
 tasks, configured members/hierarchy are checked, and a complete new directory is
 published without overwriting another task. Existing parent files, statuses,
-session links and Git state are not changed. No commit or push occurs.
+and session links are not changed. The desktop **Create task** action additionally
+commits and pushes the newly generated files. CLI/agent file creation remains local
+and never commits or pushes implicitly.
 See [task creation CLI](docs/task-documents.md#task-creation) for agent automation.
 
 ## Open a task workspace
@@ -517,8 +523,14 @@ same native Host session.
 Successful confirmation reconnects the chat without clearing its draft. See
 [receipt recovery](docs/remote-vscode.md#local-link-receipt-recovery).
 
-Automatic synchronization uses an app-owned Git replica and safe source refresh;
-it does not stage unrelated task/code changes or rebase unpublished user commits.
+Automatic synchronization uses the selected workspace checkout, not a second AD
+clone or worktree. Background synchronization automatically commits only public
+`.taskcontinuum` metadata; the explicit **Create task** action also publishes its
+new task files.
+User edits, staged changes, in-progress Git operations and unpublished user commits
+pause Git synchronization without staging, stashing or discarding that work.
+Pending signed operations and an offline metadata-only cache remain in app data;
+task documents are never duplicated there.
 See [workspace Git synchronization](docs/workspace-git-sync.md) for enrollment,
 typed configuration editing, conflict resolution and revocation, and
 [task-document validation](docs/task-documents.md) for the owned read-only checker.

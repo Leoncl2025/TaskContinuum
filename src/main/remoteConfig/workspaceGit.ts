@@ -4,7 +4,7 @@ import { GitReplica } from './git'
 import type { GitPublication, GitReplicaOptions, GitSyncOptions, GitSyncResult } from './git'
 
 const execute = promisify(execFile)
-export interface WorkspaceGitOptions extends GitReplicaOptions { prepare?: boolean; cachedRoot?: string }
+export type WorkspaceGitOptions = GitReplicaOptions
 
 /** Bootstrap validates fetched configuration before allowing its first publication. */
 export class WorkspaceGitReplica {
@@ -21,7 +21,6 @@ export class WorkspaceGitReplica {
     try {
       if (options.prepare !== false) {
         await inner.sync([], {
-          refreshUserCheckout: false,
           validateReplica: async (checkout) => {
             const heads = (await replica.local(['rev-parse', 'HEAD', 'FETCH_HEAD'], checkout)).split(/\r?\n/)
             if (heads.length !== 2 || heads[0] !== heads[1]) throw new Error('Bootstrap found pending publication commits. Restore the existing enrollment before publishing them.')

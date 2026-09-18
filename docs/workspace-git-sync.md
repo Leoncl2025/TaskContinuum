@@ -39,7 +39,7 @@ No local or remote branch is permanently bound to enrollment. Each Git cycle
 uses the **current local branch's configured upstream**, including task branches.
 Neither `main`/`master` nor the remote default branch is selected implicitly.
 Switching back to `main` after merging and deleting a task branch needs no
-reenrollment. The app-owned cache, pending immutable records and device trust
+reenrollment. The metadata-only cache, pending immutable records and device trust
 remain intact and are reconciled with the newly selected upstream.
 Existing published or enrolled workspace IDs are preserved. New workspace IDs
 are derived from the repository URL, not the branch name.
@@ -59,12 +59,16 @@ those branches receive the records; task documents always reflect the user check
 
 ## Timing and the A/B/C exchange
 
+- Git operations use the **same repository checkout selected in the workspace**.
+  Task Continuum does not clone the AD repository or create another worktree.
+  Task documents and public configuration have one editable location.
 - Git synchronization is fixed at **15,000 ms** while enabled.
 - A local configuration change durably saves its immutable operation, then
-  immediately schedules Git publication. A binding change also immediately
+  immediately schedules Git publication when the checkout is safe. A binding change also immediately
   notifies the affected SSH peers without waiting for Git completion.
-- Git operations are serialized; a tick/edit during a running cycle coalesces
-  into follow-up work. Push races have at most three attempts per cycle.
+- Git operations are serialized; edits during a running cycle coalesce into
+  follow-up work. Overlapping timer ticks are skipped so slow Git operations do
+  not keep the UI permanently waiting. Push races have at most three attempts per cycle.
 - A discovers B/C public identities and publishes separate A-issued invitations.
   B and C consume their respective invitations and independently publish
   reciprocal invitations. An invitation issued by X to Y enables **Y -> X**.
@@ -108,6 +112,9 @@ Public Git data:
 
 Each operation is signed, hash-addressed and immutable. Git merges add files
 instead of rewriting one shared registry. Different entity keys combine.
+Git's LF/CRLF checkout conversion is accepted without changing the user's Git
+settings or rewriting local files; all other canonical-content, hash and signature
+checks still apply.
 Concurrent incompatible values retain both authors' operations and produce
 **needs resolution**; ambiguous bindings are disabled. Reassigning the intended
 session or explicitly detaching with the current revision resolves known heads.
@@ -115,7 +122,11 @@ The same canonical session cannot have two active task claims.
 
 The local app-data directory holds protected SSH keys, native private
 invitations, enrollment pins, the outbox, overlay markers, configuration editor
-state and an isolated Git replica. Generated views are not a second Git authority.
+state and a metadata-only cache of previously accepted signed records. This cache
+contains no Git checkout, `.agentdesk` folder or task documents; it supports
+offline startup and branch changes, and is not a second editable AD repository.
+Pending configuration is kept in the outbox until Git publication succeeds.
+Generated views are not a second Git authority.
 The private key store continues to use OS protection.
 
 Session binding documents and signed binding payloads require schema v2. They
@@ -165,8 +176,21 @@ Fingerprint changes are blocked, not trusted automatically: deliberate key
 replacement requires explicit reenrollment/trust policy rather than replacing
 the saved private identity on startup.
 
-The protected-source checkout is refreshed only when safe. A dirty checkout is
-left untouched while the app-owned replica handles metadata. Force pushes,
+Synchronization pauses with a visible error while the selected checkout has
+user edits, staged changes, unpublished user commits or an in-progress merge,
+rebase or cherry-pick. Task Continuum does not stash, discard, stage or publish
+that work. Finish the Git operation and commit/push or otherwise resolve your
+changes, then use **Sync now** or wait for the next cycle. Only allowlisted public
+`.taskcontinuum` metadata is automatically committed by the background sync.
+The separate **Create task** action commits and pushes only its generated task
+files, using the same checkout and Git lock. It does not include unrelated edits.
+
+This is a breaking local sync-state change. Old replica-based state is rejected,
+not migrated, reused or automatically cleared. Start with a fresh Task Continuum
+data directory and explicitly enable automatic links again. Existing old files
+and pending operations are left untouched for manual recovery; they are not
+silently imported into the new state. No new replica is created.
+Force pushes,
 record mutation/removal, invalid signatures and unsupported records block
 synchronization with an actionable error.
 
