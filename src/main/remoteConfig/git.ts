@@ -837,6 +837,7 @@ export class GitReplica {
   async publishCreatedTask(taskId: string, directory: string, files: readonly string[]): Promise<void> {
     if (!/^T-\d{4}$/.test(taskId) || !directory.split('/').at(-1)?.startsWith(`${taskId}-`)
       || !files.length || files.length > 32 || new Set(files).size !== files.length
+      // eslint-disable-next-line no-control-regex -- Reject control bytes in generated Git paths.
       || files.some((file) => !file.startsWith(`${directory}/`) || file.includes('\\') || /[\0-\x1f\x7f]/.test(file)
         || file.split('/').some((part) => !part || part === '.' || part === '..' || part.toLowerCase() === '.git'))) {
       throw new GitSyncError('integrity', 'Only the files generated for this new task may be published.')

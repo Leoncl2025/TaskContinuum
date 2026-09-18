@@ -63,7 +63,12 @@ describe('canonical task creation', () => {
     ])
     for (const [file, text] of untouched) fs.writeFileSync(file, text)
     const result = createTaskDocuments(root, { title: '  Create a useful task  ' })
-    expect(result).toEqual({ taskId: 'T-0001', directory: 'tasks/T-0001-create-a-useful-task' })
+    expect(result).toEqual({
+      taskId: 'T-0001',
+      directory: 'tasks/T-0001-create-a-useful-task',
+      files: ['task.json', 'skill.md', 'RequirementAnalysis.md', 'Plan.md', 'Checklist.md', 'Reference.md']
+        .map((file) => `tasks/T-0001-create-a-useful-task/${file}`),
+    })
     const { directory, content, task } = loadCreated(root, result)
     expect(content.charCodeAt(0)).not.toBe(0xfeff)
     expect(content).toBe(`${JSON.stringify(JSON.parse(content), null, 2)}\n`)

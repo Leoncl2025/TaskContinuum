@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { _electron as electron, expect, test } from '@playwright/test'
 import type { ElectronApplication, Page } from '@playwright/test'
@@ -10,6 +10,7 @@ let environment: Record<string, string>
 let fixtureFolder: string
 const errors: string[] = []
 const externalRequests: string[] = []
+const manifest: { version: string } = JSON.parse(readFileSync(resolve('package.json'), 'utf8'))
 
 async function zoomKey(key: string, shift = false, keypad = false): Promise<void> {
   await app.evaluate(({ BrowserWindow }, input) => {
@@ -80,7 +81,7 @@ test.beforeEach(async () => {
   await page.evaluate(async () => { await window.workspace!.closeWorkspace(); localStorage.clear() })
   await page.reload()
   await expect(page.getByRole('heading', { level: 1, name: 'Create your task repository' })).toBeVisible()
-  await expect(page.getByText('Desktop · 0.1.0', { exact: true })).toBeVisible()
+  await expect(page.getByText(`Desktop · ${manifest.version}`, { exact: true })).toBeVisible()
   await expect(page.locator('.workbench')).toHaveAttribute('aria-busy', 'false')
 })
 

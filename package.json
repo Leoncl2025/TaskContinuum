@@ -1,7 +1,7 @@
 {
   "name": "taskcontinuum",
   "productName": "Task Continuum",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A focused desktop workbench for tasks and agent sessions",
   "private": true,
   "license": "UNLICENSED",
