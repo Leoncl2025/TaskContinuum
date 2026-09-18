@@ -151,15 +151,18 @@ catalog before dispatch. Update both desktops for remote configuration support.
 Each turn records its requested config for inspection. Options are retained only
 while the panel stays open, not across application restarts.
 
-Each binding requires `provider: "agent-host"`, `hostId`, `sessionId`, `chatId`
-and a stable owner (`clientId`, `machineName`). Native Copilot sessions use
+Binding documents use **schema v2**. Each binding requires `provider: "agent-host"`,
+`sessionId`, `chatId` and an owner (`clientId`, plus the display `machineName`).
+The stable chat key is `(owner.clientId, sessionId, chatId)`; workspace authorization
+remains mandatory. Runtime `hostId` is rejected in a binding. Native Copilot sessions use
 `copilotcli:/...` and `ahp-chat://default/...`; the prototype's `ahp-session:/...`
 form is also accepted.
 Only the verified `copilotcli` provider is currently listed; this native URI is
 not a CLI resume/import route. The binding contains no endpoint token, route or
-history. Host instance identity is pinned: replacing/restarting that Host does
-not silently select a different process; explicitly verify and relink its existing
-session if needed. AHP cannot subscribe to extension-host Local conversations or
+history. The owner resolves the same session and visible chat on current trusted
+local Hosts before connecting. Exactly one Host must verify; missing or ambiguous
+targets fail closed. Host restarts do not change bindings, receipts, cache identity
+or message delivery identity. AHP cannot subscribe to extension-host Local conversations or
 preserve their runtime by starting a new Host. See
 [the remote runbook](docs/remote-vscode.md#agent-host-ahp).
 
@@ -428,8 +431,10 @@ operations and descendants use the same resolver. Provisional values expire
 after 60 seconds; expiry or restart leaves an explicit awaiting-sync marker and
 disables the affected binding instead of restoring an older route.
 
-Only complete `agent-host` bindings with the original `hostId`, `sessionId`,
-`chatId` and owner are accepted, including through signed records and SSH notices.
+Only complete v2 `agent-host` bindings with the original `sessionId`, `chatId`
+and owner are accepted, including through signed records and SSH notices.
+Signed binding set/delete payloads also require `schemaVersion: 2`; the generic
+immutable operation envelope remains v1. No v1 binding payload is imported.
 Conflicting heads remain visible and ambiguous bindings are disabled. The same
 canonical session cannot have two active task claims. Resolve known heads by
 explicitly selecting the intended native session or detaching at the current
@@ -441,12 +446,15 @@ Existing files remain untouched. Enable Automatic workspace links and explicitly
 select the existing native Host sessions again. Unsupported local store metadata
 or authorization receipts are reported, not reset or imported.
 
-Local link receipts accept only the current Agent Host format. Old Local receipts
+Local receipts require `{ "schemaVersion": 2, "receipts": [...] }`, with logical
+session/chat identities and no Host instance field. Old arrays, Host-pinned entries
 and mixed-format files are rejected, not ignored, migrated or automatically reset.
-Fully quit the desktop before explicitly removing obsolete receipt entries;
-preserve current receipts and never convert old identity fields into authorization.
-If a previous link attempt saved a binding without a receipt, clean the file first,
-then use **Review session link** to explicitly confirm the same native Host session.
+This is a breaking data-model change: update both desktops, use fresh v2 binding
+metadata, and explicitly confirm existing chats again. Old signed binding logs
+must not be edited in place or silently imported. Delivery/cache and private
+creation records also require v2; original chat history and device keys are untouched.
+For a v2 binding without a receipt, use **Review session link** to confirm the
+same native Host session.
 Successful confirmation reconnects the chat without clearing its draft. See
 [receipt recovery](docs/remote-vscode.md#local-link-receipt-recovery).
 

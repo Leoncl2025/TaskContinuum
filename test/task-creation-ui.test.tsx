@@ -18,7 +18,7 @@ async function setup(mode: 'form' | 'agent' = 'form', configure?: (agent: AgentH
     getInfo: vi.fn(async () => ({ name: 'Task Continuum', version: 'test', platform: 'win32', security: { sandboxed: true, contextIsolated: true } })),
     copyText, minimize: vi.fn(async () => {}), toggleMaximize: vi.fn(async () => {}), close: vi.fn(async () => {}),
   }
-  const target = { hostId: 'local-host', sessionId: 'copilotcli:/local-task-creation', chatId: 'ahp-chat:/local-task-creation', owner: { clientId: crypto.randomUUID(), machineName: 'This PC' } }
+  const target = { sessionId: 'copilotcli:/local-task-creation', chatId: 'ahp-chat:/local-task-creation', owner: { clientId: crypto.randomUUID(), machineName: 'This PC' } }
   const session = { ...target, title: 'Task planning', provider: 'copilotcli', updatedAt: new Date().toISOString(), canSend: true }
   const saved: LocalAgentHostCreation[] = []
   const listeners = new Set<Parameters<AgentHostBridge['onView']>[0]>()
@@ -31,7 +31,7 @@ async function setup(mode: 'form' | 'agent' = 'form', configure?: (agent: AgentH
     create: vi.fn(async () => { throw new Error('Remote creation must not be used.') }),
     creationStatus: vi.fn(async () => { throw new Error('Remote creation must not be used.') }),
     bindCreation: vi.fn(async () => { throw new Error('Task binding must not be used.') }),
-    localCreationHosts: vi.fn(async () => [{ hostId: target.hostId, name: 'Local VS Code', available: true }]),
+    localCreationHosts: vi.fn(async () => [{ hostId: 'local-host', name: 'Local VS Code', available: true }]),
     localCreations: vi.fn(async () => structuredClone(saved)),
     createLocal: vi.fn(async (request) => {
       const result: LocalAgentHostCreation = { ...request, state: 'ready', session }

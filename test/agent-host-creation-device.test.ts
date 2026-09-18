@@ -21,7 +21,7 @@ async function fixture() {
   const request: AgentHostCreateRequest = { operationId: randomUUID(), workerId: randomUUID(), workspaceId: 'b'.repeat(64), taskId: 'T-0007', hostId: 'native-host-123', expectedRevision: null }
   const sessionId = `copilotcli:/${randomUUID()}`
   const result: AgentHostCreationResult = { operationId: request.operationId, workspaceId: request.workspaceId, taskId: request.taskId, hostId: request.hostId, state: 'ready',
-    session: { hostId: request.hostId, sessionId, chatId: `ahp-chat://default/${Buffer.from(sessionId).toString('base64url')}`, owner, title: 'Created session', provider: 'copilotcli', updatedAt: new Date().toISOString(), canSend: true } }
+    session: { sessionId, chatId: `ahp-chat://default/${Buffer.from(sessionId).toString('base64url')}`, owner, title: 'Created session', provider: 'copilotcli', updatedAt: new Date().toISOString(), canSend: true } }
   const catalog = { ownerId, deviceId: pairId, owner, hosts: [{ hostId: request.hostId, name: 'Copilot', available: true }],
     workspaces: [{ id: request.workspaceId, name: 'Worker workspace', canSend: true, taskState: 'available', expectedRevision: null }] }
   const requests: { path: string; body: Record<string, unknown> }[] = []

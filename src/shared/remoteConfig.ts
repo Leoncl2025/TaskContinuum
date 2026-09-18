@@ -52,7 +52,7 @@ export type InvitationPayload = InvitationIdentity & ({
   expiresAt: string
   routeRef: { identityRef: string; routeIndex: number }
 } | { action: 'revoke'; revokes: string })
-export type BindingPayload = { action: 'set'; taskId: string; target: SessionLink } | { action: 'delete'; taskId: string }
+export type BindingPayload = { schemaVersion: 2; action: 'set'; taskId: string; target: SessionLink } | { schemaVersion: 2; action: 'delete'; taskId: string }
 export interface RemoteSettings {
   autoLink: boolean
   tunnelEnabled: boolean

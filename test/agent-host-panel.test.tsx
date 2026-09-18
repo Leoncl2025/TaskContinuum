@@ -11,7 +11,7 @@ import { modelConfigFixture } from './agent-host-model-fixture'
 afterEach(() => { delete window.agentHost; delete window.desktop })
 
 function fixture() {
-  const target = { hostId: 'original-host-123', sessionId: 'ahp-session:/original', chatId: 'ahp-chat:/original/main', owner: { clientId: crypto.randomUUID(), machineName: 'Owner-B' } }
+  const target = { sessionId: 'ahp-session:/original', chatId: 'ahp-chat:/original/main', owner: { clientId: crypto.randomUUID(), machineName: 'Owner-B' } }
   const listeners = new Set<Parameters<AgentHostBridge['onView']>[0]>()
   const view: AgentHostView = { target, state: 'connected', canSend: true, readOnly: false, terminals: {}, chat: { resource: target.chatId, title: 'Same original Host chat', modifiedAt: '', status: 1, turns: [] } }
   let watchId = ''

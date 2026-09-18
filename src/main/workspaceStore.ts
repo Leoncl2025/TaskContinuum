@@ -9,7 +9,7 @@ import type { SessionLinksSnapshot, SessionOwner } from '../shared/sessionBindin
 import { readClientIdentity } from './clientIdentity'
 import { recordLocalLink } from './linkedSessionPolicy'
 import type { AgentHostTarget } from '../shared/agentHost'
-import { agentHostChatIdSchema, agentHostIdSchema, agentHostKey, agentHostSessionIdSchema, agentHostTargetSchema } from './agentHostProtocol'
+import { agentHostChatIdSchema, agentHostKey, agentHostSessionIdSchema, agentHostTargetSchema } from './agentHostProtocol'
 import { createWorkspaceRepositorySchema, repositoryPushRequestSchema, workspaceRepositoryIdSchema, WorkspaceRepositoryService } from './workspaceRepository'
 import { createTaskDocuments, getTaskCreationContext } from './taskDocuments/create'
 import type { CreateWorkspaceTaskResult, WorkspaceTaskCreationContext } from '../shared/taskCreation'
@@ -24,7 +24,7 @@ const linkRequestSchema = z.object({
 const linkChangeSchema = z.union([
   linkRequestSchema.extend({
     sessionId: agentHostSessionIdSchema,
-    agentHost: z.object({ hostId: agentHostIdSchema, chatId: agentHostChatIdSchema }).strict(),
+    agentHost: z.object({ chatId: agentHostChatIdSchema }).strict(),
     owner: sessionOwnerSchema,
   }),
   linkRequestSchema.extend({ sessionId: z.null() }),

@@ -163,7 +163,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       if (entity) entity.state = 'blocked'
       resolution.diagnostics.push({ code: 'awaiting-sync', message: 'A provisional binding expired or was recovered after restart. Await the exact canonical operation or explicitly cancel it.', entityKey: `binding:${marker.taskId}`, operationId: marker.operationId })
     }
-    const document: SessionLinksDocument = { schemaVersion: 1, bindings }
+    const document: SessionLinksDocument = { schemaVersion: 2, bindings }
     const revision = sha({ resolution: resolution.revision, canonical: canonical.map((record) => record.operationId), overlay: overlay?.revision ?? null, initialized: state.initialized })
     if (state.initialized) {
       const accepted = canonical.map((record) => record.operationId).sort()
@@ -294,7 +294,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
         const target = document.bindings[taskId]
         if (canonicalJson(previous ?? null) === canonicalJson(target ?? null)) continue
         if (previous?.owner && target && previous.provider === target.provider && previous.sessionId === target.sessionId && previous.owner.clientId !== target.owner?.clientId) throw new RemoteConfigError('ownership-transfer', 'Session ownership cannot be changed by linking.')
-        operations.push(await this.make('binding', target ? { action: 'set', taskId, target } : { action: 'delete', taskId }, before))
+        operations.push(await this.make('binding', target ? { schemaVersion: 2, action: 'set', taskId, target } : { schemaVersion: 2, action: 'delete', taskId }, before))
       }
       if (!operations.length) return { value: before, changed: recovered, snapshot: before }
       await this.validateNew(before, operations)
@@ -327,7 +327,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       if ((selected && entity?.state === 'active' && canonicalJson(prior ?? null) === canonicalJson(selected)) || (!selected && entity?.state === 'deleted')) {
         return { value: before, changed: recovered, snapshot: before }
       }
-      const record = await this.make('binding', selected ? { action: 'set', taskId, target: selected } : { action: 'delete', taskId }, before)
+      const record = await this.make('binding', selected ? { schemaVersion: 2, action: 'set', taskId, target: selected } : { schemaVersion: 2, action: 'delete', taskId }, before)
       await this.validateNew(before, [record])
       await this.ensureRevision(state, expectedRevision)
       if (beforeWrite) {

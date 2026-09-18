@@ -67,7 +67,7 @@ export function bindRepositoryAgentHostCreation(root: string, taskId: string, ta
     if (prior && JSON.stringify(prior) !== JSON.stringify(selected)) throw new Error('The task already has a different session binding. Creation cannot replace it.')
     const existingTask = Object.entries(before.bindings).find(([id, link]) => id !== taskId && linkKey(link) === linkKey(selected))?.[0]
     if (existingTask) throw new Error(`This session is already linked to ${existingTask}. Detach it there before moving it.`)
-    return { schemaVersion: 1, bindings: { ...before.bindings, [taskId]: selected } }
+    return { schemaVersion: 2, bindings: { ...before.bindings, [taskId]: selected } }
   }, check)
 }
 
@@ -87,7 +87,7 @@ async function updateLink(root: string, taskId: string, selected: SessionLink | 
     const bindings = { ...before.bindings }
     if (selected === null) delete bindings[taskId]
     else bindings[taskId] = selected
-    return { schemaVersion: 1, bindings }
+    return { schemaVersion: 2, bindings }
   })
 }
 

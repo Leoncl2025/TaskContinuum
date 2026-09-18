@@ -51,11 +51,11 @@ export class AgentHostManager {
     if (target.owner.clientId === (await this.owner()).clientId) {
       if (!await this.hasConsent(root)) throw new Error('Enable Agent Host access from the session picker before linking.')
       const verified = await this.local.describe(target)
-      return agentHostTargetSchema.parse({ hostId: verified.hostId, sessionId: verified.sessionId, chatId: verified.chatId, owner: await this.owner() })
+      return agentHostTargetSchema.parse({ sessionId: verified.sessionId, chatId: verified.chatId, owner: await this.owner() })
     }
     const verified = (await this.devices.agentHostSessions(root)).sessions.find((session) => agentHostKey(session) === agentHostKey(target))
     if (!verified) throw new Error('This exact Agent Host chat is not available from its authenticated owner.')
-    return { hostId: verified.hostId, sessionId: verified.sessionId, chatId: verified.chatId, owner: verified.owner }
+    return { sessionId: verified.sessionId, chatId: verified.chatId, owner: verified.owner }
   }
 
   async authorize(root: string, value: AgentHostTarget): Promise<void> {

@@ -65,8 +65,8 @@ const invitationPayloadSchema = z.discriminatedUnion('action', [
   }
 })
 const bindingPayloadSchema = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('set'), taskId: sessionLinkTaskIdSchema.max(64), target: sessionLinkSchema }).strict(),
-  z.object({ action: z.literal('delete'), taskId: sessionLinkTaskIdSchema.max(64) }).strict(),
+  z.object({ schemaVersion: z.literal(2), action: z.literal('set'), taskId: sessionLinkTaskIdSchema.max(64), target: sessionLinkSchema }).strict(),
+  z.object({ schemaVersion: z.literal(2), action: z.literal('delete'), taskId: sessionLinkTaskIdSchema.max(64) }).strict(),
 ])
 export const settingKeySchema = z.enum(['autoLink', 'tunnelEnabled', 'connectTimeoutMs'])
 const settingPayloadSchema = z.object({

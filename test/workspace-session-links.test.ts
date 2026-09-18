@@ -44,7 +44,7 @@ async function fixture(legacyContent?: string) {
   const workspace = (await store.openFolder(root)).current!
   const backend = await createImmutableBindingsFixture(root)
   backends.push(backend)
-  const request = { workspaceId: workspace.id, taskId: 'T-0002', sessionId: target.sessionId, agentHost: { hostId: target.hostId, chatId: target.chatId }, owner: target.owner, expectedRevision: backend.snapshot.revision }
+  const request = { workspaceId: workspace.id, taskId: 'T-0002', sessionId: target.sessionId, agentHost: { chatId: target.chatId }, owner: target.owner, expectedRevision: backend.snapshot.revision }
   return { root, profile, taskFile, original, legacyFile, sessionFile, sessionContent, store, workspace, target, request, backend, verifyAgentHost }
 }
 
@@ -60,7 +60,7 @@ describe('workspace-scoped immutable Agent Host links', () => {
     expect(saved.document.bindings['T-0002']).toEqual({ provider: 'agent-host', ...target })
     expect(await locallyLinkedAgentHostSessions(profile, root, target.owner)).toEqual([target])
     expect((await backend.store.read()).records).toEqual([expect.objectContaining({
-      kind: 'binding', payload: { action: 'set', taskId: 'T-0002', target: { provider: 'agent-host', ...target } },
+      kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0002', target: { provider: 'agent-host', ...target } },
       signature: { algorithm: 'ed25519', value: expect.any(String) },
     })])
     await expect(readFile(legacyFile, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
@@ -93,12 +93,12 @@ describe('workspace-scoped immutable Agent Host links', () => {
     expect(await readFile(sessionFile, 'utf8')).toBe(sessionContent)
   })
 
-  it.each(['hostId', 'sessionId', 'chatId', 'owner'] as const)('rejects a verifier that changes the selected %s', async (field) => {
+  it.each(['sessionId', 'chatId', 'owner'] as const)('rejects a verifier that changes the selected %s', async (field) => {
     const { store, request, target, verifyAgentHost, backend } = await fixture()
     const changed = {
       ...target,
       [field]: field === 'owner' ? { clientId: '00000000-0000-4000-8000-000000000099', machineName: 'Another-machine' }
-        : field === 'hostId' ? 'different-host' : field === 'chatId' ? 'ahp-chat:/different' : 'copilotcli:/different',
+        : field === 'chatId' ? 'ahp-chat:/different' : 'copilotcli:/different',
     }
     verifyAgentHost.mockResolvedValue(changed)
     await expect(store.updateSessionLink(request)).rejects.toThrow('identity changed')
@@ -142,6 +142,7 @@ describe('workspace-scoped immutable Agent Host links', () => {
       oldRequest,
       { ...oldRequest, vscodeWorkspaceStorageId: 'a'.repeat(32) },
       { ...oldRequest, vscodeWorkspaceStorageId: 'a'.repeat(32), vscodeRemoteMachineName: 'Machine-B' },
+      { ...request, agentHost: { ...request.agentHost, hostId: 'previous-host' } },
       { ...request, owner: undefined },
       { ...request, agentHost: undefined },
       { ...request, vscodeWorkspaceStorageId: 'a'.repeat(32) },
@@ -193,8 +194,8 @@ describe('workspace-scoped immutable Agent Host links', () => {
     expect(await locallyLinkedAgentHostSessions(profile, root, target.owner)).toEqual([])
     expect(await readFile(sessionFile, 'utf8')).toBe(sessionContent)
     expect((await backend.store.read()).records).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'binding', payload: { action: 'set', taskId: 'T-0002', target: { provider: 'agent-host', ...target } } }),
-      expect.objectContaining({ kind: 'binding', payload: { action: 'delete', taskId: 'T-0002' } }),
+      expect.objectContaining({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0002', target: { provider: 'agent-host', ...target } } }),
+      expect.objectContaining({ kind: 'binding', payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0002' } }),
     ]))
     expect(verifyAgentHost).toHaveBeenCalledOnce()
   })

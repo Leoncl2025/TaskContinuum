@@ -12,7 +12,7 @@ import type { VSCodeDeviceClient } from './vscodeDeviceClient'
 import { readTaskWorkspace } from './workspaceReader'
 
 const recordSchema = z.object({
-  schemaVersion: z.literal(1), root: z.string().min(1).max(4096), createdAt: z.iso.datetime(),
+  schemaVersion: z.literal(2), root: z.string().min(1).max(4096), createdAt: z.iso.datetime(),
   request: agentHostCreateRequestSchema, owner: agentHostTargetSchema.shape.owner,
   expectedRevision: creationRevisionSchema, result: agentHostCreationSchema,
   localBound: z.boolean(), bindingBlocked: z.boolean(),
@@ -148,7 +148,7 @@ export class AgentHostCreationClient {
           if (!worker.hosts.some((host) => host.hostId === request.hostId && host.available)) throw new Error('The exact selected Host is unavailable or unsupported.')
           await this.current(authorize)
           const result: AgentHostCreation = { operationId: request.operationId, taskId: request.taskId, workerId: request.workerId, workspaceId: request.workspaceId, hostId: request.hostId, state: 'uncertain', error: 'Creation intent saved; no worker result has been confirmed. Query this operation without replaying it.' }
-          record = { schemaVersion: 1, root: scope.root, createdAt: new Date().toISOString(), request, owner: worker.owner, expectedRevision: links.revision, result: agentHostCreationSchema.parse(result), localBound: false, bindingBlocked: false }
+          record = { schemaVersion: 2, root: scope.root, createdAt: new Date().toISOString(), request, owner: worker.owner, expectedRevision: links.revision, result: agentHostCreationSchema.parse(result), localBound: false, bindingBlocked: false }
           await this.save(record, true)
         }
       } finally { await lock.close(); await rm(lockFile, { force: true }) }
@@ -199,8 +199,8 @@ export class AgentHostCreationClient {
         if (prior.provider !== 'agent-host' || agentHostKey(prior) !== agentHostKey(result.session)) throw new Error('The task is already bound to a different session. It was not overwritten.')
       } else {
         await this.current(authorize)
-        const { hostId, sessionId, chatId, owner } = result.session
-        await bindRepositoryAgentHostCreation(record.root, record.request.taskId, { hostId, sessionId, chatId, owner }, record.expectedRevision, () => this.current(authorize))
+        const { sessionId, chatId, owner } = result.session
+        await bindRepositoryAgentHostCreation(record.root, record.request.taskId, { sessionId, chatId, owner }, record.expectedRevision, () => this.current(authorize))
       }
       record.localBound = true
       record.bindingBlocked = false

@@ -15,7 +15,7 @@ function fixture() {
     hosts: [{ hostId: 'exact-host-123', name: 'Native Host', available: true }],
     workspaces: [{ id: 'remote-workspace', name: 'Worker project', canSend: true, taskState: 'available', expectedRevision: 'a'.repeat(64) }],
   }
-  const session: AgentHostSession = { hostId: worker.hosts[0].hostId, sessionId: 'ahp-session:/created', chatId: 'ahp-chat:/created/main', owner, title: 'New native chat', provider: 'copilotcli', canSend: true, updatedAt: '' }
+  const session: AgentHostSession = { sessionId: 'ahp-session:/created', chatId: 'ahp-chat:/created/main', owner, title: 'New native chat', provider: 'copilotcli', canSend: true, updatedAt: '' }
   const saved = new Map<string, AgentHostCreation>()
   const bridge: AgentHostBridge = {
     list: vi.fn(async () => ({ sessions: [], warnings: [] })),

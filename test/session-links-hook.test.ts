@@ -22,7 +22,7 @@ function attachment(session: string, owner = localOwner): SessionBinding {
   return { id: target.sessionId, title: 'Private title', owner, agentHost: target }
 }
 function linksSnapshot(bindings: Record<string, SessionLink> = {}, revision: string | null = null): SessionLinksSnapshot {
-  return { document: { schemaVersion: 1, bindings }, revision, localOwner }
+  return { document: { schemaVersion: 2, bindings }, revision, localOwner }
 }
 function fixture() {
   const workspace: WorkspaceSnapshot = { id: 'workspace-one', name: 'TaskContinuum-ad', title: 'Task Continuum', root: 'Q:\\src\\Projects\\TaskContinuum-ad', tasks: [fixtureTasks[1]], warnings: [], loadedAt: '2026-09-06T00:00:00Z' }
@@ -117,7 +117,7 @@ describe('repository-backed Agent Host binding state', () => {
     expect(result.current.busy).toBe(true)
     await act(async () => { finish(linksSnapshot({ 'T-0002': link('session-one') }, 'a'.repeat(64))); await writing })
     expect(result.current.bindings['T-0002'].id).toBe('copilotcli:/session-one')
-    expect(bridge.updateSessionLink).toHaveBeenCalledWith({ workspaceId: workspace.id, taskId: 'T-0002', sessionId: 'copilotcli:/session-one', agentHost: { hostId: 'host-main', chatId: 'ahp-chat:/session-one' }, owner: localOwner, expectedRevision: null })
+    expect(bridge.updateSessionLink).toHaveBeenCalledWith({ workspaceId: workspace.id, taskId: 'T-0002', sessionId: 'copilotcli:/session-one', agentHost: { chatId: 'ahp-chat:/session-one' }, owner: localOwner, expectedRevision: null })
     expect(getItem).not.toHaveBeenCalled()
     expect(setItem).not.toHaveBeenCalled()
     expect(removeItem).not.toHaveBeenCalled()

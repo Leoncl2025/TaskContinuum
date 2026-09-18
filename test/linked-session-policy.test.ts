@@ -51,12 +51,14 @@ it('projects participant identity to owner and retries an immutable link written
   await recordLocalLink(profile, root, retry[0][0], retry[0][1], participant)
   const receiptFile = join(profile, 'local-session-link-receipts.json')
   const receipt = JSON.parse(await readFile(receiptFile, 'utf8'))
-  expect(receipt[0].owner).toEqual(owner)
-  expect(receipt[0].owner).not.toHaveProperty('username')
+  expect(receipt.schemaVersion).toBe(2)
+  expect(receipt.receipts[0].owner).toEqual(owner)
+  expect(receipt.receipts[0].owner).not.toHaveProperty('username')
+  expect(receipt.receipts[0].identity).not.toHaveProperty('hostId')
   expect(await locallyLinkedAgentHostSessions(profile, root, participant)).toEqual([target])
   expect(await unregisteredLocalLinks(profile, root, written.document.bindings, participant)).toEqual([])
   await recordLocalLink(profile, root, 'T-0001', written.document.bindings['T-0001'], participant)
-  expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toHaveLength(1)
+  expect(JSON.parse(await readFile(receiptFile, 'utf8')).receipts).toHaveLength(1)
   const foreignOwner = { clientId: '00000000-0000-4000-8000-000000000002', machineName: owner.machineName }
   const foreign = await updateRepositoryAgentHostLink(root, 'T-0002', agentHostTargetFixture('foreign', foreignOwner), written.revision)
   await recordLocalLink(profile, root, 'T-0002', foreign.document.bindings['T-0002'], participant)
@@ -110,7 +112,7 @@ it('rejects legacy local receipts without accepting, migrating or rewriting them
   const old = [{ root: canonical, taskId: 'T-0001', owner, identity: { nativeSessionId: 'original', workspaceStorageId: 'a'.repeat(32) } }]
   const content = JSON.stringify(old)
   await writeFile(file, content)
-  await expect(locallyLinkedAgentHostSessions(profile, root, owner)).rejects.toThrow('Only the current Agent Host format is supported')
+  await expect(locallyLinkedAgentHostSessions(profile, root, owner)).rejects.toThrow('Schema v2 logical session receipts are required')
   await expect(unregisteredLocalLinks(profile, root, saved.document.bindings, owner)).rejects.toThrow('invalid')
   await expect(recordLocalLink(profile, root, 'T-0001', saved.document.bindings['T-0001'], owner)).rejects.toThrow('invalid')
   await expect(recordLocalLink(profile, root, 'T-0001', undefined, owner)).rejects.toThrow('invalid')
@@ -126,10 +128,10 @@ it.each(['same', 'another'])('rejects mixed legacy and current receipts from %s 
   const saved = await updateRepositoryAgentHostLink(root, 'T-0002', retryTarget, first.revision)
   await recordLocalLink(profile, root, 'T-0001', saved.document.bindings['T-0001'], owner)
   const file = join(profile, 'local-session-link-receipts.json')
-  const native: unknown[] = JSON.parse(await readFile(file, 'utf8'))
+  const native: unknown[] = JSON.parse(await readFile(file, 'utf8')).receipts
   const legacy = { root: await canonicalPolicyRoot(root), taskId: 'T-0002', owner, identity: { nativeSessionId: 'retry', workspaceStorageId: 'a'.repeat(32) } }
   const unrelated = { ...legacy, root: workspace === 'another' ? join(legacy.root, 'another-workspace') : legacy.root, taskId: 'T-0003' }
-  const content = JSON.stringify([legacy, unrelated, ...native])
+  const content = JSON.stringify({ schemaVersion: 2, receipts: [legacy, unrelated, ...native] })
   await writeFile(file, content)
   await expect(locallyLinkedAgentHostSessions(profile, root, owner)).rejects.toThrow('invalid')
   await expect(unregisteredLocalLinks(profile, root, saved.document.bindings, owner)).rejects.toThrow('invalid')
@@ -145,13 +147,14 @@ it.each([
   { nativeSessionId: 'copilotcli:/original', workspaceStorageId: 'a'.repeat(32) },
   { nativeSessionId: 'original', workspaceStorageId: 'a'.repeat(32), hostId: 'host-main' },
   { hostId: 'host-main', sessionId: 'copilotcli:/original' },
+  { hostId: 'host-main', sessionId: 'copilotcli:/original', chatId: 'ahp-chat:/original' },
 ])('still rejects a malformed receipt identity without accepting other receipts: %j', async (identity) => {
   const { root, profile, backend, owner } = await fixture()
   const saved = await updateRepositoryAgentHostLink(root, 'T-0001', agentHostTargetFixture('original', owner), backend.snapshot.revision)
   await recordLocalLink(profile, root, 'T-0001', saved.document.bindings['T-0001'], owner)
   const file = join(profile, 'local-session-link-receipts.json')
-  const native: unknown[] = JSON.parse(await readFile(file, 'utf8'))
-  const content = JSON.stringify([...native, { root, taskId: 'T-0002', owner, identity }])
+  const native: unknown[] = JSON.parse(await readFile(file, 'utf8')).receipts
+  const content = JSON.stringify({ schemaVersion: 2, receipts: [...native, { root, taskId: 'T-0002', owner, identity }] })
   await writeFile(file, content)
   await expect(locallyLinkedAgentHostSessions(profile, root, owner)).rejects.toThrow('invalid')
   await expect(unregisteredLocalLinks(profile, root, saved.document.bindings, owner)).rejects.toThrow('invalid')

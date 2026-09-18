@@ -61,7 +61,7 @@ async function ready(setup: Fixture) {
   expect(await setup.service.create(setup.root, setup.request, setup.authorize)).toMatchObject({ ...setup.request, state: 'creating' })
   const result = await settled(setup)
   expect(result.state).toBe('ready')
-  return agentHostTargetSchema.parse({ hostId: result.session!.hostId, sessionId: result.session!.sessionId, chatId: result.session!.chatId, owner: result.session!.owner })
+  return agentHostTargetSchema.parse({ sessionId: result.session!.sessionId, chatId: result.session!.chatId, owner: result.session!.owner })
 }
 
 describe('private workspace-local native planning sessions', () => {
@@ -90,7 +90,7 @@ describe('private workspace-local native planning sessions', () => {
     expect(setup.devices.agentHostSessions).not.toHaveBeenCalled()
     expect(setup.devices.agentHostTransport).not.toHaveBeenCalled()
     const unregister = await registerRepositorySessionLinksBackend(setup.root, {
-      read: async () => ({ document: { schemaVersion: 1, bindings: { 'T-0001': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64) }),
+      read: async () => ({ document: { schemaVersion: 2, bindings: { 'T-0001': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64) }),
       update: async () => { throw new Error('Local planning must not write shared bindings.') },
     })
     try { expect(await locallyLinkedAgentHostSessions(setup.profile, setup.root, setup.owner)).toEqual([]) }
@@ -207,7 +207,7 @@ describe('private workspace-local native planning sessions', () => {
     })
     await setup.service.create(setup.root, setup.request, setup.authorize)
     expect((await settled(setup)).state).toBe(reason === 'failed' ? 'failed' : 'uncertain')
-    expect(await setup.service.authorizes(setup.root, { hostId: setup.native.hostId, sessionId: setup.native.creations[0].channel,
+    expect(await setup.service.authorizes(setup.root, { sessionId: setup.native.creations[0].channel,
       chatId: [...setup.native.sessions.values()][0].chat.resource, owner: setup.owner })).toBe(false)
     expect(setup.native.creations).toHaveLength(1)
   })

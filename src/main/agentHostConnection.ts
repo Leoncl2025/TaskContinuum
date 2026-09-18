@@ -15,7 +15,7 @@ import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 
 export type AgentHostEvent = { type: 'action'; envelope: ActionEnvelope } | { type: 'snapshot'; snapshot: Snapshot } | { type: 'state' }
 const commandSchema = z.object({ id: z.uuid(), hash: z.string().regex(/^[a-f0-9]{64}$/), state: z.enum(['pending', 'uncertain', 'confirmed', 'failed']) }).strict()
-const ledgerSchema = z.object({ target: agentHostTargetSchema, commands: z.array(commandSchema).max(1000) }).strict()
+const ledgerSchema = z.object({ schemaVersion: z.literal(2), target: agentHostTargetSchema, commands: z.array(commandSchema).max(1000) }).strict()
 type Command = z.infer<typeof commandSchema>
 
 export class AgentHostConnection {
@@ -87,7 +87,7 @@ export class AgentHostConnection {
         this.commands = saved.commands.map((command) => command.state === 'pending' ? { ...command, state: 'uncertain' } : command)
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Agent Host delivery records are unreadable. No message was sent.') }
       try {
-        const saved = z.object({ target: agentHostTargetSchema, chat: z.unknown() }).strict().parse(await readJsonBounded(`${this.file}.cache.json`, 16 * 1024 * 1024))
+        const saved = z.object({ schemaVersion: z.literal(2), target: agentHostTargetSchema, chat: z.unknown() }).strict().parse(await readJsonBounded(`${this.file}.cache.json`, 16 * 1024 * 1024))
         if (agentHostKey(saved.target) === agentHostKey(this.target)) this.chat.snapshot(saved.chat as Snapshot)
       } catch { this.error = 'No verified offline history is available yet.' }
     })()
@@ -95,7 +95,7 @@ export class AgentHostConnection {
   }
 
   private save(): Promise<void> {
-    const ledger = structuredClone({ target: this.target, commands: this.commands })
+    const ledger = structuredClone({ schemaVersion: 2, target: this.target, commands: this.commands })
     const operation = this.writing.then(() => writeJsonAtomic(`${this.file}.commands.json`, ledgerSchema.parse(ledger)))
     this.writing = operation.catch(() => undefined)
     return operation
@@ -331,7 +331,7 @@ export class AgentHostConnection {
     await this.opening?.catch(() => undefined)
     await this.writing
     const chat = this.snapshots.get(this.target.chatId)
-    if (chat && Buffer.byteLength(JSON.stringify(chat)) < 15 * 1024 * 1024) await writeJsonAtomic(`${this.file}.cache.json`, { target: this.target, chat })
+    if (chat && Buffer.byteLength(JSON.stringify(chat)) < 15 * 1024 * 1024) await writeJsonAtomic(`${this.file}.cache.json`, { schemaVersion: 2, target: this.target, chat })
     this.listeners.clear()
   }
 }

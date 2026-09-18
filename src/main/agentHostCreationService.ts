@@ -15,10 +15,11 @@ import { readTaskWorkspace } from './workspaceReader'
 type CreateCommand = z.infer<typeof agentHostCreateCommandSchema>
 type Lookup = z.infer<typeof agentHostCreationLookupSchema>
 const operationSchema = z.object({
+  schemaVersion: z.literal(2),
   pairId: z.uuid(), root: z.string().min(1).max(32768), owner: sessionOwnerSchema,
   request: agentHostCreateCommandSchema, requestHash: z.string().regex(/^[a-f0-9]{64}$/),
   nativeSessionId: agentHostSessionIdSchema, phase: z.enum(['reserved', 'dispatched', 'binding', 'complete']),
-  nativeAcknowledged: z.boolean().default(false), nativeLifecycle: z.enum(['creating', 'ready', 'failed']).optional(),
+  nativeAcknowledged: z.boolean(), nativeLifecycle: z.enum(['creating', 'ready', 'failed']).optional(),
   bindingRevision: creationRevisionSchema, everReady: z.boolean(), version: z.number().int().nonnegative(),
   result: agentHostCreationResultSchema,
 }).strict().superRefine((operation, context) => {
@@ -132,7 +133,7 @@ export class AgentHostCreationService {
       await this.checkTask(root, request)
       await this.authorizedRoot(pairId, request.workspaceId, root)
       const result: AgentHostCreationResult = { operationId: request.operationId, taskId: request.taskId, workspaceId: request.workspaceId, hostId: request.hostId, state: 'creating' }
-      const operation: Operation = { pairId, root, owner, request, requestHash: hash(request), nativeSessionId: `copilotcli:/${randomUUID()}`, phase: 'reserved',
+      const operation: Operation = { schemaVersion: 2, pairId, root, owner, request, requestHash: hash(request), nativeSessionId: `copilotcli:/${randomUUID()}`, phase: 'reserved',
         nativeAcknowledged: false, bindingRevision: request.expectedRevision, everReady: false, version: 0, result }
       operations.push(operation)
       return { value: { operation, start: true }, changed: true }
@@ -243,7 +244,7 @@ export class AgentHostCreationService {
   private async acceptInspection(operation: Operation, inspected: AgentHostCreationInspection): Promise<Operation> {
     if (inspected.state === 'creating') return this.replace(operation, { nativeLifecycle: 'creating', result: { ...operation.result, state: 'uncertain', error: inspected.error } })
     if (inspected.state === 'failed') return this.replace(operation, { phase: 'complete', nativeLifecycle: 'failed', result: { ...operation.result, state: 'failed', error: inspected.error } })
-    if (JSON.stringify(inspected.session.owner) !== JSON.stringify(operation.owner) || inspected.session.hostId !== operation.request.hostId || inspected.session.sessionId !== operation.nativeSessionId
+    if (JSON.stringify(inspected.session.owner) !== JSON.stringify(operation.owner) || inspected.session.sessionId !== operation.nativeSessionId
       || operation.result.session && agentHostKey(operation.result.session) !== agentHostKey(inspected.session)) throw new AgentHostCreationError('The native session identity changed. No replacement session or chat was selected.')
     const recovery = operation.phase === 'binding'
     operation = await this.replace(operation, { nativeLifecycle: inspected.nativeLifecycle, result: { ...operation.result, session: inspected.session } })
@@ -267,7 +268,7 @@ export class AgentHostCreationService {
   private async bindVerified(initial: Operation, expectedRevision: string | null, recovering = false): Promise<Operation> {
     let operation = initial
     const session = operation.result.session!
-    const target = agentHostTargetSchema.parse({ hostId: session.hostId, sessionId: session.sessionId, chatId: session.chatId, owner: session.owner })
+    const target = agentHostTargetSchema.parse({ sessionId: session.sessionId, chatId: session.chatId, owner: session.owner })
     const authorize = async () => {
       if (JSON.stringify(await this.registry.creationOwner()) !== JSON.stringify(operation.owner)) throw new AgentHostCreationRequestError(403, 'The worker execution identity changed before binding.')
       await this.authorizedRoot(operation.pairId, operation.request.workspaceId, operation.root)

@@ -3,12 +3,13 @@ import * as bindings from '../src/renderer/chat/sessionBindings'
 import { agentHostTargetFixture } from './immutable-bindings-fixture'
 
 describe('Agent Host-only UI binding identities', () => {
-  it('keeps the exact Host, session, chat and owner in the binding key', () => {
+  it('keys the logical session, chat and owner independently of runtime Host metadata', () => {
     const target = agentHostTargetFixture('original')
     const key = bindings.sessionBindingKey({ agentHost: target })
     expect(bindings.sessionBindingKey({ agentHost: { ...target } })).toBe(key)
+    const discovered = { ...target, hostId: 'another-host' }
+    expect(bindings.sessionBindingKey({ agentHost: discovered })).toBe(key)
     for (const other of [
-      { ...target, hostId: 'another-host' },
       { ...target, sessionId: 'copilotcli:/another' },
       { ...target, chatId: 'ahp-chat:/another' },
       { ...target, owner: { ...target.owner, clientId: '00000000-0000-4000-8000-000000000099' } },

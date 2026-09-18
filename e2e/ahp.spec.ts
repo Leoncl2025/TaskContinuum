@@ -153,7 +153,7 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
     const participant = { clientId: randomUUID(), username: 'Observer', machineName: 'Viewer-A' }
     const endpoint: AgentHostEndpoint = { schemaVersion: 2, type: 'standalone', pid: host.pid!, instanceId: randomUUID(), connectionToken: token, protocolVersion: '0.9.0', endpoint: { type: 'tcp', host: '127.0.0.1', port } }
     await writeFile(join(discovery, 'host.json'), JSON.stringify(endpoint))
-    const target = { hostId: endpoint.instanceId, sessionId: session, chatId: chat, owner }
+    const target = { sessionId: session, chatId: chat, owner }
     const protector = { available: () => true, encrypt: (value: string) => Buffer.from(value), decrypt: (value: Buffer) => value.toString() }
     registry = new AgentHostRegistry(profileB, [discovery], async () => owner)
     deviceHost = new VSCodeDeviceHost(profileB, protector)
@@ -281,13 +281,13 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
     const createdA = (await readRepositorySessionLinks(tasksA)).document.bindings['T-0007']
     const createdB = (await readRepositorySessionLinks(tasksB)).document.bindings['T-0007']
     expect(createdA).toEqual(createdB)
-    expect(createdA).toMatchObject({ provider: 'agent-host', hostId: endpoint.instanceId, sessionId: createdSession.sessionId, chatId: createdSession.chatId, owner })
+    expect(createdA).toMatchObject({ provider: 'agent-host', sessionId: createdSession.sessionId, chatId: createdSession.chatId, owner })
     for (const folder of [tasksA, tasksB]) await expect(readFile(join(folder, '.taskcontinuum', 'session-bindings.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     expect((await creationClient.create(tasksA, createRequest, async () => {})).session?.sessionId).toBe(createdSession.sessionId)
     await creationClient.close()
     creationClient = new AgentHostCreationClient(profileA, deviceClient)
     expect((await creationClient.status(tasksA, createRequest.operationId, async () => {})).session?.sessionId).toBe(createdSession.sessionId)
-    const createdTarget = { hostId: createdSession.hostId, sessionId: createdSession.sessionId, chatId: createdSession.chatId, owner: createdSession.owner }
+    const createdTarget = { sessionId: createdSession.sessionId, chatId: createdSession.chatId, owner: createdSession.owner }
     createdConnection = new AgentHostConnection(createdTarget, profileA, (signal) => deviceClient!.agentHostTransport(tasksA, createdTarget, signal))
     await createdConnection.open()
     expect(createdConnection.view.chat?.turns).toHaveLength(0)

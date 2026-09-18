@@ -20,7 +20,7 @@ describe('AHP original chat connection', () => {
   it('rejects an older remote gateway rather than letting it discard the explicit model', async () => {
     const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-old-gateway-'))
     const host = await startAgentHostFixture({ taskcontinuumCanSend: true })
-    const target = { hostId: host.hostId, sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+    const target = { sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
     const connection = new AgentHostConnection(target, root, (signal) => connectLocalAgentHost(host.endpoint, signal))
     try {
       await expect(connection.models()).rejects.toThrow('Update Task Continuum on the owner device')
@@ -32,7 +32,7 @@ describe('AHP original chat connection', () => {
   it('rejects a model-selection gateway without configuration support before dispatch', async () => {
     const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-old-config-'))
     const host = await startAgentHostFixture({ taskcontinuumCanSend: true, taskcontinuumModelSelection: true })
-    const target = { hostId: host.hostId, sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+    const target = { sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
     const connection = new AgentHostConnection(target, root, (signal) => connectLocalAgentHost(host.endpoint, signal))
     try {
       await expect(connection.models()).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'gpt-6' })]))
@@ -46,7 +46,7 @@ describe('AHP original chat connection', () => {
   it('sends an explicit model instead of a stale owner selection and includes it in replay identity', async () => {
     const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-model-'))
     const host = await startAgentHostFixture()
-    const target = { hostId: host.hostId, sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+    const target = { sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
     const connection = new AgentHostConnection(target, root, (signal) => connectLocalAgentHost(host.endpoint, signal))
     const model = { id: 'gpt-6', config: { thinkingLevel: 'max', contextSize: 872000 } }
     try {
@@ -75,7 +75,7 @@ describe('AHP original chat connection', () => {
   it('retains and clears native model and agent selections without overwriting an owner draft', async () => {
     const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-selection-'))
     const host = await startAgentHostFixture()
-    const target = { hostId: host.hostId, sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+    const target = { sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
     const connection = new AgentHostConnection(target, root, (signal) => connectLocalAgentHost(host.endpoint, signal))
     const selection = { model: { id: 'owner-model', config: { reasoningEffort: 'high', contextSize: 128000 } }, agent: { uri: 'file:///fixture/plan.agent.md' } }
     try {
@@ -103,7 +103,7 @@ describe('AHP original chat connection', () => {
   it('rechecks live state after authorization awaits and does not overwrite a newly started turn', async () => {
     const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-race-'))
     const host = await startAgentHostFixture()
-    const target = { hostId: host.hostId, sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+    const target = { sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
     const connection = new AgentHostConnection(target, root, (signal) => connectLocalAgentHost(host.endpoint, signal))
     let checks = 0
     try {
@@ -120,7 +120,7 @@ describe('AHP original chat connection', () => {
   it('streams, deduplicates, recovers snapshots and refuses a native draft', async () => {
     const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-client-'))
     const host = await startAgentHostFixture()
-    const target = { hostId: host.hostId, sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+    const target = { sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
     const connection = new AgentHostConnection(target, root, (signal) => connectLocalAgentHost(host.endpoint, signal))
     const unlisten = connection.listen(() => {})
     const id = randomUUID()
@@ -149,7 +149,7 @@ describe('AHP original chat connection', () => {
   it('persists unknown outcomes and never replays across restart', async () => {
     const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-uncertain-'))
     const host = await startAgentHostFixture()
-    const target = { hostId: host.hostId, sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+    const target = { sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
     const first = new AgentHostConnection(target, root, (signal) => connectLocalAgentHost(host.endpoint, signal))
     const second = new AgentHostConnection(target, root, (signal) => connectLocalAgentHost(host.endpoint, signal))
     const id = randomUUID()

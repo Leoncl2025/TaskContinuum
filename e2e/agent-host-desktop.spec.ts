@@ -17,7 +17,7 @@ test('links and streams original AHP chats with current receipts and explicit li
   const unrelatedReceipt = {
     root: join(root, 'another-workspace'), taskId: 'T-0001',
     owner: { clientId: randomUUID(), machineName: 'Another-machine' },
-    identity: { hostId: 'another-host', sessionId: 'copilotcli:/another-chat', chatId: 'ahp-chat:/another-chat' },
+    identity: { sessionId: 'copilotcli:/another-chat', chatId: 'ahp-chat:/another-chat' },
   }
   const fixture = await startAgentHostFixture()
   let app: ElectronApplication | undefined
@@ -34,7 +34,7 @@ test('links and streams original AHP chats with current receipts and explicit li
   const taskText = JSON.stringify({ schemaVersion: '1.0', id: 'T-0001', title: 'Verify original Agent Host integration', type: 'feature', status: 'backlog', priority: 'P2', relations: { level: 'task', parent: null } })
   await writeFile(taskFile, taskText)
   await writeFile(join(discovery, 'host.json'), JSON.stringify(fixture.endpoint))
-  await writeFile(receiptFile, JSON.stringify([unrelatedReceipt]))
+  await writeFile(receiptFile, JSON.stringify({ schemaVersion: 2, receipts: [unrelatedReceipt] }))
   const environment = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined))
   delete environment.ELECTRON_RUN_AS_NODE
   delete environment.ELECTRON_RENDERER_URL
@@ -64,25 +64,25 @@ test('links and streams original AHP chats with current receipts and explicit li
     let panel = page!.getByRole('complementary', { name: 'Agent Host task chat' })
     await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
     const saved = await readDesktopBindings(page!)
-    expect(saved.document.bindings['T-0001']).toMatchObject({ provider: 'agent-host', hostId: fixture.hostId, sessionId: fixture.sessionId, chatId: fixture.chatId, owner: saved.localOwner })
+    expect(saved.document.bindings['T-0001']).toMatchObject({ provider: 'agent-host', sessionId: fixture.sessionId, chatId: fixture.chatId, owner: saved.localOwner })
     const confirmedReceipts: unknown = JSON.parse(await readFile(receiptFile, 'utf8'))
-    expect(confirmedReceipts).toEqual([unrelatedReceipt, expect.objectContaining({
+    expect(confirmedReceipts).toEqual({ schemaVersion: 2, receipts: [unrelatedReceipt, expect.objectContaining({
       taskId: 'T-0001', owner: saved.localOwner,
-      identity: { hostId: fixture.hostId, sessionId: fixture.sessionId, chatId: fixture.chatId },
-    })])
+      identity: { sessionId: fixture.sessionId, chatId: fixture.chatId },
+    })] })
     expect(saved.revision).toMatch(/^[a-f0-9]{64}$/)
     expect(JSON.stringify(saved)).not.toContain(fixture.endpoint.connectionToken)
     expect(JSON.stringify(saved)).not.toContain(discovery)
     await expect(readFile(join(workspace, '.taskcontinuum', 'session-bindings.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     await app!.close()
     app = undefined
-    await writeFile(receiptFile, JSON.stringify([unrelatedReceipt]))
+    await writeFile(receiptFile, JSON.stringify({ schemaVersion: 2, receipts: [unrelatedReceipt] }))
     await launch()
     panel = page!.getByRole('complementary', { name: 'Agent Host task chat' })
     await expect(panel.getByRole('alert').filter({ hasText: 'A Git-only edit cannot grant local Agent Host access.' })).toHaveCount(2)
     await expect(panel.getByText('Connection failed', { exact: true })).toBeVisible()
     await expect(panel.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
-    expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toEqual([unrelatedReceipt])
+    expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toEqual({ schemaVersion: 2, receipts: [unrelatedReceipt] })
     expect(await readDesktopBindings(page!)).toEqual(saved)
     expect(fixture.dispatches).toHaveLength(0)
     await panel.getByRole('textbox', { name: 'Message Agent Host' }).fill('Keep the draft while confirming this link')
@@ -109,7 +109,7 @@ test('links and streams original AHP chats with current receipts and explicit li
       const state = await window.workspace!.getState()
       const link = (await window.workspace!.getSessionLinks(state.current!.id)).document.bindings['T-0001']
       if (link.provider !== 'agent-host') throw new Error('AHP link was not retained.')
-      return { hostId: link.hostId, sessionId: link.sessionId, chatId: link.chatId, owner: link.owner }
+      return { sessionId: link.sessionId, chatId: link.chatId, owner: link.owner }
     })
     const security = await page!.evaluate(async () => ({
       info: await window.desktop!.getInfo(), keys: Object.keys(window.agentHost!).sort(), require: typeof Reflect.get(window, 'require'),
@@ -192,7 +192,7 @@ test('links and streams original AHP chats with current receipts and explicit li
     await page!.getByRole('button', { name: 'Detach session', exact: true }).click()
     await expect(restored).toHaveCount(0)
     expect((await readDesktopBindings(page!)).document.bindings).toEqual({})
-    expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toEqual([unrelatedReceipt])
+    expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toEqual({ schemaVersion: 2, receipts: [unrelatedReceipt] })
     await expect(readFile(join(workspace, '.taskcontinuum', 'session-bindings.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await readFile(taskFile, 'utf8')).toBe(taskText)
     expect(fixture.dispatches).toHaveLength(1)

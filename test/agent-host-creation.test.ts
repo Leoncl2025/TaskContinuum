@@ -57,10 +57,10 @@ describe('worker-authoritative native Agent Host creation', () => {
     const session = await ready(worker)
     const links = await readRepositorySessionLinks(worker.workspace)
     expect(links.document.bindings['T-0007']).toEqual({ provider: 'agent-host', ...agentHostTargetSchema.parse({
-      owner: worker.owner, hostId: worker.native.hostId, sessionId: session.sessionId, chatId: session.chatId,
+      owner: worker.owner, sessionId: session.sessionId, chatId: session.chatId,
     }) })
     expect(await locallyLinkedAgentHostSessions(worker.profile, worker.workspace, worker.owner)).toEqual([agentHostTargetSchema.parse({
-      owner: session.owner, hostId: session.hostId, sessionId: session.sessionId, chatId: session.chatId,
+      owner: session.owner, sessionId: session.sessionId, chatId: session.chatId,
     })])
     expect(session.owner.clientId).toBe(worker.owner.clientId)
     expect(session.owner.clientId).not.toBe(worker.participant.clientId)
@@ -70,7 +70,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     expect(JSON.stringify(catalog) + JSON.stringify(await worker.status())).not.toContain(worker.workspace)
     expect(JSON.stringify(catalog) + JSON.stringify(await worker.status())).not.toContain(worker.pair.token)
     const immutable = await worker.bindings.store.getRecords()
-    expect(immutable).toMatchObject([{ kind: 'binding', payload: { action: 'set', taskId: 'T-0007', target: links.document.bindings['T-0007'] } }])
+    expect(immutable).toMatchObject([{ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0007', target: links.document.bindings['T-0007'] } }])
     const git = JSON.stringify(immutable)
     expect(git).not.toContain(worker.request.operationId)
     expect(git).not.toContain(worker.workspace)
@@ -91,7 +91,7 @@ describe('worker-authoritative native Agent Host creation', () => {
       const result = agentHostCreationResultSchema.parse(await deviceRequest(bridge.port, worker.port, worker.pair.token, '/device/agent-host/create', worker.request, AbortSignal.timeout(10000)))
       expect(result.state).toBe('creating')
       const session = await ready(worker)
-      const target = { owner: session.owner, hostId: session.hostId, sessionId: session.sessionId, chatId: session.chatId }
+      const target = { owner: session.owner, sessionId: session.sessionId, chatId: session.chatId }
       raw = new AhpClient(await connectAgentHostWebSocket(`ws://127.0.0.1:${bridge.port}/device/agent-host?target=${Buffer.from(JSON.stringify(target)).toString('base64url')}`,
         { headers: { Host: `127.0.0.1:${worker.port}`, Authorization: `Bearer ${worker.pair.token}` } }, signal.signal))
       raw.connect()
@@ -128,7 +128,8 @@ describe('worker-authoritative native Agent Host creation', () => {
       await expect.poll(async () => (await caller.client.status(caller.workspace, request.operationId, authorize)).state, { timeout: 8000, interval: 25 }).toBe(conflict === 'none' ? 'ready' : 'created-unbound')
       const initial = await caller.client.status(caller.workspace, request.operationId, authorize)
       const identity = initial.session!
-      expect(identity).toMatchObject({ hostId: request.hostId, sessionId: worker.native.creations[0].channel, owner: worker.owner, provider: 'copilotcli' })
+      expect(identity).toMatchObject({ sessionId: worker.native.creations[0].channel, owner: worker.owner, provider: 'copilotcli' })
+      expect(identity).not.toHaveProperty('hostId')
       await caller.restart()
       expect((await caller.client.workers(caller.workspace, request.taskId))[0].id).toBe(request.workerId)
       expect(caller.connections).toBe(2)
@@ -149,7 +150,7 @@ describe('worker-authoritative native Agent Host creation', () => {
       expect(await caller.client.list(caller.workspace, request.taskId)).toEqual([])
       expect((await caller.client.create(caller.workspace, request, authorize)).session).toEqual(identity)
 
-      const target = { owner: identity.owner, hostId: identity.hostId, sessionId: identity.sessionId, chatId: identity.chatId }
+      const target = { owner: identity.owner, sessionId: identity.sessionId, chatId: identity.chatId }
       raw = new AhpClient(await caller.devices.agentHostTransport(caller.workspace, target, new AbortController().signal))
       raw.connect()
       await raw.initialize({ clientId: randomUUID(), protocolVersions: ['0.9.0'] })
@@ -294,7 +295,7 @@ describe('worker-authoritative native Agent Host creation', () => {
       const before = await readRepositorySessionLinks(worker.workspace)
       expect((await readRepositorySessionLinks(caller.workspace)).document).toEqual(before.document)
       expect(await locallyLinkedAgentHostSessions(worker.profile, worker.workspace, worker.owner)).toHaveLength(1)
-      const target = { hostId: session.hostId, sessionId: session.sessionId, chatId: session.chatId, owner: session.owner }
+      const target = { sessionId: session.sessionId, chatId: session.chatId, owner: session.owner }
       connection = new AgentHostConnection(target, caller.profile, (signal) => caller.devices.agentHostTransport(caller.workspace, target, signal))
       await connection.open()
       expect(connection.view.canSend).toBe(true)
@@ -498,7 +499,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     expect((await readRepositorySessionLinks(worker.workspace)).document).toEqual(conflict.document)
     expect(await locallyLinkedAgentHostSessions(worker.profile, worker.workspace, worker.owner)).toEqual([])
     await expect(bindRepositoryAgentHostCreation(worker.workspace, 'T-0007', {
-      owner: session.owner, hostId: session.hostId, sessionId: session.sessionId, chatId: session.chatId,
+      owner: session.owner, sessionId: session.sessionId, chatId: session.chatId,
     }, conflict.revision)).rejects.toThrow('different session binding')
     expect((await worker.bind(conflict.revision)).state).toBe('created-unbound')
     const detached = await removeRepositorySessionLink(worker.workspace, 'T-0007', conflict.revision)
@@ -655,7 +656,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     const worker = await fixture()
     const root = await canonicalPolicyRoot(worker.workspace)
     const sessionId = `copilotcli:/${randomUUID()}`
-    const target = { owner: worker.owner, hostId: worker.native.hostId, sessionId, chatId: `ahp-chat://default/${Buffer.from(sessionId).toString('base64url')}` }
+    const target = { owner: worker.owner, sessionId, chatId: `ahp-chat://default/${Buffer.from(sessionId).toString('base64url')}` }
     const reached = deferred(), release = deferred()
     let checks = 0
     const pending = bindRepositoryAgentHostCreation(worker.workspace, 'T-0007', target, worker.bindings.snapshot.revision, async () => {

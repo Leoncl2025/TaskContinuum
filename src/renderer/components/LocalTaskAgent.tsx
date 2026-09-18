@@ -135,7 +135,7 @@ export function LocalTaskAgent({ workspace, workspaces, onCreated, onReviewDraft
     {session ? <AgentHostPanel
       key={session.sessionId}
       workspace={workspace}
-      target={{ hostId: session.hostId, sessionId: session.sessionId, chatId: session.chatId, owner: session.owner }}
+      target={{ sessionId: session.sessionId, chatId: session.chatId, owner: session.owner }}
       onClose={onClose}
       onBusy={setChatBusy}
       beforeReconnect={async () => {

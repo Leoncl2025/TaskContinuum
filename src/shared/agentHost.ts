@@ -5,7 +5,6 @@ import type { AgentHostCreateRequest, AgentHostCreation, AgentHostCreationHost, 
 import type { LocalAgentHostCreateRequest, LocalAgentHostCreation } from './localAgentHostCreation'
 
 export interface AgentHostTarget {
-  hostId: string
   sessionId: string
   chatId: string
   owner: SessionOwner
@@ -48,6 +47,6 @@ export interface AgentHostBridge {
   onView(listener: (event: { id: string; view: AgentHostView }) => void): () => void
 }
 
-export function agentHostKey(target: { hostId: string; sessionId: string; chatId: string; owner?: { clientId: string } }): string {
-  return JSON.stringify([target.owner?.clientId, target.hostId, target.sessionId, target.chatId])
+export function agentHostKey(target: { sessionId: string; chatId: string; owner?: { clientId: string } }): string {
+  return JSON.stringify([target.owner?.clientId, target.sessionId, target.chatId])
 }

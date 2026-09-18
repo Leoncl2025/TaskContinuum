@@ -102,11 +102,11 @@ describe('owned document contract integration', () => {
     const unknown = publicFixtureSigner(8)
     const forged = await createRecord({
       kind: 'binding', workspaceId: remoteWorkspaceId, actor: signer.actor,
-      payload: { action: 'delete', taskId: 'T-0001' },
+      payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0001' },
     }, () => Buffer.alloc(64))
     const missing = await createRecord({
       kind: 'binding', workspaceId: remoteWorkspaceId, actor: unknown.actor, parents: ['f'.repeat(64)],
-      payload: { action: 'delete', taskId: 'T-0002' },
+      payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0002' },
     }, unknown.sign)
     await savePublicRecord(root, forged)
     await savePublicRecord(root, missing)
@@ -159,7 +159,7 @@ describe('owned document contract integration', () => {
     }, () => Buffer.alloc(64))
     await savePublicRecord(root, forgedDevice)
     const binding = await createRecord({
-      kind: 'binding', workspaceId: remoteWorkspaceId, actor: signer.actor, payload: { action: 'delete', taskId: 'T-0001' },
+      kind: 'binding', workspaceId: remoteWorkspaceId, actor: signer.actor, payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0001' },
     }, signer.sign)
     await savePublicRecord(root, binding)
     const diagnostics = validateDocuments(root).issues.map((issue) => issue.message).join('\n')

@@ -173,7 +173,7 @@ export class AgentHostRegistry {
           dispatched = true
           if (await connection.client.request('createSession', command) !== null) throw new AgentHostCreationError('The native creation acknowledgement was not recognized. Query the original operation; do not create a replacement.')
         },
-        inspect: (chatId, nativeAcknowledged) => this.inspectCreatedSession(connection.client, hostId, sessionId, canonical, owner, chatId, nativeAcknowledged),
+        inspect: (chatId, nativeAcknowledged) => this.inspectCreatedSession(connection.client, sessionId, canonical, owner, chatId, nativeAcknowledged),
         close: connection.close,
       }
     } catch (error) { await connection.close(); throw error }
@@ -182,12 +182,15 @@ export class AgentHostRegistry {
   async inspectCreation(hostId: string, sessionId: string, root: string, signal: AbortSignal, chatId?: string, nativeAcknowledged = false): Promise<AgentHostCreationInspection> {
     agentHostSessionIdSchema.parse(sessionId)
     const owner = await this.creationOwner()
-    const connection = await this.creationClient(hostId, signal)
-    try { return await this.inspectCreatedSession(connection.client, hostId, sessionId, root, owner, chatId, nativeAcknowledged) }
+    const endpoints = await discoverAgentHosts(this.discovery)
+    const endpoint = endpoints.find((item) => item.instanceId === hostId)
+      ?? (chatId ? await this.resolveEndpoint({ sessionId, chatId, owner }, endpoints, signal) : undefined)
+    const connection = await this.creationClient(endpoint?.instanceId ?? hostId, signal, endpoint)
+    try { return await this.inspectCreatedSession(connection.client, sessionId, root, owner, chatId, nativeAcknowledged) }
     finally { await connection.close() }
   }
 
-  private async inspectCreatedSession(client: AhpClient, hostId: string, sessionId: string, root: string, owner: SessionOwner, expectedChatId?: string, nativeAcknowledged = false): Promise<AgentHostCreationInspection> {
+  private async inspectCreatedSession(client: AhpClient, sessionId: string, root: string, owner: SessionOwner, expectedChatId?: string, nativeAcknowledged = false): Promise<AgentHostCreationInspection> {
     const result = await client.request('subscribe', { channel: sessionId })
     const parsed = creationSessionSchema.safeParse(result.snapshot?.state)
     if (result.snapshot?.resource !== sessionId || !parsed.success) throw new AgentHostCreationError('The exact native session could not be verified. No creation was replayed.')
@@ -207,7 +210,7 @@ export class AgentHostRegistry {
       throw new AgentHostCreationError('The created chat snapshot does not match the verified session chat.')
     }
     if (chat.data.workingDirectories) await this.verifyCreationDirectory(chat.data.workingDirectories, root)
-    return { state: 'ready', nativeLifecycle: state.lifecycle, session: agentHostSessionSchema.parse({ hostId, sessionId, chatId, owner, title: 'New Copilot chat', provider: 'copilotcli', updatedAt: chat.data.modifiedAt, canSend: true }) }
+    return { state: 'ready', nativeLifecycle: state.lifecycle, session: agentHostSessionSchema.parse({ sessionId, chatId, owner, title: 'New Copilot chat', provider: 'copilotcli', updatedAt: chat.data.modifiedAt, canSend: true }) }
   }
 
   private async verifyCreationDirectory(directories: string[] | undefined, root: string): Promise<void> {
@@ -237,7 +240,7 @@ export class AgentHostRegistry {
             const state = result.snapshot?.state as SessionState | undefined
             for (const chat of state?.chats ?? []) {
               if (chat.interactivity === 'hidden' || sessions.length >= 1000) continue
-              sessions.push(agentHostSessionSchema.parse({ hostId: endpoint.instanceId, sessionId: item.resource, chatId: chat.resource, owner,
+              sessions.push(agentHostSessionSchema.parse({ sessionId: item.resource, chatId: chat.resource, owner,
                 title: (chat.title || item.title || 'Untitled chat').slice(0, 2000), provider: item.provider, updatedAt: chat.modifiedAt, canSend: chat.interactivity !== 'read-only' }))
             }
             await client.unsubscribe(item.resource)
@@ -248,10 +251,13 @@ export class AgentHostRegistry {
       } catch { warnings.push('A local Agent Host could not be read. Check that it is running and supports AHP 0.9.0.') }
       finally { abort.abort(); await client?.shutdown() }
     }
-    return { sessions, warnings }
+    const counts = new Map<string, number>()
+    for (const session of sessions) counts.set(agentHostKey(session), (counts.get(agentHostKey(session)) ?? 0) + 1)
+    if ([...counts.values()].some((count) => count > 1)) warnings.push('Some chats are available on multiple local Agent Hosts. Close duplicate Hosts on the owner device before selecting those chats.')
+    return { sessions: sessions.filter((session) => counts.get(agentHostKey(session)) === 1), warnings }
   }
 
-  private async restoredEndpoint(target: AgentHostTarget, endpoints: AgentHostEndpoint[], signal: AbortSignal): Promise<AgentHostEndpoint> {
+  private async resolveEndpoint(target: AgentHostTarget, endpoints: AgentHostEndpoint[], signal: AbortSignal): Promise<AgentHostEndpoint> {
     const candidates = await Promise.all(endpoints.map(async (endpoint) => {
       try {
         const probe = await this.creationClient(endpoint.instanceId, signal, endpoint)
@@ -267,7 +273,7 @@ export class AgentHostRegistry {
     }))
     signal.throwIfAborted()
     const matches = candidates.filter((endpoint) => endpoint !== undefined)
-    if (matches.length !== 1) throw new Error(matches.length ? 'The original chat is available on multiple local Agent Hosts. Explicitly confirm its Host before reconnecting.'
+    if (matches.length !== 1) throw new Error(matches.length ? 'The original chat is available on multiple local Agent Hosts. Close duplicate Hosts on the owner device before reconnecting.'
       : 'The original chat is unavailable on the current local Agent Hosts. No replacement session was selected.')
     return matches[0]
   }
@@ -281,7 +287,7 @@ export class AgentHostRegistry {
       if (this.connections.size >= 64) throw new Error('Agent Host connection limit reached.')
       connection = new AgentHostConnection(target, this.directory, async (signal) => {
         const endpoints = await discoverAgentHosts(this.discovery)
-        const endpoint = endpoints.find((item) => item.instanceId === target.hostId) ?? await this.restoredEndpoint(target, endpoints, signal)
+        const endpoint = await this.resolveEndpoint(target, endpoints, signal)
         return connectLocalAgentHost(endpoint, signal)
       })
       this.connections.set(key, connection)

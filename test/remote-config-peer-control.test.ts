@@ -80,12 +80,12 @@ async function fixture(overrides: Partial<PeerControlServerOptions> = {}) {
   }
   const parent = await createRecord({
     kind: 'binding', workspaceId, actor: { deviceId: senderId, keyId: sshFingerprint(key.publicKey) },
-    payload: { action: 'delete', taskId: 'T-0009' },
+    payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0009' },
   }, sign)
   const operation = await createRecord({
     kind: 'binding', workspaceId, actor: { deviceId: senderId, keyId: sshFingerprint(key.publicKey) }, parents: [parent.operationId],
-    payload: { action: 'set', taskId: 'T-0009', target: {
-      provider: 'agent-host', hostId: 'test-host-0009', sessionId: 'ahp-session:/metadata-test', chatId: 'ahp-chat:/metadata-test',
+    payload: { schemaVersion: 2, action: 'set', taskId: 'T-0009', target: {
+      provider: 'agent-host', sessionId: 'ahp-session:/metadata-test', chatId: 'ahp-chat:/metadata-test',
       owner: { clientId: localId, machineName: 'metadata-owner' },
     } },
   }, sign)
@@ -345,7 +345,7 @@ describe('authenticated peer metadata transport', () => {
   it('requires record schemas, actor signatures and dependencies rather than treating a binding notice as a new grant', async () => {
     const peer = await fixture()
     for (const payload of [
-      { ...peer.notification, operation: { ...peer.notification.operation, payload: { action: 'set', taskId: 'T-0009', target: 'unrestricted' } } },
+      { ...peer.notification, operation: { ...peer.notification.operation, payload: { schemaVersion: 2, action: 'set', taskId: 'T-0009', target: 'unrestricted' } } },
       { ...peer.notification, operation: { ...peer.notification.operation, actor: { ...peer.notification.operation.actor, deviceId: randomUUID() } } },
       { ...peer.notification, dependencies: [] },
     ]) {

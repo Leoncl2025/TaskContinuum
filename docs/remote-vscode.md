@@ -1,8 +1,9 @@
 # Remote Agent Host Devices
 
 Remote mode connects a Task Continuum desktop on A or C to the existing GitHub
-Copilot Agent Host on B. It retains the original `hostId`, `sessionId`, `chatId`
-and owner, with B's native account, tools and execution environment.
+Copilot Agent Host on B. It retains the original `sessionId`, `chatId` and owner,
+with B's native account, tools and execution environment. A runtime Host instance
+is a discovered connection endpoint, not part of the persisted chat identity.
 
 **Runtime boundary:** Local Copilot SDK execution, CLI resume/import,
 journal/Companion sessions, shared SDK Hosts/checkpoints and their session IPC are
@@ -141,11 +142,17 @@ persisted before dispatch; uncertain outcomes survive desktop restart and are ne
 resent automatically. Busy/queued/owner-draft states block sends. Offline history
 comes from a bounded private cache, not Git, and never grants control.
 
-Reconnection prefers the Host instance recorded in the immutable binding. If that
-instance is no longer discoverable, the owner verifies the same `copilotcli`
-session and chat on current trusted local Hosts and reconnects only when exactly
-one Host matches. No match or multiple matches fail closed. This does not rewrite
-bindings or receipts, bypass owner/workspace authorization, or replay messages.
+The stable chat identity is `(owner.clientId, sessionId, chatId)`. The owner resolves
+that identity against current trusted local Hosts on each new connection, verifies
+the `copilotcli` provider, session snapshot and visible chat membership, and connects
+only when exactly one Host matches. No match or multiple matches fail closed.
+Host instance IDs, process IDs, endpoint tokens and addresses stay in discovery;
+bindings, receipt identities, UI keys, offline caches and delivery keys do not
+depend on them. Host restarts do not rewrite bindings or receipts, bypass
+owner/workspace authorization, create a replacement session, or replay messages.
+Native creation still explicitly selects a running Host. Its saved operation
+retains that original creation intent for audit and replay prevention; the resulting
+session identity does not retain the instance ID.
 Legacy Local chats are not Agent Host chats: starting a Host does not make their
 original runtime available through AHP. No Local migration is performed.
 
@@ -156,34 +163,37 @@ membership. This build lists only the verified `copilotcli` provider.
 
 ### Local link receipt recovery
 
-Only the current Agent Host receipt format is accepted: each entry has `root`,
-`taskId`, `owner` and an `identity` containing exactly `hostId`, `sessionId` and
-`chatId`. Old Local identities (`nativeSessionId`, `workspaceStorageId`), mixed
-files and malformed data block access. There is no compatibility mode, automatic
-migration or filtering during reads.
+Only schema v2 is accepted. The file is an object with `schemaVersion: 2` and a
+`receipts` array. Each entry has `root`, `taskId`, `owner` and an `identity`
+containing exactly `sessionId` and `chatId`. Bare arrays, `hostId`, old Local
+identities (`nativeSessionId`, `workspaceStorageId`), mixed files and malformed
+data block access. There is no compatibility mode, migration or filtering.
 
-To clean an existing profile:
+This is a breaking upgrade, not a receipt-only migration:
 
-1. Fully quit Task Continuum so it cannot write receipts during cleanup.
-2. Open `local-session-link-receipts.json` in the desktop user-data directory.
-  On Windows the default is `%APPDATA%\Task Continuum`; a profile launched with
-  `TASKCONTINUUM_DATA_DIR` uses that directory instead.
-3. Delete whole obsolete receipt entries whose `identity` contains
-  `nativeSessionId` or `workspaceStorageId`. Preserve current Agent Host entries
-  exactly, including their owners and roots. Keep a valid JSON array, using `[]`
-  if no entries remain. Never rename old fields or synthesize new receipts.
-4. Restart the updated desktop. For a binding that lacks a current local receipt,
-  use **Review session link** in its chat panel, or open **Agent Host sessions**,
-  and explicitly select that same existing session for the current task.
+1. Update both desktops and fully quit them before explicitly resetting any
+  private state. The default Windows profile is `%APPDATA%\Task Continuum`;
+  `TASKCONTINUUM_DATA_DIR` selects another profile for development.
+2. Use fresh Automatic workspace links metadata for v2 bindings. Existing canonical
+  logs containing old binding payloads are rejected. Do not modify signed records,
+  delete individual operations from an accepted store, or import old authority.
+  Archive any retired enrollment out of band and initialize a new workspace
+  metadata set rather than treating a corrupted history as an empty store.
+3. Explicitly remove an obsolete `local-session-link-receipts.json`, or reset it
+  to `{ "schemaVersion": 2, "receipts": [] }`, only after all desktops using that
+  profile have stopped. Preserve already-valid v2 receipts. Never remove `hostId`
+  from an old receipt and claim that the result is newly authorized.
+4. Old private creation records and old delivery/cache records are not imported.
+  Retire them explicitly if needed; do not replay any uncertain operation or
+  message from them. The application does not reset these records automatically.
+5. On the owner, link the existing native chats again through **Agent Host sessions**.
+  For a v2 binding already saved without its receipt, **Review session link**
+  confirms the same chat and restores history/models without clearing its draft.
 
 Cleanup removes obsolete authorization metadata only. It does not authorize a
 session, create a chat, detach a task or modify immutable binding history. Do not
 delete the entire profile, device keys or VS Code chat history.
 
-If an older build reported invalid receipts while linking, its immutable binding
-may already have been saved without a local receipt. After cleanup, the explicit
-confirmation in step 4 verifies the exact Host and owner before writing a current
-receipt. The chat then retries history and models without clearing its draft.
 Choosing a session belonging to another task only navigates to that task; it does
 not confirm its access on your behalf.
 
@@ -245,7 +255,7 @@ pairs can continue independently of another offline device.
 Public data is the `.taskcontinuum/workspace.json` descriptor plus immutable
 signed, hash-addressed operations under `.taskcontinuum/records/v1`. Only four
 public record types exist: **device**, **invitation**, **binding** and **setting**.
-A binding requires `provider: "agent-host"`, `hostId`, `sessionId`, `chatId`
+A v2 binding requires `provider: "agent-host"`, `sessionId`, `chatId`
 and a stable owner (`clientId`, `machineName`). Ownerless and retired provider
 formats are unsupported even inside signed records or SSH notifications.
 

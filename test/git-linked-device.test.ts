@@ -35,7 +35,7 @@ it('streams the exact AHP chat through paired SSH with immutable bindings and re
   const key = newSshKeyPair()
   const transport = vi.fn(async (invitation, signal) => openSessionSshBridge(createConnection(ssh.port, '127.0.0.1'), { key, hostPublicKey: ssh.publicKey, grantId: invitation.id, targetPort: invitation.port, signal }))
   const client = new VSCodeDeviceClient(join(root, 'profile-a'), protector, transport, async () => {})
-  const target = { hostId: fixture.hostId, sessionId: fixture.sessionId, chatId: fixture.chatId, owner }
+  const target = { sessionId: fixture.sessionId, chatId: fixture.chatId, owner }
   const connection = new AgentHostConnection(target, join(root, 'profile-a'), (signal) => client.agentHostTransport(tasksA, target, signal))
   let raw: AhpClient | undefined
   try {
@@ -137,7 +137,7 @@ it.each(['vscode-copilot', 'github-copilot'])('preserves old %s data without imp
     await recordLocalLink(profileB, tasksB, 'T-0001', saved.document.bindings['T-0001'], owner)
     expect(await locallyLinkedAgentHostSessions(profileB, tasksB, owner)).toEqual([target])
     expect(await locallyLinkedAgentHostSessions(profileA, tasksA, owner)).toEqual([])
-    expect(await linksB.store.getRecords()).toMatchObject([{ kind: 'binding', payload: {
+    expect(await linksB.store.getRecords()).toMatchObject([{ kind: 'binding', payload: { schemaVersion: 2,
       action: 'set', taskId: 'T-0001', target: { provider: 'agent-host', ...target },
     } }])
     for (const folder of [tasksA, tasksB]) expect(await readFile(join(folder, '.taskcontinuum', 'session-bindings.json'), 'utf8')).toBe(content)

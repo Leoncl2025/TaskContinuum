@@ -228,7 +228,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
 
   async function linkAgentHost(session: AgentHostSession): Promise<void> {
     if (!workspace || !selectedId || !links.ready) throw new Error('Select a task and reload its workspace links before linking an Agent Host chat.')
-    const binding = { id: session.sessionId, title: session.title, owner: session.owner, agentHost: { hostId: session.hostId, sessionId: session.sessionId, chatId: session.chatId, owner: session.owner } }
+    const binding = { id: session.sessionId, title: session.title, owner: session.owner, agentHost: { sessionId: session.sessionId, chatId: session.chatId, owner: session.owner } }
     const existing = Object.entries(bindings).find(([, current]) => sessionBindingKey(current) === sessionBindingKey(binding))?.[0]
     if (existing) {
       if (!tasks.some((item) => item.id === existing)) throw new Error(`The Agent Host conversation belongs to unavailable task ${existing}.`)

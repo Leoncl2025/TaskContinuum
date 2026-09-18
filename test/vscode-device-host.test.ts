@@ -21,7 +21,7 @@ describe('device-scoped native Agent Host gateway', () => {
     const root = await mkdtemp(join(process.cwd(), '.test-ah-device-host-'))
     const workspace = join(root, 'tasks')
     await mkdir(workspace)
-    const target: AgentHostTarget = { hostId: 'native-host-123', sessionId: 'copilotcli:/original', chatId: 'ahp-chat:/original', owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+    const target: AgentHostTarget = { sessionId: 'copilotcli:/original', chatId: 'ahp-chat:/original', owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
     const describeSession = vi.fn(async () => ({ ...target, title: 'Original native chat', provider: 'copilotcli', updatedAt: new Date().toISOString(), canSend: true }))
     const registry = { describe: describeSession } as unknown as AgentHostRegistry
     const createHost = () => {

@@ -77,9 +77,9 @@ async function installCreationMock(app: ElectronApplication, files: MockFiles, w
         const state = record('agent-host:bind-creation', [id])
         const operation = state.operations.find((item) => item.operationId === id)
         if (operation?.state !== 'created-unbound' || !operation.session) throw new Error('Binding retry must use the already-created chat.')
-        const { hostId, sessionId, chatId, owner } = operation.session
+        const { sessionId, chatId, owner } = operation.session
         const before = JSON.parse(fs.readFileSync(files.bindingSnapshot, 'utf8')) as SessionLinksSnapshot
-        const document: SessionLinksSnapshot['document'] = { schemaVersion: 1, bindings: { ...before.document.bindings, [operation.taskId]: { provider: 'agent-host', hostId, sessionId, chatId, owner } } }
+        const document: SessionLinksSnapshot['document'] = { schemaVersion: 2, bindings: { ...before.document.bindings, [operation.taskId]: { provider: 'agent-host', sessionId, chatId, owner } } }
         const revision = process.getBuiltinModule('crypto').createHash('sha256').update(JSON.stringify(document)).digest('hex')
         const snapshot: SessionLinksSnapshot = { ...before, document, revision }
         fs.writeFileSync(`${files.bindingSnapshot}.next`, JSON.stringify(snapshot))
@@ -150,7 +150,7 @@ test('creates explicitly through sandboxed IPC and recovers the same operation a
   await writeFile(taskFile, taskText)
   await writeFile(files.ledger, JSON.stringify({ workers, operations: [], calls: [] } satisfies MockLedger))
   await writeFile(files.bindingSnapshot, JSON.stringify({
-    document: { schemaVersion: 1, bindings: {} }, revision: null,
+    document: { schemaVersion: 2, bindings: {} }, revision: null,
     localOwner: { clientId: '00000000-0000-4000-8000-000000000021', machineName: 'Creation UI fixture' },
   } satisfies SessionLinksSnapshot))
   const environment = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined))
@@ -256,7 +256,7 @@ test('creates explicitly through sandboxed IPC and recovers the same operation a
     await expect(create()).toBeDisabled()
     expect(await calls('agent-host:create')).toHaveLength(1)
     expect(await calls('agent-host:bind-creation')).toEqual([])
-    const createdSession: AgentHostSession = { hostId: operation.hostId, sessionId: `ahp-session:/${operation.operationId}`, chatId: `ahp-chat:/${operation.operationId}/main`, owner: workerOwner, title: 'Mock created chat', provider: 'copilotcli', updatedAt: '', canSend: true }
+    const createdSession: AgentHostSession = { sessionId: `ahp-session:/${operation.operationId}`, chatId: `ahp-chat:/${operation.operationId}/main`, owner: workerOwner, title: 'Mock created chat', provider: 'copilotcli', updatedAt: '', canSend: true }
     await app!.evaluate((_, { file, operationId, session }) => {
       const fs = process.getBuiltinModule('fs')
       const state = JSON.parse(fs.readFileSync(file, 'utf8')) as MockLedger
@@ -279,9 +279,9 @@ test('creates explicitly through sandboxed IPC and recovers the same operation a
     const panel = page!.getByRole('complementary', { name: 'Agent Host task chat', exact: true })
     await expect(panel).toBeVisible()
     await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
-    const target: AgentHostTarget = { hostId: createdSession.hostId, sessionId: createdSession.sessionId, chatId: createdSession.chatId, owner: createdSession.owner }
+    const target: AgentHostTarget = { sessionId: createdSession.sessionId, chatId: createdSession.chatId, owner: createdSession.owner }
     const snapshot = JSON.parse(await readFile(files.bindingSnapshot, 'utf8')) as SessionLinksSnapshot
-    expect(snapshot.document).toEqual({ schemaVersion: 1, bindings: { 'T-0001': { provider: 'agent-host', ...target } } })
+    expect(snapshot.document).toEqual({ schemaVersion: 2, bindings: { 'T-0001': { provider: 'agent-host', ...target } } })
     expect(snapshot.revision).toMatch(/^[a-f0-9]{64}$/)
     expect(await page!.evaluate(async () => window.workspace!.getSessionLinks((await window.workspace!.getState()).current!.id))).toEqual(snapshot)
     await expect(readFile(join(workspace, '.taskcontinuum', 'session-bindings.json'))).rejects.toMatchObject({ code: 'ENOENT' })

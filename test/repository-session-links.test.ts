@@ -32,13 +32,20 @@ const oldInputs: { name: string; value: unknown }[] = [
   { name: 'GitHub Copilot', value: { provider: 'github-copilot', sessionId: 'original' } },
   { name: 'VS Code Copilot', value: { provider: 'vscode-copilot', sessionId: 'original', workspaceStorageId: 'a'.repeat(32), owner: immutableOwner } },
   { name: 'ownerless Agent Host', value: { provider: 'agent-host', hostId: 'host-main', sessionId: 'copilotcli:/original', chatId: 'ahp-chat:/original' } },
-  { name: 'Agent Host without a host', value: { provider: 'agent-host', sessionId: 'copilotcli:/original', chatId: 'ahp-chat:/original', owner: immutableOwner } },
+  { name: 'Host-pinned Agent Host', value: { provider: 'agent-host', hostId: 'host-main', sessionId: 'copilotcli:/original', chatId: 'ahp-chat:/original', owner: immutableOwner } },
   { name: 'Agent Host without a chat', value: { provider: 'agent-host', hostId: 'host-main', sessionId: 'copilotcli:/original', owner: immutableOwner } },
   { name: 'Agent Host without a stable owner ID', value: { provider: 'agent-host', ...agentHostTargetFixture(), owner: { machineName: 'Machine-B' } } },
   { name: 'Agent Host without an owner machine name', value: { provider: 'agent-host', ...agentHostTargetFixture(), owner: { clientId: immutableOwner.clientId } } },
 ]
 
 describe('immutable task/session links', () => {
+  it('accepts only v2 logical binding documents and never imports v1 identity', () => {
+    const bindings = { 'T-0001': { provider: 'agent-host', ...agentHostTargetFixture() } }
+    expect(sessionLinksDocumentSchema.safeParse({ schemaVersion: 2, bindings }).success).toBe(true)
+    expect(sessionLinksDocumentSchema.safeParse({ schemaVersion: 1, bindings }).success).toBe(false)
+    expect(sessionLinksDocumentSchema.safeParse({ schemaVersion: 2, bindings: { 'T-0001': { ...bindings['T-0001'], hostId: 'host-main' } } }).success).toBe(false)
+  })
+
   it('requires a registered backend even for an empty workspace and does not create legacy files', async () => {
     const root = await folder()
     const transform = vi.fn<Parameters<typeof writeRepositorySessionLinks>[2]>((document) => document)
@@ -92,7 +99,7 @@ describe('immutable task/session links', () => {
 
   it.each(oldInputs)('rejects $name rather than accepting an old binding shape', ({ value }) => {
     expect(sessionLinkSchema.safeParse(value).success).toBe(false)
-    expect(sessionLinksDocumentSchema.safeParse({ schemaVersion: 1, bindings: { 'T-0001': value } }).success).toBe(false)
+    expect(sessionLinksDocumentSchema.safeParse({ schemaVersion: 2, bindings: { 'T-0001': value } }).success).toBe(false)
   })
 
   it('carries exact portable Agent Host ownership in signed immutable records across replicas', async () => {
@@ -133,18 +140,20 @@ describe('immutable task/session links', () => {
     expect(detached.document.bindings).toEqual({ 'T-0002': second.document.bindings['T-0002'] })
     const records = await active.store.getRecords()
     expect(records).toHaveLength(3)
-    expect(records).toContainEqual(expect.objectContaining({ kind: 'binding', payload: { action: 'delete', taskId: 'T-0001' } }))
+    expect(records).toContainEqual(expect.objectContaining({ kind: 'binding', payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0001' } }))
     expect((await active.store.read()).resolution.entities['binding:T-0001'].state).toBe('deleted')
     const moved = await updateRepositoryAgentHostLink(root, 'T-0003', agentHostTargetFixture('first'), detached.revision)
     expect(moved.document.bindings['T-0002']).toEqual(second.document.bindings['T-0002'])
     expect(moved.document.bindings['T-0003']).toEqual(first.document.bindings['T-0001'])
   })
 
-  it('distinguishes sessions by stable owner and host, not a machine display name', async () => {
+  it('distinguishes logical sessions by owner and session while rejecting runtime Host fields', async () => {
     const root = await folder()
     const active = await backend(root)
     const first = await updateRepositoryAgentHostLink(root, 'T-0001', agentHostTargetFixture(), active.snapshot.revision)
-    const second = await updateRepositoryAgentHostLink(root, 'T-0002', { ...agentHostTargetFixture(), hostId: 'host-other' }, first.revision)
+    const hostPinned = { ...agentHostTargetFixture(), hostId: 'host-other' }
+    await expect(updateRepositoryAgentHostLink(root, 'T-0002', hostPinned, first.revision)).rejects.toThrow()
+    const second = await updateRepositoryAgentHostLink(root, 'T-0002', agentHostTargetFixture('two'), first.revision)
     const anotherOwner = { ...immutableOwner, clientId: '00000000-0000-4000-8000-000000000002' }
     const third = await updateRepositoryAgentHostLink(root, 'T-0003', agentHostTargetFixture('one', anotherOwner), second.revision)
     await expect(updateRepositoryAgentHostLink(root, 'T-0004', agentHostTargetFixture('one', { ...immutableOwner, machineName: 'Renamed-machine' }), third.revision)).rejects.toThrow('already linked to T-0001')
@@ -183,7 +192,7 @@ describe('immutable task/session links', () => {
     await writeFile(join(root, '.taskcontinuum', '.gitignore'), ignore)
     await writeFile(join(root, '.taskcontinuum', 'session-bindings.lock'), 'old process')
     const active = await backend(root)
-    const update = () => ({ schemaVersion: 1 as const, bindings: { 'T-0001': { provider: 'agent-host' as const, ...agentHostTargetFixture() } } })
+    const update = () => ({ schemaVersion: 2 as const, bindings: { 'T-0001': { provider: 'agent-host' as const, ...agentHostTargetFixture() } } })
     await expect(writeRepositorySessionLinks(root, active.snapshot.revision, update, async () => { throw new Error('Authorization revoked') })).rejects.toThrow('Authorization revoked')
     expect(await readRecords(active.outboxRoot)).toEqual([])
     await writeRepositorySessionLinks(root, active.snapshot.revision, update)

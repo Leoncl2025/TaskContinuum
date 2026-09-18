@@ -23,7 +23,7 @@ const trust: RecordTrust = {
   authorize: () => true,
 }
 function target(session = 'one', owner = b) {
-  return { owner: { clientId: owner.actor.deviceId, machineName: `machine-${owner.actor.deviceId.at(-1)}` }, hostId: 'host-main', sessionId: `copilotcli:/${session}`, chatId: `ahp-chat:/${session}` }
+  return { owner: { clientId: owner.actor.deviceId, machineName: `machine-${owner.actor.deviceId.at(-1)}` }, sessionId: `copilotcli:/${session}`, chatId: `ahp-chat:/${session}` }
 }
 function binding(session = 'one', owner = b): SessionLink { return { provider: 'agent-host', ...target(session, owner) } }
 async function operation(input: Omit<RecordInput, 'actor' | 'workspaceId'>, author = a): Promise<RemoteRecord> {
@@ -89,7 +89,7 @@ describe('effective repository binding backend and durable immutable store', () 
     const f = await fixture()
     const file = await legacyFile(f.workspaceRoot, raw)
     const before = await f.store.read()
-    expect(before).toMatchObject({ initialized: false, document: { schemaVersion: 1, bindings: {} }, records: [] })
+    expect(before).toMatchObject({ initialized: false, document: { schemaVersion: 2, bindings: {} }, records: [] })
     const initialized = await f.store.initialize()
     expect(initialized).toMatchObject({ initialized: true, document: before.document, records: [] })
     expect(await readFile(file, 'utf8')).toBe(raw)
@@ -133,7 +133,7 @@ describe('effective repository binding backend and durable immutable store', () 
     expect(before.document.bindings).toEqual({})
     await expect(writeRepositorySessionLinks(f.workspaceRoot, before.revision, (document) => document)).rejects.toThrow('Enable the immutable binding store')
     await expect(f.store.writeBinding('T-0004', binding('new'), before.revision)).rejects.toThrow('Enable the immutable binding store')
-    await expect(f.store.append('binding', { action: 'set', taskId: 'T-0004', target: binding('new') })).rejects.toThrow('Enable the immutable binding store')
+    await expect(f.store.append('binding', { schemaVersion: 2, action: 'set', taskId: 'T-0004', target: binding('new') })).rejects.toThrow('Enable the immutable binding store')
     const initialized = await f.store.initialize()
     expect(initialized.initialized).toBe(true)
     expect(initialized.document.bindings).toEqual({})
@@ -151,9 +151,9 @@ describe('effective repository binding backend and durable immutable store', () 
 
   it('resolves only canonical and outbox records before enrollment and never resurrects their tombstones', async () => {
     const f = await fixture(b)
-    const base = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding('old') } })
-    const deleted = await operation({ kind: 'binding', payload: { action: 'delete', taskId: 'T-0001' }, parents: [base.operationId] })
-    const pending = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0002', target: binding('two') } }, b)
+    const base = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: binding('old') } })
+    const deleted = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0001' }, parents: [base.operationId] })
+    const pending = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0002', target: binding('two') } }, b)
     for (const record of [base, deleted]) await appendRecord(f.recordsRoot, record)
     await appendRecord(f.outboxRoot, pending)
     const raw = JSON.stringify({ schemaVersion: 1, bindings: { 'T-0001': binding('resurrected'), 'T-0003': binding('not-imported') } })
@@ -184,7 +184,7 @@ describe('effective repository binding backend and durable immutable store', () 
     const pending = await f.store.getRecords()
     expect(pending).toHaveLength(2)
     expect(pending).toContainEqual(device)
-    await expect(f.store.append('binding', { action: 'set', taskId: 'T-0001', target: binding() })).rejects.toThrow('Enable the immutable binding store')
+    await expect(f.store.append('binding', { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: binding() })).rejects.toThrow('Enable the immutable binding store')
     const initialized = await f.store.initialize()
     expect(initialized.records).toEqual(pending)
     expect(initialized.document.bindings).toEqual({})
@@ -193,7 +193,7 @@ describe('effective repository binding backend and durable immutable store', () 
   })
 
   it.each([
-    { legacyDocument: { schemaVersion: 1, bindings: {} } },
+    { legacyDocument: { schemaVersion: 2, bindings: {} } },
     { legacyRevision: 'a'.repeat(64) },
     { allowLegacyBindings: true },
     { migrationNonce: '00000000-0000-4000-8000-000000000099' },
@@ -253,9 +253,9 @@ describe('effective repository binding backend and durable immutable store', () 
   it('retains original causal heads and fails stale revisions instead of rebasing a semantic edit', async () => {
     const f = await fixture()
     const initial = await f.store.initialize()
-    const first = await f.store.update(initial.revision, () => ({ schemaVersion: 1, bindings: { 'T-0001': binding('old') } }))
+    const first = await f.store.update(initial.revision, () => ({ schemaVersion: 2, bindings: { 'T-0001': binding('old') } }))
     const original = first.records[0]
-    const remote = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding('remote') }, parents: [original.operationId] }, b)
+    const remote = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: binding('remote') }, parents: [original.operationId] }, b)
     await appendRecord(f.recordsRoot, original)
     const fetched = await f.store.read()
     await expect(f.store.update(fetched.revision, async (document) => {
@@ -273,8 +273,8 @@ describe('effective repository binding backend and durable immutable store', () 
   it('writes an explicit conflict tombstone even when the effective document transform would be a no-op', async () => {
     const f = await fixture()
     await f.store.initialize()
-    const first = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding('one') } })
-    const second = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding('two') } }, b)
+    const first = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: binding('one') } })
+    const second = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: binding('two') } }, b)
     for (const record of [first, second]) await appendRecord(f.recordsRoot, record)
     const before = await f.store.read()
     expect(before.document.bindings).toEqual({})
@@ -298,8 +298,8 @@ describe('effective repository binding backend and durable immutable store', () 
     const f = await fixture()
     await f.store.initialize()
     disposers.push(await registerRepositorySessionLinksBackend(f.workspaceRoot, f.store))
-    const first = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding('one') } })
-    const second = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding('two') } }, b)
+    const first = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: binding('one') } })
+    const second = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: binding('two') } }, b)
     for (const record of [first, second]) await appendRecord(f.recordsRoot, record)
     const before = await readRepositorySessionLinks(f.workspaceRoot)
     expect(before.document.bindings).toEqual({})
@@ -315,9 +315,9 @@ describe('effective repository binding backend and durable immutable store', () 
   it('checks beforeWrite at the durable boundary, forbids uniqueness violations and never transfers ownership', async () => {
     const f = await fixture()
     const initial = await f.store.initialize()
-    await expect(f.store.update(initial.revision, () => ({ schemaVersion: 1, bindings: { 'T-0001': binding() } }), async () => { throw new Error('Authorization changed') })).rejects.toThrow('Authorization changed')
+    await expect(f.store.update(initial.revision, () => ({ schemaVersion: 2, bindings: { 'T-0001': binding() } }), async () => { throw new Error('Authorization changed') })).rejects.toThrow('Authorization changed')
     expect(await readRecords(f.outboxRoot)).toEqual([])
-    const saved = await f.store.update(initial.revision, () => ({ schemaVersion: 1, bindings: { 'T-0001': binding() } }))
+    const saved = await f.store.update(initial.revision, () => ({ schemaVersion: 2, bindings: { 'T-0001': binding() } }))
     await expect(f.store.update(saved.revision, (document) => ({ ...document, bindings: { ...document.bindings, 'T-0002': binding() } }))).rejects.toThrow('only one task')
     await expect(f.store.update(saved.revision, (document) => ({ ...document, bindings: { 'T-0001': binding('one', a) } }))).rejects.toThrow('ownership')
     const beforeWrite = vi.fn(async () => undefined)
@@ -343,7 +343,7 @@ describe('effective repository binding backend and durable immutable store', () 
         resolve()
       })
     })
-    const saving = f.store.update(initial.revision, () => ({ schemaVersion: 1, bindings: { 'T-0001': binding() } }))
+    const saving = f.store.update(initial.revision, () => ({ schemaVersion: 2, bindings: { 'T-0001': binding() } }))
     await received
     expect(seen.sort()).toEqual(['git', 'ssh'])
     releaseGit()
@@ -358,8 +358,8 @@ describe('effective repository binding backend and durable immutable store', () 
   it('recovers an interrupted durable batch with the original signed operations instead of exposing partial success', async () => {
     const f = await fixture()
     await f.store.initialize()
-    const first = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding() } })
-    const second = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0002', target: binding('two') } })
+    const first = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: binding() } })
+    const second = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0002', target: binding('two') } })
     const state = JSON.parse(await readFile(join(f.stateDirectory, 'store.json'), 'utf8')) as unknown
     const journal = { schemaVersion: 1, workspaceId, operations: [first, second], state }
     await writeFile(join(f.stateDirectory, 'pending-operations.json'), JSON.stringify(journal))
@@ -384,7 +384,7 @@ describe('effective repository binding backend and durable immutable store', () 
   it('detects deleted or mutated accepted canonical history even if the outbox retains the original record', async () => {
     const f = await fixture()
     const before = await f.store.initialize()
-    const saved = await f.store.update(before.revision, () => ({ schemaVersion: 1, bindings: { 'T-0001': binding() } }))
+    const saved = await f.store.update(before.revision, () => ({ schemaVersion: 2, bindings: { 'T-0001': binding() } }))
     const record = saved.records[0]
     await appendRecord(f.recordsRoot, record)
     await f.store.read()
@@ -398,7 +398,7 @@ describe('effective repository binding backend and durable immutable store', () 
   it('detects a removed pending local operation and permits outbox retirement only after canonical publication', async () => {
     const f = await fixture()
     const before = await f.store.initialize()
-    const saved = await f.store.update(before.revision, () => ({ schemaVersion: 1, bindings: { 'T-0001': binding() } }))
+    const saved = await f.store.update(before.revision, () => ({ schemaVersion: 2, bindings: { 'T-0001': binding() } }))
     const record = saved.records[0]
     const file = join(f.outboxRoot, recordPath(record))
     await rm(file)
@@ -486,7 +486,7 @@ describe('effective repository binding backend and durable immutable store', () 
     const synced = await f.store.reconcileSynced()
     expect(synced.revision).not.toBe(saved.revision)
     expect(await f.store.getPendingRecords()).toEqual([])
-    const received = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding('received') } })
+    const received = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: binding('received') } })
     expect((await f.store.receiveOverlay(notice(received), a.actor.deviceId)).result).toBe('provisional')
     expect((await f.store.status()).provisionalTasks).toEqual(['T-0001'])
     expect(await f.store.getRecords()).toEqual(pending)
@@ -497,7 +497,7 @@ describe('effective repository binding backend and durable immutable store', () 
     expect(await f.store.getRecords()).toHaveLength(2)
     expect((await f.store.status()).pendingOperationIds).toEqual([])
     expect(f.changed).toHaveBeenCalledTimes(1)
-    const forged = await createRecord({ kind: 'binding', workspaceId, actor: a.actor, payload: { action: 'delete', taskId: 'T-0002' } }, () => Buffer.alloc(64))
+    const forged = await createRecord({ kind: 'binding', workspaceId, actor: a.actor, payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0002' } }, () => Buffer.alloc(64))
     await appendRecord(f.recordsRoot, forged)
     await expect(f.store.exportRecords()).rejects.toThrow('unauthorized')
     expect(await f.store.status()).toMatchObject({ blocked: true, conflicts: [{ entityKey: 'binding:T-0002', state: 'blocked' }] })
@@ -516,10 +516,10 @@ describe('SSH binding overlay and exact canonical reconciliation', () => {
     })
     await f.store.initialize()
     disposers.push(await registerRepositorySessionLinksBackend(f.workspaceRoot, f.store))
-    const base = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding('old') } })
+    const base = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: binding('old') } })
     await appendRecord(f.recordsRoot, base)
     const before = await f.store.read()
-    const changed = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding('new') }, parents: [base.operationId] })
+    const changed = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: binding('new') }, parents: [base.operationId] })
     return { ...f, base, before, change: changed, overlay, requestSync, onChange, advance: (milliseconds: number) => { time += milliseconds } }
   }
 
@@ -532,7 +532,7 @@ describe('SSH binding overlay and exact canonical reconciliation', () => {
       ? { provider: 'agent-host', hostId: 'host-main', sessionId: 'copilotcli:/historic', chatId: 'ahp-chat:/historic' }
       : { provider, sessionId: 'historic', ...(provider === 'vscode-copilot' ? { workspaceStorageId: 'a'.repeat(32), owner: target().owner } : {}) }
     const old = signedBindingFixture(oldTarget, a, workspaceId)
-    const changed = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding('modern') }, parents: [old.operationId] })
+    const changed = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: binding('modern') }, parents: [old.operationId] })
     expect((await f.store.receiveOverlay({ ...notice(changed), dependencies: [old] }, a.actor.deviceId)).result).toBe('rejected')
     expect((await f.store.receiveOverlay({ ...notice(changed), operation: old }, a.actor.deviceId)).result).toBe('rejected')
     expect(await f.store.read()).toEqual(initialized)
@@ -564,15 +564,15 @@ describe('SSH binding overlay and exact canonical reconciliation', () => {
     expect(await readRecords(f.outboxRoot)).toEqual([])
     expect(f.changed).not.toHaveBeenCalled()
     expect(f.requestSync).toHaveBeenCalled()
-    await expect(f.store.update(f.before.revision, () => ({ schemaVersion: 1, bindings: {} }))).rejects.toThrow('overlay')
-    await expect(f.store.update(effective.revision, () => ({ schemaVersion: 1, bindings: {} }))).rejects.toThrow('closure')
+    await expect(f.store.update(f.before.revision, () => ({ schemaVersion: 2, bindings: {} }))).rejects.toThrow('overlay')
+    await expect(f.store.update(effective.revision, () => ({ schemaVersion: 2, bindings: {} }))).rejects.toThrow('closure')
   })
 
   it('retains a provisional binding when pull precedes push and retires only on the exact canonical operation', async () => {
     const f = await receiving()
     await f.store.acceptNotification(notice(f.change), a.actor.deviceId)
     expect((await f.store.read()).provisional).toEqual(['T-0001'])
-    const unrelated = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0002', target: binding('two') } })
+    const unrelated = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0002', target: binding('two') } })
     await appendRecord(f.recordsRoot, unrelated)
     const during = await f.store.read()
     expect(during.provisional).toEqual(['T-0001'])
@@ -599,7 +599,7 @@ describe('SSH binding overlay and exact canonical reconciliation', () => {
     expect(expired.resolution.bindings['T-0001']).toBeUndefined()
     expect(expired.awaitingSync).toEqual([{ operationId: f.change.operationId, taskId: 'T-0001' }])
     expect((await f.store.acceptNotification(notice(f.change), a.actor.deviceId)).result).toBe('awaiting-sync')
-    const unrelated = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding('other') }, parents: [f.base.operationId] }, b)
+    const unrelated = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: binding('other') }, parents: [f.base.operationId] }, b)
     await appendRecord(f.recordsRoot, unrelated)
     expect((await f.store.read()).document.bindings['T-0001']).toBeUndefined()
     await appendRecord(f.recordsRoot, f.change)
@@ -632,7 +632,7 @@ describe('SSH binding overlay and exact canonical reconciliation', () => {
     await f.store.acceptNotification(notice(f.change), a.actor.deviceId)
     f.advance(60000)
     await f.store.read()
-    const successor = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding('successor') }, parents: [f.change.operationId] })
+    const successor = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: binding('successor') }, parents: [f.change.operationId] })
     expect((await f.store.acceptNotification(notice(successor, [f.change]), a.actor.deviceId)).result).toBe('awaiting-sync')
     expect((await f.store.read()).document.bindings['T-0001']).toBeUndefined()
     await f.overlay.cancel(f.change.operationId)
@@ -641,7 +641,7 @@ describe('SSH binding overlay and exact canonical reconciliation', () => {
 
   it('handles out-of-order notices, deletion and a canonical causal successor without reviving ancestors', async () => {
     const f = await receiving()
-    const remove = await operation({ kind: 'binding', payload: { action: 'delete', taskId: 'T-0001' }, parents: [f.change.operationId] })
+    const remove = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0001' }, parents: [f.change.operationId] })
     expect((await f.store.acceptNotification(notice(remove, [f.change]), a.actor.deviceId)).result).toBe('provisional')
     expect((await f.store.read()).document.bindings['T-0001']).toBeUndefined()
     expect((await f.store.acceptNotification(notice(f.change), a.actor.deviceId)).result).toBe('provisional')
@@ -655,11 +655,11 @@ describe('SSH binding overlay and exact canonical reconciliation', () => {
 
   it('blocks concurrent same-task and global same-session claims instead of giving the overlay precedence', async () => {
     const f = await receiving()
-    const otherTask = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0002', target: binding('new') } }, b)
+    const otherTask = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0002', target: binding('new') } }, b)
     await appendRecord(f.recordsRoot, otherTask)
     expect((await f.store.acceptNotification(notice(f.change), a.actor.deviceId)).result).toBe('conflict')
     expect((await f.store.read()).document.bindings).toEqual({})
-    const other = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding('other') }, parents: [f.base.operationId] }, b)
+    const other = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: binding('other') }, parents: [f.base.operationId] }, b)
     await appendRecord(f.recordsRoot, other)
     const conflict = await f.store.read()
     expect(conflict.document.bindings['T-0001']).toBeUndefined()
@@ -677,7 +677,7 @@ describe('SSH binding overlay and exact canonical reconciliation', () => {
       { ...notice(f.change), operation: { ...f.change, createdAt: '2020-01-01T00:00:00.000Z' } },
     ]) expect((await f.store.acceptNotification(request, a.actor.deviceId)).result).toBe('rejected')
     expect((await f.store.acceptNotification(notice(f.change), b.actor.deviceId)).result).toBe('rejected')
-    const unrelated = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0003', target: binding('unrelated') } })
+    const unrelated = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0003', target: binding('unrelated') } })
     expect((await f.store.acceptNotification(notice(f.change, [unrelated]), a.actor.deviceId)).result).toBe('rejected')
     expect((await f.store.read()).revision).toBe(original)
     expect((await f.store.read()).document.bindings['T-0001']).toEqual(binding('old'))
@@ -685,7 +685,7 @@ describe('SSH binding overlay and exact canonical reconciliation', () => {
 
   it('requests synchronization for missing or over-budget closures and honors current trust revocation', async () => {
     const f = await receiving()
-    const missing = await operation({ kind: 'binding', payload: { action: 'set', taskId: 'T-0001', target: binding('unavailable') }, parents: ['e'.repeat(64)] })
+    const missing = await operation({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: binding('unavailable') }, parents: ['e'.repeat(64)] })
     expect((await f.store.acceptNotification(notice(missing), a.actor.deviceId)).result).toBe('awaiting-sync')
     expect((await f.store.acceptNotification({ ...notice(f.change), huge: 'x'.repeat(262144) }, a.actor.deviceId)).result).toBe('awaiting-sync')
     expect((await f.store.read()).document.bindings['T-0001']).toEqual(binding('old'))

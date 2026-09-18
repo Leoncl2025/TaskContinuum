@@ -55,7 +55,7 @@ type AgentHostPanelProps = {
 
 export function AgentHostPanel({ task, workspace, target, connectionRevision = 0, onDetach, onClose, onDevices, onSessions, onBusy, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
   const bridge = window.agentHost
-  const { hostId, sessionId, chatId } = target
+  const { sessionId, chatId } = target
   const { clientId, machineName } = target.owner
   const key = agentHostKey(target)
   const contextId = task ? task.id : workspace.id
@@ -90,7 +90,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   useEffect(() => {
     let active = true
     let watchId: string | undefined
-    const selected = { hostId, sessionId, chatId, owner: { clientId, machineName } }
+    const selected = { sessionId, chatId, owner: { clientId, machineName } }
     if (!bridge) return
     const unlisten = bridge.onView((event) => {
       if (active && (!watchId || event.id === watchId) && agentHostKey(event.view.target) === agentHostKey(selected)) setView(event.view)
@@ -102,7 +102,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     })
     void bridge.watch(selected).then((id) => { if (active) { watchId = id; setError(undefined) } else void bridge.unwatch(id).catch(() => undefined) }).catch((failure: unknown) => { if (active) setError(failure instanceof Error ? failure.message : 'Agent Host access is unavailable.') })
     return () => { active = false; unlisten(); if (watchId) void bridge.unwatch(watchId).catch(() => undefined) }
-  }, [bridge, hostId, sessionId, chatId, clientId, machineName, catalogKey])
+  }, [bridge, sessionId, chatId, clientId, machineName, catalogKey])
   const activeTurn = view?.chat?.activeTurn
   const responding = Boolean(activeTurn)
   const pending = Boolean(view?.pendingTurn)

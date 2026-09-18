@@ -35,6 +35,5 @@ export const agentHostCreationResultSchema = agentHostCreateCommandSchema.omit({
   session: agentHostSessionSchema.extend({ provider: z.literal('copilotcli') }).optional(), error: errorSchema.optional(),
 }).strict().superRefine((result, context) => {
   if ((result.state === 'ready' || result.state === 'created-unbound') && !result.session) context.addIssue({ code: 'custom', message: 'A created session requires its verified identity.' })
-  if (result.session && result.session.hostId !== result.hostId) context.addIssue({ code: 'custom', message: 'Creation returned a different Host.' })
 })
 export const agentHostCreationSchema = agentHostCreationResultSchema.safeExtend({ workerId: z.uuid() }).strict()

@@ -118,7 +118,8 @@ invitations, enrollment pins, the outbox, overlay markers, configuration editor
 state and an isolated Git replica. Generated views are not a second Git authority.
 The private key store continues to use OS protection.
 
-Session bindings accept only `agent-host` targets with `hostId`, `sessionId`,
+Session binding documents and signed binding payloads require schema v2. They
+accept only logical `agent-host` targets with `sessionId`,
 `chatId` and a stable owner (`clientId`, `machineName`). GitHub Copilot SDK,
 VS Code journal and ownerless binding formats are unsupported, including
 inside signed Git records and SSH notifications.

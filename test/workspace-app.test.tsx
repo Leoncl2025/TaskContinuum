@@ -26,7 +26,7 @@ function fixtures() {
     openRecent: vi.fn(async (id) => { state = { ...state, current: id === first.id ? first : second }; return state }),
     refresh: vi.fn(async () => state),
     closeWorkspace: vi.fn(async () => { state = { ...state, current: null }; return state }),
-    getSessionLinks: vi.fn(async (id) => repository[id] ?? { document: { schemaVersion: 1, bindings: {} }, revision: null }),
+    getSessionLinks: vi.fn(async (id) => repository[id] ?? { document: { schemaVersion: 2, bindings: {} }, revision: null }),
     updateSessionLink: vi.fn(async (request) => {
       if (request.expectedRevision !== (repository[request.workspaceId]?.revision ?? null)) throw new Error('Workspace session links changed.')
       const bindings = { ...repository[request.workspaceId]?.document.bindings }
@@ -35,7 +35,7 @@ function fixtures() {
         if (!request.agentHost || !request.owner) throw new Error('An owned Agent Host target is required.')
         bindings[request.taskId] = { provider: 'agent-host', ...request.agentHost, sessionId: request.sessionId, owner: request.owner }
       }
-      return repository[request.workspaceId] = { document: { schemaVersion: 1, bindings }, revision: (++revision).toString(16).padStart(64, '0') }
+      return repository[request.workspaceId] = { document: { schemaVersion: 2, bindings }, revision: (++revision).toString(16).padStart(64, '0') }
     }),
   }
   window.workspace = bridge
@@ -45,9 +45,9 @@ function fixtures() {
 function creationFixture() {
   const workspace = fixtures()
   const owner = { clientId: crypto.randomUUID(), machineName: 'Creation-worker' }
-  const target = { hostId: 'exact-host-123', sessionId: 'ahp-session:/new-chat', chatId: 'ahp-chat:/new-chat/main', owner }
+  const target = { sessionId: 'ahp-session:/new-chat', chatId: 'ahp-chat:/new-chat/main', owner }
   const session: AgentHostSession = { ...target, title: 'Created chat', provider: 'copilotcli', updatedAt: '', canSend: true }
-  const worker: AgentHostWorker = { id: 'paired-worker', owner, state: 'connected', hosts: [{ hostId: target.hostId, name: 'Native Host', available: true }], workspaces: [{ id: 'worker-workspace', name: 'Worker project', canSend: true, taskState: 'available', expectedRevision: 'd'.repeat(64) }] }
+  const worker: AgentHostWorker = { id: 'paired-worker', owner, state: 'connected', hosts: [{ hostId: 'exact-host-123', name: 'Native Host', available: true }], workspaces: [{ id: 'worker-workspace', name: 'Worker project', canSend: true, taskState: 'available', expectedRevision: 'd'.repeat(64) }] }
   const saved = new Map<string, AgentHostCreation>()
   const listeners = new Set<Parameters<AgentHostBridge['onView']>[0]>()
   const watched = new Map<string, AgentHostView>()
@@ -60,7 +60,7 @@ function creationFixture() {
     create: vi.fn(async (request) => {
       const operation: AgentHostCreation = { ...request, state: 'ready', session }
       saved.set(request.operationId, operation)
-      workspace.repository[workspace.first.id] = { document: { schemaVersion: 1, bindings: { ...workspace.repository[workspace.first.id]?.document.bindings, [request.taskId]: { provider: 'agent-host', ...target } } }, revision: 'e'.repeat(64) }
+      workspace.repository[workspace.first.id] = { document: { schemaVersion: 2, bindings: { ...workspace.repository[workspace.first.id]?.document.bindings, [request.taskId]: { provider: 'agent-host', ...target } } }, revision: 'e'.repeat(64) }
       return operation
     }),
     creationStatus: vi.fn(async (id) => saved.get(id)!),
@@ -107,7 +107,7 @@ describe('workspace switching in the desktop workbench', () => {
     await waitFor(() => expect(finishReload).toBeTypeOf('function'))
     fireEvent.click(screen.getByRole('tab', { name: 'Keep selected task' }))
     const replacement = { ...target, sessionId: 'ahp-session:/replacement', chatId: 'ahp-chat:/replacement/main' }
-    repository[first.id] = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...replacement } } }, revision: 'f'.repeat(64) }
+    repository[first.id] = { document: { schemaVersion: 2, bindings: { 'T-0002': { provider: 'agent-host', ...replacement } } }, revision: 'f'.repeat(64) }
     await act(async () => { finishReload(repository[first.id]) })
     await waitFor(() => expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Keep selected task'))
     expect(agentHost.watch).not.toHaveBeenCalled()
@@ -140,7 +140,7 @@ describe('workspace switching in the desktop workbench', () => {
     await waitFor(() => expect(agentHost.watch).toHaveBeenCalledWith(target))
     expect(screen.queryByRole('dialog', { name: 'Agent Host sessions' })).not.toBeInTheDocument()
     expect(bridge.updateSessionLink).not.toHaveBeenCalled()
-    expect(agentHost.create).toHaveBeenCalledExactlyOnceWith({ operationId: expect.any(String), taskId: 'T-0002', workerId: 'paired-worker', workspaceId: 'worker-workspace', hostId: target.hostId, expectedRevision: 'd'.repeat(64) })
+    expect(agentHost.create).toHaveBeenCalledExactlyOnceWith({ operationId: expect.any(String), taskId: 'T-0002', workerId: 'paired-worker', workspaceId: 'worker-workspace', hostId: 'exact-host-123', expectedRevision: 'd'.repeat(64) })
     expect(agentHost.send).not.toHaveBeenCalled()
     await user.click(screen.getByRole('tab', { name: 'Other task draft' }))
     expect(screen.queryByRole('textbox', { name: /Message/ })).not.toBeInTheDocument()
@@ -186,7 +186,7 @@ describe('workspace switching in the desktop workbench', () => {
     await waitFor(() => expect(finishReload).toBeTypeOf('function'))
     original.unmount()
     const secondTarget = agentHostTargetFixture('existing-second-workspace')
-    const secondSnapshot: SessionLinksSnapshot = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...secondTarget } } }, revision: 'b'.repeat(64) }
+    const secondSnapshot: SessionLinksSnapshot = { document: { schemaVersion: 2, bindings: { 'T-0002': { provider: 'agent-host', ...secondTarget } } }, revision: 'b'.repeat(64) }
     repository[second.id] = secondSnapshot
     await bridge.openRecent(second.id)
     render(<App />)
@@ -230,7 +230,7 @@ describe('workspace switching in the desktop workbench', () => {
 
   it('passes a bound task to the picker as ineligible for creation', async () => {
     const { first, repository, agentHost, target } = creationFixture()
-    repository[first.id] = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'b'.repeat(64) }
+    repository[first.id] = { document: { schemaVersion: 2, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'b'.repeat(64) }
     const user = userEvent.setup()
     render(<App />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
@@ -244,7 +244,7 @@ describe('workspace switching in the desktop workbench', () => {
 
   it('explicitly reconfirms an existing Agent Host link and retries access without losing its draft', async () => {
     const { bridge, first, repository, agentHost, target } = creationFixture()
-    const snapshot: SessionLinksSnapshot = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64), localOwner: target.owner }
+    const snapshot: SessionLinksSnapshot = { document: { schemaVersion: 2, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64), localOwner: target.owner }
     repository[first.id] = snapshot
     vi.mocked(agentHost.list).mockResolvedValue({ sessions: [{ ...target, title: 'Original Host chat', provider: 'copilotcli', updatedAt: '', canSend: true }], warnings: [] })
     const message = 'A Git-only edit cannot grant local Agent Host access. Confirm the link on its owner.'
@@ -262,7 +262,7 @@ describe('workspace switching in the desktop workbench', () => {
     await user.click(await screen.findByRole('button', { name: 'Link Original Host chat to T-0002' }))
     await waitFor(() => expect(bridge.updateSessionLink).toHaveBeenCalledExactlyOnceWith({
       workspaceId: first.id, taskId: 'T-0002', sessionId: target.sessionId,
-      agentHost: { hostId: target.hostId, chatId: target.chatId }, owner: target.owner, expectedRevision: snapshot.revision,
+      agentHost: { chatId: target.chatId }, owner: target.owner, expectedRevision: snapshot.revision,
     }))
     await waitFor(() => expect(agentHost.watch).toHaveBeenCalledTimes(2))
     expect(agentHost.watch).toHaveBeenLastCalledWith(target)
@@ -277,7 +277,7 @@ describe('workspace switching in the desktop workbench', () => {
 
   it('opens the exact AHP Git link without creating, sending or cancelling a session', async () => {
     const { first, repository, agentHost, target } = creationFixture()
-    repository[first.id] = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64), localOwner: target.owner }
+    repository[first.id] = { document: { schemaVersion: 2, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64), localOwner: target.owner }
     const user = userEvent.setup()
     const view = render(<App />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
@@ -316,7 +316,7 @@ describe('workspace switching in the desktop workbench', () => {
 
   it('keeps the current workspace and draft if folder selection is cancelled or fails', async () => {
     const { bridge, first, repository, target } = creationFixture()
-    repository[first.id] = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64) }
+    repository[first.id] = { document: { schemaVersion: 2, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64) }
     const user = userEvent.setup()
     render(<App />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
@@ -336,8 +336,8 @@ describe('workspace switching in the desktop workbench', () => {
     const { first, second, repository, agentHost } = creationFixture()
     const firstTarget = agentHostTargetFixture('first-session')
     const secondTarget = agentHostTargetFixture('second-session')
-    repository[first.id] = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...firstTarget } } }, revision: 'a'.repeat(64) }
-    repository[second.id] = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...secondTarget } } }, revision: 'b'.repeat(64) }
+    repository[first.id] = { document: { schemaVersion: 2, bindings: { 'T-0002': { provider: 'agent-host', ...firstTarget } } }, revision: 'a'.repeat(64) }
+    repository[second.id] = { document: { schemaVersion: 2, bindings: { 'T-0002': { provider: 'agent-host', ...secondTarget } } }, revision: 'b'.repeat(64) }
     const user = userEvent.setup()
     render(<App />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
@@ -355,7 +355,7 @@ describe('workspace switching in the desktop workbench', () => {
 
   it('locks workspace changes during an explicit native send and releases them after completion', async () => {
     const { first, repository, target, agentHost } = creationFixture()
-    repository[first.id] = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64) }
+    repository[first.id] = { document: { schemaVersion: 2, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64) }
     let finish!: () => void
     vi.mocked(agentHost.send).mockImplementation(() => new Promise<void>((resolve) => { finish = resolve }))
     const user = userEvent.setup()
@@ -376,7 +376,7 @@ describe('workspace switching in the desktop workbench', () => {
 
   it('refreshes actual task content without dropping the draft or selected task', async () => {
     const { bridge, first, repository, target } = creationFixture()
-    repository[first.id] = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64) }
+    repository[first.id] = { document: { schemaVersion: 2, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64) }
     const user = userEvent.setup()
     render(<App />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
@@ -422,7 +422,7 @@ describe('workspace switching in the desktop workbench', () => {
 
   it('keeps the original AH binding visible and detachable when its Host is unavailable', async () => {
     const { bridge, first, repository, target, agentHost } = creationFixture()
-    repository[first.id] = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'c'.repeat(64) }
+    repository[first.id] = { document: { schemaVersion: 2, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'c'.repeat(64) }
     vi.mocked(agentHost.watch).mockRejectedValue(new Error('The original Agent Host is unavailable.'))
     const user = userEvent.setup()
     render(<App />)
@@ -441,7 +441,7 @@ describe('workspace switching in the desktop workbench', () => {
   it('routes a linked session back to its owning task without rewriting the repository', async () => {
     const { bridge, first, repository, target, agentHost } = creationFixture()
     first.tasks.push({ ...first.tasks[0], id: 'T-0003', title: 'Another task' })
-    repository[first.id] = { document: { schemaVersion: 1, bindings: { 'T-0003': { provider: 'agent-host', ...target } } }, revision: 'd'.repeat(64) }
+    repository[first.id] = { document: { schemaVersion: 2, bindings: { 'T-0003': { provider: 'agent-host', ...target } } }, revision: 'd'.repeat(64) }
     vi.mocked(agentHost.list).mockResolvedValue({ sessions: [{ ...target, title: 'Existing Host work', provider: 'copilotcli', updatedAt: '', canSend: true }], warnings: [] })
     const user = userEvent.setup()
     render(<App />)
@@ -464,14 +464,14 @@ describe('workspace switching in the desktop workbench', () => {
     const { bridge, first, repository, target } = creationFixture()
     const remote = gitSyncUiFixture()
     window.remoteVSCode = remote.remote
-    repository[first.id] = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64) }
+    repository[first.id] = { document: { schemaVersion: 2, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64) }
     const user = userEvent.setup()
     render(<App />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
     await user.click(await screen.findByRole('button', { name: 'Detach conversation' }))
     const dialog = screen.getByRole('dialog', { name: 'Detach conversation' })
-    repository[first.id] = { document: { schemaVersion: 1, bindings: {} }, revision: 'b'.repeat(64) }
+    repository[first.id] = { document: { schemaVersion: 2, bindings: {} }, revision: 'b'.repeat(64) }
     await act(async () => remote.notify())
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('The task binding changed.')
     expect(within(dialog).getByRole('button', { name: 'Detach session' })).toBeDisabled()

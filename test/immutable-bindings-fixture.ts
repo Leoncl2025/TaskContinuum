@@ -25,7 +25,7 @@ export function immutableRecordSigner(index: number) {
 }
 
 export function agentHostTargetFixture(session = 'one', owner = immutableOwner): AgentHostTarget {
-  return { owner: { clientId: owner.clientId, machineName: owner.machineName }, hostId: 'host-main', sessionId: `copilotcli:/${session}`, chatId: `ahp-chat:/${session}` }
+  return { owner: { clientId: owner.clientId, machineName: owner.machineName }, sessionId: `copilotcli:/${session}`, chatId: `ahp-chat:/${session}` }
 }
 
 // Old signed records must reach the parser as untrusted input, not as SessionLink.

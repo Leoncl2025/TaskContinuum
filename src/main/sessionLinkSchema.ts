@@ -8,11 +8,11 @@ export const sessionOwnerSchema = z.object({ clientId: z.uuid(), machineName: re
 export const sessionLinkSchema = agentHostTargetSchema.extend({ provider: z.literal('agent-host') }).strict()
 
 export function sessionLinkKey(link: SessionLink): string {
-  return `${link.provider}:${link.owner.clientId}:${link.hostId}:${link.sessionId}`
+  return `${link.provider}:${link.owner.clientId}:${link.sessionId}`
 }
 
 export const sessionLinksDocumentSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(2),
   bindings: z.record(sessionLinkTaskIdSchema, sessionLinkSchema),
 }).strict().superRefine((value, context) => {
   const sessions = new Set<string>()

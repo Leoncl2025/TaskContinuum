@@ -20,6 +20,7 @@ const resultSchema = localAgentHostCreateRequestSchema.extend({
   error: z.string().min(1).max(2000).optional(),
 }).strict()
 const recordSchema = z.object({
+  schemaVersion: z.literal(2),
   root: z.string().min(1).max(32768), createdAt: z.iso.datetime(),
   request: localAgentHostCreateRequestSchema, owner: agentHostTargetSchema.shape.owner,
   nativeSessionId: z.string().regex(/^copilotcli:\/[0-9a-f-]{36}$/),
@@ -28,7 +29,7 @@ const recordSchema = z.object({
 }).strict().superRefine((record, context) => {
   const { request, result } = record
   if (request.operationId !== result.operationId || request.hostId !== result.hostId
-    || result.session && (result.session.hostId !== request.hostId || result.session.sessionId !== record.nativeSessionId
+    || result.session && (result.session.sessionId !== record.nativeSessionId
       || JSON.stringify(result.session.owner) !== JSON.stringify(record.owner))) {
     context.addIssue({ code: 'custom', message: 'Local creation identity changed.' })
   }
@@ -136,7 +137,7 @@ export class LocalAgentHostCreationService {
       if (records.length >= 1000) throw new Error('The local creation history limit was reached. Existing records were not discarded.')
       if (this.running.size >= 16) throw new Error('Too many local creation operations are active.')
       if (records.some((record) => record.root === canonical && record.result.state !== 'failed')) throw new Error('This workspace already has a local creation operation. Resume that operation instead of creating another session.')
-      const record: CreationRecord = { root: canonical, createdAt: new Date().toISOString(), request, owner, nativeSessionId: `copilotcli:/${randomUUID()}`,
+      const record: CreationRecord = { schemaVersion: 2, root: canonical, createdAt: new Date().toISOString(), request, owner, nativeSessionId: `copilotcli:/${randomUUID()}`,
         phase: 'reserved', nativeAcknowledged: false, version: 0, result: { ...request, state: 'creating' } }
       await this.verifyOwner(record)
       await this.current(authorize)
@@ -229,7 +230,7 @@ export class LocalAgentHostCreationService {
 
   private async accept(record: CreationRecord, inspected: AgentHostCreationInspection): Promise<CreationRecord> {
     if (inspected.state !== 'ready') return this.replace(record, { result: { ...record.result, state: inspected.state === 'failed' ? 'failed' : 'uncertain', nativeLifecycle: inspected.state, error: inspected.error } })
-    if (inspected.session.sessionId !== record.nativeSessionId || inspected.session.hostId !== record.request.hostId
+    if (inspected.session.sessionId !== record.nativeSessionId
       || JSON.stringify(inspected.session.owner) !== JSON.stringify(record.owner)
       || record.result.session && agentHostKey(record.result.session) !== agentHostKey(inspected.session)) throw new AgentHostCreationError('The exact local session identity changed. No replacement session or chat was selected.')
     return this.replace(record, { result: resultSchema.parse({ ...record.request, state: 'ready', session: inspected.session, nativeLifecycle: inspected.nativeLifecycle }) })

@@ -24,7 +24,7 @@ async function fixture() {
   const otherWorkspace = join(root, 'other-tasks')
   const profile = join(root, 'client')
   await Promise.all([mkdir(workspace), mkdir(otherWorkspace)])
-  const target: AgentHostTarget = { hostId: 'native-host-123', sessionId: 'copilotcli:/original', chatId: 'ahp-chat:/original', owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+  const target: AgentHostTarget = { sessionId: 'copilotcli:/original', chatId: 'ahp-chat:/original', owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
   const host = new VSCodeDeviceHost(join(root, 'owner'), protector)
   host.setAgentHostAccess({ describe: async () => ({ ...target, title: 'Original chat', provider: 'copilotcli', updatedAt: new Date().toISOString(), canSend: true }) } as unknown as AgentHostRegistry, async () => [target])
   const resources: { client?: VSCodeDeviceClient; ssh?: Awaited<ReturnType<typeof startSessionSshHost>> } = {}

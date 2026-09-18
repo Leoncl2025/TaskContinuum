@@ -198,7 +198,7 @@ it('links A/B/C over real SSH and converges immediate binding publication throug
     expect(pairs).toHaveLength(2)
     for (const pair of pairs) expect(pair.workspaces).toEqual([{ root: await canonicalPolicyRoot(peer.folder), canSend: true }])
   }
-  const target = { hostId: 'host_machine_b', sessionId: 'copilotcli:/original-session', chatId: 'ahp-chat:/original-chat', owner: { clientId: b.identity.clientId, machineName: b.identity.machineName } }
+  const target = { sessionId: 'copilotcli:/original-session', chatId: 'ahp-chat:/original-chat', owner: { clientId: b.identity.clientId, machineName: b.identity.machineName } }
   a.holdPublication()
   const before = await readRepositorySessionLinks(a.folder)
   await updateRepositoryAgentHostLink(a.folder, 'T-0001', target, before.revision)
@@ -310,8 +310,8 @@ it('upgrades saved enrolled links and creates and assigns with write access with
   const result = await client.status(a.folder, started.operationId, async () => {})
   expect(native.creations).toHaveLength(1)
   expect(native.calls.some((call) => call.method === 'dispatchAction')).toBe(false)
-  const { hostId, sessionId, chatId, owner: sessionOwner } = result.session!
-  const binding = { provider: 'agent-host', hostId, sessionId, chatId, owner: sessionOwner }
+  const { sessionId, chatId, owner: sessionOwner } = result.session!
+  const binding = { provider: 'agent-host', sessionId, chatId, owner: sessionOwner }
   expect((await readRepositorySessionLinks(a.folder)).document.bindings['T-0001']).toEqual(binding)
   expect((await readRepositorySessionLinks(b.folder)).document.bindings['T-0001']).toEqual(binding)
   await b.service.revokeDevice(b.folder, a.identity.clientId)
@@ -396,7 +396,7 @@ it('initializes without legacy bindings and restores an unopened immutable backe
   const { peers, remote } = await fixture(1)
   const [peer] = peers
   const owner = { clientId: peer.identity.clientId, machineName: peer.identity.machineName }
-  const target = { hostId: 'local_host_a', sessionId: 'copilotcli:/owner-session', chatId: 'ahp-chat:/owner-chat', owner }
+  const target = { sessionId: 'copilotcli:/owner-session', chatId: 'ahp-chat:/owner-chat', owner }
   const legacyFile = join(peer.folder, '.taskcontinuum', 'session-bindings.json')
   await mkdir(join(peer.folder, '.taskcontinuum'), { recursive: true })
   await writeFile(legacyFile, '{ unsupported legacy configuration')
@@ -456,7 +456,7 @@ it('opens an enrolled workspace without upstream and retains local edits and tru
   expect(status.state).toBe('error')
   expect(status.error).toMatch(/upstream|track/i)
   const target = {
-    hostId: 'local_host_a', sessionId: 'copilotcli:/untracked-session', chatId: 'ahp-chat:/untracked-chat',
+    sessionId: 'copilotcli:/untracked-session', chatId: 'ahp-chat:/untracked-chat',
     owner: { clientId: peer.identity.clientId, machineName: peer.identity.machineName },
   }
   const current = await readRepositorySessionLinks(peer.folder)

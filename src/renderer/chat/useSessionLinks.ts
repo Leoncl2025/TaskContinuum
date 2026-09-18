@@ -4,9 +4,10 @@ import type { WorkspaceSnapshot } from '../../shared/workspace'
 import type { SessionBinding, SessionBindings } from './sessionBindings'
 
 function uiBindings(snapshot: SessionLinksSnapshot): SessionBindings {
+  if (snapshot.document.schemaVersion !== 2) throw new Error('Workspace session bindings require schema v2. Old bindings are not migrated.')
   return Object.fromEntries(Object.entries(snapshot.document.bindings).map(([taskId, link]) => {
-    if (link.provider !== 'agent-host' || !link.hostId || !link.sessionId || !link.chatId || !link.owner?.clientId || !link.owner.machineName) throw new Error('Workspace session bindings must contain owned Agent Host targets. Legacy session configuration is not supported.')
-    return [taskId, { id: link.sessionId, title: 'Agent Host', owner: link.owner, ownerIsRemote: link.owner.clientId !== snapshot.localOwner?.clientId, agentHost: { hostId: link.hostId, sessionId: link.sessionId, chatId: link.chatId, owner: link.owner } }]
+    if (link.provider !== 'agent-host' || 'hostId' in link || !link.sessionId || !link.chatId || !link.owner?.clientId || !link.owner.machineName) throw new Error('Workspace session bindings must contain owned logical Agent Host targets. Host-pinned bindings are not supported.')
+    return [taskId, { id: link.sessionId, title: 'Agent Host', owner: link.owner, ownerIsRemote: link.owner.clientId !== snapshot.localOwner?.clientId, agentHost: { sessionId: link.sessionId, chatId: link.chatId, owner: link.owner } }]
   }))
 }
 
@@ -99,9 +100,9 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
   async function attach(taskId: string, binding: SessionBinding): Promise<void> {
     await run(({ workspace, bridge, snapshot }) => {
       const target = binding.agentHost
-      if (!target || !target.hostId || !target.sessionId || !target.chatId || !target.owner?.clientId || !target.owner.machineName || 'vscodeWorkspaceStorageId' in binding || 'remoteMachineName' in binding) throw new Error('Workspace session links require an owned Agent Host target. Local Copilot and VS Code session bindings are not supported.')
+      if (!target || 'hostId' in target || !target.sessionId || !target.chatId || !target.owner?.clientId || !target.owner.machineName || 'vscodeWorkspaceStorageId' in binding || 'remoteMachineName' in binding) throw new Error('Workspace session links require an owned logical Agent Host target. Host-pinned, Local Copilot and VS Code session bindings are not supported.')
       if (binding.id !== target.sessionId || binding.owner && (binding.owner.clientId !== target.owner.clientId || binding.owner.machineName !== target.owner.machineName)) throw new Error('The selected session and owner must match the Agent Host target.')
-      return bridge.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: target.sessionId, agentHost: { hostId: target.hostId, chatId: target.chatId }, owner: target.owner, expectedRevision: snapshot.revision })
+      return bridge.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: target.sessionId, agentHost: { chatId: target.chatId }, owner: target.owner, expectedRevision: snapshot.revision })
     })
   }
 
