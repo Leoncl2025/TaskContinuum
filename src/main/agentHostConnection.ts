@@ -106,6 +106,7 @@ export class AgentHostConnection {
     if (this.connected) return
     if (this.opening) return this.opening
     clearTimeout(this.retry)
+    this.retry = undefined
     const operation = (async () => {
       await this.load()
       if (this.closed) throw new Error('Agent Host view is closed.')

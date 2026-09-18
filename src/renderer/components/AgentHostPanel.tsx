@@ -90,16 +90,41 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   useEffect(() => {
     let active = true
     let watchId: string | undefined
+    let connected = false
+    let connectionGeneration = 0
+    let loadingModels = false
+    let loadedModels = false
     const selected = { sessionId, chatId, owner: { clientId, machineName } }
     if (!bridge) return
+    const loadModels = () => {
+      if (!active || loadingModels) return
+      loadingModels = true
+      const generation = connectionGeneration
+      let failed = false
+      void bridge.models(selected).then((models) => {
+        loadedModels = true
+        if (active) setCatalog({ key: catalogKey, models, ...(!models.length ? { error: 'No available models. Check model access on the owner device, then reconnect.' } : {}) })
+      }).catch((failure: unknown) => {
+        failed = true
+        loadedModels = false
+        if (active) setCatalog({ key: catalogKey, models: [], error: failure instanceof Error ? failure.message : 'The owner model catalog is unavailable. Reconnect to retry.' })
+      }).finally(() => {
+        loadingModels = false
+        if (connected && connectionGeneration !== generation && (failed || generation > 0)) loadModels()
+      })
+    }
     const unlisten = bridge.onView((event) => {
-      if (active && (!watchId || event.id === watchId) && agentHostKey(event.view.target) === agentHostKey(selected)) setView(event.view)
+      if (active && (!watchId || event.id === watchId) && agentHostKey(event.view.target) === agentHostKey(selected)) {
+        const recovered = event.view.state === 'connected' && !connected
+        connected = event.view.state === 'connected'
+        setView(event.view)
+        if (recovered) {
+          connectionGeneration++
+          if (!loadedModels || connectionGeneration > 1) loadModels()
+        }
+      }
     })
-    void bridge.models(selected).then((models) => {
-      if (active) setCatalog({ key: catalogKey, models, ...(!models.length ? { error: 'No available models. Check model access on the owner device, then reconnect.' } : {}) })
-    }).catch((failure: unknown) => {
-      if (active) setCatalog({ key: catalogKey, models: [], error: failure instanceof Error ? failure.message : 'The owner model catalog is unavailable. Reconnect to retry.' })
-    })
+    loadModels()
     void bridge.watch(selected).then((id) => { if (active) { watchId = id; setError(undefined) } else void bridge.unwatch(id).catch(() => undefined) }).catch((failure: unknown) => { if (active) setError(failure instanceof Error ? failure.message : 'Agent Host access is unavailable.') })
     return () => { active = false; unlisten(); if (watchId) void bridge.unwatch(watchId).catch(() => undefined) }
   }, [bridge, sessionId, chatId, clientId, machineName, catalogKey])
