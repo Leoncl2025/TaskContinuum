@@ -125,7 +125,7 @@ remain on B. Recovery obtains authoritative snapshots; it never replays a send.
 An unknown delivery blocks further sends until its original turn is observed.
 Read-only participants cannot send or cancel.
 
-Choose **Model** immediately above the Agent Host message input once. Task Continuum
+Choose a model in the compact toolbar at the bottom of the Agent Host message input once. Task Continuum
 remembers your last explicit model and options in this device's local profile,
 separately for each Agent Host owner and provider. Reopening a chat, switching tasks,
 starting another chat on the same owner/provider, or restarting the app restores
@@ -146,7 +146,11 @@ Both desktops need this update for remote model selection; an older owner gatewa
 is rejected with an update message. Model selection does not change native tool
 approvals or create a new conversation.
 
-**Model options** beside the composer are generated from the selected model's
+The toolbar shows a short options summary, such as **Medium · 872K**. Click it
+to open **Model options** above the input without shrinking the conversation.
+Escape, the close button, clicking outside, or moving focus outside dismisses the
+popup. Models without options do not show an empty options panel.
+**Model options** are generated from the selected model's
 Host-provided `configSchema`, including Thinking Level and Context Size when
 advertised. Enum labels come from the Host; numeric and boolean values retain
 their types through IPC and the paired gateway. **Default** omits that override

@@ -12,7 +12,7 @@ import { ChatImagePicker, ChatImages, ChatImageStatus } from './ChatImages'
 import { useChatImageInput } from '../chat/useChatImageInput'
 import { readModelPreference, saveModelPreference } from '../chat/modelPreferences'
 import { Icon, IconButton } from './Primitives'
-import { AgentHostModelConfig } from './AgentHostModelConfig'
+import { AgentHostModelOptions } from './AgentHostModelConfig'
 import { modelConfigErrors } from '../../shared/agentHostModelConfig'
 import type { ModelConfig } from '../../shared/agentHostModelConfig'
 
@@ -225,13 +225,20 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       {onSessions && !view && (error || currentCatalog?.error) && <button type="button" className="text-button" disabled={busy} onClick={onSessions}><Icon name="link" />Review session link</button>}
       {modelStatus && <p className="message-notice" role="status">{modelStatus}</p>}
       {preferenceError && <p className="copilot-error message-notice" role="alert">{preferenceError}</p>}
-      <div className="ahp-model-controls">
-        <label title="Your model and options are remembered on this device for this Agent Host provider.">Model<select aria-label="Agent Host model" value={modelId} disabled={busy || pending || responding || view?.readOnly || !models.length} onChange={(event) => chooseModel(event.target.value)}><option value="">{!currentCatalog ? 'Loading models...' : !models.length ? 'Models unavailable' : 'Choose a model'}</option>{modelId && !modelReady && <option value={modelId} disabled>{modelId} (unavailable)</option>}{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
-        <IconButton icon="refresh" label="Retry loading models" disabled={!bridge || busy || !currentCatalog} onClick={() => { void reconnect() }} />
-      </div>
-      {selectedModel && <AgentHostModelConfig schema={selectedModel.configSchema} config={config} disabled={busy || pending || responding || Boolean(view?.readOnly)} onChange={(config) => chooseModel(modelId, config)} />}
       {configErrors.map((message) => <p key={message} className="copilot-error message-notice" role="alert">{message}</p>)}
-      <div className="composer"><ChatImages images={images} onRemove={imageInput.remove} disabled={busy} /><textarea id="chat-composer" aria-label="Message Agent Host" placeholder="Message original Agent" rows={3} maxLength={4000} value={draft} onChange={(event) => setDraft(event.target.value)} onPaste={imageInput.paste} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} /><div className="composer-toolbar"><ChatImagePicker onFiles={imageInput.add} disabled={busy || imageInput.reading} /><span className="vscode-composer-identity"><Icon name="link" />Original chat</span>{activeTurn ? <IconButton icon="debug-stop" label="Stop Agent Host response" disabled={busy || view?.readOnly || view?.state !== 'connected'} onClick={() => { void cancel() }} /> : <button className="send-button" type="submit" aria-label="Send to Agent Host" title="Send to Agent Host" disabled={!canSend || imageInput.reading || !draft.trim() && !images.length}><Icon name="arrow-up" /></button>}</div></div>
+      <div className="composer">
+        <ChatImages images={images} onRemove={imageInput.remove} disabled={busy} />
+        <textarea id="chat-composer" aria-label="Message Agent Host" placeholder="Message original Agent" rows={3} maxLength={4000} value={draft} onChange={(event) => setDraft(event.target.value)} onPaste={imageInput.paste} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} />
+        <div className="composer-toolbar">
+          <ChatImagePicker onFiles={imageInput.add} disabled={busy || imageInput.reading} />
+          <div className="ahp-model-controls">
+            <label title={selectedModel?.name ?? 'Your model and options are remembered on this device for this Agent Host provider.'}><Icon name="copilot" /><select aria-label="Agent Host model" value={modelId} disabled={busy || pending || responding || view?.readOnly || !models.length} onChange={(event) => chooseModel(event.target.value)}><option value="">{!currentCatalog ? 'Loading models...' : !models.length ? 'Models unavailable' : 'Choose a model'}</option>{modelId && !modelReady && <option value={modelId} disabled>{modelId} (unavailable)</option>}{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
+          </div>
+          {selectedModel && <AgentHostModelOptions key={`${key}:${selectedModel.provider}:${modelId}`} schema={selectedModel.configSchema} config={config} disabled={busy || pending || responding || Boolean(view?.readOnly)} onChange={(config) => chooseModel(modelId, config)} />}
+          <IconButton icon="refresh" label="Retry loading models" disabled={!bridge || busy || !currentCatalog} onClick={() => { void reconnect() }} />
+          {activeTurn ? <IconButton icon="debug-stop" label="Stop Agent Host response" disabled={busy || view?.readOnly || view?.state !== 'connected'} onClick={() => { void cancel() }} /> : <button className="send-button" type="submit" aria-label="Send to Agent Host" title="Send to Agent Host" disabled={!canSend || imageInput.reading || !draft.trim() && !images.length}><Icon name="arrow-up" /></button>}
+        </div>
+      </div>
     </form>
   </aside>
 }

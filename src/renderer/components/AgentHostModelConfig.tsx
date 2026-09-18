@@ -1,8 +1,54 @@
+import { useEffect, useId, useRef, useState } from 'react'
 import type { ConfigSchema } from '@microsoft/agent-host-protocol'
 import { modelConfigValueLabel } from '../../shared/agentHostModelConfig'
 import type { ModelConfig } from '../../shared/agentHostModelConfig'
+import { Icon, IconButton } from './Primitives'
 
-export function AgentHostModelConfig({ schema, config, disabled, onChange }: { schema?: ConfigSchema; config: ModelConfig; disabled: boolean; onChange(config: ModelConfig): void }) {
+type ModelConfigProps = { schema?: ConfigSchema; config: ModelConfig; disabled: boolean; onChange(config: ModelConfig): void }
+
+export function AgentHostModelOptions({ schema, config, disabled, onChange }: ModelConfigProps) {
+  const [open, setOpen] = useState(false)
+  const id = useId()
+  const root = useRef<HTMLDivElement>(null)
+  const trigger = useRef<HTMLButtonElement>(null)
+  const popup = useRef<HTMLDivElement>(null)
+  const properties = Object.entries(schema?.properties ?? {})
+  const summary = properties.flatMap(([key, property]) => {
+    const value = Object.hasOwn(config, key) ? config[key] : property.default
+    return value === undefined || typeof value === 'object' && value !== null ? [] : [modelConfigValueLabel(property, value)]
+  }).join(' · ') || 'Model options'
+  useEffect(() => {
+    if (!open) return
+    popup.current?.focus()
+    function dismiss(event: PointerEvent) {
+      if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false)
+    }
+    document.addEventListener('pointerdown', dismiss)
+    return () => document.removeEventListener('pointerdown', dismiss)
+  }, [open])
+  if (!properties.length && !Object.keys(config).length) return null
+  function close() {
+    setOpen(false)
+    trigger.current?.focus()
+  }
+  return <div className="ahp-model-options" ref={root} onBlur={(event) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false)
+  }} onKeyDown={(event) => {
+    if (event.key === 'Escape' && open) { event.preventDefault(); event.stopPropagation(); close() }
+    if (event.key === 'Enter' && event.target instanceof HTMLInputElement) event.preventDefault()
+  }}>
+    <button ref={trigger} type="button" className="ahp-options-trigger" aria-label="Model options" title={summary}
+      aria-haspopup="dialog" aria-expanded={open} aria-controls={open ? id : undefined} onClick={() => setOpen(!open)}>
+      <span>{summary}</span><Icon name="chevron-down" />
+    </button>
+    {open && <div ref={popup} id={id} className="ahp-options-popup" role="dialog" aria-label="Model options" tabIndex={-1}>
+      <header><strong>Model options</strong><IconButton icon="close" label="Close model options" onClick={close} /></header>
+      <AgentHostModelConfig schema={schema} config={config} disabled={disabled} onChange={onChange} />
+    </div>}
+  </div>
+}
+
+export function AgentHostModelConfig({ schema, config, disabled, onChange }: ModelConfigProps) {
   function update(key: string, value: ModelConfig[string] | undefined): void {
     const next = { ...config }
     if (value === undefined) delete next[key]

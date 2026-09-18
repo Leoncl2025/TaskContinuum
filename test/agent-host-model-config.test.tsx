@@ -3,12 +3,79 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { ConfigSchema } from '@microsoft/agent-host-protocol'
-import { AgentHostModelConfig } from '../src/renderer/components/AgentHostModelConfig'
+import { AgentHostModelConfig, AgentHostModelOptions } from '../src/renderer/components/AgentHostModelConfig'
 import { agentHostModelConfigSchema, modelConfigErrors } from '../src/shared/agentHostModelConfig'
 import type { ModelConfig } from '../src/shared/agentHostModelConfig'
 import { modelConfigFixture } from './agent-host-model-fixture'
 
 describe('Host model configuration', () => {
+  it('keeps options collapsed, summarizes defaults and typed overrides, and supports keyboard and outside dismissal', async () => {
+    const changed = vi.fn()
+    function Harness() {
+      const [config, setConfig] = useState<ModelConfig>({})
+      return <><AgentHostModelOptions schema={modelConfigFixture} config={config} disabled={false} onChange={(value) => { setConfig(value); changed(value) }} /><button>Outside</button></>
+    }
+    const user = userEvent.setup()
+    render(<Harness />)
+    const trigger = screen.getByRole('button', { name: 'Model options' })
+    expect(trigger).toHaveTextContent('Medium · 272K')
+    expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    trigger.focus()
+    await user.keyboard('{Enter}')
+    expect(screen.getByRole('dialog', { name: 'Model options' })).toHaveFocus()
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Context Size' }), screen.getByRole('option', { name: '872K' }))
+    expect(changed).toHaveBeenLastCalledWith({ contextSize: 872000 })
+    expect(trigger).toHaveTextContent('Medium · 872K')
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(trigger).toHaveFocus()
+    await user.click(trigger)
+    await user.click(screen.getByRole('button', { name: 'Outside' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    await user.click(trigger)
+    await user.click(screen.getByRole('button', { name: 'Reset model options to defaults' }))
+    expect(trigger).toHaveTextContent('Medium · 272K')
+    await user.click(screen.getByRole('button', { name: 'Close model options' }))
+    expect(trigger).toHaveFocus()
+    expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    await user.click(trigger)
+    await user.tab()
+    expect(screen.getByRole('button', { name: 'Close model options' })).toHaveFocus()
+    await user.tab({ shift: true })
+    expect(trigger).toHaveFocus()
+    await user.tab({ shift: true })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('hides absent options but allows inspecting locked options and resetting stale overrides', async () => {
+    const changed = vi.fn()
+    const user = userEvent.setup()
+    const { rerender } = render(<AgentHostModelOptions config={{}} disabled={false} onChange={changed} />)
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+    rerender(<AgentHostModelOptions schema={modelConfigFixture} config={{ thinkingLevel: 'max' }} disabled onChange={changed} />)
+    await user.click(screen.getByRole('button', { name: 'Model options' }))
+    expect(screen.getByRole('combobox', { name: 'Thinking Level' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Reset model options to defaults' })).toBeDisabled()
+    rerender(<AgentHostModelOptions config={{ thinkingLevel: 'max' }} disabled={false} onChange={changed} />)
+    await user.click(screen.getByRole('button', { name: 'Reset model options to defaults' }))
+    expect(changed).toHaveBeenCalledExactlyOnceWith({})
+  })
+
+  it('does not submit a chat when confirming a free-form option with Enter', async () => {
+    const submitted = vi.fn()
+    const user = userEvent.setup()
+    render(<form onSubmit={(event) => { event.preventDefault(); submitted() }}>
+      <AgentHostModelOptions schema={{ type: 'object', properties: { budget: { type: 'number', title: 'Budget' } } }} config={{ budget: 42 }} disabled={false} onChange={vi.fn()} />
+      <button type="submit">Send</button>
+    </form>)
+    await user.click(screen.getByRole('button', { name: 'Model options' }))
+    await user.click(screen.getByRole('spinbutton', { name: 'Budget' }))
+    await user.keyboard('{Enter}')
+    expect(submitted).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
   it('preserves schema metadata and validates defaults, required options, types, and enum membership', () => {
     expect(agentHostModelConfigSchema.parse(modelConfigFixture)).toEqual(modelConfigFixture)
     expect(modelConfigErrors(modelConfigFixture, {})).toEqual([])
