@@ -152,7 +152,8 @@ describe('immutable task/session links', () => {
     const active = await backend(root)
     const first = await updateRepositoryAgentHostLink(root, 'T-0001', agentHostTargetFixture(), active.snapshot.revision)
     const hostPinned = { ...agentHostTargetFixture(), hostId: 'host-other' }
-    await expect(updateRepositoryAgentHostLink(root, 'T-0002', hostPinned, first.revision)).rejects.toThrow()
+    expect(() => updateRepositoryAgentHostLink(root, 'T-0002', hostPinned, first.revision)).toThrow('hostId')
+    expect(await readRepositorySessionLinks(root)).toEqual(first)
     const second = await updateRepositoryAgentHostLink(root, 'T-0002', agentHostTargetFixture('two'), first.revision)
     const anotherOwner = { ...immutableOwner, clientId: '00000000-0000-4000-8000-000000000002' }
     const third = await updateRepositoryAgentHostLink(root, 'T-0003', agentHostTargetFixture('one', anotherOwner), second.revision)

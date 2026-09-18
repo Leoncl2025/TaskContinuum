@@ -5,7 +5,7 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
 
 export default tseslint.config(
-  { ignores: ['node_modules/**', 'out/**', 'vscode-bridge/out/**', '.runtime/**', 'artifacts/**', 'test-results/**', 'playwright-report/**', 'coverage/**'] },
+  { ignores: ['node_modules/**', 'out/**', 'dist/**', 'vscode-bridge/out/**', '.runtime/**', 'artifacts/**', 'test-results/**', 'playwright-report/**', 'coverage/**'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   { languageOptions: { globals: globals.node } },

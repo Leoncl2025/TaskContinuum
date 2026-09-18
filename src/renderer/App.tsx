@@ -22,6 +22,7 @@ import { AgentHostPanel } from './components/AgentHostPanel'
 import { AgentHostSessionsDialog } from './components/AgentHostSessionsDialog'
 import type { AgentHostSession } from '../shared/agentHost'
 import { agentHostKey } from '../shared/agentHost'
+import appIcon from '../../build/icon.png'
 
 type DialogName = 'quick-open' | 'settings' | 'clear-chat' | 'remote-devices' | 'agent-host-sessions' | null
 
@@ -304,7 +305,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
     }
   }}>
     <header className="titlebar">
-      <div className="app-brand"><span className="brand-mark"><Icon name="layers" /></span><span>Task Continuum</span></div>
+      <div className="app-brand"><span className="brand-mark"><img src={appIcon} alt="" width={24} height={24} /></span><span>Task Continuum</span></div>
       <button type="button" className="command-center" onClick={() => { setQuickQuery(''); setDialog('quick-open') }}><Icon name="search" /><span>Search tasks and jump back in</span><kbd>Ctrl P</kbd></button>
       <div className="titlebar-actions">{workspaces.available && <IconButton icon="folder-opened" label="Switch workspace folder" disabled={workspaceLocked || workspaces.busy} onClick={openWorkspace} />}{!compact && <><IconButton icon="layout-sidebar-left" label="Toggle task sidebar" title="Toggle task sidebar (Ctrl+B)" aria-pressed={sidebarVisible} onClick={toggleSidebar} /><IconButton icon="comment-discussion" label="Toggle chat panel" title="Toggle chat panel (Ctrl+Alt+B)" aria-pressed={chatVisible} onClick={toggleChat} /><IconButton icon="layout-sidebar-right" label="Toggle task details" title="Toggle task details (Ctrl+Alt+D)" aria-pressed={detailsVisible} onClick={toggleDetails} /></>}</div>
       {window.desktop && <div className="window-controls"><IconButton icon="chrome-minimize" label="Minimize window" onClick={() => windowAction('minimize')} /><IconButton icon="chrome-maximize" label="Maximize or restore window" onClick={() => windowAction('toggleMaximize')} /><IconButton icon="chrome-close" label="Close window" onClick={() => windowAction('close')} /></div>}

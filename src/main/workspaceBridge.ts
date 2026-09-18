@@ -7,6 +7,9 @@ import type { AgentHostTarget } from '../shared/agentHost'
 
 export function registerWorkspaceBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, verifyAgentHost?: (root: string, target: AgentHostTarget) => Promise<AgentHostTarget>, onOpen?: (root: string) => Promise<void>) {
   const store = new WorkspaceStore(app.getPath('userData'), process.env.TASKCONTINUUM_WORKSPACE, verifyAgentHost)
+  const taskCli = app.isPackaged
+    ? join(dirname(app.getAppPath()), 'cli', 'task-documents.cjs')
+    : join(app.getAppPath(), 'scripts', 'task-documents.mjs')
   async function authorize(state: WorkspaceState): Promise<WorkspaceState> {
     if (state.current) await onOpen?.(state.current.root)
     return state
@@ -33,7 +36,7 @@ export function registerWorkspaceBridge(requireWindow: (event: IpcMainInvokeEven
   handle('create-repository', async (_window, request) => authorize(await store.createRepository(request)))
   handle('task-creation-context', async (_window, id) => store.getTaskCreationContext(id))
   handle('create-task', async (_window, request) => store.createTask(request))
-  handle('task-agent-instructions', async (_window, request) => store.getTaskAgentInstructions(request, join(app.getAppPath(), 'scripts', 'task-documents.mjs')))
+  handle('task-agent-instructions', async (_window, request) => store.getTaskAgentInstructions(request, taskCli))
   handle('repository-status', async (_window, id) => store.getRepositoryStatus(id))
   handle('open-repository-creation', async (_window, id) => { await shell.openExternal(await store.getRepositoryCreationUrl(id)) })
   handle('repository-push-plan', async (_window, request) => store.getRepositoryPushPlan(request))

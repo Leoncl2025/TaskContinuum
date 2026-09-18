@@ -48,6 +48,20 @@ key files are not deleted or imported into the new runtime.
 - Real task metadata, statuses, requirements, plans, and acceptance criteria read from
     the selected AgentDesk folder; manual refresh picks up external file changes.
 
+## Desktop releases
+
+Download the Windows x64 installer or ZIP from
+[GitHub Releases](https://github.com/Leoncl2025/TaskContinuum/releases).
+The installer installs for the current user by default. For the ZIP, extract the
+whole archive before running `TaskContinuum.exe`; keep its resources beside it.
+This release is unsigned, so Windows may display an unknown-publisher warning.
+Verify the download against the release's `SHA256SUMS.txt` before running it.
+
+The desktop bundles Electron and does not need Node.js or npm to launch. Git is
+required for repository operations; the standalone task CLI requires Node.js 24.
+Native chat and remote transport still require the separately installed and
+authorized services described below.
+
 ## Requirements
 
 - Node.js 24 LTS and npm. Verified with Node 24.14.1 and npm 11.11.0 on Windows.
@@ -78,10 +92,13 @@ Run commands from this repository's root. Dependencies are pinned in
 | `npm run typecheck` | Check main/preload, browser, and test environments separately. |
 | `npm run lint` | Run ESLint with no warnings permitted. |
 | `npm test` | Run unit and React component tests. |
-| `npm run build` | Type-check and build production main/preload/renderer output. |
+| `npm run build` | Type-check and build production main/preload/renderer output and the standalone task CLI. |
 | `npm start` | Open the already-built Electron application. |
 | `npm run check` | Run lint, unit tests, and production build. |
 | `npm run test:e2e` | Build and run real Electron tests; native AHP opt-ins are described below. |
+| `npm run icon:generate` | Render the approved SVG into a PNG and multi-resolution ICO using the installed Electron runtime. |
+| `npm run dist:win` | Build Windows x64 NSIS installer and ZIP in `dist`; never upload automatically. |
+| `npm run test:packaged` | Verify the packaged desktop, icon, standalone task CLI, and restart recovery after packaging. |
 
 Electron 44 exposes an explicit `install-electron` command instead of a package
 `postinstall` script. This project's `postinstall` runs that installer automatically.
@@ -96,6 +113,34 @@ preview if its port is already occupied.
 Desktop tests use the installed Electron executable, not a downloaded Playwright
 browser. Their isolated profiles, screenshots, and reports are ignored by Git.
 Screenshots cover dark, light, contextual chat, and compact layouts.
+
+### Windows release workflow
+
+Build from a clean, committed checkout with Node.js 24. Run lint, relevant unit
+and desktop tests, then `npm run dist:win` and `npm run test:packaged`.
+Set `TASKCONTINUUM_PACKAGED_EXECUTABLE` to an absolute executable path to test a
+separately extracted ZIP. Tests use isolated temporary profiles and workspaces.
+
+The Task Continuum icon uses the supplied AgentDesk task/session logo: a coral
+task node connected to three blue session cards. The approved source is
+[build/icon.svg](build/icon.svg); checked-in
+[build/icon.ico](build/icon.ico) contains 16, 24, 32, 48, 64, 128 and 256 pixel
+images, while [build/icon.png](build/icon.png) supplies the window icon.
+Regenerate them with [scripts/generate-icon.mjs](scripts/generate-icon.mjs).
+No Microsoft or GitHub product logo is used as the application icon.
+
+Only production output and dependencies are packaged. The standalone CLI lives
+at `resources/cli/task-documents.cjs`, outside ASAR so external Node.js can invoke
+it. The Dev Tunnels SSH peer packages are direct, pinned production dependencies
+to ensure they are included. Profiles, credentials, source tests and local
+workspaces are not release inputs. Dependency licenses, Electron credits and
+[third-party notices](THIRD_PARTY_NOTICES.md) accompany the distribution.
+
+Create a `v<version>` tag at the verified commit matching `package.json`, upload
+the installer, ZIP and SHA-256 checksums to a draft GitHub Release, verify the
+uploaded files, then publish. Packaging never publishes to npm, creates tags or
+uploads files automatically. Code signing is separate from the application icon;
+never claim a release is signed unless its signature was verified.
 
 ## Agent Host Sessions
 

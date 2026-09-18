@@ -24,10 +24,4 @@ registerHooks({
   },
 })
 
-const { run } = await import('../src/main/taskDocuments/cli.ts')
-try {
-  process.exitCode = run(process.argv.slice(2), process.cwd())
-} catch (error) {
-  console.error(`ERROR [DOCUMENT_COMMAND_FAILED] ${error instanceof Error ? error.message : String(error)}`)
-  process.exitCode = 1
-}
+await import('../src/main/taskDocuments/entry.ts')

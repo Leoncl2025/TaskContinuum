@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => {
   }
   return {
     state,
+    isPackaged: false,
+    appPath: 'Q:\\TaskContinuum',
     handlers: new Map<string, (event: unknown, value?: unknown) => Promise<unknown>>(),
     choose: vi.fn(async () => ({ canceled: false, filePaths: ['Q:\\chosen-parent'] })),
     openExternal: vi.fn<(url: string) => Promise<void>>(async () => {}),
@@ -35,7 +37,7 @@ const mocks = vi.hoisted(() => {
 })
 
 vi.mock('electron', () => ({
-  app: { getPath: () => 'Q:\\profile', getAppPath: () => 'Q:\\TaskContinuum' },
+  app: { get isPackaged() { return mocks.isPackaged }, getPath: () => 'Q:\\profile', getAppPath: () => mocks.appPath },
   ipcMain: { handle: (name: string, handler: (event: unknown, value?: unknown) => Promise<unknown>) => { mocks.handlers.set(name, handler) } },
   dialog: { showOpenDialog: mocks.choose },
   shell: { openExternal: mocks.openExternal },
@@ -49,6 +51,8 @@ vi.mock('../src/main/workspaceStore', () => ({
 beforeEach(() => {
   vi.clearAllMocks()
   mocks.handlers.clear()
+  mocks.isPackaged = false
+  mocks.appPath = 'Q:\\TaskContinuum'
   mocks.choose.mockResolvedValue({ canceled: false, filePaths: ['Q:\\chosen-parent'] })
 })
 
@@ -127,6 +131,15 @@ describe('workspace repository IPC boundary', () => {
     expect(mocks.store.getTaskAgentInstructions).toHaveBeenCalledExactlyOnceWith(agent, 'Q:\\TaskContinuum\\scripts\\task-documents.mjs')
     expect(mocks.openExternal).not.toHaveBeenCalled()
     expect(authorize).not.toHaveBeenCalled()
+  })
+
+  it('exposes the standalone CLI outside the application archive in packaged builds', async () => {
+    mocks.isPackaged = true
+    mocks.appPath = 'Q:\\TaskContinuum\\resources\\app.asar'
+    const { invoke } = setup()
+    const request = { workspaceId: mocks.state.current!.id, goal: 'Create a packaged task' }
+    await invoke('task-agent-instructions', request)
+    expect(mocks.store.getTaskAgentInstructions).toHaveBeenCalledExactlyOnceWith(request, 'Q:\\TaskContinuum\\resources\\cli\\task-documents.cjs')
   })
 
   it('does not open a browser for rejected workspace IDs and surfaces native browser errors', async () => {

@@ -332,7 +332,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     expect(worker.native.calls.filter((call) => call.method === 'dispatchAction')).toEqual([])
   })
 
-  it.each([false, true])('recovers a verified provisional session only with the durable acknowledgement (legacy record=%s)', async (legacy) => {
+  it.each([false, true])('recovers only valid durable provisional-session records (missing acknowledgement=%s)', async (missingAcknowledgement) => {
     const worker = await fixture()
     worker.native.setLifecycle('creating')
     const read = worker.native.pauseSessionRead()
@@ -340,14 +340,19 @@ describe('worker-authoritative native Agent Host creation', () => {
     await expect.poll(async () => (await records(worker))[0].nativeAcknowledged).toBe(true)
     expect((await readRepositorySessionLinks(worker.workspace)).document.bindings).toEqual({})
     await worker.restart(async () => {
-      if (!legacy) return
+      if (!missingAcknowledgement) return
       const saved = await records(worker)
       delete saved[0].nativeAcknowledged
       await writeFile(join(worker.profile, 'agent-host-creation', 'operations.json'), JSON.stringify(saved))
     })
     read.resolve()
-    if (legacy) {
-      expect((await worker.status()).state).toBe('uncertain')
+    if (missingAcknowledgement) {
+      const file = join(worker.profile, 'agent-host-creation', 'operations.json')
+      const saved = await readFile(file, 'utf8')
+      await expect(worker.status()).rejects.toMatchObject({ status: 503 })
+      await expect(worker.begin()).rejects.toMatchObject({ status: 503 })
+      await expect(worker.bind(worker.request.expectedRevision)).rejects.toMatchObject({ status: 503 })
+      expect(await readFile(file, 'utf8')).toBe(saved)
       expect((await readRepositorySessionLinks(worker.workspace)).document.bindings).toEqual({})
     } else {
       const session = await ready(worker)

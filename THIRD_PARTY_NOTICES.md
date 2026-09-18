@@ -25,17 +25,16 @@ product affiliation or grant permission to use hosted Copilot services.
 - Source: https://github.com/electron/electron
 - License: MIT; bundled Chromium, Node.js, and other components have their own notices.
 - Electron's installed distribution retains its license and Chromium credits.
-- Any future installer must include the applicable Electron and dependency notices.
+- Windows distributions retain `LICENSE.electron.txt`, `LICENSES.chromium.html`
+  and production dependency notices (under `node_modules` in `resources/app.asar`).
 
-## GitHub Copilot SDK
+## Microsoft Agent Host Protocol
 
-- Source: https://github.com/github/copilot-sdk
-- Package: `@github/copilot-sdk` 1.0.13; SDK code license: MIT.
-- The installed platform package includes Copilot runtime 1.0.83. Its notices and
-  applicable GitHub service terms remain in effect; use requires an authorized account.
-- SDK dependencies, including vscode-jsonrpc, Zod, and Koffi, retain their upstream
-  notices in the dependency installation. Include the complete license inventory
-  before distributing any installer.
+- Source: https://github.com/microsoft/agent-host-protocol
+- Package: `@microsoft/agent-host-protocol` 0.9.0.
+- License: MIT. Attribution: Microsoft Corporation.
+- VS Code, Copilot SDK and the Copilot runtime are not redistributed. Native
+  hosts and provider accounts are installed and authorized independently.
 
 ## Markdown and workspace parsing
 
@@ -69,9 +68,11 @@ product affiliation or grant permission to use hosted Copilot services.
 
 - `@microsoft/dev-tunnels-connections`, `@microsoft/dev-tunnels-management`, and
   `@microsoft/dev-tunnels-contracts` 1.3.56: https://github.com/microsoft/dev-tunnels (MIT).
+- `@microsoft/dev-tunnels-ssh` and `@microsoft/dev-tunnels-ssh-tcp` 3.12.42:
+  https://github.com/microsoft/dev-tunnels-ssh (MIT).
 - `ssh2` 1.17.0: https://github.com/mscdex/ssh2 (MIT). It provides the application-owned
   restricted SSH server and client, as well as isolated test fixtures.
-- These packages run in Electron main, not in the companion extension. Their SSH,
+- These packages run in Electron main. Their SSH,
   WebSocket, HTTP, and other transitive packages retain their upstream license files.
 - The official Dev Tunnel CLI is installed independently and is not redistributed
   by this app. Microsoft service terms and organizational policies still apply.
@@ -106,10 +107,8 @@ SOFTWARE.
 `@types/ssh2` retains its upstream DefinitelyTyped MIT notice. The `ssh2` runtime
 is listed under managed remote transport above.
 
-The local companion is packaged with `@vscode/vsce` 3.7.1
-(https://github.com/microsoft/vscode-vsce, MIT) and typed with `@types/vscode` 1.134.0
-(https://github.com/DefinitelyTyped/DefinitelyTyped, MIT). These are development-only
-dependencies. Its VSIX bundles Zod 4.3.6 (MIT); it does not bundle VS Code or Copilot.
+electron-builder 26.15.3 (https://github.com/electron-userland/electron-builder, MIT)
+creates the Windows installer and ZIP. No Companion extension or VSIX is included.
 
 Vite, electron-vite, TypeScript, ESLint, Vitest, Playwright, Testing Library,
 and other development dependencies retain their upstream licenses in the

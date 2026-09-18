@@ -1,0 +1,37 @@
+appId: com.leoncl2025.taskcontinuum
+asar: true
+directories:
+  output: dist
+files:
+  - out/main/**
+  - out/preload/**
+  - out/renderer/**
+  - package.json
+extraResources:
+  - from: out/cli
+    to: cli
+  - from: build/icon.png
+    to: icon.png
+extraFiles:
+  - README.md
+  - THIRD_PARTY_NOTICES.md
+artifactName: TaskContinuum-${version}-win-${arch}.${ext}
+win:
+  icon: build/icon.ico
+  executableName: TaskContinuum
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: zip
+      arch:
+        - x64
+nsis:
+  artifactName: TaskContinuum-${version}-win-${arch}-setup.${ext}
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: false
+  deleteAppDataOnUninstall: false

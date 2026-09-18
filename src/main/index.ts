@@ -10,6 +10,7 @@ import { registerWindowZoom, WindowZoomPreferences } from './windowZoom'
 import { registerAgentHostBridge } from './agentHostBridge'
 
 app.setName('Task Continuum')
+if (process.platform === 'win32') app.setAppUserModelId('com.leoncl2025.taskcontinuum')
 const dataDirectory = process.env.TASKCONTINUUM_DATA_DIR
 if (dataDirectory) {
   mkdirSync(dataDirectory, { recursive: true })
@@ -62,6 +63,7 @@ async function createWindow(): Promise<void> {
   await zoom.load()
   const window = new BrowserWindow({
     title: 'Task Continuum',
+    icon: app.isPackaged ? join(process.resourcesPath, 'icon.png') : join(app.getAppPath(), 'build', 'icon.png'),
     width: 1440,
     height: 940,
     minWidth: 900,

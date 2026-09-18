@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180" viewBox="0 0 180 180" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">Task Continuum</title>
+  <desc id="description">A coral task node connects to three sessions along a continuous rail.</desc>
+
+  <defs>
+    <linearGradient id="continuum-link" x1="50" y1="90" x2="86" y2="90" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F05A47" stop-opacity="0.68" />
+      <stop offset="1" stop-color="#4263D7" stop-opacity="0.78" />
+    </linearGradient>
+  </defs>
+
+  <g aria-hidden="true">
+    <path
+      d="M50 82C68 82 64 44 86 44M50 90H86M50 98C68 98 64 136 86 136"
+      stroke="url(#continuum-link)"
+      stroke-width="3.5"
+      stroke-linecap="round"
+    />
+
+    <rect x="18" y="72" width="36" height="36" rx="6" fill="#F05A47" />
+    <path d="M27 90L33 96L45 83" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />
+
+    <rect x="78" y="32" width="60" height="24" rx="4" fill="#4263D7" />
+    <rect x="78" y="78" width="82" height="24" rx="4" fill="#4263D7" />
+    <rect x="78" y="124" width="50" height="24" rx="4" fill="#4263D7" />
+    <path
+      d="M88 41H126M88 48H112M88 87H148M88 94H132M88 133H116M88 140H106"
+      stroke="#FFFFFF"
+      stroke-width="2.5"
+      stroke-linecap="round"
+    />
+  </g>
+
+</svg>

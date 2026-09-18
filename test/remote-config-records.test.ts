@@ -108,7 +108,7 @@ describe('canonical signed immutable remote records', () => {
     await expect(Reflect.apply(createRecord, undefined, [{
       kind: 'binding', workspaceId, actor: author.actor, payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: invalid },
     }, author.sign])).rejects.toThrow()
-    const modern = signedBindingFixture(target(), author, workspaceId)
+    const modern = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target() } }, author)
     expect(await verifyRecord(modern, trust)).toEqual(modern)
   })
 

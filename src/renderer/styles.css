@@ -38,7 +38,7 @@ kbd { font-family: inherit; font-size: 10px; color: var(--muted); border: 1px so
 .titlebar button { -webkit-app-region: no-drag; }
 .app-brand { width: 260px; display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .brand-mark { color: var(--accent); display: inline-flex; }
-.brand-mark .codicon { font-size: 21px; }
+.brand-mark img { display: block; }
 .command-center { flex: 1; max-width: 500px; min-width: 130px; height: 25px; display: flex; align-items: center; justify-content: center; gap: 9px; background: var(--raised); border: 1px solid #7774; border-radius: 5px; color: var(--muted); font-size: 12px; }
 .command-center:hover { border-color: #7778; }
 .command-center span:not(.codicon) { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

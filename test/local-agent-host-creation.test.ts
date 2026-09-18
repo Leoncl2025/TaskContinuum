@@ -312,9 +312,12 @@ describe('private workspace-local native planning sessions', () => {
       { ...original, request: { ...original.request, hostId: 'different-host-123' } },
       { ...original, nativeSessionId: `copilotcli:/${randomUUID()}` },
     ]) {
-      await writeFile(setup.file, JSON.stringify([edit]))
-      await expect(setup.manager.authorize(setup.root, target)).rejects.toThrow('unreadable')
+      const saved = JSON.stringify([edit])
+      await writeFile(setup.file, saved)
+      await expect(setup.service.authorizes(setup.root, target)).rejects.toThrow('unreadable')
+      await expect(setup.manager.authorize(setup.root, target)).rejects.toThrow('Enable Automatic workspace links')
       await expect(setup.service.status(setup.root, setup.request.operationId, setup.authorize)).rejects.toThrow('unreadable')
+      expect(await readFile(setup.file, 'utf8')).toBe(saved)
     }
     const history = Array.from({ length: 1000 }, () => {
       const request = { ...setup.request, operationId: randomUUID() }
