@@ -356,15 +356,36 @@ describe('single selected checkout Git synchronization', () => {
     expect(await git(setup.remote, 'for-each-ref', '--format=%(refname)', 'refs/heads')).toBe('')
   }, 60000)
 
-  it('disables hooks and pauses rather than executing configured checkout filters', async () => {
+  it('ignores unused filter configuration but pauses when checkout paths use it', async () => {
     const setup = await fixture()
     const app = await setup.replica()
     for (const hook of ['pre-commit', 'post-commit', 'pre-push', 'post-checkout', 'post-merge']) await writeFile(join(app.root, '.git', 'hooks', hook), '#!/bin/sh\nprintf invoked > hook-invoked.txt\nexit 73\n', { mode: 0o755 })
     await git(app.root, 'config', 'filter.untrusted.smudge', 'invalid-taskcon-fixture-command')
-    await expect(app.sync([record('filter-paused')])).rejects.toMatchObject({ code: 'busy' })
-    await git(app.root, 'config', '--unset-all', 'filter.untrusted.smudge')
+    await git(app.root, 'config', 'filter.untrusted.required', 'true')
+    await app.sync([record('unused-filter-allowed')])
+    await writeFile(join(app.root, '.git', 'info', 'attributes'), '*.json filter=untrusted\n')
+    await expect(app.sync([record('filter-paused')])).rejects.toThrow('Workspace files require a configured Git filter')
+    await rm(join(app.root, '.git', 'info', 'attributes'))
     await app.sync([record('hooks-disabled')])
+    expect(await git(app.root, 'config', '--get', 'filter.untrusted.smudge')).toBe('invalid-taskcon-fixture-command')
     expect(await present(join(app.root, 'hook-invoked.txt'))).toBe(false)
+  }, 60000)
+
+  it('rejects filters introduced by the incoming tree before updating the checkout', async () => {
+    const setup = await fixture()
+    const app = await setup.replica()
+    const before = await git(app.root, 'rev-parse', 'HEAD')
+    await git(app.root, 'config', 'filter.untrusted.smudge', 'invalid-taskcon-fixture-command')
+    await git(app.root, 'config', 'filter.untrusted.required', 'true')
+    await writeFile(join(setup.seed, '.gitattributes'), '*.txt filter=untrusted\n')
+    await writeFile(join(setup.seed, 'filtered.txt'), 'This incoming file requires a checkout filter.\n')
+    await git(setup.seed, 'add', '.gitattributes', 'filtered.txt')
+    await git(setup.seed, 'commit', '--quiet', '-m', 'Add filtered input')
+    await git(setup.seed, 'push', '--quiet')
+    await expect(app.sync()).rejects.toThrow('Incoming files require a configured Git filter')
+    expect(await git(app.root, 'rev-parse', 'HEAD')).toBe(before)
+    expect(await present(join(app.root, '.gitattributes'))).toBe(false)
+    expect(await present(join(app.root, 'filtered.txt'))).toBe(false)
   }, 60000)
 
   it('rejects callback writes and retains pending metadata without pushing', async () => {

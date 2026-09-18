@@ -739,6 +739,7 @@ export class GitReplica {
     await this.checkManagedPaths(finalTree.keys())
     const latest = await this.checkoutSnapshot(signal)
     if (!latest.head || latest.head !== before.head || latest.mapping !== before.mapping) throw new GitSyncError('busy', 'The selected checkout changed during synchronization; no user work was reset or stashed.')
+    if (head !== previous && await this.usesCheckoutFilter(signal, head)) throw new GitSyncError('busy', 'Incoming files require a configured Git filter. Refresh the checkout explicitly before synchronizing; pending metadata is retained.')
     await this.assertUpstream(signal)
     const headLockPath = join(this.gitDirectory, 'HEAD.lock')
     const headLock = await open(headLockPath, 'wx', 0o600).catch(() => { throw new GitSyncError('busy', 'A user Git operation acquired HEAD. Retry when it has completed.') })
@@ -888,6 +889,33 @@ export class GitReplica {
     })
   }
 
+  private async usesCheckoutFilter(signal?: AbortSignal, revision?: string): Promise<boolean> {
+    const configured = await this.git(this.workspaceRoot, ['config', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process)$'], { signal, allowFailure: true })
+    if (configured.code === 1) return false
+    if (configured.code) throw failure(configured, 'filter configuration inspection')
+    const filters = new Set(configured.stdout.toString('utf8').trim().split(/\r?\n/).map((key) => key.replace(/^filter\./, '').replace(/\.(clean|smudge|process)$/, '')))
+    const paths = (await this.git(this.workspaceRoot, revision
+      ? ['ls-tree', '-r', '--name-only', '-z', '--full-tree', revision]
+      : ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { signal })).stdout
+    if (!paths.length) return false
+    const required = async (cached = false, env?: NodeJS.ProcessEnv) => {
+      const result = await this.git(this.workspaceRoot, ['check-attr', '-z', ...(cached ? ['--cached'] : []), '--stdin', 'filter'], { signal, input: paths, env })
+      const attributes = result.stdout.toString('utf8').split('\0')
+      for (let index = 2; index < attributes.length; index += 3) {
+        if (attributes[index] !== 'unspecified' && attributes[index] !== 'unset' && filters.has(attributes[index])) return true
+      }
+      return false
+    }
+    if (await required()) return true
+    if (!revision) return false
+    const index = join(this.directory, `attributes-${randomUUID()}`)
+    const env = { GIT_INDEX_FILE: index }
+    try {
+      await this.git(this.workspaceRoot, ['read-tree', revision], { signal, env })
+      return await required(true, env)
+    } finally { await rm(index, { force: true }); await rm(`${index}.lock`, { force: true }) }
+  }
+
   private async checkoutSnapshot(signal?: AbortSignal, allowedUntracked?: ReadonlySet<string>): Promise<{ head?: string; mapping?: string; trackingRef?: string; reason?: string }> {
     const current = await this.readUpstream(signal)
     if (!this.sameUpstream(current)) throw new GitSyncError('upstream-changed', 'The workspace branch or upstream changed before checkout refresh. Retry synchronization on the current branch.')
@@ -895,9 +923,7 @@ export class GitReplica {
     for (const marker of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'REBASE_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer', 'BISECT_LOG', 'BISECT_START', 'index.lock', 'HEAD.lock']) {
       if (await exists(join(gitDirectory, marker))) return { reason: 'A user Git operation is in progress.' }
     }
-    const filters = await this.git(this.workspaceRoot, ['config', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process)$'], { signal, allowFailure: true })
-    if (!filters.code && filters.stdout.length) return { reason: 'The user checkout requires a configured checkout helper; refresh it explicitly.' }
-    if (filters.code > 1) throw failure(filters, 'configuration inspection')
+    if (await this.usesCheckoutFilter(signal)) return { reason: 'Workspace files require a configured Git filter; refresh the checkout explicitly before synchronizing.' }
     const status = await this.text(this.workspaceRoot, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'], signal)
     if (status.split('\0').filter(Boolean).some((entry) => !entry.startsWith('?? ') || !allowedUntracked?.has(entry.slice(3)))) {
       return { reason: 'The user checkout has staged, unstaged, or untracked work.' }
