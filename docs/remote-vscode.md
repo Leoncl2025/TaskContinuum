@@ -152,6 +152,44 @@ Native VS Code Copilot session resources use `copilotcli:/<id>` and a default
 `ahp-session:/<id>`. Both session formats are accepted with exact verified chat
 membership. This build lists only the verified `copilotcli` provider.
 
+### Local link receipt recovery
+
+Only the current Agent Host receipt format is accepted: each entry has `root`,
+`taskId`, `owner` and an `identity` containing exactly `hostId`, `sessionId` and
+`chatId`. Old Local identities (`nativeSessionId`, `workspaceStorageId`), mixed
+files and malformed data block access. There is no compatibility mode, automatic
+migration or filtering during reads.
+
+To clean an existing profile:
+
+1. Fully quit Task Continuum so it cannot write receipts during cleanup.
+2. Open `local-session-link-receipts.json` in the desktop user-data directory.
+  On Windows the default is `%APPDATA%\Task Continuum`; a profile launched with
+  `TASKCONTINUUM_DATA_DIR` uses that directory instead.
+3. Delete whole obsolete receipt entries whose `identity` contains
+  `nativeSessionId` or `workspaceStorageId`. Preserve current Agent Host entries
+  exactly, including their owners and roots. Keep a valid JSON array, using `[]`
+  if no entries remain. Never rename old fields or synthesize new receipts.
+4. Restart the updated desktop. For a binding that lacks a current local receipt,
+  use **Review session link** in its chat panel, or open **Agent Host sessions**,
+  and explicitly select that same existing session for the current task.
+
+Cleanup removes obsolete authorization metadata only. It does not authorize a
+session, create a chat, detach a task or modify immutable binding history. Do not
+delete the entire profile, device keys or VS Code chat history.
+
+If an older build reported invalid receipts while linking, its immutable binding
+may already have been saved without a local receipt. After cleanup, the explicit
+confirmation in step 4 verifies the exact Host and owner before writing a current
+receipt. The chat then retries history and models without clearing its draft.
+Choosing a session belonging to another task only navigates to that task; it does
+not confirm its access on your behalf.
+
+The separate **Enable Automatic workspace links** error means the immutable
+binding backend is not ready. Enable it under **Remote devices > Automatic
+workspace links** for the selected workspace before linking. Receipt cleanup
+does not bypass that requirement or create a session.
+
 ### AHP Verification Scope
 
 Existing AHP checks cover Editor Host handshake/ping and an isolated Host reached

@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
-import { recordLocalLink, locallyLinkedAgentHostSessions, unregisteredLocalLinks } from '../src/main/linkedSessionPolicy'
+import { canonicalPolicyRoot, recordLocalLink, locallyLinkedAgentHostSessions, unregisteredLocalLinks } from '../src/main/linkedSessionPolicy'
 import { readRepositorySessionLinks, removeRepositorySessionLink, updateRepositoryAgentHostLink } from '../src/main/repositorySessionLinks'
 import { agentHostTargetFixture, createImmutableBindingsFixture, immutableOwner } from './immutable-bindings-fixture'
 
@@ -100,17 +100,73 @@ it.each(['github-copilot', 'vscode-copilot'])('never grants access from an old %
   expect(await readFile(file, 'utf8')).toBe(content)
 })
 
-it('rejects legacy local receipts rather than silently migrating them or granting an Agent Host link', async () => {
+it('rejects legacy local receipts without accepting, migrating or rewriting them', async () => {
+  const { root, profile, backend, owner } = await fixture()
+  const target = agentHostTargetFixture('original', owner)
+  const saved = await updateRepositoryAgentHostLink(root, 'T-0001', target, backend.snapshot.revision)
+  await mkdir(profile)
+  const file = join(profile, 'local-session-link-receipts.json')
+  const canonical = await canonicalPolicyRoot(root)
+  const old = [{ root: canonical, taskId: 'T-0001', owner, identity: { nativeSessionId: 'original', workspaceStorageId: 'a'.repeat(32) } }]
+  const content = JSON.stringify(old)
+  await writeFile(file, content)
+  await expect(locallyLinkedAgentHostSessions(profile, root, owner)).rejects.toThrow('Only the current Agent Host format is supported')
+  await expect(unregisteredLocalLinks(profile, root, saved.document.bindings, owner)).rejects.toThrow('invalid')
+  await expect(recordLocalLink(profile, root, 'T-0001', saved.document.bindings['T-0001'], owner)).rejects.toThrow('invalid')
+  await expect(recordLocalLink(profile, root, 'T-0001', undefined, owner)).rejects.toThrow('invalid')
+  expect(await readFile(file, 'utf8')).toBe(content)
+  expect(await readRepositorySessionLinks(root)).toEqual(saved)
+})
+
+it.each(['same', 'another'])('rejects mixed legacy and current receipts from %s workspace without granting access or rewriting data', async (workspace) => {
+  const { root, profile, backend, owner } = await fixture()
+  const target = agentHostTargetFixture('original', owner)
+  const retryTarget = agentHostTargetFixture('retry', owner)
+  const first = await updateRepositoryAgentHostLink(root, 'T-0001', target, backend.snapshot.revision)
+  const saved = await updateRepositoryAgentHostLink(root, 'T-0002', retryTarget, first.revision)
+  await recordLocalLink(profile, root, 'T-0001', saved.document.bindings['T-0001'], owner)
+  const file = join(profile, 'local-session-link-receipts.json')
+  const native: unknown[] = JSON.parse(await readFile(file, 'utf8'))
+  const legacy = { root: await canonicalPolicyRoot(root), taskId: 'T-0002', owner, identity: { nativeSessionId: 'retry', workspaceStorageId: 'a'.repeat(32) } }
+  const unrelated = { ...legacy, root: workspace === 'another' ? join(legacy.root, 'another-workspace') : legacy.root, taskId: 'T-0003' }
+  const content = JSON.stringify([legacy, unrelated, ...native])
+  await writeFile(file, content)
+  await expect(locallyLinkedAgentHostSessions(profile, root, owner)).rejects.toThrow('invalid')
+  await expect(unregisteredLocalLinks(profile, root, saved.document.bindings, owner)).rejects.toThrow('invalid')
+  await expect(recordLocalLink(profile, root, 'T-0002', saved.document.bindings['T-0002'], owner)).rejects.toThrow('invalid')
+  await expect(recordLocalLink(profile, root, 'T-0001', undefined, owner)).rejects.toThrow('invalid')
+  expect(await readFile(file, 'utf8')).toBe(content)
+  expect(await readRepositorySessionLinks(root)).toEqual(saved)
+})
+
+it.each([
+  { nativeSessionId: 'original' },
+  { nativeSessionId: 'original', workspaceStorageId: 'not-a-workspace-id' },
+  { nativeSessionId: 'copilotcli:/original', workspaceStorageId: 'a'.repeat(32) },
+  { nativeSessionId: 'original', workspaceStorageId: 'a'.repeat(32), hostId: 'host-main' },
+  { hostId: 'host-main', sessionId: 'copilotcli:/original' },
+])('still rejects a malformed receipt identity without accepting other receipts: %j', async (identity) => {
+  const { root, profile, backend, owner } = await fixture()
+  const saved = await updateRepositoryAgentHostLink(root, 'T-0001', agentHostTargetFixture('original', owner), backend.snapshot.revision)
+  await recordLocalLink(profile, root, 'T-0001', saved.document.bindings['T-0001'], owner)
+  const file = join(profile, 'local-session-link-receipts.json')
+  const native: unknown[] = JSON.parse(await readFile(file, 'utf8'))
+  const content = JSON.stringify([...native, { root, taskId: 'T-0002', owner, identity }])
+  await writeFile(file, content)
+  await expect(locallyLinkedAgentHostSessions(profile, root, owner)).rejects.toThrow('invalid')
+  await expect(unregisteredLocalLinks(profile, root, saved.document.bindings, owner)).rejects.toThrow('invalid')
+  await expect(recordLocalLink(profile, root, 'T-0001', saved.document.bindings['T-0001'], owner)).rejects.toThrow('invalid')
+  expect(await readFile(file, 'utf8')).toBe(content)
+  expect(await readRepositorySessionLinks(root)).toEqual(saved)
+})
+
+it.each(['{invalid JSON', '{}'])('does not replace an unreadable receipt document: %s', async (content) => {
   const { root, profile, backend, owner } = await fixture()
   const saved = await updateRepositoryAgentHostLink(root, 'T-0001', agentHostTargetFixture('original', owner), backend.snapshot.revision)
   await mkdir(profile)
   const file = join(profile, 'local-session-link-receipts.json')
-  const old: unknown = [{ root, taskId: 'T-0001', owner, identity: { nativeSessionId: 'original', workspaceStorageId: 'a'.repeat(32) } }]
-  const content = JSON.stringify(old)
   await writeFile(file, content)
-  await expect(locallyLinkedAgentHostSessions(profile, root, owner)).rejects.toThrow('unsupported legacy format')
-  await expect(unregisteredLocalLinks(profile, root, saved.document.bindings, owner)).rejects.toThrow('unsupported legacy format')
-  await expect(recordLocalLink(profile, root, 'T-0001', saved.document.bindings['T-0001'], owner)).rejects.toThrow('unsupported legacy format')
+  await expect(locallyLinkedAgentHostSessions(profile, root, owner)).rejects.toThrow('invalid')
+  await expect(recordLocalLink(profile, root, 'T-0001', saved.document.bindings['T-0001'], owner)).rejects.toThrow('invalid')
   expect(await readFile(file, 'utf8')).toBe(content)
-  expect(await readRepositorySessionLinks(root)).toEqual(saved)
 })

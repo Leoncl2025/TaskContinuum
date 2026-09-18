@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WorkspaceStore } from '../src/main/workspaceStore'
-import { locallyLinkedAgentHostSessions } from '../src/main/linkedSessionPolicy'
+import { canonicalPolicyRoot, locallyLinkedAgentHostSessions } from '../src/main/linkedSessionPolicy'
+import { updateRepositoryAgentHostLink } from '../src/main/repositorySessionLinks'
 import { readClientIdentity } from '../src/main/clientIdentity'
 import type { AgentHostTarget } from '../src/shared/agentHost'
 import { agentHostTargetFixture, createImmutableBindingsFixture } from './immutable-bindings-fixture'
@@ -63,6 +64,33 @@ describe('workspace-scoped immutable Agent Host links', () => {
       signature: { algorithm: 'ed25519', value: expect.any(String) },
     })])
     await expect(readFile(legacyFile, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('retries a saved binding only after obsolete receipts are explicitly removed', async () => {
+    const { profile, root, workspace, store, target, request, backend, verifyAgentHost, sessionFile, sessionContent } = await fixture()
+    const file = join(profile, 'local-session-link-receipts.json')
+    const content = JSON.stringify([{
+      root: await canonicalPolicyRoot(root), taskId: request.taskId, owner: target.owner,
+      identity: { nativeSessionId: 'original', workspaceStorageId: 'a'.repeat(32) },
+    }])
+    await writeFile(file, content)
+    const partial = await updateRepositoryAgentHostLink(root, request.taskId, target, request.expectedRevision)
+    const retry = { ...request, expectedRevision: partial.revision }
+    await expect(locallyLinkedAgentHostSessions(profile, root, target.owner)).rejects.toThrow('invalid')
+    await expect(store.updateSessionLink(retry)).rejects.toThrow('invalid')
+    expect(await readFile(file, 'utf8')).toBe(content)
+    expect((await backend.store.read()).records).toHaveLength(1)
+    await rm(file)
+    expect(await locallyLinkedAgentHostSessions(profile, root, target.owner)).toEqual([])
+    verifyAgentHost.mockRejectedValueOnce(new Error('Host unavailable.'))
+    await expect(store.updateSessionLink(retry)).rejects.toThrow('unavailable')
+    await expect(readFile(file, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await backend.store.read()).records).toHaveLength(1)
+    const saved = await store.updateSessionLink(retry)
+    expect(verifyAgentHost).toHaveBeenLastCalledWith(root, target)
+    expect(await locallyLinkedAgentHostSessions(profile, root, target.owner)).toEqual([target])
+    expect((await store.getSessionLinks(workspace.id)).document).toEqual(saved.document)
+    expect(await readFile(sessionFile, 'utf8')).toBe(sessionContent)
   })
 
   it.each(['hostId', 'sessionId', 'chatId', 'owner'] as const)('rejects a verifier that changes the selected %s', async (field) => {

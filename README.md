@@ -441,6 +441,15 @@ Existing files remain untouched. Enable Automatic workspace links and explicitly
 select the existing native Host sessions again. Unsupported local store metadata
 or authorization receipts are reported, not reset or imported.
 
+Local link receipts accept only the current Agent Host format. Old Local receipts
+and mixed-format files are rejected, not ignored, migrated or automatically reset.
+Fully quit the desktop before explicitly removing obsolete receipt entries;
+preserve current receipts and never convert old identity fields into authorization.
+If a previous link attempt saved a binding without a receipt, clean the file first,
+then use **Review session link** to explicitly confirm the same native Host session.
+Successful confirmation reconnects the chat without clearing its draft. See
+[receipt recovery](docs/remote-vscode.md#local-link-receipt-recovery).
+
 Automatic synchronization uses an app-owned Git replica and safe source refresh;
 it does not stage unrelated task/code changes or rebase unpublished user commits.
 See [workspace Git synchronization](docs/workspace-git-sync.md) for enrollment,

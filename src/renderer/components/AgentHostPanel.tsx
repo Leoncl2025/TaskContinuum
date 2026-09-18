@@ -44,14 +44,16 @@ function imagesFor(turn: Turn | ActiveTurn): ChatImageAttachment[] {
 
 type AgentHostPanelProps = {
   target: AgentHostTarget
+  connectionRevision?: number
   onClose(): void
   onDevices?(): void
+  onSessions?(): void
   onBusy?(busy: boolean): void
   beforeReconnect?(): Promise<void>
   prepareFirstMessage?(text: string): Promise<string>
 } & ({ task: TaskRecord; workspace?: never; onDetach(): void } | { task?: never; workspace: Pick<WorkspaceSnapshot, 'id' | 'name'>; onDetach?: never })
 
-export function AgentHostPanel({ task, workspace, target, onDetach, onClose, onDevices, onBusy, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
+export function AgentHostPanel({ task, workspace, target, connectionRevision = 0, onDetach, onClose, onDevices, onSessions, onBusy, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
   const bridge = window.agentHost
   const { hostId, sessionId, chatId } = target
   const { clientId, machineName } = target.owner
@@ -64,9 +66,10 @@ export function AgentHostPanel({ task, workspace, target, onDetach, onClose, onD
   const [images, setImages] = useState<ChatImageAttachment[]>([])
   const [busy, setBusy] = useState(false)
   const [revision, setRevision] = useState(0)
-  const [catalog, setCatalog] = useState<{ key: string; revision: number; models: Awaited<ReturnType<AgentHostBridge['models']>>; error?: string }>()
+  const catalogKey = `${key}:${revision}:${connectionRevision}`
+  const [catalog, setCatalog] = useState<{ key: string; models: Awaited<ReturnType<AgentHostBridge['models']>>; error?: string }>()
   const [selection, setSelection] = useState<{ key: string; id: string; config?: ModelConfig }>()
-  const currentCatalog = catalog?.key === key && catalog.revision === revision ? catalog : undefined
+  const currentCatalog = catalog?.key === catalogKey ? catalog : undefined
   const models = currentCatalog?.models ?? []
   const modelId = selection?.key === key ? selection.id : ''
   const selectedModel = models.find((model) => model.id === modelId)
@@ -93,13 +96,13 @@ export function AgentHostPanel({ task, workspace, target, onDetach, onClose, onD
       if (active && (!watchId || event.id === watchId) && agentHostKey(event.view.target) === agentHostKey(selected)) setView(event.view)
     })
     void bridge.models(selected).then((models) => {
-      if (active) setCatalog({ key, revision, models, ...(!models.length ? { error: 'No available models. Check model access on the owner device, then reconnect.' } : {}) })
+      if (active) setCatalog({ key: catalogKey, models, ...(!models.length ? { error: 'No available models. Check model access on the owner device, then reconnect.' } : {}) })
     }).catch((failure: unknown) => {
-      if (active) setCatalog({ key, revision, models: [], error: failure instanceof Error ? failure.message : 'The owner model catalog is unavailable. Reconnect to retry.' })
+      if (active) setCatalog({ key: catalogKey, models: [], error: failure instanceof Error ? failure.message : 'The owner model catalog is unavailable. Reconnect to retry.' })
     })
-    void bridge.watch(selected).then((id) => { if (active) watchId = id; else void bridge.unwatch(id).catch(() => undefined) }).catch((failure: unknown) => { if (active) setError(failure instanceof Error ? failure.message : 'Agent Host access is unavailable.') })
+    void bridge.watch(selected).then((id) => { if (active) { watchId = id; setError(undefined) } else void bridge.unwatch(id).catch(() => undefined) }).catch((failure: unknown) => { if (active) setError(failure instanceof Error ? failure.message : 'Agent Host access is unavailable.') })
     return () => { active = false; unlisten(); if (watchId) void bridge.unwatch(watchId).catch(() => undefined) }
-  }, [bridge, hostId, sessionId, chatId, clientId, machineName, revision, key])
+  }, [bridge, hostId, sessionId, chatId, clientId, machineName, catalogKey])
   const activeTurn = view?.chat?.activeTurn
   const responding = Boolean(activeTurn)
   const pending = Boolean(view?.pendingTurn)
@@ -150,11 +153,11 @@ export function AgentHostPanel({ task, workspace, target, onDetach, onClose, onD
       await beforeReconnect?.()
       if (mounted.current) setRevision((value) => value + 1)
     } catch (failure) {
-      if (mounted.current) setCatalog({ key, revision, models: [], error: failure instanceof Error ? failure.message : 'The original session could not be verified. Reconnect to retry.' })
+      if (mounted.current) setCatalog({ key: catalogKey, models: [], error: failure instanceof Error ? failure.message : 'The original session could not be verified. Reconnect to retry.' })
     } finally { operating.current = false; if (mounted.current) setBusy(false) }
   }
   const turns = [...view?.chat?.turns ?? [], ...activeTurn ? [activeTurn] : []]
-  const stateLabel = !bridge ? 'Desktop update required' : !view || view.state === 'connecting' ? 'Connecting...' : view.state === 'offline' ? 'Offline history' : pending ? 'Delivery pending' : activeTurn ? 'Agent responding' : view.readOnly ? 'Read only' : 'Connected'
+  const stateLabel = !bridge ? 'Desktop update required' : !view && (error || currentCatalog?.error) ? 'Connection failed' : !view || view.state === 'connecting' ? 'Connecting...' : view.state === 'offline' ? 'Offline history' : pending ? 'Delivery pending' : activeTurn ? 'Agent responding' : view.readOnly ? 'Read only' : 'Connected'
   const modelStatus = !bridge ? 'Desktop update required.' : !currentCatalog ? 'Loading models from the owner Host...' : currentCatalog.error ? undefined : !modelId ? 'Choose a model below to enable sending.' : !modelReady ? 'The selected model is unavailable. Choose another model or retry loading models.' : undefined
   return <aside className="chat-panel ahp-panel" aria-label={workspace ? 'Agent Host task creation chat' : 'Agent Host task chat'}>
     <header className="panel-header"><span>AGENT HOST</span><div className="header-actions">{onDevices && <IconButton icon="remote" label="Manage devices" onClick={onDevices} />}<IconButton icon="refresh" label="Reconnect Agent Host" disabled={busy} onClick={() => { void reconnect() }} />{onDetach && <IconButton icon="debug-disconnect" label="Detach conversation" disabled={busy || pending} onClick={onDetach} />}{!workspace && <IconButton icon="layout-sidebar-right-off" label="Hide chat panel" onClick={onClose} />}</div></header>
@@ -174,6 +177,7 @@ export function AgentHostPanel({ task, workspace, target, onDetach, onClose, onD
       {view?.pendingTurn?.state === 'uncertain' && <p className="vscode-chat-notice" role="status">Delivery outcome unknown. Check the original chat before another send.</p>}
       {view?.chat?.draft?.text && <p className="vscode-chat-notice muted">The owner has an unsent draft.</p>}
       {currentCatalog?.error && <p className="copilot-error vscode-chat-notice" role="alert">{currentCatalog.error}</p>}
+      {onSessions && !view && (error || currentCatalog?.error) && <button type="button" className="text-button" disabled={busy} onClick={onSessions}><Icon name="link" />Review session link</button>}
       {modelStatus && <p className="message-notice" role="status">{modelStatus}</p>}
       <div className="ahp-model-controls">
         <label>Model<select aria-label="Agent Host model" value={modelId} disabled={busy || pending || responding || view?.readOnly || !models.length} onChange={(event) => setSelection({ key, id: event.target.value })}><option value="">{!currentCatalog ? 'Loading models...' : !models.length ? 'Models unavailable' : 'Choose a model'}</option>{modelId && !modelReady && <option value={modelId} disabled>{modelId} (unavailable)</option>}{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>

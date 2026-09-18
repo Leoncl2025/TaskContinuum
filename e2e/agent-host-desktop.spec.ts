@@ -7,12 +7,18 @@ import type { ElectronApplication, Page } from '@playwright/test'
 import { startAgentHostFixture } from '../test/agent-host-fixture'
 import { enableAutomaticLinks, prepareAutomaticLinksRepository, readDesktopBindings } from './immutable-workspace-fixture'
 
-test('links and streams original AHP chats through immutable workspace bindings', async () => {
+test('links and streams original AHP chats with current receipts and explicit link recovery', async () => {
   test.setTimeout(90000)
   const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-desktop-'))
   const workspace = join(root, 'tasks')
   const discovery = join(root, 'discovery')
   const profile = join(root, 'profile')
+  const receiptFile = join(profile, 'local-session-link-receipts.json')
+  const unrelatedReceipt = {
+    root: join(root, 'another-workspace'), taskId: 'T-0001',
+    owner: { clientId: randomUUID(), machineName: 'Another-machine' },
+    identity: { hostId: 'another-host', sessionId: 'copilotcli:/another-chat', chatId: 'ahp-chat:/another-chat' },
+  }
   const fixture = await startAgentHostFixture()
   let app: ElectronApplication | undefined
   let page: Page
@@ -21,12 +27,14 @@ test('links and streams original AHP chats through immutable workspace bindings'
   await mkdir(join(workspace, '.agentdesk'), { recursive: true })
   await mkdir(join(workspace, 'tasks', 'T-0001-ahp'), { recursive: true })
   await mkdir(discovery)
+  await mkdir(profile)
   await mkdir(resolve('artifacts'), { recursive: true })
   await writeFile(join(workspace, '.agentdesk/config.json'), JSON.stringify({ schemaVersion: '1.0', workspace: 'Agent Host verification' }))
   const taskFile = join(workspace, 'tasks/T-0001-ahp/task.json')
   const taskText = JSON.stringify({ schemaVersion: '1.0', id: 'T-0001', title: 'Verify original Agent Host integration', type: 'feature', status: 'backlog', priority: 'P2', relations: { level: 'task', parent: null } })
   await writeFile(taskFile, taskText)
   await writeFile(join(discovery, 'host.json'), JSON.stringify(fixture.endpoint))
+  await writeFile(receiptFile, JSON.stringify([unrelatedReceipt]))
   const environment = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined))
   delete environment.ELECTRON_RUN_AS_NODE
   delete environment.ELECTRON_RENDERER_URL
@@ -53,14 +61,50 @@ test('links and streams original AHP chats through immutable workspace bindings'
     await expect(picker.getByRole('region', { name: 'Host session Original Host chat' })).toBeVisible()
     await picker.getByRole('button', { name: 'Link Original Host chat to T-0001' }).click()
     await expect(picker).toBeHidden()
-    const panel = page!.getByRole('complementary', { name: 'Agent Host task chat' })
+    let panel = page!.getByRole('complementary', { name: 'Agent Host task chat' })
     await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
     const saved = await readDesktopBindings(page!)
     expect(saved.document.bindings['T-0001']).toMatchObject({ provider: 'agent-host', hostId: fixture.hostId, sessionId: fixture.sessionId, chatId: fixture.chatId, owner: saved.localOwner })
+    const confirmedReceipts: unknown = JSON.parse(await readFile(receiptFile, 'utf8'))
+    expect(confirmedReceipts).toEqual([unrelatedReceipt, expect.objectContaining({
+      taskId: 'T-0001', owner: saved.localOwner,
+      identity: { hostId: fixture.hostId, sessionId: fixture.sessionId, chatId: fixture.chatId },
+    })])
     expect(saved.revision).toMatch(/^[a-f0-9]{64}$/)
     expect(JSON.stringify(saved)).not.toContain(fixture.endpoint.connectionToken)
     expect(JSON.stringify(saved)).not.toContain(discovery)
     await expect(readFile(join(workspace, '.taskcontinuum', 'session-bindings.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await app!.close()
+    app = undefined
+    await writeFile(receiptFile, JSON.stringify([unrelatedReceipt]))
+    await launch()
+    panel = page!.getByRole('complementary', { name: 'Agent Host task chat' })
+    await expect(panel.getByRole('alert').filter({ hasText: 'A Git-only edit cannot grant local Agent Host access.' })).toHaveCount(2)
+    await expect(panel.getByText('Connection failed', { exact: true })).toBeVisible()
+    await expect(panel.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
+    expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toEqual([unrelatedReceipt])
+    expect(await readDesktopBindings(page!)).toEqual(saved)
+    expect(fixture.dispatches).toHaveLength(0)
+    await panel.getByRole('textbox', { name: 'Message Agent Host' }).fill('Keep the draft while confirming this link')
+    await page!.screenshot({ path: resolve('artifacts/agent-host-link-confirmation.png') })
+    const originalSize = await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getSize())
+    await app!.evaluate(({ BrowserWindow }) => { const window = BrowserWindow.getAllWindows()[0]; window.setMinimumSize(380, 600); window.setSize(420, 760) })
+    if (!await panel.isVisible()) await page!.getByRole('button', { name: 'Toggle chat panel' }).click()
+    await expect(panel.getByRole('button', { name: 'Review session link' })).toBeInViewport()
+    expect(await page!.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page!.screenshot({ path: resolve('artifacts/agent-host-link-confirmation-narrow.png') })
+    await app!.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0].setSize(size[0], size[1]), originalSize)
+    await panel.getByRole('button', { name: 'Review session link' }).click()
+    const confirmation = page!.getByRole('dialog', { name: 'Agent Host sessions' })
+    await confirmation.getByRole('button', { name: 'Link Original Host chat to T-0001' }).click()
+    await expect(confirmation).toBeHidden()
+    await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
+    await expect(panel.getByRole('alert')).toHaveCount(0)
+    await expect(panel.getByRole('combobox', { name: 'Agent Host model' })).toBeEnabled()
+    await expect(panel.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Keep the draft while confirming this link')
+    expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toEqual(confirmedReceipts)
+    expect(await readDesktopBindings(page!)).toEqual(saved)
+    expect(fixture.dispatches).toHaveLength(0)
     const target = await page!.evaluate(async () => {
       const state = await window.workspace!.getState()
       const link = (await window.workspace!.getSessionLinks(state.current!.id)).document.bindings['T-0001']
@@ -148,6 +192,7 @@ test('links and streams original AHP chats through immutable workspace bindings'
     await page!.getByRole('button', { name: 'Detach session', exact: true }).click()
     await expect(restored).toHaveCount(0)
     expect((await readDesktopBindings(page!)).document.bindings).toEqual({})
+    expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toEqual([unrelatedReceipt])
     await expect(readFile(join(workspace, '.taskcontinuum', 'session-bindings.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await readFile(taskFile, 'utf8')).toBe(taskText)
     expect(fixture.dispatches).toHaveLength(1)

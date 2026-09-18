@@ -242,6 +242,39 @@ describe('workspace switching in the desktop workbench', () => {
     expect(agentHost.create).not.toHaveBeenCalled()
   })
 
+  it('explicitly reconfirms an existing Agent Host link and retries access without losing its draft', async () => {
+    const { bridge, first, repository, agentHost, target } = creationFixture()
+    const snapshot: SessionLinksSnapshot = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64), localOwner: target.owner }
+    repository[first.id] = snapshot
+    vi.mocked(agentHost.list).mockResolvedValue({ sessions: [{ ...target, title: 'Original Host chat', provider: 'copilotcli', updatedAt: '', canSend: true }], warnings: [] })
+    const message = 'A Git-only edit cannot grant local Agent Host access. Confirm the link on its owner.'
+    vi.mocked(agentHost.watch).mockRejectedValueOnce(new Error(message))
+    vi.mocked(agentHost.models).mockRejectedValueOnce(new Error(message))
+    const user = userEvent.setup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    const panel = await screen.findByRole('complementary', { name: 'Agent Host task chat' })
+    await waitFor(() => expect(within(panel).getAllByRole('alert')).toHaveLength(2))
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+    await user.type(within(panel).getByRole('textbox', { name: 'Message Agent Host' }), 'Keep this unsent draft')
+    await user.click(within(panel).getByRole('button', { name: 'Review session link' }))
+    await user.click(await screen.findByRole('button', { name: 'Link Original Host chat to T-0002' }))
+    await waitFor(() => expect(bridge.updateSessionLink).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: first.id, taskId: 'T-0002', sessionId: target.sessionId,
+      agentHost: { hostId: target.hostId, chatId: target.chatId }, owner: target.owner, expectedRevision: snapshot.revision,
+    }))
+    await waitFor(() => expect(agentHost.watch).toHaveBeenCalledTimes(2))
+    expect(agentHost.watch).toHaveBeenLastCalledWith(target)
+    expect(agentHost.models).toHaveBeenCalledTimes(2)
+    expect(within(panel).getByText('Connected', { exact: true })).toBeInTheDocument()
+    expect(within(panel).queryAllByRole('alert')).toEqual([])
+    expect(within(panel).getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Keep this unsent draft')
+    expect(repository[first.id].document).toEqual(snapshot.document)
+    expect(agentHost.create).not.toHaveBeenCalled()
+    expect(agentHost.send).not.toHaveBeenCalled()
+  })
+
   it('opens the exact AHP Git link without creating, sending or cancelling a session', async () => {
     const { first, repository, agentHost, target } = creationFixture()
     repository[first.id] = { document: { schemaVersion: 1, bindings: { 'T-0002': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64), localOwner: target.owner }

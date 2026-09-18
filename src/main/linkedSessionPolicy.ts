@@ -16,7 +16,7 @@ export async function canonicalPolicyRoot(root: string): Promise<string> {
 }
 async function receipts(directory: string) {
   try { return receiptsSchema.parse(await readJsonBounded(join(directory, 'local-session-link-receipts.json'))) } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Local Agent Host link receipts are invalid or use an unsupported legacy format. Nothing was shared.')
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Local Agent Host link receipts are invalid. Only the current Agent Host format is supported. Close Task Continuum and clean local-session-link-receipts.json before confirming links. Nothing was shared.')
     return []
   }
 }

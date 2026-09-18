@@ -75,6 +75,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   const task = tasks.find((item) => item.id === selectedId)
   const agentHostBinding = task ? bindings[task.id]?.agentHost : undefined
   const [agentHostBusy, setAgentHostBusy] = useState(false)
+  const [agentHostRevision, setAgentHostRevision] = useState(0)
   const [createdChat, setCreatedChat] = useState<CreatedChatCompletion | null>(null)
   const creationCompletion = useRef<CreatedChatCompletion | null>(null)
   const creationLifetime = useRef({ active: false })
@@ -231,6 +232,10 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
     const existing = Object.entries(bindings).find(([, current]) => sessionBindingKey(current) === sessionBindingKey(binding))?.[0]
     if (existing) {
       if (!tasks.some((item) => item.id === existing)) throw new Error(`The Agent Host conversation belongs to unavailable task ${existing}.`)
+      if (existing === selectedId) {
+        await links.attach(existing, binding)
+        setAgentHostRevision((value) => value + 1)
+      }
       selectTask(existing)
     } else {
       if (bindings[selectedId]) throw new Error('Detach the current conversation before linking a different Host chat.')
@@ -341,7 +346,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
       </main>}
 
       {!compact && chatVisible && <PanelSash panel="chat" {...sizes.chat} onResize={(width) => changePanelWidth('chat', width)} onReset={() => changePanelWidth('chat', defaultLayout.chatWidth)} />}
-      {chatVisible && (taskAgentOpen && workspace ? <LocalTaskAgent workspace={workspace} workspaces={workspaces} onCreated={taskCreated} onReviewDraft={() => setTaskCreationMode('draft')} onTaskChat={task ? showTaskChat : undefined} onClose={toggleChat} onBusy={setTaskAgentBusy} /> : task && agentHostBinding ? <AgentHostPanel key={`${task.id}:${sessionBindingKey(bindings[task.id])}`} task={task} target={agentHostBinding} onDetach={() => { setActionError(null); setDetachTarget({ taskId: task.id, key: agentHostKey(agentHostBinding) }); setDialog('clear-chat') }} onClose={toggleChat} onDevices={window.remoteVSCode ? () => setDialog('remote-devices') : undefined} onBusy={setAgentHostBusy} /> : <aside className="chat-panel empty-chat" aria-label="Task chat">
+      {chatVisible && (taskAgentOpen && workspace ? <LocalTaskAgent workspace={workspace} workspaces={workspaces} onCreated={taskCreated} onReviewDraft={() => setTaskCreationMode('draft')} onTaskChat={task ? showTaskChat : undefined} onClose={toggleChat} onBusy={setTaskAgentBusy} /> : task && agentHostBinding ? <AgentHostPanel key={`${task.id}:${sessionBindingKey(bindings[task.id])}`} task={task} target={agentHostBinding} connectionRevision={agentHostRevision} onDetach={() => { setActionError(null); setDetachTarget({ taskId: task.id, key: agentHostKey(agentHostBinding) }); setDialog('clear-chat') }} onClose={toggleChat} onDevices={window.remoteVSCode ? () => setDialog('remote-devices') : undefined} onSessions={openAgentHostSessions} onBusy={setAgentHostBusy} /> : <aside className="chat-panel empty-chat" aria-label="Task chat">
         <header className="panel-header"><span>AGENT HOST</span><IconButton icon="layout-sidebar-right-off" label="Hide chat panel" onClick={toggleChat} /></header>
         <div className="chat-context"><Icon name="server-environment" /><div><strong>Native Agent Host chats</strong><span>{task?.id ?? 'No task selected'}</span></div></div>
         <div className="empty-workbench">
