@@ -106,7 +106,7 @@ export class VSCodeDeviceHost {
     const policy = JSON.stringify(pair.workspaces)
     for (const workspace of pair.workspaces) {
       if (send && !workspace.canSend) continue
-      const linked = await this.agentHosts.linked(workspace.root)
+      const linked = await this.agentHosts.linked(workspace.root).catch(() => [])
       if (!linked.some((item) => agentHostKey(item) === agentHostKey(target))) continue
       const current = this.state!.pairs.find((item) => item.id === pair.id)
       if (!current || !this.permitted(pair.id) || JSON.stringify(current.workspaces) !== policy) throw new Error('Device policy changed.')
@@ -118,7 +118,7 @@ export class VSCodeDeviceHost {
   private async agentHostCatalog(pair: Pairing) {
     if (!this.agentHosts) throw new DeviceRequestError(404)
     const sessions: AgentHostSession[] = []
-    for (const workspace of pair.workspaces) for (const target of await this.agentHosts.linked(workspace.root)) {
+    for (const workspace of pair.workspaces) for (const target of await this.agentHosts.linked(workspace.root).catch(() => [])) {
       try {
         await this.authorizedAgentHost(pair.token, target, false)
         const description = await this.agentHosts.registry.describe(target)
