@@ -61,7 +61,7 @@ export class AgentHostManager {
   async authorize(root: string, value: AgentHostTarget): Promise<void> {
     const target = agentHostTargetSchema.parse(value)
     const owner = await this.owner()
-    if (target.owner.clientId === owner.clientId && await this.localCreations.authorizes(root, target)) return
+    if (target.owner.clientId === owner.clientId && await this.localCreations.authorizes(root, target).catch(() => false)) return
     const { document } = await readRepositorySessionLinks(root)
     if (!Object.values(document.bindings).some((link) => link.provider === 'agent-host' && agentHostKey(link) === agentHostKey(target))) throw new Error('The task no longer links this exact Agent Host chat.')
     if (target.owner.clientId === owner.clientId && !(await locallyLinkedAgentHostSessions(this.directory, root, owner)).some((link) => agentHostKey(link) === agentHostKey(target))) throw new Error('A Git-only edit cannot grant local Agent Host access. Confirm the link on its owner.')
