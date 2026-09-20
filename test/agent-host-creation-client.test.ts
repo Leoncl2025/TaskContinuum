@@ -11,6 +11,7 @@ import { writeJsonAtomic } from '../src/main/shared/storage'
 import type { AgentHostCreateRequest, AgentHostCreation, AgentHostWorker } from '../src/shared/agentHostCreation'
 import type { VSCodeDeviceClient } from '../src/main/vscodeDeviceClient'
 import { agentHostTargetFixture, createImmutableBindingsFixture } from './immutable-bindings-fixture'
+import { taskSessionLinks } from '../src/shared/sessionBindings'
 
 const directories: string[] = []
 const clients: AgentHostCreationClient[] = []
@@ -69,23 +70,24 @@ describe('durable remote creation on the caller', () => {
     const created = await setup.client.create(setup.root, setup.request, setup.authorize)
     expect(created.error).toBeUndefined()
     expect(created.state).toBe('ready')
-    expect((await readRepositorySessionLinks(setup.root)).document.bindings['T-0007']).toEqual({ provider: 'agent-host', sessionId: setup.result.session!.sessionId, chatId: setup.result.session!.chatId, owner: setup.result.session!.owner })
+    expect(taskSessionLinks((await readRepositorySessionLinks(setup.root)).document.bindings, 'T-0007')).toEqual([
+      { provider: 'agent-host', sessionId: setup.result.session!.sessionId, chatId: setup.result.session!.chatId, owner: setup.result.session!.owner },
+    ])
     expect(await readFile(setup.taskFile, 'utf8')).toBe(originalTask)
-    expect(await setup.bindings.store.getRecords()).toMatchObject([{ kind: 'binding', payload: { schemaVersion: 2,
-      action: 'set', taskId: 'T-0007', target: { provider: 'agent-host', owner: setup.result.session!.owner },
+    expect(await setup.bindings.store.getRecords()).toMatchObject([{ kind: 'binding', payload: { schemaVersion: '2.1',
+      action: 'set', taskId: 'T-0007', targets: [{ provider: 'agent-host', owner: setup.result.session!.owner }],
     } }])
     await expect(readFile(join(setup.root, '.taskcontinuum', 'session-bindings.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     expect(setup.devices.agentHostCreate).toHaveBeenCalledOnce()
     expect(await setup.client.list(setup.root, setup.request.taskId)).toEqual([])
   })
 
-  it.each(['read-only', 'offline', 'blocked', 'unsupported', 'bound', 'revision'])('does not dispatch when selection is %s', async (reason) => {
+  it.each(['read-only', 'offline', 'blocked', 'unsupported', 'revision'])('does not dispatch when selection is %s', async (reason) => {
     const setup = await fixture()
     if (reason === 'read-only') setup.worker.workspaces[0].canSend = false
     if (reason === 'offline') setup.worker.state = 'offline'
     if (reason === 'blocked') setup.worker.state = 'blocked'
     if (reason === 'unsupported') setup.worker.hosts[0].available = false
-    if (reason === 'bound') setup.worker.workspaces[0].taskState = 'bound'
     if (reason === 'revision') setup.worker.workspaces[0].expectedRevision = 'c'.repeat(64)
     await expect(setup.client.create(setup.root, setup.request, setup.authorize)).rejects.toThrow()
     expect(setup.devices.agentHostCreate).not.toHaveBeenCalled()
@@ -138,7 +140,7 @@ describe('durable remote creation on the caller', () => {
     expect((await readRepositorySessionLinks(setup.root)).revision).toBe(setup.bindings.snapshot.revision)
     const recovered = await setup.client.status(setup.root, setup.request.operationId, setup.authorize)
     expect(recovered.state).toBe('ready')
-    expect((await readRepositorySessionLinks(setup.root)).document.bindings['T-0007'].sessionId).toBe(setup.result.session!.sessionId)
+    expect(taskSessionLinks((await readRepositorySessionLinks(setup.root)).document.bindings, 'T-0007')[0].sessionId).toBe(setup.result.session!.sessionId)
     expect(setup.devices.agentHostCreationStatus).toHaveBeenCalledOnce()
     expect(setup.devices.agentHostCreate).not.toHaveBeenCalled()
   })
@@ -173,18 +175,18 @@ describe('durable remote creation on the caller', () => {
     expect((await readRepositorySessionLinks(setup.root)).document.bindings['T-0007']).toBeUndefined()
     expect((await setup.client.bind(setup.root, setup.request.operationId, setup.authorize)).state).toBe('ready')
     const links = await readRepositorySessionLinks(setup.root)
-    expect(links.document.bindings['T-0099'].sessionId).toBe('copilotcli:/unrelated-session')
-    expect(links.document.bindings['T-0007'].sessionId).toBe(setup.result.session!.sessionId)
+    expect(taskSessionLinks(links.document.bindings, 'T-0099')[0].sessionId).toBe('copilotcli:/unrelated-session')
+    expect(taskSessionLinks(links.document.bindings, 'T-0007')[0].sessionId).toBe(setup.result.session!.sessionId)
     expect(setup.devices.agentHostCreate).toHaveBeenCalledOnce()
     expect(setup.devices.agentHostBindCreation).toHaveBeenCalledOnce()
   })
 
-  it('does not overwrite another task binding or rebind an intentionally detached completed operation', async () => {
+  it('keeps an intentionally detached completed operation historically complete without rebinding it', async () => {
     const setup = await fixture()
     await setup.client.create(setup.root, setup.request, setup.authorize)
     const bound = await readRepositorySessionLinks(setup.root)
     await removeRepositorySessionLink(setup.root, 'T-0007', bound.revision)
-    await setup.client.status(setup.root, setup.request.operationId, setup.authorize)
+    expect(await setup.client.status(setup.root, setup.request.operationId, setup.authorize)).toMatchObject({ state: 'ready', session: setup.result.session })
     expect((await readRepositorySessionLinks(setup.root)).document.bindings['T-0007']).toBeUndefined()
     expect(setup.devices.agentHostCreate).toHaveBeenCalledOnce()
   })

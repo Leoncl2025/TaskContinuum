@@ -1,5 +1,5 @@
 import { realpath } from 'node:fs/promises'
-import type { SessionLink, SessionLinksDocument, SessionLinksSnapshot } from '../shared/sessionBindings'
+import { sessionLinkEntries, taskSessionLinks, type SessionLink, type SessionLinksDocument, type SessionLinksSnapshot } from '../shared/sessionBindings'
 import { agentHostTargetSchema } from './agentHostProtocol'
 import type { AgentHostTarget } from '../shared/agentHost'
 import { readTaskWorkspace } from './workspaceReader'
@@ -9,7 +9,7 @@ export { sessionOwnerSchema, sessionLinkSchema, sessionLinkKey } from './session
 export interface RepositorySessionLinksBackend {
   read(): Promise<SessionLinksSnapshot>
   update(expectedRevision: string | null, transform: (before: SessionLinksDocument) => SessionLinksDocument | Promise<SessionLinksDocument>, beforeWrite?: () => Promise<void>): Promise<SessionLinksSnapshot>
-  writeBinding?(taskId: string, target: SessionLink | null, expectedRevision: string | null, beforeWrite?: () => Promise<void>): Promise<SessionLinksSnapshot>
+  writeBinding?(taskId: string, targets: SessionLink | SessionLink[] | null, expectedRevision: string | null, beforeWrite?: () => Promise<void>): Promise<SessionLinksSnapshot>
 }
 const backends = new Map<string, RepositorySessionLinksBackend>()
 
@@ -34,6 +34,10 @@ function bindingSnapshot(snapshot: SessionLinksSnapshot): SessionLinksSnapshot {
   return { document: documentSchema.parse(snapshot.document), revision: snapshot.revision, ...(snapshot.localOwner ? { localOwner: snapshot.localOwner } : {}) }
 }
 
+function canonicalBindings(document: SessionLinksDocument): Record<string, SessionLink[]> {
+  return Object.fromEntries(Object.keys(document.bindings).map((taskId) => [taskId, taskSessionLinks(document.bindings, taskId)]))
+}
+
 function requireBackend(root: string): RepositorySessionLinksBackend {
   const backend = backends.get(root)
   if (!backend) throw new Error('Enable Automatic workspace links before accessing session bindings. The immutable binding backend is not ready; legacy session configuration is not supported.')
@@ -44,9 +48,9 @@ export async function readRepositorySessionLinks(root: string): Promise<SessionL
   return bindingSnapshot(await requireBackend(await canonicalRoot(root)).read())
 }
 
-export function removeRepositorySessionLink(root: string, taskId: string, expectedRevision: string | null): Promise<SessionLinksSnapshot> {
+export function removeRepositorySessionLink(root: string, taskId: string, expectedRevision: string | null, detachTarget?: AgentHostTarget): Promise<SessionLinksSnapshot> {
   taskIdSchema.parse(taskId)
-  return updateLink(root, taskId, null, expectedRevision)
+  return updateLink(root, taskId, null, expectedRevision, detachTarget ? agentHostTargetSchema.parse(detachTarget) : undefined)
 }
 
 export function updateRepositoryAgentHostLink(root: string, taskId: string, target: AgentHostTarget, expectedRevision: string | null): Promise<SessionLinksSnapshot> {
@@ -63,32 +67,55 @@ export function bindRepositoryAgentHostCreation(root: string, taskId: string, ta
   }
   return writeRepositorySessionLinks(root, expectedRevision, async (before) => {
     await check()
-    const prior = before.bindings[taskId]
-    if (prior && JSON.stringify(prior) !== JSON.stringify(selected)) throw new Error('The task already has a different session binding. Creation cannot replace it.')
-    const existingTask = Object.entries(before.bindings).find(([id, link]) => id !== taskId && linkKey(link) === linkKey(selected))?.[0]
-    if (existingTask) throw new Error(`This session is already linked to ${existingTask}. Detach it there before moving it.`)
-    return { schemaVersion: 2, bindings: { ...before.bindings, [taskId]: selected } }
+    const prior = taskSessionLinks(before.bindings, taskId)
+    const existing = sessionLinkEntries(before.bindings).find(([, link]) => linkKey(link) === linkKey(selected))
+    if (existing) {
+      if (existing[0] !== taskId) throw new Error(`This session is already linked to ${existing[0]}. Detach it there before moving it.`)
+      if (JSON.stringify(existing[1]) !== JSON.stringify(selected)) throw new Error('This session already has a different chat claim. Creation cannot replace it.')
+      return before
+    }
+    return { schemaVersion: '2.1', bindings: { ...canonicalBindings(before), [taskId]: [...prior, selected] } }
   }, check)
 }
 
-async function updateLink(root: string, taskId: string, selected: SessionLink | null, expectedRevision: string | null): Promise<SessionLinksSnapshot> {
+async function updateLink(root: string, taskId: string, selected: SessionLink | null, expectedRevision: string | null, detachTarget?: AgentHostTarget): Promise<SessionLinksSnapshot> {
   const canonical = await canonicalRoot(root)
   const backend = requireBackend(canonical)
-  if (backend.writeBinding) return bindingSnapshot(await backend.writeBinding(taskId, selected, expectedRevision, async () => {
-    if (backends.get(canonical) !== backend) throw new Error('The immutable binding backend changed. Reload and retry; no binding was written.')
-  }))
+  if (backend.writeBinding) {
+    const before = bindingSnapshot(await backend.read())
+    const targets = changedTaskTargets(before.document, taskId, selected, detachTarget)
+    return bindingSnapshot(await backend.writeBinding(taskId, targets.length ? targets : null, expectedRevision, async () => {
+      if (backends.get(canonical) !== backend) throw new Error('The immutable binding backend changed. Reload and retry; no binding was written.')
+    }))
+  }
   return writeRepositorySessionLinks(root, expectedRevision, (before) => {
-    const prior = before.bindings[taskId]
-    if (prior?.owner && selected && prior.sessionId === selected.sessionId && prior.provider === selected.provider && prior.owner.clientId !== selected.owner?.clientId) throw new Error('Session ownership cannot be changed by linking. Ownership transfer is not supported.')
-    if (selected) {
-      const existingTask = Object.entries(before.bindings).find(([id, link]) => id !== taskId && linkKey(link) === linkKey(selected))?.[0]
-      if (existingTask) throw new Error(`This session is already linked to ${existingTask}. Detach it there before moving it.`)
-    }
-    const bindings = { ...before.bindings }
-    if (selected === null) delete bindings[taskId]
-    else bindings[taskId] = selected
-    return { schemaVersion: 2, bindings }
+    const next = changedTaskTargets(before, taskId, selected, detachTarget)
+    const bindings = canonicalBindings(before)
+    if (!next.length) delete bindings[taskId]
+    else bindings[taskId] = next
+    return { schemaVersion: '2.1', bindings }
   })
+}
+
+function changedTaskTargets(before: SessionLinksDocument, taskId: string, selected: SessionLink | null, detachTarget?: AgentHostTarget): SessionLink[] {
+  const prior = taskSessionLinks(before.bindings, taskId)
+  if (!selected) {
+    if (!detachTarget) {
+      if (prior.length > 1) throw new Error('This task has multiple linked sessions. Specify the exact session to detach.')
+      return []
+    }
+    const parsed = agentHostTargetSchema.parse(detachTarget)
+    const matches = prior.filter((link) => link.sessionId === parsed.sessionId && link.chatId === parsed.chatId && link.owner.clientId === parsed.owner.clientId)
+    if (matches.length !== 1) throw new Error('The task does not link this exact Agent Host chat.')
+    return prior.filter((link) => link !== matches[0])
+  }
+  const claim = sessionLinkEntries(before.bindings).find(([, link]) => linkKey(link) === linkKey(selected))
+  if (claim) {
+    if (claim[0] !== taskId) throw new Error(`This session is already linked to ${claim[0]}. Detach it there before moving it.`)
+    if (JSON.stringify(claim[1]) !== JSON.stringify(selected)) throw new Error('This session already has a different chat claim. Detach it before linking another chat.')
+    return prior
+  }
+  return [...prior, selected]
 }
 
 export async function writeRepositorySessionLinks(root: string, expectedRevision: string | null, update: (before: SessionLinksDocument) => SessionLinksDocument | Promise<SessionLinksDocument>, beforeCommit?: () => Promise<void>): Promise<SessionLinksSnapshot> {

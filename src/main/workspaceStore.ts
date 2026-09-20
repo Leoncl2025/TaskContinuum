@@ -28,7 +28,7 @@ const linkChangeSchema = z.union([
     agentHost: z.object({ chatId: agentHostChatIdSchema }).strict(),
     owner: sessionOwnerSchema,
   }),
-  linkRequestSchema.extend({ sessionId: z.null() }),
+  linkRequestSchema.extend({ sessionId: z.null(), detachTarget: agentHostTargetSchema.optional() }),
 ])
 
 function descriptor(snapshot: WorkspaceSnapshot): WorkspaceDescriptor {
@@ -234,15 +234,16 @@ export class WorkspaceStore {
       const localOwner = await this.localOwner()
       let saved: SessionLinksSnapshot
       if (request.sessionId === null) {
-        saved = await removeRepositorySessionLink(workspace.root, request.taskId, request.expectedRevision)
+        saved = await removeRepositorySessionLink(workspace.root, request.taskId, request.expectedRevision, request.detachTarget)
+        await recordLocalLink(this.stateDirectory, workspace.root, request.taskId, undefined, localOwner, request.detachTarget)
       } else {
         if (!this.verifyAgentHost) throw new Error('Agent Host links require a verified target and its owner. The Agent Host verifier is unavailable.')
         const target = agentHostTargetSchema.parse({ ...request.agentHost, sessionId: request.sessionId, owner: request.owner })
         const verified = agentHostTargetSchema.parse(await this.verifyAgentHost(workspace.root, target))
         if (agentHostKey(verified) !== agentHostKey(target)) throw new Error('The verified Agent Host identity changed.')
         saved = await updateRepositoryAgentHostLink(workspace.root, request.taskId, verified, request.expectedRevision)
+        await recordLocalLink(this.stateDirectory, workspace.root, request.taskId, { provider: 'agent-host', ...verified }, localOwner)
       }
-      await recordLocalLink(this.stateDirectory, workspace.root, request.taskId, saved.document.bindings[request.taskId], localOwner)
       return visibleLinks(saved, localOwner)
     })
   }

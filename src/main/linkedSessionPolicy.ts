@@ -3,8 +3,8 @@ import { realpath } from 'node:fs/promises'
 import { z } from 'zod'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 import { readRepositorySessionLinks, sessionOwnerSchema } from './repositorySessionLinks'
-import type { SessionOwner, SessionLink } from '../shared/sessionBindings'
-import { agentHostIdentitySchema } from './agentHostProtocol'
+import { sessionLinkEntries, taskSessionLinks, type SessionLinksDocument, type SessionOwner, type SessionLink } from '../shared/sessionBindings'
+import { agentHostIdentitySchema, agentHostTargetSchema } from './agentHostProtocol'
 import type { AgentHostTarget } from '../shared/agentHost'
 
 const receiptSchema = z.object({ root: z.string(), taskId: z.string(), owner: sessionOwnerSchema, identity: agentHostIdentitySchema }).strict()
@@ -20,21 +20,43 @@ async function receipts(directory: string) {
     return []
   }
 }
-export async function recordLocalLink(directory: string, root: string, taskId: string, link: SessionLink | undefined, owner: SessionOwner): Promise<void> {
+export async function recordLocalLink(
+  directory: string,
+  root: string,
+  taskId: string,
+  link: SessionLink | SessionLink[] | undefined,
+  owner: SessionOwner,
+  detachTarget?: AgentHostTarget,
+): Promise<void> {
   const storedOwner = sessionOwnerSchema.parse({ clientId: owner.clientId, machineName: owner.machineName })
   const canonical = await canonicalPolicyRoot(root)
+  const selected = Array.isArray(link)
+    ? link.length <= 1 ? link[0] : (() => { throw new Error('Confirm one exact Agent Host session at a time.') })()
+    : link
   const operation = writing.then(async () => {
-    const next = (await receipts(directory)).filter((receipt) => receipt.root !== canonical || receipt.taskId !== taskId)
-    if (link?.provider === 'agent-host' && link.owner.clientId === storedOwner.clientId) next.push({ root: canonical, taskId, owner: storedOwner, identity: { sessionId: link.sessionId, chatId: link.chatId } })
+    const parsedDetach = detachTarget ? agentHostTargetSchema.parse(detachTarget) : undefined
+    const next = (await receipts(directory)).filter((receipt) => {
+      if (receipt.root !== canonical || receipt.taskId !== taskId) return true
+      if (selected?.provider === 'agent-host') {
+        if (selected.owner.clientId !== storedOwner.clientId) return true
+        return receipt.owner.clientId !== storedOwner.clientId || receipt.identity.sessionId !== selected.sessionId
+      }
+      if (parsedDetach) {
+        return receipt.owner.clientId !== parsedDetach.owner.clientId
+          || receipt.identity.sessionId !== parsedDetach.sessionId || receipt.identity.chatId !== parsedDetach.chatId
+      }
+      return false
+    })
+    if (selected?.provider === 'agent-host' && selected.owner.clientId === storedOwner.clientId) next.push({ root: canonical, taskId, owner: storedOwner, identity: { sessionId: selected.sessionId, chatId: selected.chatId } })
     await writeJsonAtomic(join(directory, 'local-session-link-receipts.json'), receiptsSchema.parse({ schemaVersion: 2, receipts: next }))
   })
   writing = operation.catch(() => undefined)
   await operation
 }
-export async function unregisteredLocalLinks(directory: string, root: string, bindings: Record<string, SessionLink>, owner: SessionOwner) {
+export async function unregisteredLocalLinks(directory: string, root: string, bindings: SessionLinksDocument['bindings'], owner: SessionOwner) {
   const canonical = await canonicalPolicyRoot(root)
   const existing = await receipts(directory)
-  return Object.entries(bindings).filter(([taskId, link]) => link.provider === 'agent-host' && link.owner.clientId === owner.clientId
+  return sessionLinkEntries(bindings).filter(([taskId, link]) => link.provider === 'agent-host' && link.owner.clientId === owner.clientId
     && !existing.some((receipt) => receipt.root === canonical && receipt.taskId === taskId && receipt.owner.clientId === owner.clientId
       && receipt.identity.sessionId === link.sessionId && receipt.identity.chatId === link.chatId))
 }
@@ -43,8 +65,10 @@ export async function locallyLinkedAgentHostSessions(directory: string, root: st
   const canonical = await canonicalPolicyRoot(root)
   const { document } = await readRepositorySessionLinks(canonical)
   return (await receipts(directory)).flatMap((receipt) => {
-    const link = document.bindings[receipt.taskId]
-    return receipt.root === canonical && receipt.owner.clientId === owner.clientId && link?.provider === 'agent-host' && link.owner.clientId === owner.clientId
-      && link.sessionId === receipt.identity.sessionId && link.chatId === receipt.identity.chatId ? [{ ...receipt.identity, owner: link.owner }] : []
+    const link = taskSessionLinks(document.bindings, receipt.taskId).find((candidate) =>
+      candidate.provider === 'agent-host' && candidate.owner.clientId === owner.clientId
+      && candidate.sessionId === receipt.identity.sessionId && candidate.chatId === receipt.identity.chatId)
+    return receipt.root === canonical && receipt.owner.clientId === owner.clientId && link
+      ? [{ ...receipt.identity, owner: link.owner }] : []
   })
 }

@@ -16,6 +16,7 @@ import { openSessionSshBridge, startSessionSshHost } from '../src/main/devTunnel
 import { deviceRequest } from '../src/main/vscodeDeviceHttp'
 import { createAgentHostCreationCallerFixture, createPairedAgentHostCreationFixture, creationFixtureKey, deferred, writeCreationTaskWorkspace } from './agent-host-creation-fixture'
 import { agentHostTargetFixture, createImmutableBindingsFixture } from './immutable-bindings-fixture'
+import { taskSessionLinks } from '../src/shared/sessionBindings'
 
 type Fixture = Awaited<ReturnType<typeof createPairedAgentHostCreationFixture>> & { bindings: Awaited<ReturnType<typeof createImmutableBindingsFixture>> }
 const fixtures: Fixture[] = []
@@ -56,9 +57,9 @@ describe('worker-authoritative native Agent Host creation', () => {
     expect(await worker.begin()).toEqual({ operationId: worker.request.operationId, taskId: 'T-0007', workspaceId: worker.request.workspaceId, hostId: worker.native.hostId, state: 'creating' })
     const session = await ready(worker)
     const links = await readRepositorySessionLinks(worker.workspace)
-    expect(links.document.bindings['T-0007']).toEqual({ provider: 'agent-host', ...agentHostTargetSchema.parse({
+    expect(taskSessionLinks(links.document.bindings, 'T-0007')).toEqual([{ provider: 'agent-host', ...agentHostTargetSchema.parse({
       owner: worker.owner, sessionId: session.sessionId, chatId: session.chatId,
-    }) })
+    }) }])
     expect(await locallyLinkedAgentHostSessions(worker.profile, worker.workspace, worker.owner)).toEqual([agentHostTargetSchema.parse({
       owner: session.owner, sessionId: session.sessionId, chatId: session.chatId,
     })])
@@ -70,7 +71,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     expect(JSON.stringify(catalog) + JSON.stringify(await worker.status())).not.toContain(worker.workspace)
     expect(JSON.stringify(catalog) + JSON.stringify(await worker.status())).not.toContain(worker.pair.token)
     const immutable = await worker.bindings.store.getRecords()
-    expect(immutable).toMatchObject([{ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0007', target: links.document.bindings['T-0007'] } }])
+    expect(immutable).toMatchObject([{ kind: 'binding', payload: { taskId: 'T-0007' } }])
     const git = JSON.stringify(immutable)
     expect(git).not.toContain(worker.request.operationId)
     expect(git).not.toContain(worker.workspace)
@@ -192,16 +193,15 @@ describe('worker-authoritative native Agent Host creation', () => {
       expect(caller.connections).toBe(2)
 
       if (conflict !== 'none') {
-        expect((await readRepositorySessionLinks(conflictingRoot)).document.bindings[request.taskId].sessionId).toBe(`copilotcli:/${conflict}-existing-session`)
-        const before = await readRepositorySessionLinks(conflictingRoot)
-        await removeRepositorySessionLink(conflictingRoot, request.taskId, before.revision)
+        expect(taskSessionLinks((await readRepositorySessionLinks(conflictingRoot)).document.bindings, request.taskId)[0].sessionId).toBe(`copilotcli:/${conflict}-existing-session`)
         expect((await caller.client.status(caller.workspace, request.operationId, authorize)).state).toBe('created-unbound')
-        expect((await readRepositorySessionLinks(conflictingRoot)).document.bindings).toEqual({})
         expect(await caller.client.bind(caller.workspace, request.operationId, authorize)).toMatchObject({ state: 'ready', session: identity, workerId: request.workerId })
       }
       expect(await caller.client.status(caller.workspace, request.operationId, authorize)).toMatchObject({ state: 'ready', session: identity, workerId: request.workerId })
       const linksA = await readRepositorySessionLinks(caller.workspace), linksB = await readRepositorySessionLinks(worker.workspace)
-      expect(linksA.document.bindings[request.taskId]).toEqual(linksB.document.bindings[request.taskId])
+      for (const links of [linksA, linksB]) {
+        expect(taskSessionLinks(links.document.bindings, request.taskId).some((link) => link.sessionId === identity.sessionId && link.chatId === identity.chatId)).toBe(true)
+      }
       expect(await locallyLinkedAgentHostSessions(worker.profile, worker.workspace, worker.owner)).toHaveLength(1)
       expect(await locallyLinkedAgentHostSessions(caller.profile, caller.workspace, worker.owner)).toEqual([])
       expect(await caller.client.list(caller.workspace, request.taskId)).toEqual([])
@@ -434,7 +434,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     expect((await worker.status()).nativeLifecycle).toBeUndefined()
     expect((await worker.begin()).state).toBe('uncertain')
     expect(worker.native.creations).toHaveLength(1)
-    expect((await readRepositorySessionLinks(worker.workspace)).document.bindings['T-0007'].sessionId).toBe(session.sessionId)
+    expect(taskSessionLinks((await readRepositorySessionLinks(worker.workspace)).document.bindings, 'T-0007')[0].sessionId).toBe(session.sessionId)
     if (detached) await removeRepositorySessionLink(worker.workspace, 'T-0007', before.revision)
     worker.native.sessions.set(session.sessionId, native)
     expect(await worker.status()).toMatchObject({ state: detached ? 'created-unbound' : 'ready', nativeLifecycle: 'creating', session })
@@ -548,7 +548,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     expect(JSON.stringify(await worker.status())).not.toContain(worker.workspace)
   })
 
-  it('preserves a conflicting B binding, leaves creation unbound, and retries only binding at a refreshed revision', async () => {
+  it('preserves an existing B binding and appends creation only at a refreshed revision', async () => {
     const worker = await fixture()
     worker.native.setLifecycle('creating')
     const acknowledgement = worker.native.pauseAcknowledgement()
@@ -560,15 +560,12 @@ describe('worker-authoritative native Agent Host creation', () => {
     const session = (await worker.status()).session!
     expect((await readRepositorySessionLinks(worker.workspace)).document).toEqual(conflict.document)
     expect(await locallyLinkedAgentHostSessions(worker.profile, worker.workspace, worker.owner)).toEqual([])
-    await expect(bindRepositoryAgentHostCreation(worker.workspace, 'T-0007', {
-      owner: session.owner, sessionId: session.sessionId, chatId: session.chatId,
-    }, conflict.revision)).rejects.toThrow('different session binding')
-    expect((await worker.bind(conflict.revision)).state).toBe('created-unbound')
-    const detached = await removeRepositorySessionLink(worker.workspace, 'T-0007', conflict.revision)
-    expect((await worker.status()).state).toBe('created-unbound')
-    expect((await readRepositorySessionLinks(worker.workspace)).document.bindings).toEqual({})
-    const bound = await worker.bind(detached.revision)
+    const bound = await worker.bind(conflict.revision)
     expect(bound).toMatchObject({ state: 'ready', session })
+    expect(taskSessionLinks((await readRepositorySessionLinks(worker.workspace)).document.bindings, 'T-0007')).toEqual([
+      { provider: 'agent-host', ...agentHostTargetFixture('existing-original', worker.owner) },
+      { provider: 'agent-host', owner: session.owner, sessionId: session.sessionId, chatId: session.chatId },
+    ])
     expect(worker.native.creations).toHaveLength(1)
   })
 
@@ -580,7 +577,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     await expect.poll(async () => (await worker.status()).state).toBe('created-unbound')
     const created = (await worker.status()).session!
     const linked = await readRepositorySessionLinks(worker.workspace)
-    expect(linked.document.bindings['T-0007'].sessionId).toBe(created.sessionId)
+    expect(taskSessionLinks(linked.document.bindings, 'T-0007').some((link) => link.sessionId === created.sessionId)).toBe(true)
     await rm(receipt, { recursive: true })
     expect(await worker.bind(linked.revision)).toMatchObject({ state: 'ready', session: created })
     expect(worker.native.creations).toHaveLength(1)

@@ -8,6 +8,7 @@ import {
   type RemoteActor, type RemoteConfigDiagnostic, type RemoteRecord, type RemoteRecordBody,
   type RemoteRecordHeader, type RemoteRecordKind, type RemoteSettings, type ResolvedRemoteConfig,
 } from '../../shared/remoteConfig'
+import type { SessionLink } from '../../shared/sessionBindings'
 import { devTunnelIdSchema, sshFingerprint, sshPublicKeySchema } from '../devTunnel/protocol'
 import { sessionLinkKey, sessionLinkSchema, sessionLinkTaskIdSchema } from '../sessionLinkSchema'
 import { remoteClientSchema, remoteMachineSchema } from '../vscodeRemoteProtocol'
@@ -66,8 +67,18 @@ const invitationPayloadSchema = z.discriminatedUnion('action', [
   }
 })
 const bindingPayloadSchema = z.discriminatedUnion('action', [
-  z.object({ schemaVersion: z.literal(2), action: z.literal('set'), taskId: sessionLinkTaskIdSchema.max(64), target: sessionLinkSchema }).strict(),
-  z.object({ schemaVersion: z.literal(2), action: z.literal('delete'), taskId: sessionLinkTaskIdSchema.max(64) }).strict(),
+  z.object({
+    schemaVersion: z.literal('2.1'), action: z.literal('set'), taskId: sessionLinkTaskIdSchema.max(64),
+    targets: z.array(sessionLinkSchema).min(1).max(1000),
+  }).strict().superRefine((value, context) => {
+    const claims = new Set<string>()
+    for (const target of value.targets) {
+      const key = sessionLinkKey(target)
+      if (claims.has(key)) context.addIssue({ code: 'custom', message: 'A binding payload cannot claim the same session more than once.' })
+      claims.add(key)
+    }
+  }),
+  z.object({ schemaVersion: z.literal('2.1'), action: z.literal('delete'), taskId: sessionLinkTaskIdSchema.max(64) }).strict(),
 ])
 export const settingKeySchema = z.enum(['autoLink', 'tunnelEnabled', 'connectTimeoutMs'])
 const settingPayloadSchema = z.object({
@@ -161,7 +172,7 @@ export function parseRecord(input: unknown): RemoteRecord {
   if (Buffer.byteLength(encoded) > remoteConfigLimits.recordBytes) throw new RemoteConfigError('resource-limit', 'A remote configuration record exceeds the 32 KiB limit.')
   let record: RemoteRecord
   try { record = remoteRecordSchema.parse(input) as RemoteRecord }
-  catch { throw new RemoteConfigError('invalid-record', 'A remote configuration record has an invalid or unknown schema.') }
+  catch { throw new RemoteConfigError('invalid-record', 'A remote configuration record has an invalid or unknown schema. Task session bindings require v2.1; previous bindings are unsupported and are not migrated. Use a fresh workspace binding configuration to link existing native sessions again.') }
   if (canonicalJson(record) !== encoded) throw new RemoteConfigError('noncanonical-record', 'A signed record cannot contain values that require schema normalization.', entityKey(record), record.operationId)
   if (hash({ ...bodyOf(record), signature: record.signature }) !== record.operationId) throw new RemoteConfigError('hash-mismatch', 'An immutable record hash does not match its content.', entityKey(record), record.operationId)
   return record
@@ -179,6 +190,11 @@ export interface RecordTrust {
   allowDeviceReactivation?(record: RemoteRecord<'device'>): Awaitable<boolean>
   maximumInvitationLifetimeMs?: number
   now?: () => number
+}
+
+export function bindingTargets(payload: RemoteRecord<'binding'>['payload']): SessionLink[] {
+  if (payload.action !== 'set') return []
+  return payload.targets
 }
 
 export function verifyRecordSignature(input: unknown, publicKey: string): RemoteRecord {
@@ -208,7 +224,7 @@ export async function verifyRecord(input: unknown, trust: RecordTrust): Promise<
     }
   }
   if (record.kind === 'binding' && record.payload.action === 'set') {
-    if (!uuidSchema.safeParse(record.payload.target.owner.clientId).success) deny('Published owner identities must use canonical lowercase UUIDs.')
+    if (bindingTargets(record.payload).some((target) => !uuidSchema.safeParse(target.owner.clientId).success)) deny('Published owner identities must use canonical lowercase UUIDs.')
   }
   if (record.kind === 'setting' && record.payload.scope === 'device' && record.actor.deviceId !== record.payload.deviceId) deny('Only the owning device can change its device settings.')
   if (!await trust.authorize(record)) deny('The enrolled policy does not authorize this operation, task or target.')
@@ -335,12 +351,19 @@ export async function resolveRecords(inputs: readonly unknown[], trust: RecordTr
       }
     }
     if (record.kind === 'binding' && record.payload.action === 'set') {
-      const target = record.payload.target
       for (const parent of record.parents) {
         const previous = records.get(parent)
         if (previous?.kind === 'binding' && previous.payload.action === 'set') {
-          const old = previous.payload.target
-          if (old.owner && old.provider === target.provider && old.sessionId === target.sessionId && old.owner.clientId !== target.owner?.clientId) diagnostic('ownership-transfer', 'A binding edit cannot transfer session ownership.', record)
+          const oldTargets = bindingTargets(previous.payload)
+          const newTargets = bindingTargets(record.payload)
+          const removed = oldTargets.filter((old) => !newTargets.some((target) => sessionLinkKey(target) === sessionLinkKey(old)))
+          const added = newTargets.filter((target) => !oldTargets.some((old) => sessionLinkKey(old) === sessionLinkKey(target)))
+          for (const old of removed) {
+            if (added.some((target) => old.provider === target.provider && old.sessionId === target.sessionId
+              && old.owner.clientId !== target.owner.clientId)) {
+              diagnostic('ownership-transfer', 'A binding edit cannot transfer session ownership.', record)
+            }
+          }
         }
       }
     }
@@ -430,13 +453,13 @@ export async function resolveRecords(inputs: readonly unknown[], trust: RecordTr
       else resolution.invitations[entity.key] = record
     }
     if (record.kind === 'binding' && record.payload.action === 'set') {
-      const owner = record.payload.target.owner?.clientId
-      const ownerEntity = owner ? resolution.entities[`device:${owner}`] : undefined
+      const targets = bindingTargets(record.payload)
+      const ownerEntities = targets.map((target) => resolution.entities[`device:${target.owner.clientId}`]).filter(Boolean)
       const actorEntity = resolution.entities[`device:${record.actor.deviceId}`]
-      if ((ownerEntity && ownerEntity.state !== 'active') || (actorEntity && actorEntity.state !== 'active')) {
+      if (ownerEntities.some((owner) => owner.state !== 'active') || (actorEntity && actorEntity.state !== 'active')) {
         entity.state = 'blocked'
         diagnostics.push({ code: 'unavailable-device', message: 'The binding owner or author identity is removed, invalid or conflicting.', entityKey: entity.key })
-      } else resolution.bindings[record.payload.taskId] = record.payload.target
+      } else resolution.bindings[record.payload.taskId] = targets
     }
   }
   const claims = new Map<string, Set<string>>()
@@ -444,10 +467,12 @@ export async function resolveRecords(inputs: readonly unknown[], trust: RecordTr
     if (entity.kind !== 'binding' || (entity.state !== 'active' && entity.state !== 'needs-resolution')) continue
     for (const record of entity.records) {
       if (!entity.heads.includes(record.operationId) || record.kind !== 'binding' || record.payload.action !== 'set') continue
-      const key = sessionLinkKey(record.payload.target)
-      const tasks = claims.get(key) ?? new Set<string>()
-      tasks.add(record.payload.taskId)
-      claims.set(key, tasks)
+      for (const target of bindingTargets(record.payload)) {
+        const key = sessionLinkKey(target)
+        const tasks = claims.get(key) ?? new Set<string>()
+        tasks.add(record.payload.taskId)
+        claims.set(key, tasks)
+      }
     }
   }
   for (const claimants of claims.values()) if (claimants.size > 1) {
@@ -459,6 +484,7 @@ export async function resolveRecords(inputs: readonly unknown[], trust: RecordTr
     }
   }
   if (Object.keys(resolution.bindings).length > 1000) throw new RemoteConfigError('resource-limit', 'The session link limit is 1,000 tasks.')
+  if (Object.values(resolution.bindings).reduce((count, links) => count + links.length, 0) > 1000) throw new RemoteConfigError('resource-limit', 'The session link limit is 1,000 sessions.')
   // Stale grants and removed owners are inactive derived state, not corrupt immutable history.
   resolution.blocked = globalBlock || blockedEntities.size > 0
   resolution.diagnostics = [...new Map(diagnostics.map((entry) => [canonicalJson(entry), entry])).entries()].sort(([left], [right]) => left < right ? -1 : 1).map(([, entry]) => entry)

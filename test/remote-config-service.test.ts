@@ -212,7 +212,7 @@ it('converges A/B/C over real SSH using only each peer\'s selected checkout', as
   const before = await readRepositorySessionLinks(a.folder)
   await updateRepositoryAgentHostLink(a.folder, 'T-0001', target, before.revision)
   await vi.waitFor(async () => {
-    expect((await readRepositorySessionLinks(b.folder)).document.bindings['T-0001']).toEqual({ provider: 'agent-host', ...target })
+    expect((await readRepositorySessionLinks(b.folder)).document.bindings['T-0001']).toEqual([{ provider: 'agent-host', ...target }])
   }, { timeout: 15000, interval: 100 })
   expect((await b.service.status(b.folder)).provisionalTasks).toContain('T-0001')
   await b.service.syncNow(b.folder)
@@ -220,7 +220,7 @@ it('converges A/B/C over real SSH using only each peer\'s selected checkout', as
   a.releasePublication()
   await settle(peers)
   for (const peer of [a, b, c]) {
-    expect((await readRepositorySessionLinks(peer.folder)).document.bindings['T-0001']).toEqual({ provider: 'agent-host', ...target })
+    expect((await readRepositorySessionLinks(peer.folder)).document.bindings['T-0001']).toEqual([{ provider: 'agent-host', ...target }])
     expect((await peer.service.status(peer.folder)).provisionalTasks).toEqual([])
   }
   const tracked = await git(remote, '--git-dir', remote, 'ls-tree', '-r', '--name-only', 'main', '.taskcontinuum')
@@ -259,7 +259,7 @@ it('converges A/B/C over real SSH using only each peer\'s selected checkout', as
   const enrollments = new LocalEnrollments(a.data)
   expect((await enrollments.get(a.folder))?.enabled).toBe(true)
   await a.service.disable(a.folder)
-  expect((await readRepositorySessionLinks(a.folder)).document.bindings['T-0001']).toEqual({ provider: 'agent-host', ...target })
+  expect((await readRepositorySessionLinks(a.folder)).document.bindings['T-0001']).toEqual([{ provider: 'agent-host', ...target }])
   expect((await a.service.status(a.folder)).enabled).toBe(false)
   expect(await readFile(join(a.data, 'git-workspace-enrollments.json'), 'utf8')).not.toContain('privateKey')
   b.holdPublication()
@@ -321,8 +321,8 @@ it('upgrades saved enrolled links and creates and assigns with write access with
   expect(native.calls.some((call) => call.method === 'dispatchAction')).toBe(false)
   const { sessionId, chatId, owner: sessionOwner } = result.session!
   const binding = { provider: 'agent-host', sessionId, chatId, owner: sessionOwner }
-  expect((await readRepositorySessionLinks(a.folder)).document.bindings['T-0001']).toEqual(binding)
-  expect((await readRepositorySessionLinks(b.folder)).document.bindings['T-0001']).toEqual(binding)
+  expect((await readRepositorySessionLinks(a.folder)).document.bindings['T-0001']).toEqual([binding])
+  expect((await readRepositorySessionLinks(b.folder)).document.bindings['T-0001']).toEqual([binding])
   await b.service.revokeDevice(b.folder, a.identity.clientId)
   expect((await b.host.list()).find((entry) => entry.id === pair.id)!.workspaces).toEqual([{ root: await canonicalPolicyRoot(unrelated), canSend: false }])
 }, 120000)
@@ -503,7 +503,7 @@ it('opens an enrolled workspace without upstream and retains local edits and tru
   const restored = await peer.restart()
   await restored.restore()
   await restored.open(peer.folder)
-  expect((await readRepositorySessionLinks(peer.folder)).document.bindings['T-0001']).toEqual({ provider: 'agent-host', ...target })
+  expect((await readRepositorySessionLinks(peer.folder)).document.bindings['T-0001']).toEqual([{ provider: 'agent-host', ...target }])
   const pending = await restored.status(peer.folder)
   expect(pending.pending).toBeGreaterThan(0)
   expect(pending.settings?.connectTimeoutMs).toBe(15000)
@@ -518,7 +518,7 @@ it('opens an enrolled workspace without upstream and retains local edits and tru
   expect((await restored.status(peer.folder)).pending).toBe(0)
   expect((await restored.status(peer.folder)).error).toBeUndefined()
   expect(await git(remote, '--git-dir', remote, 'rev-parse', 'main')).not.toBe(before)
-  expect((await readRepositorySessionLinks(peer.folder)).document.bindings['T-0001']).toEqual({ provider: 'agent-host', ...target })
+  expect((await readRepositorySessionLinks(peer.folder)).document.bindings['T-0001']).toEqual([{ provider: 'agent-host', ...target }])
 
   const mainHead = await git(remote, '--git-dir', remote, 'rev-parse', 'main')
   await git(peer.folder, 'switch', '-c', 'tracked-task')

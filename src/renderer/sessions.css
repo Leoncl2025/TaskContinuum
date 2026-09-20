@@ -1,4 +1,27 @@
 .local-sessions { min-width: 0; }
+.session-sidebar .panel-header { gap: 4px; padding-inline: 10px; font-size: 10px; }
+.session-task-context { display: grid; gap: 6px; padding: 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.session-task-context strong { overflow-wrap: anywhere; line-height: 1.5; }
+.session-task-context .text-button { justify-self: start; }
+.session-view-tabs { display: flex; flex-shrink: 0; border-bottom: 1px solid var(--border); }
+.session-view-tabs button { flex: 1; padding: 10px 6px; border-bottom: 2px solid transparent; font-size: 12px; }
+.session-view-tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+.session-sidebar-content { padding: 10px; min-width: 0; }
+.session-sidebar-content > p { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.session-sidebar input, .session-sidebar select { max-width: 100%; min-width: 0; background: var(--input); border: 1px solid var(--border); border-radius: 4px; padding: 6px; }
+.session-sidebar .session-filter { padding: 0; }
+.session-sidebar .ah-creation { margin: 0; padding: 0; border: 0; }
+.session-sidebar .ah-creation-pickers { grid-template-columns: minmax(0, 1fr); }
+.session-sidebar button { overflow-wrap: anywhere; }
+.session-tree-task { display: flex; align-items: center; width: 100%; gap: 8px; padding: 8px 4px; font-size: 12px; }
+.session-tree-task > span:last-child { margin-left: auto; color: var(--muted); }
+.session-tree .session-row { padding: 10px 6px; }
+.session-tree-row { display: flex; align-items: center; min-width: 0; }
+.session-tree-row.is-selected { background: var(--selected); }
+.session-tree-row .session-row { flex: 1; min-width: 0; border: 0; }
+.session-tree [role="treeitem"]:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.session-sidebar-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-block: 12px; }
+.session-inline-confirm { margin-top: 12px; border: 1px solid var(--border); padding: 10px; border-radius: 4px; font-size: 12px; overflow-wrap: anywhere; }
 .local-sessions .panel-header { padding-left: 15px; letter-spacing: 0; }
 .copilot-connection { display: flex; align-items: center; gap: 10px; padding: 13px 15px 19px; }
 .copilot-connection > .codicon { font-size: 23px; color: var(--accent); }

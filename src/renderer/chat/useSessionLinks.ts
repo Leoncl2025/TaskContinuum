@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { SessionLinksSnapshot } from '../../shared/sessionBindings'
+import { taskSessionLinks } from '../../shared/sessionBindings'
 import type { WorkspaceSnapshot } from '../../shared/workspace'
 import type { SessionBinding, SessionBindings } from './sessionBindings'
 
 function uiBindings(snapshot: SessionLinksSnapshot): SessionBindings {
-  if (snapshot.document.schemaVersion !== 2) throw new Error('Workspace session bindings require schema v2. Old bindings are not migrated.')
-  return Object.fromEntries(Object.entries(snapshot.document.bindings).map(([taskId, link]) => {
+  if (snapshot.document.schemaVersion !== '2.1') throw new Error('Workspace session bindings require schema v2.1. Previous bindings are unsupported and are not migrated. Use a fresh workspace binding configuration and link existing native sessions again.')
+  return Object.fromEntries(Object.keys(snapshot.document.bindings).map((taskId) => [taskId, taskSessionLinks(snapshot.document.bindings, taskId).map((link) => {
     if (link.provider !== 'agent-host' || 'hostId' in link || !link.sessionId || !link.chatId || !link.owner?.clientId || !link.owner.machineName) throw new Error('Workspace session bindings must contain owned logical Agent Host targets. Host-pinned bindings are not supported.')
-    return [taskId, { id: link.sessionId, title: 'Agent Host', owner: link.owner, ownerIsRemote: link.owner.clientId !== snapshot.localOwner?.clientId, agentHost: { sessionId: link.sessionId, chatId: link.chatId, owner: link.owner } }]
-  }))
+    return { id: link.sessionId, title: 'Agent Host', owner: link.owner, ownerIsRemote: link.owner.clientId !== snapshot.localOwner?.clientId, agentHost: { sessionId: link.sessionId, chatId: link.chatId, owner: link.owner } }
+  })]))
 }
 
 export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
@@ -106,11 +107,11 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
     })
   }
 
-  async function detach(taskId: string): Promise<void> {
-    await run(({ workspace, bridge, snapshot }) => bridge.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: null, expectedRevision: snapshot.revision }))
+  async function detach(taskId: string, binding?: SessionBinding): Promise<void> {
+    await run(({ workspace, bridge, snapshot }) => bridge.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: null, ...(binding ? { detachTarget: binding.agentHost } : {}), expectedRevision: snapshot.revision }))
   }
 
-  async function reload(): Promise<void> {
+  async function reload(): Promise<SessionLinksSnapshot | undefined> {
     if (!workspace || !bridge || pending.current) return
     readGeneration.current += 1
     pending.current = true
@@ -118,6 +119,7 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
     try {
       const value = await bridge.getSessionLinks(workspace.id)
       if (mounted.current) { applySnapshot(value); setError(null) }
+      return value
     } catch (failure) {
       if (mounted.current) setError(failure instanceof Error ? failure.message : 'Repository session links could not be read.')
     } finally {
@@ -128,7 +130,7 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
   }
 
   return {
-    bindings, busy, error, attach, detach, reload,
+    bindings, busy, error, attach, detach, reload, localOwner: snapshot?.localOwner,
     ready: !busy && !error && workspace !== null && snapshot !== null,
   }
 }

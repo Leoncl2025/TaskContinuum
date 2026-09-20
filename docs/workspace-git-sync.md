@@ -115,10 +115,12 @@ instead of rewriting one shared registry. Different entity keys combine.
 Git's LF/CRLF checkout conversion is accepted without changing the user's Git
 settings or rewriting local files; all other canonical-content, hash and signature
 checks still apply.
-Concurrent incompatible values retain both authors' operations and produce
+Each task binding operation stores the task's complete session array. Concurrent
+incompatible changes to the same task retain both authors' operations and produce
 **needs resolution**; ambiguous bindings are disabled. Reassigning the intended
-session or explicitly detaching with the current revision resolves known heads.
-The same canonical session cannot have two active task claims.
+session set or explicitly detaching an exact session with the current revision
+resolves known heads. The same canonical owner/session cannot appear twice,
+including as different chats or under different tasks.
 
 The local app-data directory holds protected SSH keys, native private
 invitations, enrollment pins, the outbox, overlay markers, configuration editor
@@ -129,8 +131,17 @@ Pending configuration is kept in the outbox until Git publication succeeds.
 Generated views are not a second Git authority.
 The private key store continues to use OS protection.
 
-Session binding documents and signed binding payloads require schema v2. They
-accept only logical `agent-host` targets with `sessionId`,
+Session binding documents and signed binding payloads accept only schema v2.1 arrays,
+identified by the string `"schemaVersion": "2.1"`, not the number `2.1`.
+Earlier binding formats, including signed v2 single-target history, are unsupported
+and block the configuration; no migration, partial import, or automatic reset occurs.
+Archive the old configuration and initialize a fresh workspace metadata set before
+manually linking the existing native sessions again. Cached records and pending
+outboxes belong to the old enrollment too; deleting individual Git records is not
+a migration. Do not rewrite signed history. All participating desktops need v2.1 support.
+Creation operation records and local authorization receipts keep their separate v2
+schemas; native session history and keys are untouched.
+Bindings accept only logical `agent-host` targets with `sessionId`,
 `chatId` and a stable owner (`clientId`, `machineName`). GitHub Copilot SDK,
 VS Code journal and ownerless binding formats are unsupported, including
 inside signed Git records and SSH notifications.

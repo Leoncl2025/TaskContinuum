@@ -1,10 +1,12 @@
-import { Activity, useCallback, useEffect, useEffectEvent, useRef, useState, useSyncExternalStore } from 'react'
+import { Activity, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties } from 'react'
 import type { DesktopInfo } from '../shared/desktop'
 import { filterTasks } from '../shared/tasks'
 import type { WorkspaceSnapshot } from '../shared/workspace'
 import { useSessionLinks } from './chat/useSessionLinks'
 import { sessionBindingKey } from './chat/sessionBindings'
+import type { SessionBinding } from './chat/sessionBindings'
+import { taskSessionLinks } from '../shared/sessionBindings'
 import { Dialog, Icon, IconButton } from './components/Primitives'
 import { TaskSidebar } from './components/TaskSidebar'
 import { TaskViewer } from './components/TaskViewer'
@@ -19,20 +21,12 @@ import { LocalTaskAgent } from './components/LocalTaskAgent'
 import type { TaskCreationMode } from './components/TaskCreationDialog'
 import { RemoteDevicesDialog } from './components/RemoteDevicesDialog'
 import { AgentHostPanel } from './components/AgentHostPanel'
-import { AgentHostSessionsDialog } from './components/AgentHostSessionsDialog'
+import { AgentHostSessionsSidebar } from './components/AgentHostSessionsSidebar'
 import type { AgentHostSession } from '../shared/agentHost'
 import { agentHostKey } from '../shared/agentHost'
 import appIcon from '../../build/icon.png'
 
-type DialogName = 'quick-open' | 'settings' | 'clear-chat' | 'remote-devices' | 'agent-host-sessions' | null
-
-interface CreatedChatCompletion {
-  taskId: string
-  session: AgentHostSession
-  picker: { active: boolean }
-  resolve(): void
-  reject(error: Error): void
-}
+type DialogName = 'quick-open' | 'settings' | 'remote-devices' | null
 
 export default function App() {
   const workspaces = useWorkspaces()
@@ -61,6 +55,9 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   const [query, setQuery] = useState('')
   const [quickQuery, setQuickQuery] = useState('')
   const [layout, setLayout] = useState(readLayout)
+  const [sidebarView, setSidebarView] = useState<'tasks' | 'sessions'>('tasks')
+  const [selectedSessions, setSelectedSessions] = useState<Record<string, string | null>>({})
+  const [visitedSessions, setVisitedSessions] = useState<string[]>([])
   const [dialog, setDialog] = useState<DialogName>(null)
   const [taskCreationMode, setTaskCreationMode] = useState<'form' | 'draft' | null>(null)
   const [taskAgentBusy, setTaskAgentBusy] = useState(false)
@@ -69,69 +66,48 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   const [desktop, setDesktop] = useState<DesktopInfo>()
   const [desktopError, setDesktopError] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
-  const [detachTarget, setDetachTarget] = useState<{ taskId: string; key: string } | null>(null)
   const compact = useSyncExternalStore(subscribeCompact, isCompact, () => false)
   const desktopWidth = useSyncExternalStore(subscribeViewport, viewportWidth, () => 1440)
   const sizes = panelSizes(layout, desktopWidth)
   const task = tasks.find((item) => item.id === selectedId)
   const primaryPanel = task || taskAgentOpen ? 'chat' : 'details'
-  const agentHostBinding = task ? bindings[task.id]?.agentHost : undefined
+  const taskBindings = task ? bindings[task.id] ?? [] : []
+  let activeKey = task ? selectedSessions[task.id] : undefined
+  if (task && activeKey === undefined && taskBindings.length) {
+    activeKey = sessionBindingKey(taskBindings[0])
+    setSelectedSessions({ ...selectedSessions, [task.id]: activeKey })
+  }
+  const activeBinding = taskBindings.find((binding) => sessionBindingKey(binding) === activeKey)
+  const agentHostBinding = activeBinding?.agentHost
+  const activePanelKey = task && activeBinding ? `${task.id}:${sessionBindingKey(activeBinding)}` : undefined
+  const panelKeys = new Set([...visitedSessions, ...activePanelKey ? [activePanelKey] : []])
+  const chatPanels = tasks.flatMap((item) => (bindings[item.id] ?? []).flatMap((binding) => {
+    const key = `${item.id}:${sessionBindingKey(binding)}`
+    return panelKeys.has(key) ? [{ task: item, binding, key }] : []
+  }))
   const [agentHostBusy, setAgentHostBusy] = useState(false)
   const [agentHostRevision, setAgentHostRevision] = useState(0)
-  const [createdChat, setCreatedChat] = useState<CreatedChatCompletion | null>(null)
-  const creationCompletion = useRef<CreatedChatCompletion | null>(null)
   const creationLifetime = useRef({ active: false })
-  const creationPicker = useRef<{ active: boolean } | null>(null)
+  const sessionViewLifetime = useRef({ active: false })
+  const currentTaskId = useRef(selectedId)
   const sidebarVisible = compact ? compactPanel === 'tasks' : layout.sidebar
   const chatVisible = compact ? compactPanel === 'chat' : layout.chat
   const detailsVisible = compact ? compactPanel === 'details' : layout.details
   const sessionBusy = (Boolean(agentHostBinding) && agentHostBusy) || taskAgentBusy
-  const workspaceLocked = repositorySetupOpen || taskCreationMode !== null || links.busy || sessionBusy || dialog === 'remote-devices' || dialog === 'agent-host-sessions' || dialog === 'clear-chat'
+  const workspaceLocked = repositorySetupOpen || taskCreationMode !== null || links.busy || sessionBusy || dialog === 'remote-devices'
   const connectionError = (taskAgentOpen ? null : links.error) ?? actionError
-  const detachBinding = detachTarget ? bindings[detachTarget.taskId]?.agentHost : undefined
-  const detachmentChanged = Boolean(detachTarget && (!detachBinding || agentHostKey(detachBinding) !== detachTarget.key))
 
   useEffect(() => {
     const scope = { active: true }
     creationLifetime.current = scope
-    return () => {
-      scope.active = false
-      creationCompletion.current?.reject(new Error('The original workspace was closed. Reopen it to recover the saved chat.'))
-      creationCompletion.current = null
-    }
+    return () => { scope.active = false }
   }, [])
+  useEffect(() => { currentTaskId.current = selectedId }, [selectedId])
   useEffect(() => {
-    if (dialog !== 'agent-host-sessions') return
-    const picker = { active: true }
-    creationPicker.current = picker
-    return () => {
-      picker.active = false
-      if (creationPicker.current === picker) creationPicker.current = null
-      if (creationCompletion.current?.picker === picker) {
-        creationCompletion.current.reject(new Error('The picker was closed. Reopen it to recover the saved chat.'))
-        creationCompletion.current = null
-      }
-    }
-  }, [dialog])
-  const finishCreatedChat = useEffectEvent((completion: CreatedChatCompletion) => {
-    if (creationCompletion.current !== completion) return
-    creationCompletion.current = null
-    if (!completion.picker.active || dialog !== 'agent-host-sessions') { completion.reject(new Error('The picker was closed. Reopen it to recover the saved chat.')); return }
-    if (!tasks.some((item) => item.id === completion.taskId)) { completion.reject(new Error(`The original task ${completion.taskId} is no longer in this workspace.`)); return }
-    const linked = bindings[completion.taskId]?.agentHost
-    if (!links.ready || !linked) { completion.reject(new Error(links.error ?? `Reload the saved Agent Host binding for ${completion.taskId} before opening its chat.`)); return }
-    if (agentHostKey(linked) !== agentHostKey(completion.session)) { completion.reject(new Error('The task binding no longer matches the created chat. No replacement chat was selected.')); return }
-    selectTask(completion.taskId)
-    showTaskChat()
-    setDialog(null)
-    completion.resolve()
-  })
-  useEffect(() => {
-    if (!createdChat || links.busy) return
-    let active = true
-    void Promise.resolve().then(() => { if (active) finishCreatedChat(createdChat) })
-    return () => { active = false }
-  }, [createdChat, links.busy])
+    const scope = { active: sidebarVisible && sidebarView === 'sessions' }
+    sessionViewLifetime.current = scope
+    return () => { scope.active = false }
+  }, [sidebarVisible, sidebarView, selectedId])
 
   useEffect(() => { saveLayout(layout) }, [layout])
   useEffect(() => {
@@ -143,15 +119,15 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   const toggleSidebar = useCallback(() => {
     if (compact) setCompactPanel((value) => value === 'tasks' ? primaryPanel : 'tasks')
     else setLayout((value) => ({ ...value, sidebar: !value.sidebar }))
-  }, [compact, primaryPanel])
+  }, [compact, primaryPanel, setCompactPanel, setLayout])
   const toggleChat = useCallback(() => {
     if (compact) setCompactPanel((value) => value === 'chat' ? 'details' : 'chat')
     else setLayout((value) => ({ ...value, chat: !value.chat, details: value.chat || value.details }))
-  }, [compact])
+  }, [compact, setCompactPanel, setLayout])
   const toggleDetails = useCallback(() => {
     if (compact) setCompactPanel((value) => value === 'details' ? 'chat' : 'details')
     else setLayout((value) => ({ ...value, details: !value.details, chat: value.details || value.chat }))
-  }, [compact])
+  }, [compact, setCompactPanel, setLayout])
 
   useEffect(() => {
     const handle = (event: KeyboardEvent) => {
@@ -174,6 +150,8 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   }, [compact, primaryPanel, dialog, taskCreationMode, repositorySetupOpen, workspace, workspaces.available, workspaces.busy, workspaceLocked, toggleChat, toggleDetails, toggleSidebar])
 
   function selectTask(id: string): void {
+    rememberChat()
+    currentTaskId.current = id
     setSelectedId(id)
     setOpenTasks((current) => current.includes(id) ? current : [...current, id])
     setCompactPanel('chat')
@@ -198,6 +176,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   }
 
   function closeTask(id: string): void {
+    rememberChat()
     const remaining = openTasks.filter((item) => item !== id)
     setOpenTasks(remaining)
     if (selectedId === id) setSelectedId(remaining.at(-1) ?? null)
@@ -219,6 +198,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   }
 
   function openSidebar(): void {
+    setSidebarView('tasks')
     if (compact) setCompactPanel('tasks')
     else setLayout((value) => ({ ...value, sidebar: true }))
   }
@@ -232,57 +212,57 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
     if (!window.agentHost) { setActionError('The Agent Host desktop API is unavailable. Open this workspace in the desktop app.'); return }
     setActionError(null)
     setTaskAgentOpen(false)
-    setDialog('agent-host-sessions')
+    setSidebarView('sessions')
+    if (compact) setCompactPanel('tasks')
+    else setLayout((value) => ({ ...value, sidebar: true }))
+  }
+
+  function rememberChat(): void {
+    if (activePanelKey) setVisitedSessions((current) => current.includes(activePanelKey) ? current : [...current, activePanelKey])
+  }
+
+  function selectSession(taskId: string, binding: SessionBinding): void {
+    rememberChat()
+    setSelectedSessions((current) => ({ ...current, [taskId]: sessionBindingKey(binding) }))
+    selectTask(taskId)
+    showTaskChat()
   }
 
   async function linkAgentHost(session: AgentHostSession): Promise<void> {
     if (!workspace || !selectedId || !links.ready) throw new Error('Select a task and reload its workspace links before linking an Agent Host chat.')
+    const taskId = selectedId
+    const scope = creationLifetime.current
+    const sessionView = sessionViewLifetime.current
     const binding = { id: session.sessionId, title: session.title, owner: session.owner, agentHost: { sessionId: session.sessionId, chatId: session.chatId, owner: session.owner } }
-    const existing = Object.entries(bindings).find(([, current]) => sessionBindingKey(current) === sessionBindingKey(binding))?.[0]
-    if (existing) {
-      if (!tasks.some((item) => item.id === existing)) throw new Error(`The Agent Host conversation belongs to unavailable task ${existing}.`)
-      if (existing === selectedId) {
-        await links.attach(existing, binding)
-        setAgentHostRevision((value) => value + 1)
-      }
-      selectTask(existing)
-    } else {
-      if (bindings[selectedId]) throw new Error('Detach the current conversation before linking a different Host chat.')
-      await links.attach(selectedId, binding)
-    }
+    const existing = Object.entries(bindings).find(([, members]) => members.some((current) => current.id === binding.id && current.owner.clientId === binding.owner.clientId))?.[0]
+    if (existing && existing !== taskId) throw new Error(`This session is already linked to ${existing}. Detach it there before moving it.`)
+    await links.attach(taskId, binding)
+    if (!scope.active) throw new Error('The original workspace was closed. Reopen it to view the saved session link.')
+    setAgentHostRevision((value) => value + 1)
     setActionError(null)
-    setDialog(null)
-    showTaskChat()
+    if (sessionView.active && currentTaskId.current === taskId) selectSession(taskId, binding)
   }
 
   async function agentHostCreated(taskId: string, session: AgentHostSession): Promise<void> {
     const scope = creationLifetime.current
-    const picker = creationPicker.current
-    if (!scope.active || !picker?.active || !workspace || !tasks.some((item) => item.id === taskId)) throw new Error(`The original task ${taskId} is unavailable in this workspace.`)
-    await links.reload()
+    const sessionView = sessionViewLifetime.current
+    if (!scope.active || !workspace || !tasks.some((item) => item.id === taskId)) throw new Error(`The original task ${taskId} is unavailable in this workspace.`)
+    const snapshot = await links.reload()
     if (!scope.active) throw new Error('The original workspace was closed. Reopen it to recover the saved chat.')
-    if (!picker.active) throw new Error('The picker was closed. Reopen it to recover the saved chat.')
-    await new Promise<void>((resolve, reject) => {
-      if (creationCompletion.current) { reject(new Error('Another created chat is still opening.')); return }
-      const completion = { taskId, session, picker, resolve, reject }
-      creationCompletion.current = completion
-      setCreatedChat(completion)
-    })
+    if (!snapshot) throw new Error('Reload the saved Agent Host binding before opening the created chat.')
+    const linked = taskSessionLinks(snapshot.document.bindings, taskId).find((link) => agentHostKey(link) === agentHostKey(session))
+    if (!linked) throw new Error('The task binding no longer includes the created chat. No replacement chat was selected.')
+    if (sessionView.active && currentTaskId.current === taskId) selectSession(taskId, { id: session.sessionId, title: session.title, owner: session.owner, agentHost: linked })
   }
 
-  async function detachSession(taskId: string): Promise<void> {
+  async function detachSession(taskId: string, binding: SessionBinding): Promise<void> {
     setActionError(null)
-    const current = bindings[taskId]?.agentHost
-    if (!detachTarget || detachTarget.taskId !== taskId || !current || agentHostKey(current) !== detachTarget.key) {
-      setActionError('The task binding changed. Review the current Agent Host chat before detaching.')
-      return
-    }
-    try {
-      await links.detach(taskId)
-      setDialog(null)
-    } catch (failure) {
-      setActionError(failure instanceof Error ? failure.message : 'The Agent Host binding could not be removed.')
-    }
+    const key = sessionBindingKey(binding)
+    if (!bindings[taskId]?.some((current) => sessionBindingKey(current) === key)) throw new Error('The task binding changed. Review the current Agent Host chat before detaching.')
+    if (taskId === selectedId && key === activeKey && agentHostBusy) throw new Error('Wait for the current Agent Host operation to finish before detaching this session.')
+    await links.detach(taskId, binding)
+    if (!creationLifetime.current.active) return
+    setSelectedSessions((current) => current[taskId] === key ? { ...current, [taskId]: null } : current)
   }
 
   function openWorkspace(): void {
@@ -312,17 +292,17 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
     </header>
 
     {compact && <nav className="compact-navigation" aria-label="Workspace panes">
-      <button type="button" aria-label="Toggle task sidebar" aria-pressed={sidebarVisible} onClick={toggleSidebar}><Icon name="checklist" />Tasks</button>
+      <button type="button" aria-label="Toggle task sidebar" aria-pressed={sidebarVisible} onClick={toggleSidebar}><Icon name={sidebarView === 'sessions' ? 'server-environment' : 'checklist'} />{sidebarView === 'sessions' ? 'Sessions' : 'Tasks'}</button>
       <button type="button" aria-label="Toggle chat panel" aria-pressed={chatVisible} onClick={toggleChat}><Icon name="comment-discussion" />Chat</button>
       <button type="button" aria-label="Toggle task details" aria-pressed={detailsVisible} onClick={toggleDetails}><Icon name="file-text" />Details</button>
     </nav>}
 
     {workspaces.error && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{workspaces.error}</span><IconButton icon="close" label="Dismiss workspace error" onClick={() => workspaces.setError(null)} /></div>}
-    {connectionError && dialog !== 'clear-chat' && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{connectionError}</span>{links.error ? <IconButton icon="refresh" label="Reload session links" disabled={links.busy || sessionBusy} onClick={() => { setActionError(null); void links.reload() }} /> : <IconButton icon="close" label="Dismiss Agent Host error" onClick={() => setActionError(null)} />}</div>}
+    {connectionError && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{connectionError}</span>{links.error ? <IconButton icon="refresh" label="Reload session links" disabled={links.busy || sessionBusy} onClick={() => { setActionError(null); void links.reload() }} /> : <IconButton icon="close" label="Dismiss Agent Host error" onClick={() => setActionError(null)} />}</div>}
     <div className="workbench-body" style={{ '--sidebar-width': `${sizes.sidebar.width}px`, '--details-width': `${sizes.details.width}px` } as CSSProperties}>
       <nav className="activity-bar" aria-label="Workbench navigation">
-        <button type="button" className={sidebarVisible ? 'activity active' : 'activity'} aria-label="Tasks" title="Tasks" aria-pressed={sidebarVisible} onClick={openSidebar}><Icon name="checklist" /></button>
-        <button type="button" className="activity" aria-label="Agent Host sessions" title="Native Agent Host sessions" onClick={openAgentHostSessions}><Icon name="server-environment" /></button>
+        <button type="button" className={sidebarVisible && sidebarView === 'tasks' ? 'activity active' : 'activity'} aria-label="Tasks" title="Tasks" aria-pressed={sidebarVisible && sidebarView === 'tasks'} onClick={openSidebar}><Icon name="checklist" /></button>
+        <button type="button" className={sidebarVisible && sidebarView === 'sessions' ? 'activity active' : 'activity'} aria-label="Agent Host sessions" title="Native Agent Host sessions" aria-pressed={sidebarVisible && sidebarView === 'sessions'} onClick={openAgentHostSessions}><Icon name="server-environment" /></button>
         {workspace && window.remoteVSCode && <button type="button" className="activity" aria-label="Remote devices" title="Remote devices" onClick={() => setDialog('remote-devices')}><Icon name="remote" /></button>}
         <button type="button" className="activity" aria-label="Search tasks" title="Search tasks" onClick={() => { openSidebar(); requestAnimationFrame(() => document.getElementById('task-filter')?.focus()) }}><Icon name="search" /></button>
         <div className="activity-spacer" />
@@ -330,7 +310,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
         <button type="button" className="activity" aria-label="Preferences" title="Preferences and integration status" onClick={() => setDialog('settings')}><Icon name="settings-gear" /></button>
       </nav>
 
-      {sidebarVisible && <TaskSidebar key={createdTaskId ?? 'initial'} tasks={tasks} selectedId={selectedId} query={query} onQuery={setQuery} onSelect={selectTask} onCreate={onCreateRepository} onCreateTask={openTaskCreation} creationDisabled={!workspaces.available || workspaceLocked || workspaces.busy} onClose={toggleSidebar} workspace={workspace ?? undefined} workspaceControls={workspaceControls} />}
+      {sidebarVisible && (sidebarView === 'sessions' ? <AgentHostSessionsSidebar key={task?.id ?? 'no-task'} taskId={task?.id} taskTitle={task?.title} taskReady={Boolean(task && links.ready)} bindings={bindings} activeKey={activeBinding ? sessionBindingKey(activeBinding) : undefined} localOwnerId={links.localOwner?.clientId} busy={links.busy} onSelect={task ? (binding) => selectSession(task.id, binding) : undefined} onDetach={task ? (binding) => detachSession(task.id, binding) : undefined} onLink={linkAgentHost} onCreated={agentHostCreated} onDevices={() => setDialog('remote-devices')} onTasks={openSidebar} onClose={toggleSidebar} /> : <TaskSidebar key={createdTaskId ?? 'initial'} tasks={tasks} selectedId={selectedId} query={query} onQuery={setQuery} onSelect={selectTask} onCreate={onCreateRepository} onCreateTask={openTaskCreation} creationDisabled={!workspaces.available || workspaceLocked || workspaces.busy} onClose={toggleSidebar} workspace={workspace ?? undefined} workspaceControls={workspaceControls} />)}
       {!compact && sidebarVisible && <PanelSash panel="sidebar" {...sizes.sidebar} onResize={(width) => changePanelWidth('sidebar', width)} onReset={() => changePanelWidth('sidebar', defaultLayout.sidebarWidth)} />}
 
       <Activity mode={compact && sidebarVisible ? 'hidden' : 'visible'}><main className="main-panel" aria-label="Task workspace">
@@ -353,13 +333,15 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
         </div>
         <div id="active-task" className="active-task" data-chat-visible={chatVisible}>
           <Activity mode={chatVisible ? 'visible' : 'hidden'}>
-            {taskAgentOpen && workspace ? <LocalTaskAgent workspace={workspace} workspaces={workspaces} onCreated={taskCreated} onReviewDraft={() => setTaskCreationMode('draft')} onTaskChat={task ? showTaskChat : undefined} onClose={toggleChat} onBusy={setTaskAgentBusy} /> : task && agentHostBinding ? <AgentHostPanel key={`${task.id}:${sessionBindingKey(bindings[task.id])}`} task={task} target={agentHostBinding} connectionRevision={agentHostRevision} onDetach={() => { setActionError(null); setDetachTarget({ taskId: task.id, key: agentHostKey(agentHostBinding) }); setDialog('clear-chat') }} onClose={toggleChat} onDevices={window.remoteVSCode ? () => setDialog('remote-devices') : undefined} onSessions={openAgentHostSessions} onBusy={setAgentHostBusy} /> : <aside className="chat-panel empty-chat" aria-label="Task chat">
+            {chatPanels.map((panel) => <Activity key={panel.key} mode={!taskAgentOpen && panel.key === activePanelKey ? 'visible' : 'hidden'}><AgentHostPanel task={panel.task} target={panel.binding.agentHost} active={!taskAgentOpen && panel.key === activePanelKey} connectionRevision={agentHostRevision} onDetach={openAgentHostSessions} onClose={toggleChat} onDevices={window.remoteVSCode ? () => setDialog('remote-devices') : undefined} onSessions={openAgentHostSessions} onBusy={setAgentHostBusy} /></Activity>)}
+            {taskAgentOpen && workspace && <LocalTaskAgent workspace={workspace} workspaces={workspaces} onCreated={taskCreated} onReviewDraft={() => setTaskCreationMode('draft')} onTaskChat={task ? showTaskChat : undefined} onClose={toggleChat} onBusy={setTaskAgentBusy} />}
+            {!taskAgentOpen && !agentHostBinding && <aside className="chat-panel empty-chat" aria-label="Task chat">
               <header className="panel-header"><span>AGENT HOST</span><IconButton icon="close" label="Hide chat panel" onClick={toggleChat} /></header>
               <div className="chat-context"><Icon name="server-environment" /><div><strong>{task?.title ?? 'Native Agent Host chats'}</strong><span>{task?.id ?? 'No task selected'}</span></div></div>
               <div className="empty-workbench">
                 <span className="chat-welcome-icon"><Icon name="comment-discussion" /></span>
                 <h2>{task ? 'Keep the conversation moving' : 'Your task conversations, front and center'}</h2>
-                <p>{!task ? 'Select a task to open its Agent Host chat.' : `No Agent Host chat is linked to ${task.id}. Select an existing chat or explicitly create one from the session picker.`}</p>
+                <p>{!task ? 'Select a task to open its Agent Host chat.' : taskBindings.length ? `Choose a linked session for ${task.id} in the Agent Host sessions sidebar.` : `No Agent Host chat is linked to ${task.id}. Link an existing chat or create one from the Agent Host sessions sidebar.`}</p>
                 <p className="muted">Local SDK and Companion sessions are not supported. Existing session data is left untouched.</p>
                 {task && workspace && <button type="button" className="primary-button" disabled={links.busy} onClick={openAgentHostSessions}>Browse Agent Host sessions</button>}
               </div>
@@ -391,9 +373,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
 
     {dialog === 'settings' && <Dialog title="Preferences" onClose={() => setDialog(null)}><section className="settings-section"><h3>Appearance</h3><div className="theme-options">{(['dark', 'light'] as const).map((theme) => <label key={theme}><input type="radio" name="theme" checked={layout.theme === theme} onChange={() => setLayout((value) => ({ ...value, theme }))} /><span>{theme === 'dark' ? 'Dark' : 'Light'}</span></label>)}</div><button type="button" className="secondary-button" onClick={() => { setLayout((value) => ({ ...defaultLayout, theme: value.theme })); setCompactPanel(primaryPanel) }}>Reset panel layout</button></section><section className="settings-section"><h3>Integrations</h3><div className="integration-row"><span>Native Agent Host (AHP)</span><span className="integration-state">{window.agentHost ? 'Desktop API available' : 'Desktop API unavailable'}</span></div><div className="integration-row"><span>Remote devices and automatic workspace links</span><span className="integration-state">{window.remoteVSCode ? 'Desktop API available' : 'Desktop API unavailable'}</span></div></section><section className="settings-section"><h3>Keyboard shortcuts</h3><div className="shortcut-row"><span>New task</span><kbd>Ctrl / ⌘ N</kbd></div><div className="shortcut-row"><span>Quick open</span><kbd>Ctrl / ⌘ P</kbd></div><div className="shortcut-row"><span>Toggle task sidebar</span><kbd>Ctrl / ⌘ B</kbd></div><div className="shortcut-row"><span>Toggle chat</span><kbd>Ctrl / ⌘ Alt B</kbd></div><div className="shortcut-row"><span>Toggle task details</span><kbd>Ctrl / ⌘ Alt D</kbd></div></section><p className="dialog-hint">{workspace ? `Workspace: ${workspace.root}. Create new tasks in the Explorer; existing task views remain read-only. Session links: immutable Agent Host metadata.` : 'No workspace is selected. Create or open a task repository to get started; nothing is published automatically.'} Icons: Microsoft Codicons · CC BY 4.0.</p></Dialog>}
 
-    {dialog === 'clear-chat' && detachTarget && <Dialog title="Detach conversation" onClose={() => { if (!links.busy) setDialog(null) }}><p>Detach this Agent Host chat from {detachTarget.taskId}? An immutable workspace update will remove the binding. Conversation history stays on its Host.</p>{(detachmentChanged || connectionError) && <p className="copilot-error" role="alert">{detachmentChanged ? 'The task binding changed. Close this dialog and review the current Agent Host chat before detaching.' : connectionError}</p>}<div className="dialog-actions">{links.error && <button type="button" className="secondary-button" disabled={links.busy} onClick={() => { setActionError(null); void links.reload() }}>Reload session links</button>}<button type="button" className="secondary-button" disabled={links.busy} onClick={() => setDialog(null)}>Keep conversation</button><button type="button" className="primary-button" disabled={!links.ready || sessionBusy || detachmentChanged} onClick={() => { void detachSession(detachTarget.taskId) }}>Detach session</button></div></Dialog>}
     {dialog === 'remote-devices' && workspace && <RemoteDevicesDialog onClose={() => setDialog(null)} />}
-    {dialog === 'agent-host-sessions' && workspace && <AgentHostSessionsDialog taskId={selectedId ?? undefined} taskUnbound={Boolean(task && links.ready && !bindings[task.id])} onLink={linkAgentHost} onCreated={agentHostCreated} onDevices={() => setDialog('remote-devices')} onClose={() => setDialog(null)} />}
 
   </div>
 }

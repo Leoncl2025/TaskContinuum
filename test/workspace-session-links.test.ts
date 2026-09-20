@@ -57,13 +57,35 @@ describe('workspace-scoped immutable Agent Host links', () => {
     expect((await backend.store.read()).records).toEqual([])
     const saved = await store.updateSessionLink(request)
     expect(verifyAgentHost).toHaveBeenLastCalledWith(root, target)
-    expect(saved.document.bindings['T-0002']).toEqual({ provider: 'agent-host', ...target })
+    expect(saved.document.bindings['T-0002']).toEqual([{ provider: 'agent-host', ...target }])
     expect(await locallyLinkedAgentHostSessions(profile, root, target.owner)).toEqual([target])
     expect((await backend.store.read()).records).toEqual([expect.objectContaining({
-      kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0002', target: { provider: 'agent-host', ...target } },
+      kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0002', targets: [{ provider: 'agent-host', ...target }] },
       signature: { algorithm: 'ed25519', value: expect.any(String) },
     })])
     await expect(readFile(legacyFile, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('requires and applies an exact detach target when a task has multiple sessions', async () => {
+    const { profile, root, store, target, request } = await fixture()
+    const first = await store.updateSessionLink(request)
+    const secondTarget = { ...target, sessionId: 'copilotcli:/second', chatId: 'ahp-chat:/second' }
+    const second = await store.updateSessionLink({
+      ...request, sessionId: secondTarget.sessionId, agentHost: { chatId: secondTarget.chatId }, expectedRevision: first.revision,
+    })
+    await expect(store.updateSessionLink({
+      workspaceId: request.workspaceId, taskId: request.taskId, sessionId: null, expectedRevision: second.revision,
+    })).rejects.toThrow('multiple linked sessions')
+    await expect(store.updateSessionLink({
+      workspaceId: request.workspaceId, taskId: request.taskId, sessionId: null, expectedRevision: second.revision,
+      detachTarget: { ...target, extra: true },
+    })).rejects.toThrow()
+    const detached = await store.updateSessionLink({
+      workspaceId: request.workspaceId, taskId: request.taskId, sessionId: null, expectedRevision: second.revision,
+      detachTarget: target,
+    })
+    expect(detached.document.bindings[request.taskId]).toEqual([{ provider: 'agent-host', ...secondTarget }])
+    expect(await locallyLinkedAgentHostSessions(profile, root, target.owner)).toEqual([secondTarget])
   })
 
   it('retries a saved binding only after obsolete receipts are explicitly removed', async () => {
@@ -194,8 +216,8 @@ describe('workspace-scoped immutable Agent Host links', () => {
     expect(await locallyLinkedAgentHostSessions(profile, root, target.owner)).toEqual([])
     expect(await readFile(sessionFile, 'utf8')).toBe(sessionContent)
     expect((await backend.store.read()).records).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0002', target: { provider: 'agent-host', ...target } } }),
-      expect.objectContaining({ kind: 'binding', payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0002' } }),
+      expect.objectContaining({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0002', targets: [{ provider: 'agent-host', ...target }] } }),
+      expect.objectContaining({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'delete', taskId: 'T-0002' } }),
     ]))
     expect(verifyAgentHost).toHaveBeenCalledOnce()
   })
