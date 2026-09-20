@@ -39,9 +39,47 @@ To link an existing session:
   VS Code journal saves. Stop targets the exact active turn, with read/send access.
   Provider sign-in, tool confirmations and agent questions still use the owner UI.
 
+### Create on This Computer
+
+In **Agent Host sessions**, select an unbound task and change **Execution location**
+from its default **Remote worker** to **This computer**. The trusted local adapter
+selects this machine and only the current canonical task workspace; the renderer
+cannot supply another folder. Choose the exact available Copilot Host and click
+**Create and assign**. This creates a native local session and assigns its confirmed
+session/chat identity to that task, writing the binding and private owner receipt
+before reporting **Created and assigned**.
+
+The Host must already be running and signed in. Local Host consent, read/send
+access, and the same authoritative workspace binding backend required by **Link**
+are mandatory. Currently, enable **Automatic workspace links** for this task
+workspace; a documents-only workspace cannot create a task binding. Creation does
+not silently enroll a workspace or enable networking, remote pairing, SSH, or a
+Dev Tunnel. Local discovery and creation do not consult paired devices. After
+binding, existing paired-device workspace sharing policies still apply to the
+chat; local execution does not make the binding private or disable sharing.
+Missing consent, an offline Host, unavailable task bindings, and unreadable
+creation records are surfaced as errors and keep creation disabled. An older
+desktop API that returns remote workers for this choice is rejected, not treated
+as a local worker.
+
+Local task creation uses the current workspace with native **Folder** isolation
+(no worktree), normal tool approvals on this computer, and no initial or warm-up
+prompt. Model selection and the first send remain explicit. It does not use the
+workspace **With agent** assistant's separate local creation flow. **With agent**
+helps with workspace setup; **Create and assign** binds a new chat to a selected
+task; **Link** binds an existing chat.
+
+Local and remote creation share durable caller history and a per-task reservation.
+Switching location cannot discard an uncertain operation or allow a second chat
+for that task. The location control is disabled while discovery or an operation is
+in flight. Reopening the controls checks the same saved operation; **Retry binding**
+only assigns the existing chat. Resolve any pending local or remote operation
+before attempting another creation in either location.
+
 ### Create on a Remote Worker
 
-In **Agent Host sessions**, use **Create on remote worker** for an unbound task.
+In **Agent Host sessions**, keep **Execution location** set to **Remote worker**
+and use **Create on remote worker** for an unbound task.
 Select a paired worker, one of its shared task workspaces, and the exact available
 Copilot Host. Existing **Read and send** workspace access includes creation:
 there is no separate create permission or approval. Read-only, expired, revoked,

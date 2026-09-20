@@ -158,10 +158,25 @@ or Host-wide credential is required. Workspace read/send policy and B's private
 local confirmation receipt remain mandatory; Git metadata alone is not authority.
 
 Creation is a separate explicit native action, never a fallback for an unavailable
-session. **Create on remote worker** uses the selected paired worker's shared task
-workspace and existing send permission. It uses native Folder isolation, sends no
-initial or warm-up prompt, and retains a durable operation for binding-only recovery.
-See [remote creation and recovery](docs/remote-vscode.md#create-on-a-remote-worker).
+session. In **Agent Host sessions**, **Execution location** defaults to **Remote
+worker**, using the selected paired worker's shared task workspace and existing
+send permission. Choose **This computer** to create a local native session and bind
+it to the selected unbound task. The local machine and current canonical task
+workspace are selected automatically; choose the exact available Host, then
+**Create and assign**. Local creation requires local Host consent and the same
+authoritative workspace binding backend as **Link** (currently Automatic workspace
+links enrollment). It does not enable networking, pair devices, or use SSH or a
+Dev Tunnel to discover or create the local session. After binding, the chat still
+follows existing paired-device workspace sharing policies; local execution is not
+a private-only binding mode.
+
+Both locations use native Folder isolation, normal tool approvals, and no initial
+or warm-up prompt. They share durable task creation history: an unresolved operation
+blocks another creation in either location, and recovery retries only status or
+binding, never native creation. **Link** still attaches an existing chat.
+The workspace **With agent** assistant remains a separate flow, not task-scoped
+**Create and assign**. See [local task creation](docs/remote-vscode.md#create-on-this-computer)
+and [remote creation and recovery](docs/remote-vscode.md#create-on-a-remote-worker).
 
 The chat panel shows live Markdown, reasoning/tool status and terminal output,
 supports pasted images and exact-turn cancellation, and retains drafts during

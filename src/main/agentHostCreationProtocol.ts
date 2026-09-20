@@ -7,6 +7,7 @@ export const agentHostCreationErrorResponseSchema = z.object({
 }).strict()
 
 export const creationTaskIdSchema = z.string().regex(/^T-\d{4,}$/)
+export const creationLocationSchema = z.enum(['local', 'remote'])
 export const creationWorkspaceIdSchema = z.string().regex(/^[a-f0-9]{64}$/)
 export const creationRevisionSchema = z.string().regex(/^[a-f0-9]{64}$/).nullable()
 const errorSchema = z.string().min(1).max(2000)

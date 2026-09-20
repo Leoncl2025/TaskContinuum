@@ -1,6 +1,8 @@
 import type { AgentHostSession } from './agentHost'
 import type { SessionOwner } from './sessionBindings'
 
+export type AgentHostCreationLocation = 'local' | 'remote'
+
 export const agentHostCreationErrorCodes = ['creation-records-unavailable'] as const
 export type AgentHostCreationErrorCode = typeof agentHostCreationErrorCodes[number]
 export const agentHostCreationErrorMessages: Record<AgentHostCreationErrorCode, string> = {
@@ -26,6 +28,7 @@ export interface AgentHostCreationWorkspace {
 export interface AgentHostWorker {
   id: string
   owner: SessionOwner
+  local?: true
   state: 'connected' | 'offline' | 'unsupported' | 'blocked'
   hosts: AgentHostCreationHost[]
   workspaces: AgentHostCreationWorkspace[]

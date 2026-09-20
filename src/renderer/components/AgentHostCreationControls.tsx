@@ -1,5 +1,5 @@
 import { useEffect, useEffectEvent, useRef, useState } from 'react'
-import type { AgentHostCreation, AgentHostCreateRequest, AgentHostWorker } from '../../shared/agentHostCreation'
+import type { AgentHostCreation, AgentHostCreateRequest, AgentHostCreationLocation, AgentHostWorker } from '../../shared/agentHostCreation'
 import type { AgentHostSession } from '../../shared/agentHost'
 import { Icon } from './Primitives'
 import './agent-host-creation.css'
@@ -30,7 +30,7 @@ function sameOperation(left: AgentHostCreation, right: AgentHostCreation): boole
 }
 
 function failureMessage(failure: unknown): string {
-  return failure instanceof Error ? failure.message : 'The remote creation operation could not be checked.'
+  return failure instanceof Error ? failure.message : 'The creation operation could not be checked.'
 }
 
 export function AgentHostCreationControls(props: CreationControlsProps) {
@@ -40,6 +40,7 @@ export function AgentHostCreationControls(props: CreationControlsProps) {
 function CreationControls({ taskId, taskUnbound, disabled = false, onCreated }: CreationControlsProps) {
   const bridge = window.agentHost
   const supported = Boolean(bridge && ['creationWorkers', 'creations', 'create', 'creationStatus', 'bindCreation'].every((name) => typeof bridge[name as keyof typeof bridge] === 'function'))
+  const [location, setLocation] = useState<AgentHostCreationLocation>('remote')
   const [workers, setWorkers] = useState<AgentHostWorker[]>([])
   const [operations, setOperations] = useState<AgentHostCreation[]>([])
   const savedOperations = useRef<AgentHostCreation[]>([])
@@ -55,11 +56,13 @@ function CreationControls({ taskId, taskUnbound, disabled = false, onCreated }: 
   const [busy, setBusy] = useState(false)
   const running = useRef(false)
   const lifetime = useRef<Lifetime>({ active: false })
+  const local = location === 'local'
+  const heading = local ? 'Create on this computer' : 'Create on remote worker'
   const worker = workers.find((item) => item.id === workerId)
   const workspace = worker?.workspaces.find((item) => item.id === workspaceId)
   const host = worker?.hosts.find((item) => item.hostId === hostId)
   const unresolved = operations.some(pending)
-  const canCreate = Boolean(taskId && taskUnbound && supported && !disabled && !busy && catalogueLoaded && historyLoaded && !catalogueError && !historyError && !unresolved && !completedOperation && worker?.state === 'connected' && workspace?.canSend && workspace.taskState === 'available' && host?.available)
+  const canCreate = Boolean(taskId && taskUnbound && supported && !disabled && !busy && catalogueLoaded && historyLoaded && !catalogueError && !historyError && !unresolved && !completedOperation && (!local || (worker?.local === true && worker.workspaces.length === 1)) && worker?.state === 'connected' && workspace?.canSend && workspace.taskState === 'available' && host?.available)
 
   function save(operation: AgentHostCreation): void {
     if (operation.taskId !== taskId) throw new Error('The creation response belongs to a different task.')
@@ -104,13 +107,23 @@ function CreationControls({ taskId, taskUnbound, disabled = false, onCreated }: 
     }
   }
 
-  async function refresh(clearError = false): Promise<void> {
+  async function refresh(clearError = false, selectedLocation = location): Promise<void> {
     await run(async (scope) => {
       const previouslyPending = new Set(savedOperations.current.filter(pending).map((operation) => operation.operationId))
-      const [catalogue, history] = await Promise.allSettled([bridge!.creationWorkers(taskId!), bridge!.creations(taskId!)])
+      const [catalogue, history] = await Promise.allSettled([selectedLocation === 'local' ? bridge!.creationWorkers(taskId!, 'local') : bridge!.creationWorkers(taskId!), bridge!.creations(taskId!)])
       if (!scope.active) return
-      if (catalogue.status === 'fulfilled') { setWorkers(catalogue.value); setCatalogueLoaded(true); setCatalogueError(undefined) }
-      else { setCatalogueError(failureMessage(catalogue.reason)); setCatalogueLoaded(false) }
+      if (catalogue.status === 'fulfilled') {
+        const localWorkers = catalogue.value.filter((item) => item.local === true)
+        const availableWorkers = selectedLocation === 'local' ? (localWorkers.length === 1 ? localWorkers : []) : catalogue.value
+        setWorkers(availableWorkers)
+        if (selectedLocation === 'local') {
+          const localWorker = availableWorkers[0]
+          setWorkerId(localWorker?.id ?? '')
+          setWorkspaceId(localWorker?.workspaces.length === 1 ? localWorker.workspaces[0].id : '')
+        }
+        setCatalogueLoaded(true)
+        setCatalogueError(undefined)
+      } else { setCatalogueError(failureMessage(catalogue.reason)); setCatalogueLoaded(false) }
       if (history.status === 'fulfilled') {
         for (const operation of history.value) save(operation)
         setHistoryLoaded(true)
@@ -134,6 +147,18 @@ function CreationControls({ taskId, taskUnbound, disabled = false, onCreated }: 
     window.addEventListener('online', tick)
     return () => { scope.active = false; clearInterval(timer); window.removeEventListener('online', tick) }
   }, [bridge, taskId, supported])
+
+  function changeLocation(nextLocation: AgentHostCreationLocation): void {
+    if (running.current || disabled || nextLocation === location) return
+    setLocation(nextLocation)
+    setWorkers([])
+    setWorkerId('')
+    setWorkspaceId('')
+    setHostId('')
+    setCatalogueLoaded(false)
+    setCatalogueError(undefined)
+    void refresh(false, nextLocation)
+  }
 
   async function create(): Promise<void> {
     if (!canCreate || running.current || !worker || !workspace || !host || !taskId) return
@@ -163,30 +188,33 @@ function CreationControls({ taskId, taskUnbound, disabled = false, onCreated }: 
     })
   }
 
-  return <section className="ah-creation" aria-label="Create on remote worker" aria-busy={busy}>
-    <h3><Icon name="server-environment" />Create on remote worker</h3>
-    <p className="muted">Read and send access includes creation in the same shared workspace. Creates in the selected workspace folder (no worktree). Native tool approvals remain on the worker. No prompt is sent. Other Host settings keep their native defaults. The native agent may initialize on the first explicit send. Choose a model when sending.</p>
-    {!supported && <p role="status">Remote creation is unavailable in this version of the desktop Agent Host API.</p>}
+  return <section className="ah-creation" aria-label={heading} aria-busy={busy}>
+    <h3><Icon name="server-environment" />{heading}</h3>
+    <label className="form-field">Execution location<select aria-label="Execution location" value={location} disabled={!supported || busy || disabled || !taskId} onChange={(event) => { if (event.target.value === 'local' || event.target.value === 'remote') changeLocation(event.target.value) }}><option value="remote">Remote worker</option><option value="local">This computer</option></select></label>
+    <p className="muted">{local ? 'Creates and assigns a native chat in this task\'s current workspace using Folder isolation (no worktree). Local Host access and the same authoritative workspace binding backend as Link are required. No networking or remote pairing is enabled. Native tool approvals remain on this computer.' : 'Read and send access includes creation in the same shared workspace. Creates in the selected workspace folder (no worktree). Native tool approvals remain on the worker.'} No prompt is sent. Other Host settings keep their native defaults. The native agent may initialize on the first explicit send. Choose a model when sending.</p>
+    {!supported && <p role="status">{local ? 'Local' : 'Remote'} creation is unavailable in this version of the desktop Agent Host API.</p>}
     {!taskId ? <p role="status">Select a task in a real workspace to create and assign a chat.</p> : !taskUnbound && <p role="status">Creation requires an unbound task. Detach its current conversation first, or wait for session links to finish loading.</p>}
     {supported && taskId && <>
       <button type="button" className="secondary-button" disabled={busy} onClick={() => { void refresh(true) }}><Icon name="refresh" />Refresh workers and creation status</button>
       {(!catalogueLoaded || !historyLoaded) && !catalogueError && !historyError && <p className="muted" role="status">Loading workers and saved creation operations...</p>}
       {catalogueError && <p className="copilot-error" role="alert">Workers could not be loaded: {catalogueError}</p>}
       {historyError && <p className="copilot-error" role="alert">Saved creations could not be loaded. Creation is disabled to avoid duplicates. {historyError}</p>}
-      {catalogueLoaded && !workers.length && <p className="muted">No paired remote workers are available. Manage devices to connect a worker.</p>}
+      {catalogueLoaded && !workers.length && (local ? <p role="status">Local task creation is unavailable: the desktop API did not provide a trusted local worker. Update the desktop and check local Host access.</p> : <p className="muted">No paired remote workers are available. Manage devices to connect a worker.</p>)}
     </>}
     <div className="ah-creation-pickers">
-      <label className="form-field">Remote worker<select aria-label="Remote worker" value={workerId} disabled={!supported || busy || disabled || !taskId} onChange={(event) => { setWorkerId(event.target.value); setWorkspaceId(''); setHostId('') }}><option value="">Choose a worker</option>{workers.map((item) => <option key={item.id} value={item.id}>{item.owner.machineName} — {item.state} ({item.id})</option>)}</select></label>
-      <label className="form-field">Shared worker workspace<select aria-label="Shared worker workspace" value={workspaceId} disabled={!worker || busy || disabled} onChange={(event) => setWorkspaceId(event.target.value)}><option value="">Choose a workspace</option>{worker?.workspaces.map((item) => <option key={item.id} value={item.id}>{item.name} — {item.canSend ? 'Read and send' : 'Read only'} / task {item.taskState} ({item.id})</option>)}</select></label>
+      {!local && <><label className="form-field">Remote worker<select aria-label="Remote worker" value={workerId} disabled={!supported || busy || disabled || !taskId} onChange={(event) => { setWorkerId(event.target.value); setWorkspaceId(''); setHostId('') }}><option value="">Choose a worker</option>{workers.map((item) => <option key={item.id} value={item.id}>{item.owner.machineName} — {item.state} ({item.id})</option>)}</select></label>
+      <label className="form-field">Shared worker workspace<select aria-label="Shared worker workspace" value={workspaceId} disabled={!worker || busy || disabled} onChange={(event) => setWorkspaceId(event.target.value)}><option value="">Choose a workspace</option>{worker?.workspaces.map((item) => <option key={item.id} value={item.id}>{item.name} — {item.canSend ? 'Read and send' : 'Read only'} / task {item.taskState} ({item.id})</option>)}</select></label></>}
+      {local && workspace && <p>Current workspace: <strong>{workspace.name}</strong> · <code>{workspace.id}</code></p>}
       <label className="form-field">Exact Agent Host<select aria-label="Exact Agent Host" value={hostId} disabled={!worker || busy || disabled} onChange={(event) => setHostId(event.target.value)}><option value="">Choose a Host</option>{worker?.hosts.map((item) => <option key={item.hostId} value={item.hostId}>{item.name} — {item.available ? 'available' : 'unavailable'} ({item.hostId})</option>)}</select></label>
     </div>
     {worker && <div className="ah-creation-selection">
       <p>Machine: <strong>{worker.owner.machineName}</strong> · Worker: <code>{worker.id}</code> · Owner: <code>{worker.owner.clientId}</code></p>
-      {worker.state !== 'connected' && <p role="status">{worker.state === 'blocked' ? 'This worker is connected, but its creation records must be repaired before creating.' : worker.state === 'offline' ? 'This worker is offline. Reconnect it in Manage devices, then check the saved operation.' : 'This worker does not support remote chat creation. Update the worker before creating.'}</p>}
+      {worker.state !== 'connected' && <p role="status">{local ? 'Local task creation is unavailable. Resolve the local Host or workspace error before creating.' : worker.state === 'blocked' ? 'This worker is connected, but its creation records must be repaired before creating.' : worker.state === 'offline' ? 'This worker is offline. Reconnect it in Manage devices, then check the saved operation.' : 'This worker does not support remote chat creation. Update the worker before creating.'}</p>}
       {worker.error && <p className="copilot-error" role="alert">{worker.error}</p>}
-      {worker.state !== 'blocked' && !worker.workspaces.length && <p role="status">This worker exposes no shared workspaces.</p>}
+      {local && worker.workspaces.length !== 1 && <p role="status">Local task creation requires exactly one verified current workspace. No workspace can be selected manually.</p>}
+      {!local && worker.state !== 'blocked' && !worker.workspaces.length && <p role="status">This worker exposes no shared workspaces.</p>}
       {worker.state !== 'blocked' && !worker.hosts.length && <p role="status">This worker exposes no Agent Hosts.</p>}
-      {workspace && !workspace.canSend && <p role="status">This shared workspace is read only. Read and send access is required to create.</p>}
+      {workspace && !workspace.canSend && <p role="status">{local ? 'Local Host read and send access is required to create.' : 'This shared workspace is read only. Read and send access is required to create.'}</p>}
       {workspace && workspace.taskState !== 'available' && <p role="status">{workspace.taskState === 'bound' ? 'This task already has a conversation on the worker.' : workspace.taskState === 'missing' ? 'This task is missing from the worker workspace.' : 'The task state on this worker could not be verified.'}</p>}
       {workspace?.error && <p className="copilot-error" role="alert">{workspace.error}</p>}
       {host && !host.available && <p role="status">The selected Agent Host is unavailable.</p>}

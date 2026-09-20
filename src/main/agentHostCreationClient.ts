@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto'
 import { mkdir, open, readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
-import type { AgentHostCreateRequest, AgentHostCreation, AgentHostWorker } from '../shared/agentHostCreation'
-import { agentHostCreateRequestSchema, agentHostCreationSchema, creationRevisionSchema, creationTaskIdSchema } from './agentHostCreationProtocol'
+import type { AgentHostCreateRequest, AgentHostCreation, AgentHostCreationLocation, AgentHostWorker } from '../shared/agentHostCreation'
+import { agentHostCreateRequestSchema, agentHostCreationSchema, creationLocationSchema, creationRevisionSchema, creationTaskIdSchema } from './agentHostCreationProtocol'
 import { agentHostKey, agentHostTargetSchema } from './agentHostProtocol'
 import { canonicalPolicyRoot } from './linkedSessionPolicy'
 import { bindRepositoryAgentHostCreation, readRepositorySessionLinks } from './repositorySessionLinks'
@@ -23,7 +23,9 @@ const recordSchema = z.object({
   if (record.result.session && record.result.session.owner.clientId !== record.owner.clientId) context.addIssue({ code: 'custom', message: 'Creation record owner changed.' })
 })
 type CreationRecord = z.infer<typeof recordSchema>
-type Devices = Pick<VSCodeDeviceClient, 'agentHostWorkers' | 'agentHostWorker' | 'agentHostCreate' | 'agentHostCreationStatus' | 'agentHostBindCreation'>
+export type AgentHostCreationDevices = Pick<VSCodeDeviceClient, 'agentHostWorkers' | 'agentHostWorker' | 'agentHostCreate' | 'agentHostCreationStatus' | 'agentHostBindCreation'> & {
+  localAgentHostWorkers?(root: string, taskId: string): Promise<AgentHostWorker[]>
+}
 
 function failureMessage(error: unknown): string {
   return (error instanceof Error ? error.message : 'The creation operation could not be confirmed.').slice(0, 2000)
@@ -33,7 +35,7 @@ export class AgentHostCreationClient {
   private readonly pending = new Map<string, Promise<AgentHostCreation>>()
   private closed = false
 
-  constructor(private readonly directory: string, private readonly devices: Devices) {}
+  constructor(private readonly directory: string, private readonly devices: AgentHostCreationDevices) {}
 
   private async scope(root: string) {
     const canonical = await canonicalPolicyRoot(root)
@@ -50,12 +52,12 @@ export class AgentHostCreationClient {
       throw error
     }
     const files = entries.filter((entry) => entry.name.endsWith('.json'))
-    if (files.length > 1000) throw new Error('The remote creation history limit was reached. Records were not discarded.')
+    if (files.length > 1000) throw new Error('The session creation history limit was reached. Records were not discarded.')
     const records: CreationRecord[] = []
     for (const file of files) {
-      if (!file.isFile() || !z.uuid().safeParse(file.name.slice(0, -5)).success) throw new Error('Remote creation records are invalid. No operation was replayed.')
+      if (!file.isFile() || !z.uuid().safeParse(file.name.slice(0, -5)).success) throw new Error('Session creation records are invalid. No operation was replayed.')
       const record = recordSchema.parse(await readJsonBounded(join(scope.directory, file.name), 32768))
-      if (record.root !== scope.root || `${record.request.operationId}.json` !== file.name) throw new Error('Remote creation records belong to a different workspace or operation.')
+      if (record.root !== scope.root || `${record.request.operationId}.json` !== file.name) throw new Error('Session creation records belong to a different workspace or operation.')
       records.push(record)
     }
     return records.sort((left, right) => right.createdAt.localeCompare(left.createdAt))
@@ -78,9 +80,9 @@ export class AgentHostCreationClient {
   }
 
   private async current(authorize: () => Promise<void>): Promise<void> {
-    if (this.closed) throw new Error('The remote creation client is closed. No operation was replayed.')
+    if (this.closed) throw new Error('The session creation client is closed. No operation was replayed.')
     await authorize()
-    if (this.closed) throw new Error('The remote creation client closed while preparing the operation.')
+    if (this.closed) throw new Error('The session creation client closed while preparing the operation.')
   }
 
   private async knownTask(root: string, taskId: string): Promise<void> {
@@ -96,9 +98,14 @@ export class AgentHostCreationClient {
     return work
   }
 
-  async workers(root: string, taskId: string): Promise<AgentHostWorker[]> {
+  async workers(root: string, taskId: string, location: AgentHostCreationLocation = 'remote'): Promise<AgentHostWorker[]> {
     creationTaskIdSchema.parse(taskId)
+    creationLocationSchema.parse(location)
     await this.knownTask(root, taskId)
+    if (location === 'local') {
+      if (!this.devices.localAgentHostWorkers) throw new Error('Local task creation is not available in this desktop.')
+      return this.devices.localAgentHostWorkers(root, taskId)
+    }
     return this.devices.agentHostWorkers(root, taskId)
   }
 
@@ -135,7 +142,7 @@ export class AgentHostCreationClient {
           record = prior
           existing = true
         } else {
-          if (records.length >= 1000) throw new Error('The remote creation history limit was reached.')
+          if (records.length >= 1000) throw new Error('The session creation history limit was reached.')
           if (records.some((item) => item.request.taskId === request.taskId && !item.localBound && item.result.state !== 'failed')) throw new Error('This task has an unresolved creation operation. Check that operation instead of creating another session.')
           await this.knownTask(scope.root, request.taskId)
           const links = await readRepositorySessionLinks(scope.root)
@@ -159,7 +166,7 @@ export class AgentHostCreationClient {
           await this.current(authorize)
           await this.knownTask(scope.root, request.taskId)
           const links = await readRepositorySessionLinks(scope.root)
-          if (links.revision !== record.expectedRevision || links.document.bindings[request.taskId]) throw new Error('The caller task binding changed before creation. No remote create request was sent.')
+          if (links.revision !== record.expectedRevision || links.document.bindings[request.taskId]) throw new Error('The caller task binding changed before creation. No create request was dispatched.')
           await this.current(authorize)
           dispatched = true
         })

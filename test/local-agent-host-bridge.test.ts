@@ -5,14 +5,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { registerAgentHostBridge } from '../src/main/agentHostBridge'
 import type { AgentHostManager } from '../src/main/agentHostManager'
 import type { LocalAgentHostCreateRequest, LocalAgentHostCreation } from '../src/shared/localAgentHostCreation'
+import type { AgentHostCreateRequest, AgentHostCreationLocation, AgentHostWorker } from '../src/shared/agentHostCreation'
 
 const ipc = vi.hoisted(() => ({
-  handlers: new Map<string, (event: IpcMainInvokeEvent, value?: unknown) => Promise<unknown>>(),
+  handlers: new Map<string, (event: IpcMainInvokeEvent, ...values: unknown[]) => Promise<unknown>>(),
   dialog: vi.fn(),
 }))
 vi.mock('electron', () => ({
   app: { getPath: () => 'Q:\\profile' },
-  ipcMain: { handle: (channel: string, handler: (event: IpcMainInvokeEvent, value?: unknown) => Promise<unknown>) => { ipc.handlers.set(channel, handler) } },
+  ipcMain: { handle: (channel: string, handler: (event: IpcMainInvokeEvent, ...values: unknown[]) => Promise<unknown>) => { ipc.handlers.set(channel, handler) } },
   dialog: { showMessageBox: ipc.dialog },
 }))
 beforeEach(() => { vi.clearAllMocks(); ipc.handlers.clear() })
@@ -31,9 +32,12 @@ function fixture() {
     create: vi.fn(async (_root: string, _request: LocalAgentHostCreateRequest, authorize: () => Promise<void>) => { await authorize(); return result }),
     status: vi.fn(async (_root: string, _id: string, authorize: () => Promise<void>) => { await authorize(); return result }),
   }
-  const manager = { localCreations, allow: vi.fn(), creations: { create: vi.fn() } }
+  const manager = { localCreations, allow: vi.fn(), creations: {
+    workers: vi.fn<(root: string, taskId: string, location: AgentHostCreationLocation) => Promise<AgentHostWorker[]>>(async () => []),
+    create: vi.fn(async (_root: string, request: AgentHostCreateRequest, authorize: () => Promise<void>) => { await authorize(); return { ...request, state: 'creating' as const } }),
+  } }
   registerAgentHostBridge(requireWindow, currentRoot, manager as unknown as AgentHostManager)
-  const invoke = (channel: string, value?: unknown) => ipc.handlers.get(`agent-host:${channel}`)!({} as IpcMainInvokeEvent, value)
+  const invoke = (channel: string, ...values: unknown[]) => ipc.handlers.get(`agent-host:${channel}`)!({} as IpcMainInvokeEvent, ...values)
   return { request, result, localCreations, manager, currentRoot, invoke,
     change: (what: 'root' | 'window' | 'webContents' | 'identity') => {
       if (what === 'root') root = 'Q:\\different-workspace'
@@ -55,6 +59,40 @@ describe('local planning creation IPC', () => {
     expect(setup.manager.creations.create).not.toHaveBeenCalled()
     expect(setup.manager.allow).not.toHaveBeenCalled()
     expect(ipc.dialog).not.toHaveBeenCalled()
+  })
+
+  describe('task-local creation IPC', () => {
+    it('selects only the requested location while resolving the workspace in main', async () => {
+      const setup = fixture()
+      await setup.invoke('creation-workers', 'T-0007', 'local')
+      expect(setup.manager.creations.workers).toHaveBeenLastCalledWith('Q:\\workspace', 'T-0007', 'local')
+      await setup.invoke('creation-workers', 'T-0007')
+      expect(setup.manager.creations.workers).toHaveBeenLastCalledWith('Q:\\workspace', 'T-0007', 'remote')
+      for (const location of ['other', { location: 'local', root: 'Q:\\other' }]) {
+        await expect(setup.invoke('creation-workers', 'T-0007', location)).rejects.toThrow()
+      }
+      expect(setup.manager.creations.workers).toHaveBeenCalledTimes(2)
+      expect(setup.localCreations.hosts).not.toHaveBeenCalled()
+    })
+
+    it('uses the durable task creation route, not the workspace assistant, and rejects injected fields', async () => {
+      const setup = fixture()
+      const request: AgentHostCreateRequest = { ...setup.request, taskId: 'T-0007', workerId: randomUUID(), workspaceId: 'a'.repeat(64), expectedRevision: null }
+      expect(await setup.invoke('create', request)).toMatchObject({ ...request, state: 'creating' })
+      expect(setup.manager.creations.create).toHaveBeenCalledExactlyOnceWith('Q:\\workspace', request, expect.any(Function))
+      for (const extra of [{ local: true }, { root: 'Q:\\other' }, { location: 'local' }]) {
+        await expect(setup.invoke('create', { ...request, ...extra })).rejects.toThrow()
+      }
+      expect(setup.manager.creations.create).toHaveBeenCalledOnce()
+      expect(setup.localCreations.create).not.toHaveBeenCalled()
+      expect(setup.manager.allow).not.toHaveBeenCalled()
+    })
+
+    it('does not return a local catalog after switching the task workspace', async () => {
+      const setup = fixture()
+      setup.manager.creations.workers.mockImplementationOnce(async () => { setup.change('root'); return [] })
+      await expect(setup.invoke('creation-workers', 'T-0007', 'local')).rejects.toThrow('changed')
+    })
   })
 
   it('rejects task, worker, workspace and arbitrary target injection before reservation', async () => {

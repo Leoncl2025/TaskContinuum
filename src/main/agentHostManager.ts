@@ -12,6 +12,8 @@ import { readRepositorySessionLinks } from './repositorySessionLinks'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 import { AgentHostCreationClient } from './agentHostCreationClient'
 import { LocalAgentHostCreationService } from './localAgentHostCreationService'
+import { routeAgentHostCreations } from './localTaskAgentHostWorker'
+import type { LocalTaskAgentHostWorker } from './localTaskAgentHostWorker'
 
 export class AgentHostManager {
   private readonly remote = new Map<string, AgentHostConnection>()
@@ -19,8 +21,8 @@ export class AgentHostManager {
   readonly creations: AgentHostCreationClient
   readonly localCreations: LocalAgentHostCreationService
 
-  constructor(private readonly directory: string, readonly local: AgentHostRegistry, private readonly devices: VSCodeDeviceClient, private readonly owner: () => Promise<SessionOwner>) {
-    this.creations = new AgentHostCreationClient(directory, devices)
+  constructor(private readonly directory: string, readonly local: AgentHostRegistry, private readonly devices: VSCodeDeviceClient, private readonly owner: () => Promise<SessionOwner>, localTaskWorker?: LocalTaskAgentHostWorker) {
+    this.creations = new AgentHostCreationClient(directory, localTaskWorker ? routeAgentHostCreations(devices, localTaskWorker) : devices)
     this.localCreations = new LocalAgentHostCreationService(directory, local)
   }
 

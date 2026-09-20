@@ -1,7 +1,7 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { createServer } from 'node:http'
 import type { IncomingMessage } from 'node:http'
-import { basename, join } from 'node:path'
+import { join } from 'node:path'
 import { z } from 'zod'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 import { remoteClientSchema } from './vscodeRemoteProtocol'
@@ -12,11 +12,9 @@ import type { AgentHostAccess } from './agentHostGateway'
 import type { AgentHostSession, AgentHostTarget } from '../shared/agentHost'
 import type { AgentHostRegistry } from './agentHostRegistry'
 import { agentHostKey } from './agentHostProtocol'
-import { AgentHostCreationRequestError, AgentHostCreationService, agentHostCreationWorkspaceId } from './agentHostCreationService'
+import { AgentHostCreationRequestError, AgentHostCreationService, agentHostCreationWorkspaceId, describeAgentHostCreationWorkspace } from './agentHostCreationService'
 import { agentHostCreateCommandSchema, agentHostCreationBindSchema, agentHostCreationLookupSchema, agentHostWorkerCatalogSchema, creationTaskIdSchema } from './agentHostCreationProtocol'
 import { canonicalPolicyRoot } from './linkedSessionPolicy'
-import { readRepositorySessionLinks } from './repositorySessionLinks'
-import { readTaskWorkspace } from './workspaceReader'
 import type { AgentHostCreationWorkspace } from '../shared/agentHostCreation'
 
 const workspacePolicySchema = z.object({ root: z.string().min(1), canSend: z.boolean() }).strict()
@@ -44,10 +42,17 @@ export class VSCodeDeviceHost {
 
   constructor(private readonly directory: string, private readonly protector: DeviceProtector) {}
 
-  setAgentHostAccess(registry: AgentHostRegistry, linked: (root: string) => Promise<AgentHostTarget[]>): void {
+  setAgentHostAccess(registry: AgentHostRegistry, linked: (root: string) => Promise<AgentHostTarget[]>,
+    authorizeLocal?: (ownerId: string, workspaceId: string) => Promise<string>): void {
     if (this.server) throw new Error('Agent Host access must be configured before device publication.')
     this.agentHosts = { registry, linked }
-    this.agentHostCreations = new AgentHostCreationService(this.directory, registry, (pairId, workspaceId) => this.authorizedCreationWorkspace(pairId, workspaceId))
+    this.agentHostCreations = new AgentHostCreationService(this.directory, registry, (pairId, workspaceId) => this.authorizedCreationWorkspace(pairId, workspaceId), authorizeLocal)
+  }
+
+  // Share reservations so local and incoming remote requests cannot race for the same task.
+  get taskCreationService(): AgentHostCreationService {
+    if (this.closed || !this.agentHostCreations) throw new Error('The task creation service is unavailable.')
+    return this.agentHostCreations
   }
 
   private async authorizedCreationWorkspace(pairId: string, workspaceId: string): Promise<string> {
@@ -76,20 +81,8 @@ export class VSCodeDeviceHost {
     const policies = JSON.stringify(pair.workspaces)
     const workspaces: AgentHostCreationWorkspace[] = []
     for (const policy of pair.workspaces) {
-      let id: string
-      let reachable = true
-      try { id = await agentHostCreationWorkspaceId(policy.root) } catch {
-        id = createHash('sha256').update(process.platform === 'win32' ? policy.root.toLowerCase() : policy.root).digest('hex')
-        reachable = false
-      }
-      if (workspaces.some((workspace) => workspace.id === id)) continue
-      const workspace: AgentHostCreationWorkspace = { id, name: basename(policy.root).slice(0, 300) || 'Authorized workspace', canSend: policy.canSend, taskState: 'unavailable', expectedRevision: null }
-      try {
-        if (!reachable) throw new Error('Unavailable workspace.')
-        const [tasks, links] = await Promise.all([readTaskWorkspace(policy.root), readRepositorySessionLinks(policy.root)])
-        workspace.expectedRevision = links.revision
-        workspace.taskState = !tasks.tasks.some((task) => task.id === taskId) ? 'missing' : links.document.bindings[taskId] ? 'bound' : 'available'
-      } catch { workspace.error = 'The authorized task workspace or its session bindings could not be read.' }
+      const workspace = await describeAgentHostCreationWorkspace(policy.root, taskId, policy.canSend)
+      if (workspaces.some((existing) => existing.id === workspace.id)) continue
       workspaces.push(workspace)
     }
     const hosts = await this.agentHosts.registry.creationHosts(AbortSignal.any([this.abort.signal, AbortSignal.timeout(8000)]))

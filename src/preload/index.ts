@@ -22,7 +22,7 @@ const agentHost: AgentHostBridge = {
   localCreations: () => ipcRenderer.invoke('agent-host:local-creations'),
   createLocal: (request) => ipcRenderer.invoke('agent-host:create-local', request),
   localCreationStatus: (operationId) => ipcRenderer.invoke('agent-host:local-creation-status', operationId),
-  creationWorkers: (taskId) => ipcRenderer.invoke('agent-host:creation-workers', taskId),
+  creationWorkers: (taskId, location) => location === undefined ? ipcRenderer.invoke('agent-host:creation-workers', taskId) : ipcRenderer.invoke('agent-host:creation-workers', taskId, location),
   creations: (taskId) => ipcRenderer.invoke('agent-host:creations', taskId),
   create: (request) => ipcRenderer.invoke('agent-host:create', request),
   creationStatus: (operationId) => ipcRenderer.invoke('agent-host:creation-status', operationId),

@@ -63,6 +63,263 @@ async function choose(user: ReturnType<typeof userEvent.setup>) {
   await user.selectOptions(screen.getByRole('combobox', { name: 'Exact Agent Host' }), 'exact-host-123')
 }
 
+function localFixture() {
+  const result = fixture()
+  const owner = { clientId: 'd740398c-967a-4ae3-8910-a5e7b55e6763', machineName: 'This workstation' }
+  const localWorker: AgentHostWorker = {
+    id: owner.clientId, owner, local: true, state: 'connected',
+    hosts: [{ hostId: 'local-native-host', name: 'Local native Host', available: true }],
+    workspaces: [{ id: 'canonical-current-workspace', name: 'Current task project', canSend: true, taskState: 'available', expectedRevision: 'b'.repeat(64) }],
+  }
+  vi.mocked(result.bridge.creationWorkers).mockImplementation(async (_taskId, location) => location === 'local' ? [localWorker] : [result.worker])
+  result.session.owner = owner
+  return { ...result, localWorker }
+}
+
+async function selectLocation(user: ReturnType<typeof userEvent.setup>, location: 'local' | 'remote') {
+  await waitFor(() => expect(screen.getByRole('combobox', { name: 'Execution location' })).toBeEnabled())
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Execution location' }), location)
+  await waitFor(() => expect(screen.getByRole('combobox', { name: 'Execution location' })).toBeEnabled())
+}
+
+describe('explicit task-local Agent Host creation', () => {
+  it('creates locally while unrelated existing-session discovery is still pending', async () => {
+    const { bridge, session, localWorker } = localFixture()
+    let finishList!: (result: Awaited<ReturnType<AgentHostBridge['list']>>) => void
+    vi.mocked(bridge.list).mockImplementationOnce(() => new Promise((resolve) => { finishList = resolve }))
+    const onCreated = vi.fn(async () => {})
+    const onLink = vi.fn(async () => {})
+    const user = userEvent.setup()
+    render(<AgentHostSessionsDialog taskId="T-0002" taskUnbound onLink={onLink} onCreated={onCreated} onDevices={vi.fn()} onClose={vi.fn()} />)
+    await selectLocation(user, 'local')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Exact Agent Host' }), 'local-native-host')
+    expect(screen.getByText('Loading sessions...')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Refresh Agent Host sessions' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeEnabled()
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    await waitFor(() => expect(onCreated).toHaveBeenCalledExactlyOnceWith('T-0002', session))
+    expect(bridge.create).toHaveBeenCalledExactlyOnceWith({
+      operationId: expect.any(String), taskId: 'T-0002', workerId: localWorker.id,
+      workspaceId: 'canonical-current-workspace', hostId: 'local-native-host', expectedRevision: 'b'.repeat(64),
+    })
+    expect(screen.getByText('Loading sessions...')).toBeInTheDocument()
+    expect(onLink).not.toHaveBeenCalled()
+    expect(bridge.createLocal).not.toHaveBeenCalled()
+    expect(bridge.send).not.toHaveBeenCalled()
+    await act(async () => { finishList({ sessions: [], warnings: [] }) })
+  })
+
+  it('keeps local creation disabled while manual linking is active, not merely while listing sessions', async () => {
+    const { bridge, session } = localFixture()
+    vi.mocked(bridge.list).mockResolvedValue({ sessions: [session], warnings: [] })
+    let finishLink!: () => void
+    const onLink = vi.fn(() => new Promise<void>((resolve) => { finishLink = resolve }))
+    const user = userEvent.setup()
+    render(<AgentHostSessionsDialog taskId="T-0002" taskUnbound onLink={onLink} onDevices={vi.fn()} onClose={vi.fn()} />)
+    await selectLocation(user, 'local')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Exact Agent Host' }), 'local-native-host')
+    const create = screen.getByRole('button', { name: 'Create and assign to T-0002' })
+    expect(create).toBeEnabled()
+    await user.click(screen.getByRole('button', { name: 'Link New native chat to T-0002' }))
+    expect(onLink).toHaveBeenCalledExactlyOnceWith(session)
+    expect(screen.getByRole('combobox', { name: 'Execution location' })).toBeDisabled()
+    expect(create).toBeDisabled()
+    await user.click(create)
+    expect(bridge.create).not.toHaveBeenCalled()
+    await act(async () => { finishLink() })
+    expect(screen.getByRole('combobox', { name: 'Execution location' })).toBeEnabled()
+    expect(create).toBeEnabled()
+  })
+
+  it('creates and assigns using only the trusted current workspace and the exact chosen Host', async () => {
+    const { bridge, localWorker, session } = localFixture()
+    localWorker.hosts.push({ hostId: 'second-local-host', name: 'Second local Host', available: true })
+    const onCreated = vi.fn(async () => {})
+    const onLink = vi.fn(async () => {})
+    const user = userEvent.setup()
+    render(<AgentHostSessionsDialog taskId="T-0002" taskUnbound onLink={onLink} onCreated={onCreated} onDevices={vi.fn()} onClose={vi.fn()} />)
+    expect(screen.getByRole('combobox', { name: 'Execution location' })).toHaveValue('remote')
+    await selectLocation(user, 'local')
+    expect(bridge.creationWorkers).toHaveBeenCalledWith('T-0002')
+    expect(bridge.creationWorkers).toHaveBeenLastCalledWith('T-0002', 'local')
+    expect(screen.getByRole('heading', { name: 'Create on this computer' })).toBeInTheDocument()
+    expect(screen.getByText('This workstation')).toBeInTheDocument()
+    expect(screen.getByText('Current task project')).toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'Remote worker' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'Shared worker workspace' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Exact Agent Host' }), 'second-local-host')
+    expect(bridge.create).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    await waitFor(() => expect(onCreated).toHaveBeenCalledExactlyOnceWith('T-0002', session))
+    expect(bridge.create).toHaveBeenCalledExactlyOnceWith({
+      operationId: expect.stringMatching(/^[0-9a-f-]{36}$/), taskId: 'T-0002', workerId: localWorker.id,
+      workspaceId: 'canonical-current-workspace', hostId: 'second-local-host', expectedRevision: 'b'.repeat(64),
+    })
+    expect(bridge.send).not.toHaveBeenCalled()
+    expect(bridge.createLocal).not.toHaveBeenCalled()
+    expect(bridge.localCreations).not.toHaveBeenCalled()
+    expect(bridge.localCreationHosts).not.toHaveBeenCalled()
+    expect(bridge.bindCreation).not.toHaveBeenCalled()
+    expect(onLink).not.toHaveBeenCalled()
+    expect(screen.getByRole('heading', { name: 'Created and assigned · T-0002' })).toBeInTheDocument()
+    await selectLocation(user, 'remote')
+    await choose(user)
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+  })
+
+  it.each(['blocked', 'offline', 'no Host', 'no consent', 'no binding backend', 'unavailable Host'] as const)('surfaces %s and disables local creation', async (reason) => {
+    const { bridge, localWorker } = localFixture()
+    const message = `Local creation diagnostic: ${reason}.`
+    if (reason === 'blocked' || reason === 'offline') { localWorker.state = reason; localWorker.error = message }
+    if (reason === 'no Host') { localWorker.hosts = []; localWorker.error = message }
+    if (reason === 'no consent') { localWorker.workspaces[0].canSend = false; localWorker.workspaces[0].error = message }
+    if (reason === 'no binding backend') { localWorker.workspaces[0].taskState = 'unavailable'; localWorker.workspaces[0].error = message }
+    if (reason === 'unavailable Host') { localWorker.hosts[0].available = false; localWorker.hosts[0].error = message }
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound />)
+    await selectLocation(user, 'local')
+    if (localWorker.hosts.length) await user.selectOptions(screen.getByRole('combobox', { name: 'Exact Agent Host' }), 'local-native-host')
+    expect(screen.getByRole('alert')).toHaveTextContent(message)
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    expect(bridge.create).not.toHaveBeenCalled()
+    expect(bridge.createLocal).not.toHaveBeenCalled()
+  })
+
+  it.each(['empty', 'older preload', 'multiple local workers', 'no workspace', 'multiple workspaces'] as const)('fails closed for a %s catalogue', async (reason) => {
+    const { bridge, localWorker, worker } = localFixture()
+    if (reason === 'empty') vi.mocked(bridge.creationWorkers).mockResolvedValue([])
+    if (reason === 'older preload') vi.mocked(bridge.creationWorkers).mockResolvedValue([worker])
+    if (reason === 'multiple local workers') vi.mocked(bridge.creationWorkers).mockResolvedValue([localWorker, { ...localWorker, id: 'another-local-worker' }])
+    if (reason === 'no workspace') localWorker.workspaces = []
+    if (reason === 'multiple workspaces') localWorker.workspaces.push({ ...localWorker.workspaces[0], id: 'other-workspace' })
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound />)
+    await selectLocation(user, 'local')
+    expect(screen.getByRole('status')).toHaveTextContent(reason === 'no workspace' || reason === 'multiple workspaces' ? 'exactly one verified current workspace' : 'did not provide a trusted local worker')
+    expect(screen.queryByRole('option', { name: /Paired workstation/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    expect(bridge.create).not.toHaveBeenCalled()
+  })
+
+  it('surfaces local discovery and shared history failures without falling back to remote creation', async () => {
+    const { bridge } = localFixture()
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound />)
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Execution location' })).toBeEnabled())
+    vi.mocked(bridge.creationWorkers).mockRejectedValue(new Error('Local Host consent is required.'))
+    vi.mocked(bridge.creations).mockRejectedValue(new Error('Shared creation history is unreadable.'))
+    await selectLocation(user, 'local')
+    expect(screen.getByText(/Workers could not be loaded/)).toHaveTextContent('Local Host consent is required.')
+    expect(screen.getByText(/Creation is disabled to avoid duplicates/)).toHaveTextContent('Shared creation history is unreadable.')
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    expect(bridge.create).not.toHaveBeenCalled()
+    expect(bridge.createLocal).not.toHaveBeenCalled()
+  })
+
+  it.each(['local', 'remote'] as const)('keeps an unresolved %s operation across mode changes even when history omits it', async (initialLocation) => {
+    const { bridge } = localFixture()
+    vi.mocked(bridge.create).mockRejectedValue(new Error('Acknowledgement lost.'))
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound />)
+    if (initialLocation === 'local') {
+      await selectLocation(user, 'local')
+      await user.selectOptions(screen.getByRole('combobox', { name: 'Exact Agent Host' }), 'local-native-host')
+    } else await choose(user)
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    const request = vi.mocked(bridge.create).mock.calls[0][0]
+    await selectLocation(user, initialLocation === 'local' ? 'remote' : 'local')
+    if (initialLocation === 'local') await choose(user)
+    else await user.selectOptions(screen.getByRole('combobox', { name: 'Exact Agent Host' }), 'local-native-host')
+    expect(screen.getByRole('region', { name: `Creation ${request.operationId}` })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Outcome uncertain · T-0002' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    expect(bridge.creationStatus).toHaveBeenCalledExactlyOnceWith(request.operationId)
+    expect(bridge.create).toHaveBeenCalledTimes(1)
+    expect(bridge.bindCreation).not.toHaveBeenCalled()
+  })
+
+  it('prevents mode changes while a catalogue is in flight and clears the old selection on a later switch', async () => {
+    const { bridge, worker } = localFixture()
+    let complete!: (workers: AgentHostWorker[]) => void
+    vi.mocked(bridge.creationWorkers).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve }))
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound />)
+    await waitFor(() => expect(bridge.creationWorkers).toHaveBeenCalledWith('T-0002'))
+    const picker = screen.getByRole('combobox', { name: 'Execution location' })
+    expect(picker).toBeDisabled()
+    fireEvent.change(picker, { target: { value: 'local' } })
+    expect(picker).toHaveValue('remote')
+    await act(async () => { complete([worker]) })
+    await choose(user)
+    await selectLocation(user, 'local')
+    expect(screen.getByRole('combobox', { name: 'Exact Agent Host' })).toHaveValue('')
+    expect(screen.queryByRole('option', { name: /Native Host — available/ })).not.toBeInTheDocument()
+    expect(screen.getByText('Current task project')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    expect(bridge.create).not.toHaveBeenCalled()
+  })
+
+  it('recovers a durable local operation after remount even with remote selected by default', async () => {
+    const { bridge, saved, session } = localFixture()
+    vi.mocked(bridge.create).mockImplementationOnce(async (request) => {
+      const operation: AgentHostCreation = { ...request, state: 'uncertain' }
+      saved.set(request.operationId, operation)
+      return operation
+    })
+    const user = userEvent.setup()
+    const first = render(<AgentHostCreationControls taskId="T-0002" taskUnbound />)
+    await selectLocation(user, 'local')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Exact Agent Host' }), 'local-native-host')
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    const request = vi.mocked(bridge.create).mock.calls[0][0]
+    first.unmount()
+    const onCreated = vi.fn(async () => {})
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound onCreated={onCreated} />)
+    await waitFor(() => expect(bridge.creationStatus).toHaveBeenCalledExactlyOnceWith(request.operationId))
+    await choose(user)
+    expect(screen.getByRole('combobox', { name: 'Execution location' })).toHaveValue('remote')
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    saved.set(request.operationId, { ...request, state: 'ready', session })
+    await user.click(screen.getByRole('button', { name: 'Check status' }))
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith('T-0002', session)
+    expect(bridge.create).toHaveBeenCalledTimes(1)
+    expect(bridge.bindCreation).not.toHaveBeenCalled()
+    expect(bridge.createLocal).not.toHaveBeenCalled()
+    expect(bridge.send).not.toHaveBeenCalled()
+  })
+
+  it('prevents switching and duplicate creation until a local operation completes, then retries only binding', async () => {
+    const { bridge, saved, session } = localFixture()
+    let complete!: (operation: AgentHostCreation) => void
+    vi.mocked(bridge.create).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve }))
+    const onCreated = vi.fn(async () => {})
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound onCreated={onCreated} />)
+    await selectLocation(user, 'local')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Exact Agent Host' }), 'local-native-host')
+    const button = screen.getByRole('button', { name: 'Create and assign to T-0002' })
+    act(() => { fireEvent.click(button); fireEvent.click(button) })
+    const picker = screen.getByRole('combobox', { name: 'Execution location' })
+    expect(picker).toBeDisabled()
+    fireEvent.change(picker, { target: { value: 'remote' } })
+    expect(picker).toHaveValue('local')
+    const request = vi.mocked(bridge.create).mock.calls[0][0]
+    await act(async () => {
+      const operation: AgentHostCreation = { ...request, state: 'created-unbound', session }
+      saved.set(request.operationId, operation)
+      complete(operation)
+    })
+    await selectLocation(user, 'remote')
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Retry binding' }))
+    expect(bridge.bindCreation).toHaveBeenCalledExactlyOnceWith(request.operationId)
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith('T-0002', session)
+    expect(bridge.create).toHaveBeenCalledTimes(1)
+    expect(bridge.send).not.toHaveBeenCalled()
+  })
+})
+
 describe('explicit remote Agent Host creation', () => {
   it('distinguishes acknowledged lazy native initialization from a saved task assignment', async () => {
     const { bridge, operation } = fixture()

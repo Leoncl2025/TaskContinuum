@@ -7,7 +7,7 @@ import { chatSubmissionSchema } from '../shared/chatAttachments'
 import { agentHostModelSelectionSchema, agentHostTargetSchema } from './agentHostProtocol'
 import type { AgentHostManager } from './agentHostManager'
 import { readClientIdentity } from './clientIdentity'
-import { agentHostCreateRequestSchema, creationTaskIdSchema } from './agentHostCreationProtocol'
+import { agentHostCreateRequestSchema, creationLocationSchema, creationTaskIdSchema } from './agentHostCreationProtocol'
 import { localAgentHostCreateRequestSchema } from './localAgentHostCreationService'
 
 export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>, manager: AgentHostManager) {
@@ -33,12 +33,13 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     await current(event, window, root)
     return result
   })
-  ipcMain.handle('agent-host:creation-workers', async (event, value: unknown) => {
+  ipcMain.handle('agent-host:creation-workers', async (event, value: unknown, locationValue?: unknown) => {
     const window = requireWindow(event)
     const root = await currentRoot()
     const taskId = creationTaskIdSchema.parse(value)
+    const location = creationLocationSchema.optional().parse(locationValue) ?? 'remote'
     await current(event, window, root)
-    const result = await manager.creations.workers(root, taskId)
+    const result = await manager.creations.workers(root, taskId, location)
     await current(event, window, root)
     return result
   })

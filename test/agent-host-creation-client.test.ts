@@ -53,6 +53,13 @@ async function fixture() {
 }
 
 describe('durable remote creation on the caller', () => {
+  it('does not fall back to remote discovery when local task creation is unavailable', async () => {
+    const setup = await fixture()
+    await expect(setup.client.workers(setup.root, setup.request.taskId, 'local')).rejects.toThrow('Local task creation is not available')
+    expect(setup.devices.agentHostWorkers).not.toHaveBeenCalled()
+    expect(setup.devices.agentHostCreate).not.toHaveBeenCalled()
+  })
+
   it('persists only the acknowledged identity and never creates while listing', async () => {
     const setup = await fixture()
     const originalTask = await readFile(setup.taskFile, 'utf8')

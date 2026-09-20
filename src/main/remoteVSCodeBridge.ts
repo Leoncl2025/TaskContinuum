@@ -9,6 +9,7 @@ import { VSCodeDeviceClient } from './vscodeDeviceClient'
 import { readClientIdentity } from './clientIdentity'
 import { AgentHostRegistry } from './agentHostRegistry'
 import { AgentHostManager } from './agentHostManager'
+import { LocalTaskAgentHostWorker } from './localTaskAgentHostWorker'
 import { locallyLinkedAgentHostSessions } from './linkedSessionPolicy'
 import { WorkspaceSyncService } from './remoteConfig/service'
 import { registerGitSyncBridge } from './remoteConfig/bridge'
@@ -37,11 +38,13 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     const { clientId, machineName } = await clientIdentity()
     return { clientId, machineName }
   })
-  const agentHosts = new AgentHostManager(app.getPath('userData'), registry, devices, async () => {
+  const localTaskWorker = new LocalTaskAgentHostWorker(registry, () => host.taskCreationService, (root) => agentHosts.hasConsent(root))
+  const agentHosts: AgentHostManager = new AgentHostManager(app.getPath('userData'), registry, devices, async () => {
     const { clientId, machineName } = await clientIdentity()
     return { clientId, machineName }
-  })
-  host.setAgentHostAccess(registry, async (root) => { await gitSync.requireReadyRoot(root); return locallyLinkedAgentHostSessions(app.getPath('userData'), root, await clientIdentity()) })
+  }, localTaskWorker)
+  host.setAgentHostAccess(registry, async (root) => { await gitSync.requireReadyRoot(root); return locallyLinkedAgentHostSessions(app.getPath('userData'), root, await clientIdentity()) },
+    (ownerId, workspaceId) => localTaskWorker.authorize(ownerId, workspaceId))
   const gitSync = new WorkspaceSyncService({
     directory: app.getPath('userData'), keys, tunnels, host, devices,
     identity: clientIdentity, onChange: onConfigurationChanged,

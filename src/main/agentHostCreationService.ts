@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, open, rm } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { z } from 'zod'
 import { agentHostCreationErrorMessages } from '../shared/agentHostCreation'
-import type { AgentHostCreationErrorCode, AgentHostCreationResult } from '../shared/agentHostCreation'
+import type { AgentHostCreationErrorCode, AgentHostCreationLocation, AgentHostCreationResult, AgentHostCreationWorkspace } from '../shared/agentHostCreation'
 import { agentHostCreateCommandSchema, agentHostCreationBindSchema, agentHostCreationLookupSchema, agentHostCreationResultSchema, creationRevisionSchema } from './agentHostCreationProtocol'
 import { agentHostKey, agentHostSessionIdSchema, agentHostTargetSchema } from './agentHostProtocol'
 import { AgentHostCreationError } from './agentHostRegistry'
@@ -17,6 +17,8 @@ type CreateCommand = z.infer<typeof agentHostCreateCommandSchema>
 type Lookup = z.infer<typeof agentHostCreationLookupSchema>
 const operationSchema = z.object({
   schemaVersion: z.literal(2),
+  // Local operations use the owner's client ID as principal, not a network pairing.
+  local: z.literal(true).optional(),
   pairId: z.uuid(), root: z.string().min(1).max(32768), owner: sessionOwnerSchema,
   request: agentHostCreateCommandSchema, requestHash: z.string().regex(/^[a-f0-9]{64}$/),
   nativeSessionId: agentHostSessionIdSchema, phase: z.enum(['reserved', 'dispatched', 'binding', 'complete']),
@@ -25,6 +27,7 @@ const operationSchema = z.object({
   result: agentHostCreationResultSchema,
 }).strict().superRefine((operation, context) => {
   const request = operation.request, result = operation.result
+  if (operation.local && operation.pairId !== operation.owner.clientId) context.addIssue({ code: 'custom', message: 'Local creation must belong to its execution owner.' })
   if (hash(request) !== operation.requestHash || result.operationId !== request.operationId || result.workspaceId !== request.workspaceId || result.taskId !== request.taskId || result.hostId !== request.hostId
     || result.session && (result.session.sessionId !== operation.nativeSessionId || JSON.stringify(result.session.owner) !== JSON.stringify(operation.owner))) {
     context.addIssue({ code: 'custom', message: 'Creation operation identity does not match its durable intent.' })
@@ -47,6 +50,24 @@ class ChangedOperationError extends AgentHostCreationError {}
 function hash(request: CreateCommand): string { return createHash('sha256').update(JSON.stringify(agentHostCreateCommandSchema.parse(request))).digest('hex') }
 export async function agentHostCreationWorkspaceId(root: string): Promise<string> { return createHash('sha256').update(await canonicalPolicyRoot(root)).digest('hex') }
 function unresolved(operation: Operation): boolean { return !operation.everReady && ['creating', 'uncertain', 'created-unbound'].includes(operation.result.state) }
+function operationLocation(operation: Operation): AgentHostCreationLocation { return operation.local ? 'local' : 'remote' }
+
+export async function describeAgentHostCreationWorkspace(root: string, taskId: string, canSend: boolean): Promise<AgentHostCreationWorkspace> {
+  let id: string
+  let reachable = true
+  try { id = await agentHostCreationWorkspaceId(root) } catch {
+    id = createHash('sha256').update(process.platform === 'win32' ? root.toLowerCase() : root).digest('hex')
+    reachable = false
+  }
+  const workspace: AgentHostCreationWorkspace = { id, name: basename(root).slice(0, 300) || 'Authorized workspace', canSend, taskState: 'unavailable', expectedRevision: null }
+  try {
+    if (!reachable) throw new Error('Unavailable workspace.')
+    const [tasks, links] = await Promise.all([readTaskWorkspace(root), readRepositorySessionLinks(root)])
+    workspace.expectedRevision = links.revision
+    workspace.taskState = !tasks.tasks.some((task) => task.id === taskId) ? 'missing' : links.document.bindings[taskId] ? 'bound' : 'available'
+  } catch { workspace.error = 'The authorized task workspace or its session bindings could not be read.' }
+  return workspace
+}
 
 export class AgentHostCreationService {
   private readonly abort = new AbortController()
@@ -57,7 +78,8 @@ export class AgentHostCreationService {
   private closed = false
 
   constructor(private readonly directory: string, private readonly registry: AgentHostRegistry,
-    private readonly authorize: (pairId: string, workspaceId: string) => Promise<string>) {}
+    private readonly authorize: (pairId: string, workspaceId: string) => Promise<string>,
+    private readonly authorizeLocal?: (ownerId: string, workspaceId: string) => Promise<string>) {}
 
   private async readOperations(): Promise<Operation[]> {
     try { return operationsSchema.parse(await readJsonBounded(join(this.directory, 'agent-host-creation', 'operations.json'), 8 * 1024 * 1024)) }
@@ -105,12 +127,18 @@ export class AgentHostCreationService {
     return operation
   }
 
-  private async authorizedRoot(pairId: string, workspaceId: string, expectedRoot?: string): Promise<string> {
+  private async authorizedRoot(pairId: string, workspaceId: string, expectedRoot?: string, location: AgentHostCreationLocation = 'remote'): Promise<string> {
     if (this.closed) throw new AgentHostCreationRequestError(403, 'The worker is closed.')
-    const root = await this.authorize(pairId, workspaceId)
+    const authorize = location === 'local' ? this.authorizeLocal : this.authorize
+    if (!authorize) throw new AgentHostCreationRequestError(403, 'Local task creation is not authorized.')
+    const root = await authorize(pairId, workspaceId)
     if (expectedRoot && root !== expectedRoot) throw new AgentHostCreationRequestError(403, 'The authorized workspace identity changed.')
     this.abort.signal.throwIfAborted()
     return root
+  }
+
+  private authorizedOperation(operation: Operation): Promise<string> {
+    return this.authorizedRoot(operation.pairId, operation.request.workspaceId, operation.root, operationLocation(operation))
   }
 
   private async checkTask(root: string, request: CreateCommand): Promise<void> {
@@ -123,17 +151,17 @@ export class AgentHostCreationService {
     if (links.document.bindings[request.taskId]) throw new AgentHostCreationRequestError(409, 'The worker task already has a session binding. Creation cannot replace it.')
   }
 
-  async begin(pairId: string, value: CreateCommand): Promise<AgentHostCreationResult> {
+  async begin(pairId: string, value: CreateCommand, location: AgentHostCreationLocation = 'remote'): Promise<AgentHostCreationResult> {
     const request = agentHostCreateCommandSchema.parse(value)
-    const root = await this.authorizedRoot(pairId, request.workspaceId)
+    const root = await this.authorizedRoot(pairId, request.workspaceId, undefined, location)
     const owner = await this.registry.creationOwner()
     const reserved = await this.transaction(async (operations) => {
       const existing = operations.find((operation) => operation.request.operationId === request.operationId)
       if (existing) {
-        if (existing.pairId !== pairId || existing.root !== root) throw new AgentHostCreationRequestError(403, 'This operation does not belong to the authenticated pairing and workspace.')
+        if (existing.pairId !== pairId || existing.root !== root || operationLocation(existing) !== location) throw new AgentHostCreationRequestError(403, 'This operation does not belong to the authenticated caller and workspace.')
         if (JSON.stringify(existing.owner) !== JSON.stringify(owner)) throw new AgentHostCreationRequestError(403, 'The original worker execution identity is unavailable.')
         if (existing.requestHash !== hash(request)) throw new AgentHostCreationRequestError(409, 'The operation ID was already used with different creation parameters.')
-        await this.authorizedRoot(pairId, request.workspaceId, root)
+        await this.authorizedRoot(pairId, request.workspaceId, root, location)
         return { value: { operation: existing, start: false } }
       }
       if (operations.length >= 1000) throw new AgentHostCreationRequestError(409, 'The private creation operation limit was reached. No records were discarded.')
@@ -141,15 +169,15 @@ export class AgentHostCreationService {
         throw new AgentHostCreationRequestError(409, 'Another unresolved creation already owns this worker task. Check that original operation instead of creating a duplicate.')
       }
       await this.checkTask(root, request)
-      await this.authorizedRoot(pairId, request.workspaceId, root)
+      await this.authorizedRoot(pairId, request.workspaceId, root, location)
       const result: AgentHostCreationResult = { operationId: request.operationId, taskId: request.taskId, workspaceId: request.workspaceId, hostId: request.hostId, state: 'creating' }
-      const operation: Operation = { schemaVersion: 2, pairId, root, owner, request, requestHash: hash(request), nativeSessionId: `copilotcli:/${randomUUID()}`, phase: 'reserved',
+      const operation: Operation = { schemaVersion: 2, ...(location === 'local' ? { local: true as const } : {}), pairId, root, owner, request, requestHash: hash(request), nativeSessionId: `copilotcli:/${randomUUID()}`, phase: 'reserved',
         nativeAcknowledged: false, bindingRevision: request.expectedRevision, everReady: false, version: 0, result }
       operations.push(operation)
       return { value: { operation, start: true }, changed: true }
     })
     if (reserved.start) this.launch(reserved.operation)
-    await this.authorizedRoot(pairId, request.workspaceId, root)
+    await this.authorizedRoot(pairId, request.workspaceId, root, location)
     return this.visible(reserved.operation)
   }
 
@@ -178,22 +206,22 @@ export class AgentHostCreationService {
     let operation = initial
     let prepared: PreparedAgentHostCreation | undefined
     try {
-      await this.authorizedRoot(operation.pairId, operation.request.workspaceId, operation.root)
+      await this.authorizedOperation(operation)
       if (JSON.stringify(await this.registry.creationOwner()) !== JSON.stringify(operation.owner)) throw new AgentHostCreationError('The worker execution identity changed. No replacement owner was selected.')
       prepared = await this.registry.prepareCreation(operation.request.hostId, operation.nativeSessionId, operation.root, this.abort.signal)
       await this.checkTask(operation.root, operation.request)
       if (JSON.stringify(await this.registry.creationOwner()) !== JSON.stringify(operation.owner)) throw new AgentHostCreationError('The worker execution identity changed during native preparation.')
-      await this.authorizedRoot(operation.pairId, operation.request.workspaceId, operation.root)
+      await this.authorizedOperation(operation)
       operation = await this.replace(operation, { phase: 'dispatched' })
       await prepared.create(async () => {
         await this.checkTask(operation.root, operation.request)
         if (JSON.stringify(await this.registry.creationOwner()) !== JSON.stringify(operation.owner)) throw new AgentHostCreationError('The worker execution identity changed before creation.')
-        await this.authorizedRoot(operation.pairId, operation.request.workspaceId, operation.root)
+        await this.authorizedOperation(operation)
       })
       operation = await this.replace(operation, { nativeAcknowledged: true })
-      await this.authorizedRoot(operation.pairId, operation.request.workspaceId, operation.root)
+      await this.authorizedOperation(operation)
       const inspected = await prepared.inspect(undefined, operation.nativeAcknowledged)
-      await this.authorizedRoot(operation.pairId, operation.request.workspaceId, operation.root)
+      await this.authorizedOperation(operation)
       await this.acceptInspection(operation, inspected)
     } catch (error) {
       if (error instanceof ChangedOperationError) return
@@ -204,17 +232,17 @@ export class AgentHostCreationService {
     } finally { await prepared?.close() }
   }
 
-  private async lookup(pairId: string, value: Lookup): Promise<Operation> {
+  private async lookup(pairId: string, value: Lookup, location: AgentHostCreationLocation = 'remote'): Promise<Operation> {
     const request = agentHostCreationLookupSchema.parse(value)
-    const root = await this.authorizedRoot(pairId, request.workspaceId)
+    const root = await this.authorizedRoot(pairId, request.workspaceId, undefined, location)
     const operation = await this.transaction((operations) => {
       const operation = operations.find((item) => item.request.operationId === request.operationId)
-      if (!operation || operation.pairId !== pairId || operation.request.workspaceId !== request.workspaceId || operation.root !== root) {
+      if (!operation || operation.pairId !== pairId || operation.request.workspaceId !== request.workspaceId || operation.root !== root || operationLocation(operation) !== location) {
         throw new AgentHostCreationRequestError(403, 'This operation does not belong to the authenticated pairing and workspace.')
       }
       return { value: operation }
     })
-    await this.authorizedRoot(pairId, request.workspaceId, operation.root)
+    await this.authorizedOperation(operation)
     if (JSON.stringify(await this.registry.creationOwner()) !== JSON.stringify(operation.owner)) throw new AgentHostCreationRequestError(403, 'The original worker execution identity is unavailable.')
     return operation
   }
@@ -224,8 +252,8 @@ export class AgentHostCreationService {
     return agentHostCreationResultSchema.parse({ ...(failure ? { ...operation.result, state: operation.result.session ? 'created-unbound' : 'uncertain', error: failure } : operation.result), nativeLifecycle: operation.nativeLifecycle })
   }
 
-  async status(pairId: string, value: Lookup): Promise<AgentHostCreationResult> {
-    let operation = await this.lookup(pairId, value)
+  async status(pairId: string, value: Lookup, location: AgentHostCreationLocation = 'remote'): Promise<AgentHostCreationResult> {
+    let operation = await this.lookup(pairId, value, location)
     if (!this.running.has(operation.request.operationId)) {
       if (operation.result.state === 'ready') {
         if (!await this.bindingReady(operation)) operation = await this.replace(operation, { phase: 'complete', result: { ...operation.result, state: 'created-unbound', error: 'The original task binding or local receipt was removed. Status will not rebind it. Explicitly retry binding this same session if intended.' } })
@@ -235,17 +263,17 @@ export class AgentHostCreationService {
         operation = await this.reconcile(operation)
       }
     }
-    await this.authorizedRoot(pairId, operation.request.workspaceId, operation.root)
+    await this.authorizedOperation(operation)
     return this.visible(operation)
   }
 
   private async reconcile(operation: Operation): Promise<Operation> {
     try {
       const inspected = await this.registry.inspectCreation(operation.request.hostId, operation.nativeSessionId, operation.root, this.abort.signal, operation.result.session?.chatId, operation.nativeAcknowledged)
-      await this.authorizedRoot(operation.pairId, operation.request.workspaceId, operation.root)
+      await this.authorizedOperation(operation)
       return await this.acceptInspection(operation, inspected)
     } catch (error) {
-      if (error instanceof ChangedOperationError) return this.lookup(operation.pairId, { operationId: operation.request.operationId, workspaceId: operation.request.workspaceId })
+      if (error instanceof ChangedOperationError) return this.lookup(operation.pairId, { operationId: operation.request.operationId, workspaceId: operation.request.workspaceId }, operationLocation(operation))
       return this.replace(operation, { nativeLifecycle: undefined, result: { ...operation.result, state: operation.result.session && !operation.everReady ? 'created-unbound' : 'uncertain',
         error: error instanceof AgentHostCreationError ? error.message : 'The recorded native session is not currently verifiable. A missing session is not permission to replay creation.' } })
     }
@@ -281,7 +309,7 @@ export class AgentHostCreationService {
     const target = agentHostTargetSchema.parse({ sessionId: session.sessionId, chatId: session.chatId, owner: session.owner })
     const authorize = async () => {
       if (JSON.stringify(await this.registry.creationOwner()) !== JSON.stringify(operation.owner)) throw new AgentHostCreationRequestError(403, 'The worker execution identity changed before binding.')
-      await this.authorizedRoot(operation.pairId, operation.request.workspaceId, operation.root)
+      await this.authorizedOperation(operation)
     }
     try {
       const before = await readRepositorySessionLinks(operation.root)
@@ -309,20 +337,20 @@ export class AgentHostCreationService {
     }
   }
 
-  async bind(pairId: string, value: z.infer<typeof agentHostCreationBindSchema>): Promise<AgentHostCreationResult> {
+  async bind(pairId: string, value: z.infer<typeof agentHostCreationBindSchema>, location: AgentHostCreationLocation = 'remote'): Promise<AgentHostCreationResult> {
     const request = agentHostCreationBindSchema.parse(value)
-    let operation = await this.lookup(pairId, { operationId: request.operationId, workspaceId: request.workspaceId })
+    let operation = await this.lookup(pairId, { operationId: request.operationId, workspaceId: request.workspaceId }, location)
     if (this.running.has(request.operationId)) throw new AgentHostCreationRequestError(409, 'This creation is still running. Query its status before retrying binding.')
     if (operation.result.state === 'ready' && await this.bindingReady(operation)) {
-      return operation.nativeLifecycle === 'creating' ? this.status(pairId, { operationId: request.operationId, workspaceId: request.workspaceId }) : this.visible(operation)
+      return operation.nativeLifecycle === 'creating' ? this.status(pairId, { operationId: request.operationId, workspaceId: request.workspaceId }, location) : this.visible(operation)
     }
     if (!operation.result.session) throw new AgentHostCreationRequestError(409, 'The exact native session and chat have not been verified. Query status; binding cannot create a session.')
     const inspected = await this.registry.inspectCreation(operation.request.hostId, operation.nativeSessionId, operation.root, this.abort.signal, operation.result.session.chatId, operation.nativeAcknowledged)
-    await this.authorizedRoot(pairId, request.workspaceId, operation.root)
+    await this.authorizedOperation(operation)
     if (inspected.state !== 'ready' || agentHostKey(inspected.session) !== agentHostKey(operation.result.session)) throw new AgentHostCreationRequestError(409, 'The exact original native session and chat are not ready. Binding did not create or replace a session.')
     operation = await this.replace(operation, { nativeLifecycle: inspected.nativeLifecycle })
     operation = await this.bindVerified(operation, request.expectedRevision)
-    await this.authorizedRoot(pairId, request.workspaceId, operation.root)
+    await this.authorizedOperation(operation)
     return this.visible(operation)
   }
 
