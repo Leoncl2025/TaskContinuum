@@ -222,7 +222,7 @@ export class AgentHostRegistry {
   async list(): Promise<{ sessions: AgentHostSession[]; warnings: string[] }> {
     const owner = await this.owner()
     const sessions: AgentHostSession[] = []
-    const warnings: string[] = []
+    const warnings = new Set<string>()
     for (const endpoint of await discoverAgentHosts(this.discovery)) {
       const abort = new AbortController()
       let client: AhpClient | undefined
@@ -236,25 +236,41 @@ export class AgentHostRegistry {
           for (const item of catalog.items) {
             if (sessions.length >= 1000) break
             if (item.provider !== 'copilotcli') continue
-            const result = await client.request('subscribe', { channel: item.resource })
-            const state = result.snapshot?.state as SessionState | undefined
-            for (const chat of state?.chats ?? []) {
-              if (chat.interactivity === 'hidden' || sessions.length >= 1000) continue
-              sessions.push(agentHostSessionSchema.parse({ sessionId: item.resource, chatId: chat.resource, owner,
-                title: (chat.title || item.title || 'Untitled chat').slice(0, 2000), provider: item.provider, updatedAt: chat.modifiedAt, canSend: chat.interactivity !== 'read-only' }))
+            let subscribed = false
+            try {
+              const result = await client.request('subscribe', { channel: item.resource })
+              subscribed = true
+              const state = result.snapshot?.state as SessionState | undefined
+              if (result.snapshot?.resource !== item.resource || state?.provider !== 'copilotcli' || !Array.isArray(state.chats)) {
+                throw new Error('The catalog session snapshot could not be verified.')
+              }
+              const converted: AgentHostSession[] = []
+              for (const chat of state.chats) {
+                if (chat.interactivity === 'hidden') continue
+                const session = agentHostSessionSchema.parse({ sessionId: item.resource, chatId: chat.resource, owner,
+                  title: (chat.title || item.title || 'Untitled chat').slice(0, 2000), provider: item.provider, updatedAt: chat.modifiedAt, canSend: chat.interactivity !== 'read-only' })
+                if (sessions.length + converted.length < 1000) converted.push(session)
+              }
+              sessions.push(...converted)
+            } catch {
+              warnings.add('Some local Agent Host sessions could not be read and were skipped.')
+            } finally {
+              if (subscribed) {
+                try { await client.unsubscribe(item.resource) }
+                catch { warnings.add('Some local Agent Host session subscriptions could not be released.') }
+              }
             }
-            await client.unsubscribe(item.resource)
           }
           if (catalog.nextCursor === cursor) break
           cursor = catalog.nextCursor
         } while (cursor && sessions.length < 1000)
-      } catch { warnings.push('A local Agent Host could not be read. Check that it is running and supports AHP 0.9.0.') }
+      } catch { warnings.add('A local Agent Host could not be read. Check that it is running and supports AHP 0.9.0.') }
       finally { abort.abort(); await client?.shutdown() }
     }
     const counts = new Map<string, number>()
     for (const session of sessions) counts.set(agentHostKey(session), (counts.get(agentHostKey(session)) ?? 0) + 1)
-    if ([...counts.values()].some((count) => count > 1)) warnings.push('Some chats are available on multiple local Agent Hosts. Close duplicate Hosts on the owner device before selecting those chats.')
-    return { sessions: sessions.filter((session) => counts.get(agentHostKey(session)) === 1), warnings }
+    if ([...counts.values()].some((count) => count > 1)) warnings.add('Some chats are available on multiple local Agent Hosts. Close duplicate Hosts on the owner device before selecting those chats.')
+    return { sessions: sessions.filter((session) => counts.get(agentHostKey(session)) === 1), warnings: [...warnings] }
   }
 
   private async resolveEndpoint(target: AgentHostTarget, endpoints: AgentHostEndpoint[], signal: AbortSignal): Promise<AgentHostEndpoint> {
