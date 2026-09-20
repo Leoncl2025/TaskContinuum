@@ -14,6 +14,8 @@
 .session-sidebar .ah-creation-pickers { grid-template-columns: minmax(0, 1fr); }
 .session-sidebar button { overflow-wrap: anywhere; }
 .session-tree-task { display: flex; align-items: center; width: 100%; gap: 8px; padding: 8px 4px; font-size: 12px; }
+.session-tree-task-name { min-width: 0; text-align: left; overflow-wrap: anywhere; }
+.session-tree-task > .codicon, .session-tree-task > span:last-child { flex-shrink: 0; }
 .session-tree-task > span:last-child { margin-left: auto; color: var(--muted); }
 .session-tree .session-row { padding: 10px 6px; }
 .session-tree-row { display: flex; align-items: center; min-width: 0; }

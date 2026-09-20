@@ -35,6 +35,10 @@ describe('AgentHostSessionsSidebar', () => {
 
     const tree = screen.getByRole('tree', { name: 'Sessions for T-0002' })
     const root = within(tree).getByRole('treeitem', { name: 'T-0002 Keyboard task' })
+    const toggle = within(root).getByRole('button', { name: 'Collapse sessions for Keyboard task' })
+    expect(toggle).toHaveTextContent('Keyboard task')
+    expect(toggle).not.toHaveTextContent('T-0002')
+    expect(toggle).toHaveAttribute('title', 'Keyboard task (T-0002)')
     root.focus()
     expect(root).toHaveFocus()
     await user.keyboard('{ArrowRight}')

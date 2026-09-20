@@ -58,8 +58,8 @@ function SessionTree({ taskId, title, bindings, activeKey, sessions, disabled, o
     <li role="treeitem" aria-label={`${taskId} ${title}`} aria-expanded={expanded} aria-level={1}
       tabIndex={tabStop === taskId ? 0 : -1} ref={(element) => { if (element) elements.current.set(taskId, element); else elements.current.delete(taskId) }}
       onFocus={(event) => { if (event.target === event.currentTarget) setFocused(taskId) }} onKeyDown={(event) => navigate(event, taskId)}>
-      <button type="button" className="session-tree-task" tabIndex={-1} aria-label={`${expanded ? 'Collapse' : 'Expand'} sessions for ${taskId}`}
-        onClick={() => { focus(taskId); setExpanded((value) => !value) }}><Icon name={expanded ? 'chevron-down' : 'chevron-right'} /><span>{taskId}</span><span>{bindings.length}</span></button>
+      <button type="button" className="session-tree-task" tabIndex={-1} title={`${title} (${taskId})`} aria-label={`${expanded ? 'Collapse' : 'Expand'} sessions for ${title}`}
+        onClick={() => { focus(taskId); setExpanded((value) => !value) }}><Icon name={expanded ? 'chevron-down' : 'chevron-right'} /><span className="session-tree-task-name">{title}</span><span>{bindings.length}</span></button>
       {expanded && <ul role="group" className="task-tree-group">
         {bindings.map((binding) => {
           const key = sessionBindingKey(binding)
