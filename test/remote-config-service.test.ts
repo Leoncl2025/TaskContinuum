@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createConnection } from 'node:net'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -34,18 +34,25 @@ afterEach(async () => {
 async function git(root: string, ...args: string[]) {
   return (await execute('git', ['--no-pager', '-c', 'core.autocrlf=false', '-c', 'commit.gpgSign=false', ...args], { cwd: root, timeout: 30000 })).stdout.trim()
 }
-async function workspace(root: string) {
-  await mkdir(join(root, '.agentdesk'), { recursive: true })
-  const task = join(root, 'tasks', 'T-0001-t-0001')
+function workspacePath(root: string, workspaceDirectory = '') {
+  return workspaceDirectory ? join(root, ...workspaceDirectory.split('/')) : root
+}
+async function present(path: string): Promise<boolean> {
+  try { await access(path); return true } catch { return false }
+}
+async function workspace(root: string, workspaceDirectory = '') {
+  const selectedRoot = workspacePath(root, workspaceDirectory)
+  await mkdir(join(selectedRoot, '.agentdesk'), { recursive: true })
+  const task = join(selectedRoot, 'tasks', 'T-0001-t-0001')
   await mkdir(task, { recursive: true })
-  await writeFile(join(root, '.agentdesk', 'config.json'), JSON.stringify(makeConfig()))
+  await writeFile(join(selectedRoot, '.agentdesk', 'config.json'), JSON.stringify(makeConfig()))
   await writeFile(join(task, 'task.json'), JSON.stringify(makeTask({ id: 'T-0001' })))
   for (const [file, kind] of [['RequirementAnalysis.md', 'requirement-analysis'], ['Plan.md', 'plan'], ['Checklist.md', 'checklist']]) {
     await writeFile(join(task, file), `---\ndoc: ${kind}\nupdated: "2026-09-14"\n---\n`)
   }
 }
 
-async function fixture(count: number) {
+async function fixture(count: number, workspaceDirectory = '', additionalWorkspaceDirectories: string[] = []) {
   const root = await mkdtemp(join(tmpdir(), 'taskcon-full-sync-'))
   roots.push(root)
   const remote = join(root, 'remote.git')
@@ -55,7 +62,8 @@ async function fixture(count: number) {
   await git(initial, 'config', 'core.autocrlf', 'false')
   await git(initial, 'config', 'user.name', 'Test')
   await git(initial, 'config', 'user.email', 'test@example.invalid')
-  await workspace(initial)
+  await writeFile(join(initial, 'README.md'), 'Original repository prose.\n')
+  for (const directory of new Set([workspaceDirectory, ...additionalWorkspaceDirectories])) await workspace(initial, directory)
   await git(initial, 'add', '.')
   await git(initial, 'commit', '-m', 'Initialize fixture')
   await git(initial, 'push', '-u', 'origin', 'main')
@@ -63,9 +71,10 @@ async function fixture(count: number) {
   const peers = []
   for (let index = 0; index < count; index++) {
     const name = String.fromCharCode(65 + index)
-    const folder = join(root, name)
-    await git(root, 'clone', remote, folder)
-    await git(folder, 'config', 'core.autocrlf', 'false')
+    const checkout = join(root, name)
+    await git(root, 'clone', remote, checkout)
+    await git(checkout, 'config', 'core.autocrlf', 'false')
+    const folder = workspacePath(checkout, workspaceDirectory)
     const data = join(root, `data-${name}`)
     await mkdir(data)
     const identity = { clientId: randomUUID(), username: 'test', machineName: `Machine-${name}` }
@@ -123,7 +132,7 @@ async function fixture(count: number) {
       createReplica: async (options) => {
         const replica = await GitReplica.open(options)
         return {
-          root: replica.root, remote: replica.remote, branch: replica.branch, upstreamUrl: replica.upstreamUrl,
+          root: replica.root, workspaceRelativePath: replica.workspaceRelativePath, remote: replica.remote, branch: replica.branch, upstreamUrl: replica.upstreamUrl,
           assertUpstream: () => replica.assertUpstream(),
           sync: async (files, options) => {
             if (publicationGate) {
@@ -143,7 +152,7 @@ async function fixture(count: number) {
     cleanup.push(() => service.close())
     cleanup.push(async () => { releasePrivateGrant?.(); releasePublication?.(); releaseTunnel?.() })
     peers.push({
-      folder, data, identity, service, host, devices, onChange, blocked,
+      folder, checkout, data, identity, service, host, devices, onChange, blocked,
       holdPublication: () => { publicationGate = new Promise<void>((resolve) => { releasePublication = resolve }) },
       releasePublication: () => { releasePublication?.(); publicationGate = undefined },
       holdPrivateGrant: () => { privateGrantStarted = false; privateGrantGate = new Promise<void>((resolve) => { releasePrivateGrant = resolve }) },
@@ -575,4 +584,42 @@ it('publishes in the selected checkout without a second AD tree and defers while
   expect(await git(peer.folder, 'rev-parse', 'HEAD')).toBe(await git(remote, '--git-dir', remote, 'rev-parse', 'main'))
   expect((await git(peer.folder, 'diff', '--name-only', `${before}..HEAD`)).split('\n').every((path) => path.startsWith('.taskcontinuum/'))).toBe(true)
   expect(await readFile(taskFile, 'utf8')).toBe(original)
+}, 120000)
+
+it('scopes nested workspace sync identity, backend paths, and immutable metadata to the selected AgentDesk folder', async () => {
+  const { peers, remote } = await fixture(3, 'Project', ['Sibling'])
+  const [a, b, c] = peers
+  const sibling = join(c.checkout, 'Sibling')
+  await a.service.enable(a.folder)
+  await b.service.enable(b.folder)
+  await c.service.enable(sibling)
+  const projectStatus = await a.service.status(a.folder)
+  const siblingStatus = await c.service.status(sibling)
+  const clonedProjectStatus = await b.service.status(b.folder)
+  const projectRoot = await canonicalPolicyRoot(a.folder)
+  const siblingRoot = await canonicalPolicyRoot(sibling)
+  expect(projectStatus.workspaceId).toBe(clonedProjectStatus.workspaceId)
+  expect(projectStatus.workspaceId).not.toBe(siblingStatus.workspaceId)
+  expect(projectStatus.settingsFile).toBe(join(a.data, 'workspace-sync', createHash('sha256').update(projectRoot).digest('hex'), 'settings.json'))
+  expect(siblingStatus.settingsFile).toBe(join(c.data, 'workspace-sync', createHash('sha256').update(siblingRoot).digest('hex'), 'settings.json'))
+  expect(projectStatus.settingsFile).not.toBe(siblingStatus.settingsFile)
+  expect(await readRepositorySessionLinks(a.folder)).toMatchObject({ document: { bindings: {} } })
+  expect(await readRepositorySessionLinks(sibling)).toMatchObject({ document: { bindings: {} } })
+  await expect(readRepositorySessionLinks(c.checkout)).rejects.toThrow('Enable Automatic workspace links')
+
+  const tracked = (await git(remote, '--git-dir', remote, 'ls-tree', '-r', '--name-only', 'main')).split('\n').filter(Boolean)
+  expect(tracked).toContain('Project/.taskcontinuum/workspace.json')
+  expect(tracked).toContain('Sibling/.taskcontinuum/workspace.json')
+  expect(tracked.some((path) => path.startsWith('Project/.taskcontinuum/records/v1/devices/'))).toBe(true)
+  expect(tracked.some((path) => path.startsWith('Sibling/.taskcontinuum/records/v1/devices/'))).toBe(true)
+  expect(tracked.some((path) => path === '.taskcontinuum/workspace.json' || path.startsWith('.taskcontinuum/records/v1/'))).toBe(false)
+
+  const projectDescriptor = JSON.parse(await readFile(join(a.folder, '.taskcontinuum', 'workspace.json'), 'utf8'))
+  const siblingDescriptor = JSON.parse(await readFile(join(sibling, '.taskcontinuum', 'workspace.json'), 'utf8'))
+  expect(projectDescriptor.workspaceId).toBe(projectStatus.workspaceId)
+  expect(siblingDescriptor.workspaceId).toBe(siblingStatus.workspaceId)
+  expect(await present(join(a.checkout, '.taskcontinuum'))).toBe(false)
+  expect(await present(join(c.checkout, '.taskcontinuum'))).toBe(false)
+  expect(await git(a.checkout, 'status', '--porcelain')).toBe('')
+  expect(await git(c.checkout, 'status', '--porcelain')).toBe('')
 }, 120000)

@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { access, mkdir, readFile, realpath, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { access, lstat, mkdir, readFile, realpath, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
@@ -42,7 +42,7 @@ async function writeRecord(root: string, file: GitPublication): Promise<void> {
   await mkdir(join(root, ...pieces.slice(0, -1)), { recursive: true })
   await writeFile(join(root, ...pieces), file.content)
 }
-async function fixture(count = 1) {
+async function fixture(count = 1, workspaceDirectory = '') {
   const root = resolve('.runtime', 'remote-config-git', `case ${randomUUID()}`)
   roots.push(root)
   await mkdir(root, { recursive: true })
@@ -56,7 +56,12 @@ async function fixture(count = 1) {
   await mkdir(seed)
   await git(seed, 'init', '--quiet', `--initial-branch=${BRANCH}`)
   await writeFile(join(seed, 'README.md'), 'Original task prose.\n')
-  await git(seed, 'add', '--', 'README.md')
+  if (workspaceDirectory) {
+    const configuration = join(seed, ...workspaceDirectory.split('/'), '.agentdesk')
+    await mkdir(configuration, { recursive: true })
+    await writeFile(join(configuration, 'config.json'), JSON.stringify({ schemaVersion: '1.0', workspace: 'Nested task workspace' }))
+  }
+  await git(seed, 'add', '--', '.')
   await git(seed, 'commit', '--quiet', '-m', 'Initial workspace')
   await git(seed, 'remote', 'add', 'upstream', remote)
   await git(seed, 'push', '--quiet', '--set-upstream', 'upstream', BRANCH)
@@ -67,7 +72,7 @@ async function fixture(count = 1) {
     clients.push(await realpath(client))
   }
   async function replica(index = 0, prepare = true) {
-    const value = await GitReplica.open({ workspaceRoot: clients[index], stateDirectory: join(root, `state-${index}`), prepare })
+    const value = await GitReplica.open({ workspaceRoot: join(clients[index], ...workspaceDirectory.split('/')), stateDirectory: join(root, `state-${index}`), prepare })
     replicas.push(value)
     return value
   }
@@ -75,6 +80,170 @@ async function fixture(count = 1) {
 }
 
 describe('single selected checkout Git synchronization', () => {
+  it('supports an AgentDesk folder below the repository root without moving its metadata', async () => {
+    const folder = 'Project With Spaces [AD]/Planning'
+    const setup = await fixture(2, folder)
+    const first = await setup.replica(0)
+    const second = await setup.replica(1)
+    const before = await git(setup.clients[0], 'rev-parse', 'HEAD')
+    const file = record('nested-workspace')
+    const descriptor = { path: '.taskcontinuum/workspace.json', content: JSON.stringify({ workspaceId: randomUUID() }) + '\n' }
+    expect(first.root).toBe(join(setup.clients[0], ...folder.split('/')))
+    expect(first.repositoryRoot).toBe(setup.clients[0])
+    expect(first.workspaceRelativePath).toBe(folder)
+    const pulled = vi.fn(async (root: string) => { expect(root).toBe(first.root) })
+    const result = await first.sync([descriptor, file], { onPulled: pulled })
+    expect(result.publishedPaths).toEqual([descriptor.path, file.path])
+    expect(await git(setup.remote, 'diff', '--name-only', before, BRANCH)).toBe(
+      [descriptor.path, file.path].map((path) => `${folder}/${path}`).sort().join('\n'),
+    )
+    expect(await git(setup.remote, 'show', `${BRANCH}:${folder}/${file.path}`)).toBe(file.content.trim())
+    await second.sync()
+    expect(await readFile(join(second.root, ...file.path.split('/')), 'utf8')).toBe(file.content)
+    expect(await present(join(setup.clients[0], '.taskcontinuum'))).toBe(false)
+    expect(await git(setup.clients[0], 'status', '--porcelain')).toBe('')
+    expect(await readFile(join(setup.clients[0], 'README.md'), 'utf8')).toBe('Original task prose.\n')
+    await first.close()
+    const restored = await setup.replica(0, false)
+    expect((await restored.sync()).head).toBe(result.head)
+  }, 60000)
+
+  it('publishes only the generated task below a nested workspace using a repository-relative remote', async () => {
+    const setup = await fixture(1, 'Project')
+    const checkout = setup.clients[0]
+    await git(checkout, 'remote', 'set-url', 'upstream', '../remote.git')
+    const app = await setup.replica()
+    const directory = 'tasks/T-0001-nested'
+    const files = [`${directory}/task.json`, `${directory}/Plan.md`]
+    await mkdir(join(app.root, ...directory.split('/')), { recursive: true })
+    await writeFile(join(app.root, ...files[0].split('/')), JSON.stringify({ id: 'T-0001', title: 'Nested task' }))
+    await writeFile(join(app.root, ...files[1].split('/')), '# Plan\n')
+    const before = await git(checkout, 'rev-parse', 'HEAD')
+    await app.publishCreatedTask('T-0001', directory, files)
+    expect(await git(setup.remote, 'diff', '--name-only', before, BRANCH)).toBe(files.map((path) => `Project/${path}`).sort().join('\n'))
+    expect(await git(checkout, 'status', '--porcelain')).toBe('')
+    expect(await present(join(checkout, 'tasks'))).toBe(false)
+    expect(await git(checkout, 'remote', 'get-url', 'upstream')).toBe('../remote.git')
+  }, 60000)
+
+  it.each(['unstaged', 'staged', 'untracked'] as const)('preserves %s user work outside the selected nested folder', async (mode) => {
+    const setup = await fixture(1, 'Project')
+    const app = await setup.replica()
+    const checkout = setup.clients[0]
+    const userFile = join(checkout, mode === 'untracked' ? 'outside.txt' : 'README.md')
+    await writeFile(userFile, 'Do not publish or overwrite this user work.\n')
+    if (mode === 'staged') await git(checkout, 'add', '--', 'README.md')
+    const head = await git(checkout, 'rev-parse', 'HEAD')
+    const index = await readFile(join(checkout, '.git', 'index'))
+    await expect(app.sync([record('blocked')])).rejects.toMatchObject({ code: 'busy' })
+    expect(await git(checkout, 'rev-parse', 'HEAD')).toBe(head)
+    expect(await git(setup.remote, 'rev-parse', BRANCH)).toBe(head)
+    expect(await readFile(join(checkout, '.git', 'index'))).toEqual(index)
+    expect(await readFile(userFile, 'utf8')).toBe('Do not publish or overwrite this user work.\n')
+  }, 60000)
+
+  it('protects ignored incoming paths elsewhere in the parent checkout', async () => {
+    const setup = await fixture(1, 'Project')
+    const app = await setup.replica()
+    const checkout = setup.clients[0]
+    await writeFile(join(checkout, '.git', 'info', 'exclude'), 'outside.txt\n')
+    await writeFile(join(checkout, 'outside.txt'), 'Ignored private local content')
+    const head = await git(checkout, 'rev-parse', 'HEAD')
+    await writeFile(join(setup.seed, 'outside.txt'), 'Incoming tracked content')
+    await git(setup.seed, 'add', '--', 'outside.txt')
+    await git(setup.seed, 'commit', '--quiet', '-m', 'Add a file outside the task project')
+    await git(setup.seed, 'push', '--quiet')
+    await expect(app.sync()).rejects.toMatchObject({ code: 'busy', message: expect.stringContaining('overwrite a local or ignored file') })
+    expect(await readFile(join(checkout, 'outside.txt'), 'utf8')).toBe('Ignored private local content')
+    expect(await git(checkout, 'rev-parse', 'HEAD')).toBe(head)
+  }, 60000)
+
+  it('detects configured checkout filters outside the selected nested folder', async () => {
+    const setup = await fixture(1, 'Project')
+    const checkout = setup.clients[0]
+    await writeFile(join(checkout, '.gitattributes'), 'README.md filter=outside\n')
+    await git(checkout, 'add', '.gitattributes')
+    await git(checkout, 'commit', '--quiet', '-m', 'Add root attributes')
+    await git(checkout, 'push', '--quiet')
+    await git(checkout, 'config', 'filter.outside.clean', 'this-filter-must-not-run')
+    const app = await setup.replica(0, false)
+    await expect(app.sync()).rejects.toMatchObject({ code: 'busy', message: expect.stringContaining('configured Git filter') })
+  }, 60000)
+
+  it('keeps private synchronization state outside the entire parent checkout', async () => {
+    const setup = await fixture(1, 'Project')
+    const stateDirectory = join(setup.clients[0], 'private-state')
+    await expect(GitReplica.open({ workspaceRoot: join(setup.clients[0], 'Project'), stateDirectory })).rejects.toMatchObject({
+      code: 'git', message: expect.stringContaining('outside the user checkout'),
+    })
+    expect(await present(stateDirectory)).toBe(false)
+  }, 60000)
+
+  it('stops if the selected folder becomes a different Git repository after enrollment', async () => {
+    const setup = await fixture(1, 'Project')
+    const app = await setup.replica()
+    const head = await git(setup.clients[0], 'rev-parse', 'HEAD')
+    await git(app.root, 'init', '--quiet', '--initial-branch=other')
+    await expect(app.sync([record('wrong-repository')])).rejects.toMatchObject({ code: 'upstream-changed' })
+    expect(await git(setup.remote, 'rev-parse', BRANCH)).toBe(head)
+    expect(await git(setup.clients[0], 'rev-parse', 'HEAD')).toBe(head)
+  }, 60000)
+
+  it('rejects an upstream symbolic-link replacement of the selected folder before changing the checkout', async () => {
+    const setup = await fixture(1, 'Project')
+    const app = await setup.replica()
+    const head = await git(setup.clients[0], 'rev-parse', 'HEAD')
+    const configuration = await readFile(join(app.root, '.agentdesk', 'config.json'), 'utf8')
+    const target = join(setup.root, 'link-target.txt')
+    await writeFile(target, '../outside-project')
+    const oid = await git(setup.seed, 'hash-object', '-w', target)
+    await git(setup.seed, 'rm', '-r', '--cached', '--', 'Project')
+    await git(setup.seed, 'update-index', '--add', '--cacheinfo', `120000,${oid},Project`)
+    await git(setup.seed, 'commit', '--quiet', '-m', 'Replace project tree with a link')
+    await git(setup.seed, 'push', '--quiet')
+    await expect(app.sync()).rejects.toMatchObject({ code: 'integrity', message: expect.stringContaining('not a symbolic link or submodule') })
+    expect(await git(setup.clients[0], 'rev-parse', 'HEAD')).toBe(head)
+    expect(await readFile(join(app.root, '.agentdesk', 'config.json'), 'utf8')).toBe(configuration)
+  }, 60000)
+
+  it('supports a nested workspace in a linked Git worktree with a .git file', async () => {
+    const setup = await fixture(0, 'Project')
+    const checkout = join(setup.root, 'linked-checkout')
+    await git(setup.seed, 'worktree', 'add', '--quiet', '-b', 'nested-worktree', checkout)
+    await git(checkout, 'branch', '--set-upstream-to', `upstream/${BRANCH}`)
+    expect((await lstat(join(checkout, '.git'))).isFile()).toBe(true)
+    const app = await GitReplica.open({ workspaceRoot: join(checkout, 'Project'), stateDirectory: join(setup.root, 'linked-state') })
+    replicas.push(app)
+    const file = record('linked-worktree')
+    await app.sync([file])
+    expect(await git(setup.remote, 'show', `${BRANCH}:Project/${file.path}`)).toBe(file.content.trim())
+    expect(await readFile(join(app.root, ...file.path.split('/')), 'utf8')).toBe(file.content)
+  }, 60000)
+
+  it('serializes sibling workspaces and validates each folder independently', async () => {
+    const setup = await fixture(1, 'Project')
+    const checkout = setup.clients[0]
+    const sibling = join(checkout, 'AnotherProject')
+    await mkdir(join(sibling, '.agentdesk'), { recursive: true })
+    await writeFile(join(sibling, '.agentdesk', 'config.json'), JSON.stringify({ schemaVersion: '1.0', workspace: 'Another workspace' }))
+    await git(checkout, 'add', '--', 'AnotherProject')
+    await git(checkout, 'commit', '--quiet', '-m', 'Add a second task workspace')
+    await git(checkout, 'push', '--quiet')
+    const first = await setup.replica()
+    const second = await GitReplica.open({ workspaceRoot: sibling, stateDirectory: join(setup.root, 'sibling-state') })
+    replicas.push(second)
+    const firstFile = record('first-workspace'), secondFile = record('second-workspace')
+    await Promise.all([first.sync([firstFile]), second.sync([secondFile])])
+    expect(await present(join(first.root, ...secondFile.path.split('/')))).toBe(false)
+    expect(await present(join(second.root, ...firstFile.path.split('/')))).toBe(false)
+    await writeRecord(first.root, { ...firstFile, content: '{"label":"modified immutable record"}' })
+    await git(checkout, 'add', '--', `Project/${firstFile.path}`)
+    await git(checkout, 'commit', '--quiet', '-m', 'Modify only the first workspace metadata')
+    await git(checkout, 'push', '--quiet')
+    await second.sync()
+    await expect(first.sync()).rejects.toMatchObject({ code: 'integrity' })
+  }, 60000)
+
   it.each(['autocrlf', 'attributes'] as const)('preserves signed records when Git materializes CRLF via %s', async (mode) => {
     const setup = await fixture()
     const root = setup.clients[0]

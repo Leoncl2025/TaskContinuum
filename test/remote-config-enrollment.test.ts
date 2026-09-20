@@ -19,7 +19,16 @@ describe('local Git enrollment trust', () => {
   it('derives initial workspace identity from the repository without a branch input', () => {
     const remote = 'https://example.invalid/team/workspace.git'
     expect(initialWorkspaceId(remote)).toBe(initialWorkspaceId(remote))
+    expect(initialWorkspaceId(remote, '')).toBe(initialWorkspaceId(remote))
     expect(initialWorkspaceId(remote)).not.toBe(initialWorkspaceId('https://example.invalid/team/another-workspace.git'))
+  })
+
+  it('scopes deterministic workspace identity by repository-relative AgentDesk folder', () => {
+    const remote = 'https://example.invalid/team/workspace.git'
+    expect(initialWorkspaceId(remote, 'Project')).toBe(initialWorkspaceId(remote, 'Project'))
+    expect(initialWorkspaceId(remote, 'Project/Nested')).toBe(initialWorkspaceId(remote, 'Project\\Nested'))
+    expect(initialWorkspaceId(remote, 'Project')).not.toBe(initialWorkspaceId(remote))
+    expect(initialWorkspaceId(remote, 'Project')).not.toBe(initialWorkspaceId(remote, 'Sibling'))
   })
 
   it('requires explicit local enrollment and pins admitted keys across restarts', async () => {

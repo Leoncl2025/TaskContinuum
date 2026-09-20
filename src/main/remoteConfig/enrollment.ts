@@ -21,8 +21,12 @@ const enrollmentSchema = z.object({
 const enrollmentsSchema = z.object({ schemaVersion: z.literal(1), workspaces: z.array(enrollmentSchema).max(10) }).strict()
 export type WorkspaceEnrollment = z.infer<typeof enrollmentSchema>
 
-export function initialWorkspaceId(remote: string): string {
-  const hex = createHash('sha256').update(JSON.stringify(['TaskCon.Workspace.v2', remote])).digest('hex')
+export function initialWorkspaceId(remote: string, workspaceRelativePath = ''): string {
+  const relativePath = workspaceRelativePath.split('\\').join('/').replace(/^\.\/+/, '').replace(/\/+$/, '')
+  const seed = relativePath
+    ? JSON.stringify(['TaskCon.Workspace.v3', remote, relativePath])
+    : JSON.stringify(['TaskCon.Workspace.v2', remote])
+  const hex = createHash('sha256').update(seed).digest('hex')
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`
 }
 

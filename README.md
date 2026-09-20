@@ -418,7 +418,21 @@ See [task creation CLI](docs/task-documents.md#task-creation) for agent automati
 1. In the desktop explorer, choose the folder icon labeled **Open workspace folder**.
     The title-bar folder icon is also available when the sidebar is hidden.
 2. Select the workspace root, for example `Q:\src\Projects\TaskContinuum-ad`,
-    not its `tasks` subdirectory. The root must contain `.agentdesk/config.json`.
+    not its `tasks` subdirectory. The selected folder itself must contain
+    `.agentdesk/config.json`. Its Git checkout may be the same folder or an
+    ancestor directory:
+
+    ```text
+    root/.git
+    root/Project/.agentdesk/config.json
+    root/Project/tasks/...
+    root/Project/.taskcontinuum/workspace.json
+    ```
+
+    Automatic workspace links still validate cleanliness, upstream tracking and
+    safety against the whole repository checkout rooted at `root/.git`, but the
+    public Task Continuum metadata lives under the selected AgentDesk folder's
+    `.taskcontinuum`, not at the repository root.
 3. Use the **Workspace** dropdown to switch between recent folders or return to
     **No workspace**. Closing a workspace clears its task views but retains recent
     folders. The selected folder is restored after restart.
@@ -458,7 +472,11 @@ Remove-Item Env:TASKCONTINUUM_WORKSPACE
 
 Open **Remote devices > Automatic workspace links** and enable the immutable
 backend with native consent. The workspace must have an existing tracked Git
-upstream; no branch or remote is guessed. An unconfigured workspace reads task
+upstream; no branch or remote is guessed. The selected AgentDesk folder may sit
+below the Git checkout root as long as it contains `.agentdesk/config.json`.
+Task Continuum still checks the whole repository for cleanliness and upstream
+safety, but it writes its public descriptor and immutable records under that
+selected folder's `.taskcontinuum` path. An unconfigured workspace reads task
 documents only. Binding reads and writes require this backend to be enabled,
 including when devices were paired explicitly. Pause does not enable a fallback.
 
