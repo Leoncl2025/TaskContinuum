@@ -6,9 +6,13 @@ import { readRepositorySessionLinks, sessionOwnerSchema } from './repositorySess
 import { sessionLinkEntries, taskSessionLinks, type SessionLinksDocument, type SessionOwner, type SessionLink } from '../shared/sessionBindings'
 import { agentHostIdentitySchema, agentHostTargetSchema } from './agentHostProtocol'
 import type { AgentHostTarget } from '../shared/agentHost'
+import { agentHostCreationErrorMessages } from '../shared/agentHostCreation'
 
 const receiptSchema = z.object({ root: z.string(), taskId: z.string(), owner: sessionOwnerSchema, identity: agentHostIdentitySchema }).strict()
 const receiptsSchema = z.object({ schemaVersion: z.literal(2), receipts: z.array(receiptSchema).max(1000) }).strict()
+export class LocalSessionLinkReceiptsError extends Error {
+  constructor() { super(agentHostCreationErrorMessages['link-receipts-unavailable']) }
+}
 let writing: Promise<unknown> = Promise.resolve()
 export async function canonicalPolicyRoot(root: string): Promise<string> {
   const path = await realpath(root)
@@ -16,9 +20,12 @@ export async function canonicalPolicyRoot(root: string): Promise<string> {
 }
 async function receipts(directory: string) {
   try { return receiptsSchema.parse(await readJsonBounded(join(directory, 'local-session-link-receipts.json'))).receipts } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Local Agent Host link receipts are invalid. Schema v2 logical session receipts are required; old receipts are not migrated. Close Task Continuum and explicitly reset local-session-link-receipts.json before confirming links. Nothing was shared.')
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new LocalSessionLinkReceiptsError()
     return []
   }
+}
+export async function validateLocalSessionLinkReceipts(directory: string): Promise<void> {
+  await receipts(directory)
 }
 export async function recordLocalLink(
   directory: string,

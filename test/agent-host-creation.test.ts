@@ -5,7 +5,7 @@ import { createConnection } from 'node:net'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { AhpClient } from '@microsoft/agent-host-protocol/client'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { agentHostCreationResultSchema } from '../src/main/agentHostCreationProtocol'
 import { agentHostTargetSchema } from '../src/main/agentHostProtocol'
 import { AgentHostConnection } from '../src/main/agentHostConnection'
@@ -48,6 +48,21 @@ async function records(worker: Fixture) {
 }
 
 describe('worker-authoritative native Agent Host creation', () => {
+  it('reports invalid owner receipts through the remote API before creating or rewriting any session', async () => {
+    const worker = await fixture()
+    const file = join(worker.profile, 'local-session-link-receipts.json')
+    await writeFile(file, '[]')
+    await expect(worker.workers()).rejects.toMatchObject({
+      status: 503, creationCode: 'link-receipts-unavailable', message: expect.stringContaining('local-session-link-receipts.json'),
+    })
+    await expect(worker.begin()).rejects.toMatchObject({
+      status: 503, creationCode: 'link-receipts-unavailable',
+    })
+    expect(worker.native.creations).toEqual([])
+    expect((await readRepositorySessionLinks(worker.workspace)).document.bindings).toEqual({})
+    expect(await readFile(file, 'utf8')).toBe('[]')
+  })
+
   it('creates with the existing paired workspace send policy, binds on B, and records only portable identity in Git', async () => {
     const worker = await fixture()
     const catalog = await worker.workers()
@@ -375,7 +390,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     if (acknowledgement === 'lost') worker.native.loseAcknowledgement()
     else worker.native.setAcknowledgement({})
     await worker.begin()
-    await expect.poll(async () => (await records(worker))[0].result.state).toBe('uncertain')
+    await expect.poll(async () => (await records(worker))[0].result.state, { timeout: 3000, interval: 25 }).toBe('uncertain')
     expect((await records(worker))[0].nativeAcknowledged).toBe(false)
     const original = worker.native.creations[0].channel
     expect(worker.native.sessions.get(original)!.session.lifecycle).toBe('creating')
@@ -572,7 +587,12 @@ describe('worker-authoritative native Agent Host creation', () => {
   it('preserves the exact created chat when saving its receipt fails, then repairs it without creation', async () => {
     const worker = await fixture()
     const receipt = join(worker.profile, 'local-session-link-receipts.json')
-    await mkdir(receipt)
+    const update = worker.bindings.store.update.bind(worker.bindings.store)
+    vi.spyOn(worker.bindings.store, 'update').mockImplementationOnce(async (...args) => {
+      const snapshot = await update(...args)
+      await mkdir(receipt)
+      return snapshot
+    })
     await worker.begin()
     await expect.poll(async () => (await worker.status()).state).toBe('created-unbound')
     const created = (await worker.status()).session!

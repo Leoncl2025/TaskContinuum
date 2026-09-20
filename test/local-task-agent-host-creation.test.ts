@@ -250,6 +250,66 @@ describe('task-local Agent Host creation through the shared worker', () => {
     expect(await missingBackend.manager.creations.list(missingBackend.root, missingBackend.request.taskId)).toEqual([])
   }, 20000)
 
+  it.each(['[]', '{invalid JSON'])('blocks invalid local receipts before reserving or creating a native session: %s', async (content) => {
+    const setup = await fixture()
+    const file = join(setup.profile, 'local-session-link-receipts.json')
+    await writeFile(file, content)
+    expect(await setup.manager.creations.workers(setup.root, setup.request.taskId, 'local')).toMatchObject([
+      { local: true, state: 'blocked', hosts: [], error: expect.stringContaining('local-session-link-receipts.json') },
+    ])
+    await expect(setup.manager.creations.create(setup.root, setup.request, setup.authorize)).rejects.toThrow('receipts are invalid')
+    await expect(setup.local.create(setup.root, setup.request, setup.authorize)).rejects.toMatchObject({
+      status: 503, code: 'link-receipts-unavailable', message: expect.stringContaining('back up'),
+    })
+    expect(setup.native.creations).toEqual([])
+    expect((await readRepositorySessionLinks(setup.root)).document.bindings).toEqual({})
+    expect(await readFile(file, 'utf8')).toBe(content)
+    await expect(readFile(setup.file)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('rechecks local receipts after preparation before dispatching native creation', async () => {
+    const setup = await fixture()
+    const gate = setup.native.pausePreparation()
+    await setup.manager.creations.create(setup.root, setup.request, setup.authorize)
+    await expect.poll(() => setup.native.calls.some((call) => call.method === 'resolveSessionConfig'), polling).toBe(true)
+    const file = join(setup.profile, 'local-session-link-receipts.json')
+    await writeFile(file, '[]')
+    gate.resolve()
+    const failed = await settle(setup, 'failed')
+    expect(failed.error).toContain('Schema v2 logical session receipts are required')
+    expect(setup.native.creations).toEqual([])
+    expect(await readFile(file, 'utf8')).toBe('[]')
+  })
+
+  it('preserves the receipt failure after binding and retries the same created session after explicit repair', async () => {
+    const setup = await fixture()
+    const file = join(setup.profile, 'local-session-link-receipts.json')
+    const store = setup.bindings!.store
+    const update = store.update.bind(store)
+    vi.spyOn(store, 'update').mockImplementationOnce(async (...args) => {
+      const snapshot = await update(...args)
+      await writeFile(file, '[]')
+      return snapshot
+    })
+    await setup.manager.creations.create(setup.root, setup.request, setup.authorize)
+    const unbound = await settle(setup, 'created-unbound')
+    expect(unbound.session).toBeDefined()
+    expect(unbound.error).toContain('local-session-link-receipts.json')
+    expect(unbound.error).toContain('not a bare array')
+    expect(unbound.error).not.toContain('Refresh the revision')
+    expect(taskSessionLinks((await readRepositorySessionLinks(setup.root)).document.bindings, setup.request.taskId)).toEqual([
+      { provider: 'agent-host', ...target(unbound) },
+    ])
+    expect(await readFile(file, 'utf8')).toBe('[]')
+    await expect(setup.manager.creations.bind(setup.root, setup.request.operationId, setup.authorize)).rejects.toThrow('receipts are invalid')
+    await writeFile(file, JSON.stringify({ schemaVersion: 2, receipts: [] }))
+    const recovered = await setup.manager.creations.bind(setup.root, setup.request.operationId, setup.authorize)
+    expect(recovered).toMatchObject({ state: 'ready', session: unbound.session })
+    expect(await locallyLinkedAgentHostSessions(setup.profile, setup.root, setup.owner)).toEqual([target(unbound)])
+    expect(setup.native.creations).toHaveLength(1)
+    expect(setup.native.calls.some((call) => call.method === 'dispatchAction')).toBe(false)
+  }, 20000)
+
   it('rejects a missing task but permits creation on an already-bound task', async () => {
     const setup = await fixture()
     const missing = { ...setup.request, taskId: 'T-0999' }

@@ -8,7 +8,7 @@ import { agentHostCreateCommandSchema, agentHostCreationBindSchema, agentHostCre
 import { agentHostKey, agentHostSessionIdSchema, agentHostTargetSchema } from './agentHostProtocol'
 import { AgentHostCreationError } from './agentHostRegistry'
 import type { AgentHostCreationInspection, AgentHostRegistry, PreparedAgentHostCreation } from './agentHostRegistry'
-import { canonicalPolicyRoot, locallyLinkedAgentHostSessions, recordLocalLink } from './linkedSessionPolicy'
+import { canonicalPolicyRoot, LocalSessionLinkReceiptsError, locallyLinkedAgentHostSessions, recordLocalLink, validateLocalSessionLinkReceipts } from './linkedSessionPolicy'
 import { bindRepositoryAgentHostCreation, readRepositorySessionLinks, sessionOwnerSchema } from './repositorySessionLinks'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 import { readTaskWorkspace } from './workspaceReader'
@@ -94,6 +94,15 @@ export class AgentHostCreationService {
     if (this.closed) throw new AgentHostCreationRequestError(503, 'The worker is closed.')
     await this.writing
     await this.readOperations()
+    await this.checkReceipts()
+  }
+
+  private async checkReceipts(): Promise<void> {
+    try { await validateLocalSessionLinkReceipts(this.directory) }
+    catch (error) {
+      if (error instanceof LocalSessionLinkReceiptsError) throw new AgentHostCreationRequestError(503, error.message, 'link-receipts-unavailable')
+      throw error
+    }
   }
 
   private transaction<Result>(action: (operations: Operation[]) => Promise<{ value: Result; changed?: boolean }> | { value: Result; changed?: boolean }): Promise<Result> {
@@ -149,6 +158,7 @@ export class AgentHostCreationService {
     if (!workspace.tasks.some((task) => task.id === request.taskId)) throw new AgentHostCreationRequestError(409, 'The task does not exist on this worker. No native session was created.')
     const links = await readRepositorySessionLinks(root)
     if (links.revision !== request.expectedRevision) throw new AgentHostCreationRequestError(409, 'The worker task binding revision changed. Refresh before starting a new operation.')
+    await this.checkReceipts()
   }
 
   async begin(pairId: string, value: CreateCommand, location: AgentHostCreationLocation = 'remote'): Promise<AgentHostCreationResult> {
@@ -313,6 +323,7 @@ export class AgentHostCreationService {
       await this.authorizedOperation(operation)
     }
     try {
+      await this.checkReceipts()
       const before = await readRepositorySessionLinks(operation.root)
       const same = taskSessionLinks(before.document.bindings, operation.request.taskId).some((link) => agentHostKey(link) === agentHostKey(target))
       if (recovering && !same) throw new AgentHostCreationError('A prior binding attempt was interrupted and its binding is absent or changed. Explicitly retry binding; status will not silently restore a detached task.')
@@ -333,7 +344,7 @@ export class AgentHostCreationService {
     } catch (error) {
       if (error instanceof ChangedOperationError) throw error
       return this.replace(operation, { phase: 'complete', result: { ...operation.result, state: 'created-unbound',
-        error: error instanceof AgentHostCreationError ? error.message : 'The verified native session was created, but its task binding or local receipt could not be saved. Refresh the revision and explicitly retry binding this same session.' } })
+        error: error instanceof AgentHostCreationError || error instanceof LocalSessionLinkReceiptsError ? error.message : 'The verified native session was created, but its task binding or local receipt could not be saved. Refresh the revision and explicitly retry binding this same session.' } })
     }
   }
 

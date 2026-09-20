@@ -238,6 +238,22 @@ containing exactly `sessionId` and `chatId`. Bare arrays, `hostId`, old Local
 identities (`nativeSessionId`, `workspaceStorageId`), mixed files and malformed
 data block access. There is no compatibility mode, migration or filtering.
 
+Task-session creation checks this receipt document before offering or dispatching
+native creation. Missing files are initialized on the first explicit confirmation;
+an existing bare `[]`, malformed JSON, or unsupported document blocks creation
+without replacing the file. The error names the receipt file instead of suggesting
+that a binding revision refresh can repair it.
+
+If the receipt file becomes invalid after native creation, the operation remains
+**Created, assignment incomplete** and retains the same native session/chat.
+For a receipt-only failure on an otherwise valid v2.1 workspace, do not recreate
+the workspace or its session. Quit Task Continuum on the execution device, back up
+the receipt file, and explicitly repair it. A known empty `[]` can be replaced with
+`{ "schemaVersion": 2, "receipts": [] }`; preserve valid existing receipts rather
+than clearing them. Reopen the app and use **Retry binding** on the saved operation.
+Only that binding and receipt are retried; no new chat or prompt is created.
+The application never repairs or migrates this file automatically.
+
 This is a breaking upgrade, not a receipt-only migration:
 
 1. Update both desktops and fully quit them before explicitly resetting any
