@@ -71,7 +71,7 @@ export class AgentHostCreationService {
         let operations: Operation[]
         try { operations = operationsSchema.parse(await readJsonBounded(file, 8 * 1024 * 1024)) }
         catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new AgentHostCreationRequestError(503, 'Private creation records are unreadable. They were not replaced and no native creation was retried.')
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new AgentHostCreationRequestError(503, 'Private creation records are unreadable or are not schema v2 logical session records. They were not migrated or replaced and no native creation was retried.')
           operations = []
         }
         let recovered = false

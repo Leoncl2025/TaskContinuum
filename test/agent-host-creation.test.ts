@@ -80,6 +80,39 @@ describe('worker-authoritative native Agent Host creation', () => {
     expect((await records(worker))[0]).toMatchObject({ pairId: worker.pair.id, nativeSessionId: session.sessionId, result: { state: 'ready' } })
   })
 
+  it.each(['missing version', 'Host-pinned session', 'legacy record', 'mixed formats', 'unknown version'] as const)('rejects %s without migrating records or replaying creation', async (format) => {
+    const worker = await fixture()
+    await worker.begin()
+    const session = await ready(worker)
+    if (format === 'mixed formats') {
+      await writeCreationTaskWorkspace(worker.workspace, 'T-0008')
+      Object.assign(worker.request, { operationId: randomUUID(), taskId: 'T-0008', expectedRevision: (await readRepositorySessionLinks(worker.workspace)).revision })
+      await worker.begin()
+      await ready(worker)
+    }
+    const saved = await records(worker)
+    const legacy = format === 'legacy record' || format === 'mixed formats'
+    const record: Record<string, unknown> = {
+      ...saved[0],
+      result: { ...saved[0].result, session: legacy || format === 'Host-pinned session' ? { ...session, hostId: worker.native.hostId } : session },
+    }
+    if (legacy || format === 'missing version') delete record.schemaVersion
+    if (format === 'unknown version') record.schemaVersion = 3
+    const file = join(worker.profile, 'agent-host-creation', 'operations.json')
+    const history = JSON.stringify([record, ...saved.slice(1)])
+    const links = await readRepositorySessionLinks(worker.workspace)
+    await worker.restart(() => writeFile(file, history))
+    await expect(worker.begin()).rejects.toMatchObject({ status: 503 })
+    await expect(worker.status()).rejects.toMatchObject({ status: 503 })
+    await expect(worker.bind(links.revision)).rejects.toMatchObject({ status: 503 })
+    await writeCreationTaskWorkspace(worker.workspace, 'T-0009')
+    await expect(worker.begin({ ...worker.request, operationId: randomUUID(), taskId: 'T-0009', expectedRevision: links.revision })).rejects.toMatchObject({ status: 503 })
+    expect(await readFile(file, 'utf8')).toBe(history)
+    expect(await readRepositorySessionLinks(worker.workspace)).toEqual(links)
+    expect(worker.native.creations).toHaveLength(saved.length)
+    expect(worker.native.calls.some((call) => call.method === 'dispatchAction')).toBe(false)
+  })
+
   it('uses the same paired SSH device route and does not permit raw createSession on the scoped AHP stream', async () => {
     const worker = await fixture()
     const ssh = await startSessionSshHost(creationFixtureKey())

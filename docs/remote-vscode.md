@@ -74,6 +74,11 @@ only retries binding, not creation. A completed operation does not silently
 restore a binding that was later detached. Private creation/status operation
 records remain outside Git and do not grant access after send permission is removed.
 
+Creation operation records require `schemaVersion: 2` and logical session
+identities. Missing versions, Host-pinned session identities, mixed-format files,
+and unknown versions are rejected. Unsupported records are not migrated,
+discarded, or replayed.
+
 ### Native VS Code Controls
 
 Task Continuum preserves the selected native harness's advertised capabilities;
