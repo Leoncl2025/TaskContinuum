@@ -72,15 +72,17 @@ describe('durable remote creation on the caller', () => {
     expect(await setup.client.list(setup.root, setup.request.taskId)).toEqual([])
   })
 
-  it.each(['read-only', 'offline', 'unsupported', 'bound', 'revision'])('does not dispatch when selection is %s', async (reason) => {
+  it.each(['read-only', 'offline', 'blocked', 'unsupported', 'bound', 'revision'])('does not dispatch when selection is %s', async (reason) => {
     const setup = await fixture()
     if (reason === 'read-only') setup.worker.workspaces[0].canSend = false
     if (reason === 'offline') setup.worker.state = 'offline'
+    if (reason === 'blocked') setup.worker.state = 'blocked'
     if (reason === 'unsupported') setup.worker.hosts[0].available = false
     if (reason === 'bound') setup.worker.workspaces[0].taskState = 'bound'
     if (reason === 'revision') setup.worker.workspaces[0].expectedRevision = 'c'.repeat(64)
     await expect(setup.client.create(setup.root, setup.request, setup.authorize)).rejects.toThrow()
     expect(setup.devices.agentHostCreate).not.toHaveBeenCalled()
+    expect(await setup.client.list(setup.root, setup.request.taskId)).toEqual([])
     expect((await readRepositorySessionLinks(setup.root)).revision).toBe(setup.bindings.snapshot.revision)
   })
 

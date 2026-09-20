@@ -2,7 +2,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, open, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
-import type { AgentHostCreationResult } from '../shared/agentHostCreation'
+import { agentHostCreationErrorMessages } from '../shared/agentHostCreation'
+import type { AgentHostCreationErrorCode, AgentHostCreationResult } from '../shared/agentHostCreation'
 import { agentHostCreateCommandSchema, agentHostCreationBindSchema, agentHostCreationLookupSchema, agentHostCreationResultSchema, creationRevisionSchema } from './agentHostCreationProtocol'
 import { agentHostKey, agentHostSessionIdSchema, agentHostTargetSchema } from './agentHostProtocol'
 import { AgentHostCreationError } from './agentHostRegistry'
@@ -39,7 +40,7 @@ const operationsSchema = z.array(operationSchema).max(1000).superRefine((operati
 type Operation = Omit<z.infer<typeof operationSchema>, 'result'> & { result: AgentHostCreationResult }
 
 export class AgentHostCreationRequestError extends AgentHostCreationError {
-  constructor(readonly status: 400 | 403 | 409 | 503, message: string) { super(message) }
+  constructor(readonly status: 400 | 403 | 409 | 503, message: string, readonly code?: AgentHostCreationErrorCode) { super(message) }
 }
 class ChangedOperationError extends AgentHostCreationError {}
 
@@ -58,6 +59,20 @@ export class AgentHostCreationService {
   constructor(private readonly directory: string, private readonly registry: AgentHostRegistry,
     private readonly authorize: (pairId: string, workspaceId: string) => Promise<string>) {}
 
+  private async readOperations(): Promise<Operation[]> {
+    try { return operationsSchema.parse(await readJsonBounded(join(this.directory, 'agent-host-creation', 'operations.json'), 8 * 1024 * 1024)) }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw new AgentHostCreationRequestError(503, agentHostCreationErrorMessages['creation-records-unavailable'], 'creation-records-unavailable')
+    }
+  }
+
+  async checkReady(): Promise<void> {
+    if (this.closed) throw new AgentHostCreationRequestError(503, 'The worker is closed.')
+    await this.writing
+    await this.readOperations()
+  }
+
   private transaction<Result>(action: (operations: Operation[]) => Promise<{ value: Result; changed?: boolean }> | { value: Result; changed?: boolean }): Promise<Result> {
     const operation = this.writing.then(async () => {
       const directory = join(this.directory, 'agent-host-creation')
@@ -68,12 +83,7 @@ export class AgentHostCreationService {
       })
       try {
         const file = join(directory, 'operations.json')
-        let operations: Operation[]
-        try { operations = operationsSchema.parse(await readJsonBounded(file, 8 * 1024 * 1024)) }
-        catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new AgentHostCreationRequestError(503, 'Private creation records are unreadable or are not schema v2 logical session records. They were not migrated or replaced and no native creation was retried.')
-          operations = []
-        }
+        const operations = await this.readOperations()
         let recovered = false
         if (!this.initialized) for (const saved of operations) if (saved.result.state === 'creating') {
           saved.result.state = 'uncertain'

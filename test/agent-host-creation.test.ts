@@ -102,6 +102,11 @@ describe('worker-authoritative native Agent Host creation', () => {
     const history = JSON.stringify([record, ...saved.slice(1)])
     const links = await readRepositorySessionLinks(worker.workspace)
     await worker.restart(() => writeFile(file, history))
+    const nativeCalls = worker.native.calls.length
+    await expect(worker.workers()).rejects.toMatchObject({
+      status: 503, creationCode: 'creation-records-unavailable', message: expect.stringContaining('schema v2'),
+    })
+    expect(worker.native.calls).toHaveLength(nativeCalls)
     await expect(worker.begin()).rejects.toMatchObject({ status: 503 })
     await expect(worker.status()).rejects.toMatchObject({ status: 503 })
     await expect(worker.bind(links.revision)).rejects.toMatchObject({ status: 503 })
@@ -111,6 +116,25 @@ describe('worker-authoritative native Agent Host creation', () => {
     expect(await readRepositorySessionLinks(worker.workspace)).toEqual(links)
     expect(worker.native.creations).toHaveLength(saved.length)
     expect(worker.native.calls.some((call) => call.method === 'dispatchAction')).toBe(false)
+  })
+
+  it('blocks unavailable worker history over SSH before saving a caller creation intent', async () => {
+    const worker = await fixture()
+    const directory = join(worker.profile, 'agent-host-creation')
+    await mkdir(directory, { recursive: true })
+    const file = join(directory, 'operations.json')
+    const history = '[{"schemaVersion":1}]'
+    await writeFile(file, history)
+    const caller = await callerFixture(worker)
+    try {
+      const workers = await caller.client.workers(caller.workspace, worker.request.taskId)
+      expect(workers).toMatchObject([{ state: 'blocked', error: expect.stringContaining('schema v2') }])
+      await expect(caller.client.create(caller.workspace, { ...worker.request, workerId: workers[0].id }, async () => {})).rejects.toThrow('schema v2')
+      expect(await caller.client.list(caller.workspace, worker.request.taskId)).toEqual([])
+      expect(worker.native.creations).toEqual([])
+      expect((await readRepositorySessionLinks(caller.workspace)).document.bindings).toEqual({})
+      expect(await readFile(file, 'utf8')).toBe(history)
+    } finally { await caller.close() }
   })
 
   it('uses the same paired SSH device route and does not permit raw createSession on the scoped AHP stream', async () => {

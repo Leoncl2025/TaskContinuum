@@ -1,5 +1,10 @@
 import { z } from 'zod'
 import { agentHostIdSchema, agentHostSessionSchema, agentHostTargetSchema } from './agentHostProtocol'
+import { agentHostCreationErrorCodes } from '../shared/agentHostCreation'
+
+export const agentHostCreationErrorResponseSchema = z.object({
+  error: z.object({ code: z.enum(agentHostCreationErrorCodes) }).strict(),
+}).strict()
 
 export const creationTaskIdSchema = z.string().regex(/^T-\d{4,}$/)
 export const creationWorkspaceIdSchema = z.string().regex(/^[a-f0-9]{64}$/)

@@ -10,6 +10,7 @@ import { VSCodeDeviceClient } from '../src/main/vscodeDeviceClient'
 import { deviceInvitationSchema } from '../src/main/vscodeDeviceProtocol'
 import { newSshKeyPair } from '../src/main/devTunnel/sessionSsh'
 import type { AgentHostCreateRequest, AgentHostCreationResult } from '../src/shared/agentHostCreation'
+import { agentHostCreationErrorMessages } from '../src/shared/agentHostCreation'
 
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { for (const close of cleanup.splice(0)) await close() })
@@ -26,6 +27,7 @@ async function fixture() {
     workspaces: [{ id: request.workspaceId, name: 'Worker workspace', canSend: true, taskState: 'available', expectedRevision: null }] }
   const requests: { path: string; body: Record<string, unknown> }[] = []
   let responseStatus = 200
+  let responseBody: unknown
   const server = createServer((incoming, outgoing) => {
     void (async () => {
       const chunks: Buffer[] = []
@@ -34,7 +36,7 @@ async function fixture() {
       const path = incoming.url ?? ''
       requests.push({ path, body })
       outgoing.writeHead(responseStatus, { 'Content-Type': 'application/json' })
-      outgoing.end(JSON.stringify(path === '/device/identity' ? { ownerId, deviceId: pairId } : path === '/device/agent-host/workers' ? catalog : result))
+      outgoing.end(JSON.stringify(responseBody !== undefined ? responseBody : path === '/device/identity' ? { ownerId, deviceId: pairId } : path === '/device/agent-host/workers' ? catalog : result))
     })().catch((error: unknown) => { outgoing.writeHead(500); outgoing.end(error instanceof Error ? error.message : 'Fixture request failed') })
   })
   server.listen(0, '127.0.0.1')
@@ -52,7 +54,8 @@ async function fixture() {
     devTunnel: { kind: 'dev-tunnel', tunnelId: `taskcontinuum-${'f'.repeat(32)}.jpe1`, sshPort: address.port, hostPublicKey: key.publicKey, clientPublicKey: key.publicKey } }), true)
   const workers = await client.agentHostWorkers(root, request.taskId)
   request.workerId = workers[0].id
-  return { root, client, workers, owner, request, result, catalog, requests, transport, validateRecipient, status: (status: number) => { responseStatus = status } }
+  return { root, client, workers, owner, request, result, catalog, requests, transport, validateRecipient, status: (status: number) => { responseStatus = status },
+    respond: (status: number, body: unknown) => { responseStatus = status; responseBody = body } }
 }
 
 describe('paired device creation transport', () => {
@@ -107,5 +110,39 @@ describe('paired device creation transport', () => {
     expect((await setup.client.agentHostWorkers(setup.root, setup.request.taskId))[0]).toMatchObject({ state: 'unsupported', workspaces: [], error: expect.stringContaining('does not support') })
     setup.status(403)
     await expect(setup.client.agentHostCreate(setup.root, setup.request, async () => {})).rejects.toThrow('send permission')
+  })
+
+  it('reports blocked creation records without dropping the authenticated connection or retrying creation', async () => {
+    const setup = await fixture()
+    setup.respond(503, { error: { code: 'creation-records-unavailable' } })
+    const error = agentHostCreationErrorMessages['creation-records-unavailable']
+    expect((await setup.client.agentHostWorkers(setup.root, setup.request.taskId))[0]).toMatchObject({ state: 'blocked', hosts: [], workspaces: [], error })
+    await expect(setup.client.agentHostCreationStatus(setup.root, setup.request, async () => {})).rejects.toMatchObject({
+      status: 503, creationCode: 'creation-records-unavailable', message: error,
+    })
+    expect(setup.transport).toHaveBeenCalledOnce()
+    expect(setup.requests.filter((request) => request.path.endsWith('/create'))).toEqual([])
+    setup.respond(200, undefined)
+    expect((await setup.client.agentHostWorkers(setup.root, setup.request.taskId))[0].state).toBe('connected')
+  })
+
+  it.each([
+    { error: { code: 'unknown-worker-error', message: 'worker-private-path-or-token' } },
+    { error: { code: 'creation-records-unavailable', message: 'worker-private-path-or-token' } },
+    { error: 'worker-private-path-or-token' },
+  ])('does not expose unrecognized worker error payloads: %j', async (body) => {
+    const setup = await fixture()
+    setup.respond(503, body)
+    const worker = (await setup.client.agentHostWorkers(setup.root, setup.request.taskId))[0]
+    expect(worker.state).toBe('offline')
+    expect(worker.error).toContain('could not confirm')
+    expect(worker.error).not.toContain('worker-private-path-or-token')
+  })
+
+  it('bounds worker error responses separately from successful catalogs', async () => {
+    const setup = await fixture()
+    setup.respond(503, { error: { code: 'creation-records-unavailable' }, detail: 'x'.repeat(4096) })
+    const worker = (await setup.client.agentHostWorkers(setup.root, setup.request.taskId))[0]
+    expect(worker).toMatchObject({ state: 'offline', error: expect.stringContaining('exceeds its limit') })
   })
 })

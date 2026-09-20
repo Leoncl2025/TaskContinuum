@@ -1,8 +1,11 @@
 import { request } from 'node:http'
+import { agentHostCreationErrorMessages } from '../shared/agentHostCreation'
+import type { AgentHostCreationErrorCode } from '../shared/agentHostCreation'
+import { agentHostCreationErrorResponseSchema } from './agentHostCreationProtocol'
 
 export class DeviceRequestError extends Error {
-  constructor(readonly status: number, agentHostCreation = false) {
-    super(agentHostCreation
+  constructor(readonly status: number, agentHostCreation = false, readonly creationCode?: AgentHostCreationErrorCode) {
+    super(agentHostCreation && status === 503 && creationCode ? agentHostCreationErrorMessages[creationCode] : agentHostCreation
       ? status === 401 || status === 403 ? 'The worker send permission or device pairing is unavailable, revoked, or expired.'
         : status === 404 ? 'This worker does not support the requested Agent Host creation operation. Update Task Continuum on the worker.'
           : status === 400 || status === 409 ? 'The creation request or task binding conflicts with the worker state. Refresh the same operation; do not create a replacement.'
@@ -31,19 +34,31 @@ export async function deviceRequest(port: number, remotePort: number, token: str
       signal: cancellation,
     }, (response) => {
       response.on('error', failed)
-      if (response.statusCode !== 200) {
+      const status = response.statusCode ?? 500
+      const diagnostic = creation && status === 503 && response.headers['content-type']?.split(';')[0].trim().toLowerCase() === 'application/json'
+      if (status !== 200 && !diagnostic) {
         response.destroy()
-        reject(new DeviceRequestError(response.statusCode ?? 500, creation))
+        reject(new DeviceRequestError(status, creation))
         return
       }
       const chunks: Buffer[] = []
       let length = 0
       response.on('data', (chunk: Buffer) => {
         length += chunk.length
-        if (length > 4 * 1024 * 1024) response.destroy(new Error('Device response exceeds its limit.'))
+        if (length > (diagnostic ? 4096 : 4 * 1024 * 1024)) response.destroy(new Error('Device response exceeds its limit.'))
         else chunks.push(chunk)
       })
-      response.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))) } catch { reject(new Error('Invalid device response.')) } })
+      response.on('end', () => {
+        let value: unknown
+        try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch {
+          reject(diagnostic ? new DeviceRequestError(status, creation) : new Error('Invalid device response.'))
+          return
+        }
+        if (diagnostic) {
+          const result = agentHostCreationErrorResponseSchema.safeParse(value)
+          reject(new DeviceRequestError(status, creation, result.success ? result.data.error.code : undefined))
+        } else resolve(value)
+      })
     })
     operation.on('error', failed)
     operation.end(JSON.stringify(value))

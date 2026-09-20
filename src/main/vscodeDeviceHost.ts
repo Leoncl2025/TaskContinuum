@@ -71,7 +71,8 @@ export class VSCodeDeviceHost {
   }
 
   private async agentHostWorkers(pair: Pairing, taskId: string) {
-    if (!this.agentHosts) throw new DeviceRequestError(404, true)
+    if (!this.agentHosts || !this.agentHostCreations) throw new DeviceRequestError(404, true)
+    await this.agentHostCreations.checkReady()
     const policies = JSON.stringify(pair.workspaces)
     const workspaces: AgentHostCreationWorkspace[] = []
     for (const policy of pair.workspaces) {
@@ -233,7 +234,15 @@ export class VSCodeDeviceHost {
           response.setHeader('Content-Type', 'application/json')
           response.end(JSON.stringify(result))
         })().catch((error: unknown) => {
-          if (!response.headersSent) response.writeHead(error instanceof DeviceRequestError || error instanceof AgentHostCreationRequestError ? error.status : error instanceof z.ZodError ? 400 : 503)
+          if (!response.headersSent) {
+            const status = error instanceof DeviceRequestError || error instanceof AgentHostCreationRequestError ? error.status : error instanceof z.ZodError ? 400 : 503
+            if (error instanceof AgentHostCreationRequestError && error.code) {
+              response.writeHead(status, { 'Content-Type': 'application/json' })
+              response.end(JSON.stringify({ error: { code: error.code } }))
+              return
+            }
+            response.writeHead(status)
+          }
           response.end()
         })
       })

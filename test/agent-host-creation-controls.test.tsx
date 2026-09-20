@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AgentHostBridge, AgentHostSession } from '../src/shared/agentHost'
 import type { AgentHostCreation, AgentHostWorker } from '../src/shared/agentHostCreation'
+import { agentHostCreationErrorMessages } from '../src/shared/agentHostCreation'
 import { AgentHostCreationControls } from '../src/renderer/components/AgentHostCreationControls'
 import { AgentHostSessionsDialog } from '../src/renderer/components/AgentHostSessionsDialog'
 
@@ -102,10 +103,11 @@ describe('explicit remote Agent Host creation', () => {
     expect(screen.getByText('ahp-chat:/created/main')).toBeInTheDocument()
   })
 
-  it.each(['read-only', 'offline', 'bound locally', 'bound remotely', 'missing task', 'unverified task', 'unsupported', 'unavailable Host'] as const)('denies creation for %s', async (reason) => {
+  it.each(['read-only', 'offline', 'blocked', 'bound locally', 'bound remotely', 'missing task', 'unverified task', 'unsupported', 'unavailable Host'] as const)('denies creation for %s', async (reason) => {
     const { bridge, worker } = fixture()
     if (reason === 'read-only') worker.workspaces[0].canSend = false
     if (reason === 'offline') worker.state = 'offline'
+    if (reason === 'blocked') worker.state = 'blocked'
     if (reason === 'bound remotely') worker.workspaces[0].taskState = 'bound'
     if (reason === 'missing task') worker.workspaces[0].taskState = 'missing'
     if (reason === 'unverified task') worker.workspaces[0].taskState = 'unavailable'
@@ -120,6 +122,33 @@ describe('explicit remote Agent Host creation', () => {
     expect(bridge.create).not.toHaveBeenCalled()
     expect(bridge.send).not.toHaveBeenCalled()
     expect(screen.getAllByRole('status').length).toBeGreaterThan(0)
+  })
+
+  it('shows the worker history error and keeps an existing uncertain operation without replaying it', async () => {
+    const { bridge, worker, operation } = fixture()
+    const error = agentHostCreationErrorMessages['creation-records-unavailable']
+    const pending = operation('uncertain')
+    pending.error = error
+    worker.state = 'blocked'
+    worker.error = error
+    worker.hosts = []
+    worker.workspaces = []
+    vi.mocked(bridge.creationStatus).mockRejectedValue(new Error(error))
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskUnbound />)
+    await screen.findByRole('option', { name: /Paired workstation/ })
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Remote worker' })).toBeEnabled())
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Remote worker' }), worker.id)
+    expect(screen.getByText('This worker is connected, but its creation records must be repaired before creating.')).toBeInTheDocument()
+    expect(screen.getAllByText(error)).toHaveLength(2)
+    expect(screen.getByRole('heading', { name: 'Outcome uncertain · T-0002' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    expect(screen.queryByText('This worker exposes no Agent Hosts.')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Check status' }))
+    expect(bridge.creationStatus).toHaveBeenLastCalledWith(pending.operationId)
+    expect(bridge.create).not.toHaveBeenCalled()
+    expect(bridge.bindCreation).not.toHaveBeenCalled()
+    expect(bridge.send).not.toHaveBeenCalled()
   })
 
   it('shows unavailable APIs in an older preload while existing linking still works', async () => {

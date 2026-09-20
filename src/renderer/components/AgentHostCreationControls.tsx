@@ -182,10 +182,10 @@ function CreationControls({ taskId, taskUnbound, disabled = false, onCreated }: 
     </div>
     {worker && <div className="ah-creation-selection">
       <p>Machine: <strong>{worker.owner.machineName}</strong> · Worker: <code>{worker.id}</code> · Owner: <code>{worker.owner.clientId}</code></p>
-      {worker.state !== 'connected' && <p role="status">{worker.state === 'offline' ? 'This worker is offline. Reconnect it in Manage devices, then check the saved operation.' : 'This worker does not support remote chat creation. Update the worker before creating.'}</p>}
+      {worker.state !== 'connected' && <p role="status">{worker.state === 'blocked' ? 'This worker is connected, but its creation records must be repaired before creating.' : worker.state === 'offline' ? 'This worker is offline. Reconnect it in Manage devices, then check the saved operation.' : 'This worker does not support remote chat creation. Update the worker before creating.'}</p>}
       {worker.error && <p className="copilot-error" role="alert">{worker.error}</p>}
-      {!worker.workspaces.length && <p role="status">This worker exposes no shared workspaces.</p>}
-      {!worker.hosts.length && <p role="status">This worker exposes no Agent Hosts.</p>}
+      {worker.state !== 'blocked' && !worker.workspaces.length && <p role="status">This worker exposes no shared workspaces.</p>}
+      {worker.state !== 'blocked' && !worker.hosts.length && <p role="status">This worker exposes no Agent Hosts.</p>}
       {workspace && !workspace.canSend && <p role="status">This shared workspace is read only. Read and send access is required to create.</p>}
       {workspace && workspace.taskState !== 'available' && <p role="status">{workspace.taskState === 'bound' ? 'This task already has a conversation on the worker.' : workspace.taskState === 'missing' ? 'This task is missing from the worker workspace.' : 'The task state on this worker could not be verified.'}</p>}
       {workspace?.error && <p className="copilot-error" role="alert">{workspace.error}</p>}

@@ -285,7 +285,8 @@ export class VSCodeDeviceClient {
         || catalog.owner.clientId !== clientId || catalog.owner.machineName.toLowerCase() !== peer.invitation.machineName.toLowerCase()) throw new Error('The worker catalog returned a different authenticated owner.')
       return { ...worker, state: 'connected', hosts: catalog.hosts, workspaces: catalog.workspaces }
     } catch (error) {
-      return { ...worker, state: error instanceof DeviceRequestError && error.status === 404 ? 'unsupported' : 'offline',
+      const state = error instanceof DeviceRequestError && error.creationCode ? 'blocked' : error instanceof DeviceRequestError && error.status === 404 ? 'unsupported' : 'offline'
+      return { ...worker, state,
         error: (error instanceof Error ? error.message : 'The selected worker could not be queried.').slice(0, 2000) }
     }
   }

@@ -79,6 +79,15 @@ identities. Missing versions, Host-pinned session identities, mixed-format files
 and unknown versions are rejected. Unsupported records are not migrated,
 discarded, or replayed.
 
+Worker discovery checks these records before offering creation. A connected worker
+with unreadable or unsupported records is shown as **blocked**, with a specific
+diagnostic instead of a generic uncertain-outcome error. Update both desktops to
+receive this readiness check and diagnostic. Repair or explicitly
+initialize the worker's records only after backing them up; this is not automatic
+migration. Existing uncertain caller operations remain uncertain: fixing the
+worker's storage is not evidence that those operations never created a session,
+and does not authorize discarding or replaying them.
+
 ### Native VS Code Controls
 
 Task Continuum preserves the selected native harness's advertised capabilities;
