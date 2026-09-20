@@ -71,7 +71,7 @@ interface Runtime {
   disconnecting?: Promise<void>
   connectionAbort: AbortController
 }
-type Replica = Pick<GitReplica, 'root' | 'remote' | 'branch' | 'upstreamUrl' | 'sync' | 'close' | 'assertUpstream'>
+type Replica = Pick<GitReplica, 'root' | 'workspaceRelativePath' | 'remote' | 'branch' | 'upstreamUrl' | 'sync' | 'close' | 'assertUpstream'>
 export interface WorkspaceSyncOptions {
   directory: string
   keys: Pick<DeviceSshKeys, 'get'>
@@ -305,7 +305,7 @@ export class WorkspaceSyncService {
       if (!enable && !enrollment?.enabled) throw new Error('The paused workspace has no local synced configuration. Reenable to recover it.')
       replica = await (this.options.createReplica ?? GitReplica.open)({ workspaceRoot: root, stateDirectory: directory })
       const published = await this.descriptor(replica.root)
-      const workspaceId = published?.workspaceId ?? enrollment?.workspaceId ?? initialWorkspaceId(replica.upstreamUrl)
+      const workspaceId = published?.workspaceId ?? enrollment?.workspaceId ?? initialWorkspaceId(replica.upstreamUrl, replica.workspaceRelativePath)
       if (enrollment && enrollment.workspaceId !== workspaceId) throw new Error('The upstream workspace identity differs from its local enrollment.')
       enrollment = await this.enrollments.enable(root, workspaceId, true)
       metadata = { schemaVersion: 2, workspaceId, recordsRoot: join(directory, 'records-cache'), managedPairs: {} }

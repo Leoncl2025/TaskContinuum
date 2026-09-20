@@ -19,6 +19,20 @@ Enable **Automatic workspace links** for the task workspace on both desktops
 before reading or writing bindings; an unconfigured workspace reads task documents
 only. See [workspace enrollment](workspace-git-sync.md).
 
+The selected AgentDesk folder may live inside a larger Git checkout. For example:
+
+```text
+root/.git
+root/Project/.agentdesk/config.json
+root/Project/tasks/...
+root/Project/.taskcontinuum/workspace.json
+```
+
+Automatic workspace links still enforce cleanliness, tracked-upstream checks and
+other safety rules against the whole repository rooted at `root/.git`, while the
+public Task Continuum metadata stays under the selected AgentDesk folder's own
+`.taskcontinuum` directory.
+
 To link an existing session:
 
 1. On B, open the task workspace and **Agent Host sessions**. Approve access once,

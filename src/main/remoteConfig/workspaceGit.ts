@@ -11,6 +11,7 @@ export class WorkspaceGitReplica {
   private constructor(private readonly inner: GitReplica) {}
 
   get root(): string { return this.inner.root }
+  get workspaceRelativePath(): string { return this.inner.workspaceRelativePath }
   get remote(): string { return this.inner.remote }
   get branch(): string { return this.inner.branch }
   get upstreamUrl(): string { return this.inner.upstreamUrl }

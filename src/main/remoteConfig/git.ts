@@ -43,7 +43,6 @@ export class GitSyncError extends Error {
 }
 
 const REF_PREFIX = 'refs/taskcontinuum/checkout-v2'
-const ACCEPTED_REF = `${REF_PREFIX}/accepted`
 const DESCRIPTOR = '.taskcontinuum/workspace.json'
 const RECORDS = '.taskcontinuum/records/v1/'
 const MAX_FILE_BYTES = 256 * 1024
@@ -205,6 +204,7 @@ async function serialized<T>(key: string, action: () => Promise<T>): Promise<T> 
 
 export class GitReplica {
   readonly root: string
+  readonly workspaceRelativePath: string
   get remote(): string { return this.upstream.remote }
   get branch(): string { return this.upstream.branch }
   get upstreamUrl(): string { return this.upstream.fetchUrl }
@@ -214,6 +214,8 @@ export class GitReplica {
   private readonly timeout: number
   private readonly maximum: number
   private readonly directory: string
+  private readonly refPrefix: string
+  private readonly acceptedRef: string
   private pending: Promise<unknown> = Promise.resolve()
   private closed = false
   private upstream: Upstream
@@ -223,6 +225,7 @@ export class GitReplica {
 
   private constructor(
     private readonly workspaceRoot: string,
+    readonly repositoryRoot: string,
     stateDirectory: string,
     private readonly owner: Upstream,
     options: GitReplicaOptions,
@@ -230,10 +233,25 @@ export class GitReplica {
     const id = createHash('sha256').update(JSON.stringify([workspaceRoot, owner.fetchUrl, owner.pushUrl])).digest('hex')
     this.directory = join(stateDirectory, `checkout-v2-${id}`)
     this.root = workspaceRoot
+    this.workspaceRelativePath = relative(repositoryRoot, workspaceRoot).split(sep).join('/')
+    this.refPrefix = this.workspaceRelativePath
+      ? `${REF_PREFIX}/workspaces/${createHash('sha256').update(this.workspaceRelativePath).digest('hex')}`
+      : REF_PREFIX
+    this.acceptedRef = `${this.refPrefix}/accepted`
     this.upstream = { ...owner }
     this.hooks = join(stateDirectory, 'git-hooks-disabled')
     this.timeout = options.commandTimeoutMs ?? 30000
     this.maximum = options.maxOutputBytes ?? 8 * 1024 * 1024
+  }
+
+  private repositoryPath(path: string): string {
+    return this.workspaceRelativePath ? `${this.workspaceRelativePath}/${path}` : path
+  }
+
+  private workspacePath(path: string): string | undefined {
+    if (!this.workspaceRelativePath) return path
+    const prefix = `${this.workspaceRelativePath}/`
+    return path.startsWith(prefix) ? path.slice(prefix.length) : undefined
   }
 
   private async git(
@@ -309,27 +327,30 @@ export class GitReplica {
   }
 
   private async readUpstream(signal?: AbortSignal): Promise<Upstream> {
-    const symbolic = await this.git(this.workspaceRoot, ['symbolic-ref', '--quiet', 'HEAD'], { signal, allowFailure: true })
+    if (this.workspaceRelativePath && await realpath(await this.text(this.workspaceRoot, ['rev-parse', '--show-toplevel'], signal)) !== this.repositoryRoot) {
+      throw new GitSyncError('upstream-changed', 'The selected workspace now belongs to a different Git repository. Review its repository before synchronizing.')
+    }
+    const symbolic = await this.git(this.repositoryRoot, ['symbolic-ref', '--quiet', 'HEAD'], { signal, allowFailure: true })
     if (symbolic.code === 1) throw new GitSyncError('upstream', 'Select an existing local branch with a configured remote upstream to resume synchronization. Detached HEAD cannot publish configuration.')
     if (symbolic.code) throw failure(symbolic, 'source branch inspection')
     const sourceBranch = symbolic.stdout.toString('utf8').trim()
     if (!sourceBranch.startsWith('refs/heads/')) throw new GitSyncError('upstream', 'Select an existing local branch with a tracked upstream before enabling synchronization.')
-    const fields = (await this.text(this.workspaceRoot, ['for-each-ref', '--format=%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream)', sourceBranch], signal)).split('\0')
+    const fields = (await this.text(this.repositoryRoot, ['for-each-ref', '--format=%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream)', sourceBranch], signal)).split('\0')
     const [remote, branchRef, trackingRef] = fields
     if (fields.length !== 3 || !remote || remote === '.' || remote.startsWith('-') || !/^[A-Za-z0-9._/-]+$/.test(remote) || !branchRef?.startsWith('refs/heads/') || !trackingRef?.startsWith('refs/remotes/')) {
       throw new GitSyncError('upstream', 'The selected branch must track an existing remote branch. No default branch is assumed.')
     }
     const branch = branchRef.slice('refs/heads/'.length)
-    await this.git(this.workspaceRoot, ['check-ref-format', branchRef], { signal })
+    await this.git(this.repositoryRoot, ['check-ref-format', branchRef], { signal })
     const urls = async (push: boolean) => {
-      const result = await this.git(this.workspaceRoot, ['remote', 'get-url', ...(push ? ['--push'] : []), '--all', '--', remote], { signal, allowFailure: true })
+      const result = await this.git(this.repositoryRoot, ['remote', 'get-url', ...(push ? ['--push'] : []), '--all', '--', remote], { signal, allowFailure: true })
       if (result.code) throw new GitSyncError('upstream', 'The configured upstream remote is unavailable. Configure an existing remote upstream to resume synchronization.')
       return result.stdout.toString('utf8').trim().split('\n')
     }
     const fetch = await urls(false)
     const push = await urls(true)
     if (fetch.length !== 1 || push.length !== 1) throw new GitSyncError('upstream', 'Automatic synchronization requires one fetch URL and one push URL for the selected upstream.')
-    return { sourceBranch, remote, branch, trackingRef, fetchUrl: remoteUrl(fetch[0], this.workspaceRoot), pushUrl: remoteUrl(push[0], this.workspaceRoot) }
+    return { sourceBranch, remote, branch, trackingRef, fetchUrl: remoteUrl(fetch[0], this.repositoryRoot), pushUrl: remoteUrl(push[0], this.repositoryRoot) }
   }
 
   /**
@@ -343,6 +364,9 @@ export class GitReplica {
       throw new GitSyncError('git', 'Git command limits must be positive and bounded.')
     }
     const workspaceRoot = await realpath(options.workspaceRoot)
+    const discovery = new GitReplica(workspaceRoot, workspaceRoot, resolve(options.stateDirectory), {} as Upstream, options)
+    const repositoryRoot = await realpath(await discovery.text(workspaceRoot, ['rev-parse', '--show-toplevel']))
+    if (!isWithin(repositoryRoot, workspaceRoot)) throw new GitSyncError('upstream', 'Select a workspace inside a Git working tree.')
     let ancestor = resolve(options.stateDirectory)
     const suffix: string[] = []
     while (!await exists(ancestor)) {
@@ -352,15 +376,13 @@ export class GitReplica {
       ancestor = parent
     }
     const destination = resolve(await realpath(ancestor), ...suffix)
-    if (isWithin(workspaceRoot, destination)) throw new GitSyncError('git', 'The synchronization state directory must be outside the user checkout.')
+    if (isWithin(repositoryRoot, destination)) throw new GitSyncError('git', 'The synchronization state directory must be outside the user checkout.')
     await mkdir(destination, { recursive: true })
     const stateDirectory = await realpath(destination)
-    if (isWithin(workspaceRoot, stateDirectory)) throw new GitSyncError('git', 'The synchronization state directory must be outside the user checkout.')
+    if (isWithin(repositoryRoot, stateDirectory)) throw new GitSyncError('git', 'The synchronization state directory must be outside the user checkout.')
     const stateEntries = await readdir(stateDirectory)
     if (stateEntries.some((entry) => /^(?:git|checkout)-[a-f0-9]{64}$/.test(entry))) unsupportedFormat()
-    const probe = new GitReplica(workspaceRoot, stateDirectory, {} as Upstream, options)
-    const top = await probe.text(workspaceRoot, ['rev-parse', '--show-toplevel'])
-    if (await realpath(top) !== workspaceRoot) throw new GitSyncError('upstream', 'Select the repository root as the workspace for Git synchronization.')
+    const probe = new GitReplica(workspaceRoot, repositoryRoot, stateDirectory, {} as Upstream, options)
     let upstream: Upstream | undefined
     // Reopening local records must work while detached/offline. Identity is still
     // fenced by the persistent enrollment marker, not by the current Git config.
@@ -380,8 +402,8 @@ export class GitReplica {
       const owner = metadata as Record<string, unknown>
       if (owner.version !== 2 || owner.mode !== 'selected-checkout') unsupportedFormat()
       if (owner.workspaceRoot === workspaceRoot && typeof owner.fetchUrl === 'string' && typeof owner.pushUrl === 'string' && typeof owner.remote === 'string' && typeof owner.branch === 'string') {
-        const candidate: Upstream = { sourceBranch: '', trackingRef: '', remote: owner.remote, branch: owner.branch, fetchUrl: remoteUrl(owner.fetchUrl, workspaceRoot), pushUrl: remoteUrl(owner.pushUrl, workspaceRoot) }
-        const expected = new GitReplica(workspaceRoot, stateDirectory, candidate, options)
+        const candidate: Upstream = { sourceBranch: '', trackingRef: '', remote: owner.remote, branch: owner.branch, fetchUrl: remoteUrl(owner.fetchUrl, repositoryRoot), pushUrl: remoteUrl(owner.pushUrl, repositoryRoot) }
+        const expected = new GitReplica(workspaceRoot, repositoryRoot, stateDirectory, candidate, options)
         if (expected.directory !== join(stateDirectory, entry)) integrity('The checkout state path does not match its owner.')
         if (upstream) integrity('Multiple checkout enrollments exist. Review the saved repository identity before synchronizing.')
         upstream = candidate
@@ -394,8 +416,8 @@ export class GitReplica {
     }
     // A regular file cannot contain a hook executable.
     await regularFile(hooks)
-    const replica = new GitReplica(workspaceRoot, stateDirectory, upstream, options)
-    replica.gitDirectory = await realpath(await replica.text(workspaceRoot, ['rev-parse', '--absolute-git-dir']))
+    const replica = new GitReplica(workspaceRoot, repositoryRoot, stateDirectory, upstream, options)
+    replica.gitDirectory = await realpath(await replica.text(repositoryRoot, ['rev-parse', '--absolute-git-dir']))
     await replica.lock(async () => {
       await replica.initialize()
       const retained = join(replica.directory, 'publications.json')
@@ -413,7 +435,7 @@ export class GitReplica {
   }
 
   private lock<T>(action: () => Promise<T>): Promise<T> {
-    const work = serialized(this.root, async () => {
+    const work = serialized(this.repositoryRoot, async () => {
       if (this.closed) throw cancelled()
       await mkdir(this.directory, { recursive: true })
       if (await realpath(this.directory) !== this.directory) integrity('The replica state directory may not be redirected through a symbolic link.')
@@ -472,7 +494,11 @@ export class GitReplica {
   }
 
   private ownerIdentity(): string {
-    return JSON.stringify({ version: 2, mode: 'selected-checkout', workspaceRoot: this.workspaceRoot, remote: this.owner.remote, branch: this.owner.branch, fetchUrl: this.owner.fetchUrl, pushUrl: this.owner.pushUrl })
+    return JSON.stringify({
+      version: 2, mode: 'selected-checkout', workspaceRoot: this.workspaceRoot,
+      ...(this.workspaceRelativePath ? { repositoryRoot: this.repositoryRoot, workspaceRelativePath: this.workspaceRelativePath } : {}),
+      remote: this.owner.remote, branch: this.owner.branch, fetchUrl: this.owner.fetchUrl, pushUrl: this.owner.pushUrl,
+    })
   }
 
   private async checkOwner(required: boolean): Promise<boolean> {
@@ -496,7 +522,7 @@ export class GitReplica {
   }
 
   private async checkDirectories(): Promise<void> {
-    for (const directory of [this.root, this.gitDirectory]) {
+    for (const directory of [this.root, this.repositoryRoot, this.gitDirectory]) {
       const info = await lstat(directory)
       if (!info.isDirectory() || info.isSymbolicLink() || await realpath(directory) !== directory) integrity('The workspace or its Git metadata must not be redirected through a symbolic link.')
     }
@@ -530,7 +556,7 @@ export class GitReplica {
 
   private targetRef(target = this.upstream): string {
     const id = createHash('sha256').update(JSON.stringify([target.fetchUrl, target.pushUrl, target.branch])).digest('hex')
-    return `${REF_PREFIX}/targets/${id}/accepted`
+    return `${this.refPrefix}/targets/${id}/accepted`
   }
 
   private sameUpstream(current: Upstream): boolean {
@@ -576,7 +602,7 @@ export class GitReplica {
   }
 
   private async ref(name: string, signal?: AbortSignal): Promise<string | undefined> {
-    const value = await this.git(this.root, ['rev-parse', '--verify', '--quiet', name], { signal, allowFailure: true })
+    const value = await this.git(this.repositoryRoot, ['rev-parse', '--verify', '--quiet', name], { signal, allowFailure: true })
     if (value.code === 1) return undefined
     if (value.code) throw failure(value, 'reference lookup')
     const oid = value.stdout.toString('utf8').trim()
@@ -585,27 +611,36 @@ export class GitReplica {
   }
 
   private async ancestor(before: string, after: string, signal?: AbortSignal): Promise<boolean> {
-    const result = await this.git(this.root, ['merge-base', '--is-ancestor', before, after], { signal, allowFailure: true })
+    const result = await this.git(this.repositoryRoot, ['merge-base', '--is-ancestor', before, after], { signal, allowFailure: true })
     if (result.code > 1) throw failure(result, 'ancestry check')
     return result.code === 0
   }
 
   private async history(revision: string, managedOnly: boolean, signal?: AbortSignal): Promise<void> {
     const args = ['log', '--format=', '--name-status', '-z', '--root', '--no-renames', '--no-ext-diff', '--no-textconv', '--diff-merges=separate', revision, '--']
-    if (managedOnly) args.push(DESCRIPTOR, RECORDS)
-    const tokens = (await this.git(this.root, args, { signal })).stdout.toString('utf8').split('\0').filter(Boolean)
+    if (managedOnly) args.push(this.repositoryPath(DESCRIPTOR), this.repositoryPath(RECORDS))
+    const tokens = (await this.git(this.repositoryRoot, args, { signal })).stdout.toString('utf8').split('\0').filter(Boolean)
     for (let index = 0; index < tokens.length; index += 2) {
-      if (tokens[index].trim() !== 'A' || !managedPath(tokens[index + 1] ?? '')) integrity('An immutable configuration record was changed or removed in Git history. Synchronization is blocked.')
+      if (tokens[index].trim() !== 'A' || !managedPath(this.workspacePath(tokens[index + 1] ?? '') ?? '')) integrity('An immutable configuration record was changed or removed in Git history. Synchronization is blocked.')
     }
   }
 
   private async tree(revision: string, signal?: AbortSignal): Promise<Map<string, Blob>> {
-    const listing = (await this.git(this.root, ['ls-tree', '-r', '-z', '-l', '--full-tree', revision, '--', '.taskcontinuum'], { signal })).stdout.toString('utf8')
+    let parent = ''
+    for (const part of this.workspaceRelativePath.split('/').filter(Boolean)) {
+      parent = parent ? `${parent}/${part}` : part
+      const entry = await this.text(this.repositoryRoot, ['ls-tree', '-z', revision, '--', parent], signal)
+      if (!entry) break
+      if (!entry.startsWith('040000 tree ') || !entry.endsWith(`\t${parent}\0`)) integrity('The selected workspace must remain a directory in the repository, not a symbolic link or submodule.')
+    }
+    const listing = (await this.git(this.repositoryRoot, ['ls-tree', '-r', '-z', '-l', '--full-tree', revision, '--', this.repositoryPath('.taskcontinuum')], { signal })).stdout.toString('utf8')
     const entries: { path: string; oid: string; size: number }[] = []
     for (const row of listing.split('\0').filter(Boolean)) {
       const match = /^(\d+) (\w+) ([a-f0-9]+)\s+(-|\d+)\t(.+)$/.exec(row)
       if (!match) integrity('The upstream configuration tree could not be validated.')
-      const [, mode, kind, oid, size, path] = match
+      const [, mode, kind, oid, size, repositoryPath] = match
+      const path = this.workspacePath(repositoryPath)
+      if (path === undefined) integrity('The configuration tree contains a path outside the selected workspace.')
       const relevant = path === DESCRIPTOR || path.startsWith(RECORDS) || ['.taskcontinuum', '.taskcontinuum/records', '.taskcontinuum/records/v1'].includes(path)
       if (!relevant) continue
       if (!managedPath(path) || mode !== '100644' || kind !== 'blob' || !OID.test(oid) || Number(size) > MAX_FILE_BYTES) integrity('The upstream contains an invalid, linked, executable, or oversized public configuration file.')
@@ -614,7 +649,7 @@ export class GitReplica {
     }
     const result = new Map<string, Blob>()
     if (!entries.length) return result
-    const data = (await this.git(this.root, ['cat-file', '--batch'], { signal, input: entries.map((entry) => entry.oid).join('\n') + '\n' })).stdout
+    const data = (await this.git(this.repositoryRoot, ['cat-file', '--batch'], { signal, input: entries.map((entry) => entry.oid).join('\n') + '\n' })).stdout
     let offset = 0
     for (const entry of entries) {
       const end = data.indexOf(10, offset)
@@ -638,10 +673,10 @@ export class GitReplica {
     const before = await this.checkoutSnapshot(signal)
     if (!before.head) throw new GitSyncError('busy', `${before.reason} Synchronization is paused; pending metadata is retained. Commit or move your work and retry.`)
     const previousRecords = await this.restoreLocal(signal)
-    const accepted = await this.ref(ACCEPTED_REF, signal)
+    const accepted = await this.ref(this.acceptedRef, signal)
     const previous = await this.ref('HEAD', signal)
     const targetAccepted = await this.ref(this.targetRef(), signal)
-    const fetched = await this.git(this.root, ['fetch', '--quiet', '--no-tags', '--no-recurse-submodules', '--no-auto-maintenance', '--', this.upstream.fetchUrl, this.upstreamRef], { signal, allowFailure: true })
+    const fetched = await this.git(this.repositoryRoot, ['fetch', '--quiet', '--no-tags', '--no-recurse-submodules', '--no-auto-maintenance', '--', this.upstream.fetchUrl, this.upstreamRef], { signal, allowFailure: true })
     if (fetched.code) {
       if (/couldn't find remote ref|remote ref .* not found/i.test(fetched.stderr.toString('utf8'))) {
         throw new GitSyncError('upstream', 'The selected upstream branch no longer exists. Switch to a branch with an existing remote upstream to resume synchronization; no branch was created.')
@@ -660,7 +695,7 @@ export class GitReplica {
       await regularFile(journalFile)
       const journal = JSON.parse(await readFile(journalFile, 'utf8')) as { head?: string; base?: string; branch?: string }
       if (journal.head !== previous || journal.branch !== this.upstream.sourceBranch || !journal.base || !OID.test(journal.base)) throw new GitSyncError('busy', 'HEAD is not the recorded pending Task Continuum commit. Reconcile unpublished user commits before retrying.')
-      const parents = await this.text(this.root, ['rev-list', '--parents', '-n', '1', previous], signal)
+      const parents = await this.text(this.repositoryRoot, ['rev-list', '--parents', '-n', '1', previous], signal)
       if (parents !== `${previous} ${journal.base}`) integrity('The pending publication has unexpected ancestry.')
       await this.history(`${journal.base}..${previous}`, false, signal)
       if (!await this.ancestor(journal.base, remoteHead, signal)) integrity('The upstream no longer contains the pending publication base.')
@@ -669,7 +704,7 @@ export class GitReplica {
     const pending = new Map<string, string>()
     for (const file of this.retainedPublications) pending.set(file.path, file.content)
     // Keep already accepted records across a switch to another upstream branch.
-    const knownRefs = (await this.text(this.root, ['for-each-ref', '--format=%(objectname)', `${REF_PREFIX}/targets`], signal)).split('\n').filter(Boolean)
+    const knownRefs = (await this.text(this.repositoryRoot, ['for-each-ref', '--format=%(objectname)', `${this.refPrefix}/targets`], signal)).split('\n').filter(Boolean)
     for (const oid of knownRefs) {
       for (const [path, blob] of await this.tree(oid, signal)) {
         if (pending.has(path) && pending.get(path) !== blob.content) integrity('Accepted histories contain conflicting immutable records.')
@@ -699,9 +734,9 @@ export class GitReplica {
       await this.verifyCheckout(remoteHead, remote, signal)
       if (accepted !== remoteHead || targetAccepted !== remoteHead) {
         const zero = '0'.repeat(remoteHead.length)
-        await this.git(this.root, ['update-ref', '--stdin'], {
+        await this.git(this.repositoryRoot, ['update-ref', '--stdin'], {
           signal,
-          input: `start\nupdate ${ACCEPTED_REF} ${remoteHead} ${accepted ?? zero}\nupdate ${this.targetRef()} ${remoteHead} ${targetAccepted ?? zero}\nprepare\ncommit\n`,
+          input: `start\nupdate ${this.acceptedRef} ${remoteHead} ${accepted ?? zero}\nupdate ${this.targetRef()} ${remoteHead} ${targetAccepted ?? zero}\nprepare\ncommit\n`,
         })
       }
       return { head: remoteHead, remoteHead, records: remote }
@@ -713,25 +748,25 @@ export class GitReplica {
       const index = join(this.directory, `index-${randomUUID()}`)
       const env = { GIT_INDEX_FILE: index, GIT_AUTHOR_NAME: 'Task Continuum', GIT_AUTHOR_EMAIL: 'taskcontinuum@localhost', GIT_COMMITTER_NAME: 'Task Continuum', GIT_COMMITTER_EMAIL: 'taskcontinuum@localhost' }
       try {
-        await this.git(this.root, ['read-tree', remoteHead], { signal, env })
+        await this.git(this.repositoryRoot, ['read-tree', remoteHead], { signal, env })
         let input = ''
         for (const file of additions) {
-          const oid = (await this.git(this.root, ['hash-object', '-w', '--stdin'], { signal, input: file.content })).stdout.toString('utf8').trim()
+          const oid = (await this.git(this.repositoryRoot, ['hash-object', '-w', '--stdin'], { signal, input: file.content })).stdout.toString('utf8').trim()
           if (!OID.test(oid)) integrity('A publication could not be stored as a Git blob.')
-          input += `100644 ${oid}\t${file.path}\0`
+          input += `100644 ${oid}\t${this.repositoryPath(file.path)}\0`
         }
-        await this.git(this.root, ['update-index', '-z', '--index-info'], { signal, input, env })
-        const tree = (await this.git(this.root, ['write-tree'], { signal, env })).stdout.toString('utf8').trim()
+        await this.git(this.repositoryRoot, ['update-index', '-z', '--index-info'], { signal, input, env })
+        const tree = (await this.git(this.repositoryRoot, ['write-tree'], { signal, env })).stdout.toString('utf8').trim()
         if (!OID.test(tree)) integrity('The publication tree could not be validated.')
-        const changes = (await this.git(this.root, ['diff-tree', '--no-commit-id', '--name-status', '-r', '-z', '--no-renames', remoteHead, tree], { signal })).stdout.toString('utf8').split('\0').filter(Boolean)
-        const expected = new Set(additions.map((file) => file.path))
+        const changes = (await this.git(this.repositoryRoot, ['diff-tree', '--no-commit-id', '--name-status', '-r', '-z', '--no-renames', remoteHead, tree], { signal })).stdout.toString('utf8').split('\0').filter(Boolean)
+        const expected = new Set(additions.map((file) => this.repositoryPath(file.path)))
         for (let n = 0; n < changes.length; n += 2) {
           if (changes[n] !== 'A' || !expected.delete(changes[n + 1])) integrity('The proposed Git commit contains a non-publication path or an immutable modification.')
         }
         if (expected.size) integrity('The publication tree is missing a captured record.')
-        const reuse = previous && previous !== remoteHead && await this.text(this.root, ['rev-parse', `${previous}^{tree}`], signal) === tree
-          && await this.text(this.root, ['rev-list', '--parents', '-n', '1', previous], signal) === `${previous} ${remoteHead}`
-        head = reuse ? previous! : (await this.git(this.root, ['commit-tree', tree, '-p', remoteHead, '-m', 'Publish Task Continuum public configuration'], { signal, env })).stdout.toString('utf8').trim()
+        const reuse = previous && previous !== remoteHead && await this.text(this.repositoryRoot, ['rev-parse', `${previous}^{tree}`], signal) === tree
+          && await this.text(this.repositoryRoot, ['rev-list', '--parents', '-n', '1', previous], signal) === `${previous} ${remoteHead}`
+        head = reuse ? previous! : (await this.git(this.repositoryRoot, ['commit-tree', tree, '-p', remoteHead, '-m', 'Publish Task Continuum public configuration'], { signal, env })).stdout.toString('utf8').trim()
         if (!OID.test(head)) integrity('The publication commit could not be validated.')
       } finally { await rm(index, { force: true }); await rm(`${index}.lock`, { force: true }) }
     }
@@ -747,22 +782,22 @@ export class GitReplica {
       await this.assertUpstream(signal)
       if (await this.ref('HEAD', signal) !== previous) throw new GitSyncError('busy', 'HEAD changed before checkout update. User work was retained.')
       if (head !== previous) {
-        const incoming = (await this.text(this.root, ['diff-tree', '--no-commit-id', '--name-only', '--diff-filter=A', '-r', '-z', previous!, head], signal)).split('\0').filter(Boolean)
+        const incoming = (await this.text(this.repositoryRoot, ['diff-tree', '--no-commit-id', '--name-only', '--diff-filter=A', '-r', '-z', previous!, head], signal)).split('\0').filter(Boolean)
         for (const path of incoming) {
-          if (await exists(join(this.root, ...path.split('/')))) throw new GitSyncError('busy', 'An incoming Git path would overwrite a local or ignored file. Move that file and retry synchronization.')
+          if (await exists(join(this.repositoryRoot, ...path.split('/')))) throw new GitSyncError('busy', 'An incoming Git path would overwrite a local or ignored file. Move that file and retry synchronization.')
         }
         await this.saveState(this.pendingName(), { head, base: remoteHead, branch: this.upstream.sourceBranch })
         // Two-tree read-tree refuses to overwrite work added since the preflight.
         // It updates this checkout only; Git's real index lock serializes writers.
-        const checkout = await this.git(this.root, ['read-tree', '-m', '-u', previous!, head], { signal, allowFailure: true })
+        const checkout = await this.git(this.repositoryRoot, ['read-tree', '-m', '-u', previous!, head], { signal, allowFailure: true })
         if (checkout.code) throw new GitSyncError('busy', 'Git could not safely update the selected checkout. Preserve/reconcile local changes and retry.')
       }
     } finally { await this.releaseLock(headLockPath, headLock) }
     await this.assertUpstream(signal)
     const zero = '0'.repeat(head.length)
-    await this.git(this.root, ['update-ref', '--stdin'], {
+    await this.git(this.repositoryRoot, ['update-ref', '--stdin'], {
       signal,
-      input: `start\nupdate ${this.upstream.sourceBranch} ${head} ${previous ?? zero}\nupdate ${ACCEPTED_REF} ${remoteHead} ${accepted ?? zero}\nupdate ${this.targetRef()} ${remoteHead} ${targetAccepted ?? zero}\nprepare\ncommit\n`,
+      input: `start\nupdate ${this.upstream.sourceBranch} ${head} ${previous ?? zero}\nupdate ${this.acceptedRef} ${remoteHead} ${accepted ?? zero}\nupdate ${this.targetRef()} ${remoteHead} ${targetAccepted ?? zero}\nprepare\ncommit\n`,
     })
     await this.verifyCheckout(head, finalTree, signal)
     return { head, remoteHead, records: finalTree }
@@ -807,7 +842,7 @@ export class GitReplica {
           if (head !== remoteHead) {
             // The commit is additive on remoteHead. Its exact lease also prevents
             // recreating a target deleted after fetch, without permitting a rewrite.
-            const result = await this.git(this.root, ['push', '--porcelain', '--no-verify', '--recurse-submodules=no', `--force-with-lease=${this.upstreamRef}:${remoteHead}`, '--', this.upstream.pushUrl, `${head}:${this.upstreamRef}`], { signal: options.signal, allowFailure: true })
+            const result = await this.git(this.repositoryRoot, ['push', '--porcelain', '--no-verify', '--recurse-submodules=no', `--force-with-lease=${this.upstreamRef}:${remoteHead}`, '--', this.upstream.pushUrl, `${head}:${this.upstreamRef}`], { signal: options.signal, allowFailure: true })
             if (result.code) {
               const text = Buffer.concat([result.stdout, result.stderr]).toString('utf8')
               const advertisedRace = /\[rejected\].*\((?:fetch first|non-fast-forward|stale info)\)/i.test(text)
@@ -819,14 +854,14 @@ export class GitReplica {
               }
               throw failure(result, 'push')
             }
-            await this.git(this.root, ['update-ref', '--stdin'], {
+            await this.git(this.repositoryRoot, ['update-ref', '--stdin'], {
               signal: options.signal,
-              input: `start\nupdate ${ACCEPTED_REF} ${head} ${remoteHead}\nupdate ${this.targetRef()} ${head} ${remoteHead}\nprepare\ncommit\n`,
+              input: `start\nupdate ${this.acceptedRef} ${head} ${remoteHead}\nupdate ${this.targetRef()} ${head} ${remoteHead}\nprepare\ncommit\n`,
             })
           }
           await rm(join(this.directory, this.pendingName()), { force: true })
           const tracking = await this.ref(this.upstream.trackingRef, options.signal)
-          if (tracking && await this.ancestor(tracking, head, options.signal)) await this.git(this.root, ['update-ref', this.upstream.trackingRef, head, tracking], { signal: options.signal, allowFailure: true })
+          if (tracking && await this.ancestor(tracking, head, options.signal)) await this.git(this.repositoryRoot, ['update-ref', this.upstream.trackingRef, head, tracking], { signal: options.signal, allowFailure: true })
           return { head, publishedPaths: [...requested.keys()], attempts: attempt }
         }
         throw new GitSyncError('push-rejected', 'Publication retry budget exhausted; pending records are retained.')
@@ -845,35 +880,36 @@ export class GitReplica {
     return this.lock(async () => {
       await this.selectUpstream()
       try {
-        const allowed = new Set(files)
+        const repositoryFiles = files.map((path) => this.repositoryPath(path))
+        const allowed = new Set(repositoryFiles)
         const before = await this.checkoutSnapshot(undefined, allowed)
         if (!before.head) throw new GitSyncError('busy', `${before.reason} The new task is local; finish your other Git work before committing and pushing it.`)
         await this.checkManagedPaths(files)
         for (const path of files) await regularFile(join(this.root, ...path.split('/')))
-        const tracked = await this.text(this.root, ['ls-tree', '-r', '--name-only', before.head, '--', ...files])
+        const tracked = await this.text(this.repositoryRoot, ['ls-tree', '-r', '--name-only', before.head, '--', ...repositoryFiles])
         if (tracked) integrity('A generated task path is already committed. No existing task was published.')
-        await this.git(this.root, ['fetch', '--quiet', '--no-tags', '--no-recurse-submodules', '--no-auto-maintenance', '--', this.upstream.fetchUrl, this.upstreamRef])
+        await this.git(this.repositoryRoot, ['fetch', '--quiet', '--no-tags', '--no-recurse-submodules', '--no-auto-maintenance', '--', this.upstream.fetchUrl, this.upstreamRef])
         if (await this.ref('FETCH_HEAD') !== before.head) {
           throw new GitSyncError('busy', 'The local branch and upstream differ. Pull or push your existing commits in terminal Git, then publish this already-created task; do not create it again.')
         }
         await this.assertUpstream()
         const current = await this.checkoutSnapshot(undefined, allowed)
         if (current.head !== before.head || current.mapping !== before.mapping) throw new GitSyncError('busy', 'The workspace changed before task publication. The new task was retained locally.')
-        await this.git(this.root, ['add', '--', ...files])
+        await this.git(this.repositoryRoot, ['add', '--', ...repositoryFiles])
         await this.assertUpstream()
         if (await this.ref('HEAD') !== before.head) throw new GitSyncError('busy', 'HEAD changed before committing the task. Review the staged task files in terminal Git.')
-        await this.git(this.root, ['commit', '--only', '--no-verify', '-m', `Create task ${taskId}`, '--', ...files], {
+        await this.git(this.repositoryRoot, ['commit', '--only', '--no-verify', '-m', `Create task ${taskId}`, '--', ...repositoryFiles], {
           env: {
             GIT_AUTHOR_NAME: 'Task Continuum', GIT_AUTHOR_EMAIL: 'taskcontinuum@localhost',
             GIT_COMMITTER_NAME: 'Task Continuum', GIT_COMMITTER_EMAIL: 'taskcontinuum@localhost',
           },
         })
         const head = await this.ref('HEAD')
-        if (!head || await this.text(this.root, ['rev-list', '--parents', '-n', '1', head]) !== `${head} ${before.head}`) {
+        if (!head || await this.text(this.repositoryRoot, ['rev-list', '--parents', '-n', '1', head]) !== `${head} ${before.head}`) {
           throw new GitSyncError('busy', 'The task commit has unexpected ancestry. Nothing was pushed; review local commits in terminal Git.')
         }
-        const changes = (await this.text(this.root, ['diff-tree', '--no-commit-id', '--name-status', '-r', '-z', '--no-renames', before.head, head])).split('\0').filter(Boolean)
-        const remaining = new Set(files)
+        const changes = (await this.text(this.repositoryRoot, ['diff-tree', '--no-commit-id', '--name-status', '-r', '-z', '--no-renames', before.head, head])).split('\0').filter(Boolean)
+        const remaining = new Set(repositoryFiles)
         for (let index = 0; index < changes.length; index += 2) {
           if (changes[index] !== 'A' || !remaining.delete(changes[index + 1])) integrity('The task commit contains unexpected changes. Nothing was pushed.')
         }
@@ -881,26 +917,26 @@ export class GitReplica {
         await this.assertUpstream()
         const ready = await this.checkoutSnapshot()
         if (ready.head !== head) throw new GitSyncError('busy', 'The workspace changed after committing the task. The commit is local; review it before pushing.')
-        const pushed = await this.git(this.root, ['push', '--porcelain', '--no-verify', '--no-follow-tags', '--recurse-submodules=no',
+        const pushed = await this.git(this.repositoryRoot, ['push', '--porcelain', '--no-verify', '--no-follow-tags', '--recurse-submodules=no',
           `--force-with-lease=${this.upstreamRef}:${before.head}`, '--', this.upstream.pushUrl, `${head}:${this.upstreamRef}`], { allowFailure: true })
         if (pushed.code) throw new GitSyncError('push-rejected', `Task ${taskId} was committed locally (${head.slice(0, 8)}), but the push failed. Check Git authentication, network access and upstream changes, then push the existing commit in terminal Git.`)
         const tracking = await this.ref(this.upstream.trackingRef)
-        if (tracking === before.head) await this.git(this.root, ['update-ref', this.upstream.trackingRef, head, tracking])
+        if (tracking === before.head) await this.git(this.repositoryRoot, ['update-ref', this.upstream.trackingRef, head, tracking])
       } finally { this.cycle = undefined }
     })
   }
 
   private async usesCheckoutFilter(signal?: AbortSignal, revision?: string): Promise<boolean> {
-    const configured = await this.git(this.workspaceRoot, ['config', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process)$'], { signal, allowFailure: true })
+    const configured = await this.git(this.repositoryRoot, ['config', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process)$'], { signal, allowFailure: true })
     if (configured.code === 1) return false
     if (configured.code) throw failure(configured, 'filter configuration inspection')
     const filters = new Set(configured.stdout.toString('utf8').trim().split(/\r?\n/).map((key) => key.replace(/^filter\./, '').replace(/\.(clean|smudge|process)$/, '')))
-    const paths = (await this.git(this.workspaceRoot, revision
+    const paths = (await this.git(this.repositoryRoot, revision
       ? ['ls-tree', '-r', '--name-only', '-z', '--full-tree', revision]
       : ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { signal })).stdout
     if (!paths.length) return false
     const required = async (cached = false, env?: NodeJS.ProcessEnv) => {
-      const result = await this.git(this.workspaceRoot, ['check-attr', '-z', ...(cached ? ['--cached'] : []), '--stdin', 'filter'], { signal, input: paths, env })
+      const result = await this.git(this.repositoryRoot, ['check-attr', '-z', ...(cached ? ['--cached'] : []), '--stdin', 'filter'], { signal, input: paths, env })
       const attributes = result.stdout.toString('utf8').split('\0')
       for (let index = 2; index < attributes.length; index += 3) {
         if (attributes[index] !== 'unspecified' && attributes[index] !== 'unset' && filters.has(attributes[index])) return true
@@ -912,7 +948,7 @@ export class GitReplica {
     const index = join(this.directory, `attributes-${randomUUID()}`)
     const env = { GIT_INDEX_FILE: index }
     try {
-      await this.git(this.workspaceRoot, ['read-tree', revision], { signal, env })
+      await this.git(this.repositoryRoot, ['read-tree', revision], { signal, env })
       return await required(true, env)
     } finally { await rm(index, { force: true }); await rm(`${index}.lock`, { force: true }) }
   }
@@ -920,18 +956,18 @@ export class GitReplica {
   private async checkoutSnapshot(signal?: AbortSignal, allowedUntracked?: ReadonlySet<string>): Promise<{ head?: string; mapping?: string; trackingRef?: string; reason?: string }> {
     const current = await this.readUpstream(signal)
     if (!this.sameUpstream(current)) throw new GitSyncError('upstream-changed', 'The workspace branch or upstream changed before checkout refresh. Retry synchronization on the current branch.')
-    const gitDirectory = await this.text(this.workspaceRoot, ['rev-parse', '--absolute-git-dir'], signal)
+    const gitDirectory = await this.text(this.repositoryRoot, ['rev-parse', '--absolute-git-dir'], signal)
     for (const marker of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'REBASE_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer', 'BISECT_LOG', 'BISECT_START', 'index.lock', 'HEAD.lock']) {
       if (await exists(join(gitDirectory, marker))) return { reason: 'A user Git operation is in progress.' }
     }
     if (await this.usesCheckoutFilter(signal)) return { reason: 'Workspace files require a configured Git filter; refresh the checkout explicitly before synchronizing.' }
-    const status = await this.text(this.workspaceRoot, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'], signal)
+    const status = await this.text(this.repositoryRoot, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'], signal)
     if (status.split('\0').filter(Boolean).some((entry) => !entry.startsWith('?? ') || !allowedUntracked?.has(entry.slice(3)))) {
       return { reason: 'The user checkout has staged, unstaged, or untracked work.' }
     }
-    const flags = await this.text(this.root, ['ls-files', '-v', '-z'], signal)
+    const flags = await this.text(this.repositoryRoot, ['ls-files', '-v', '-z'], signal)
     if (flags.split('\0').some((line) => /^[a-zS]/.test(line))) return { reason: 'The checkout uses assume-unchanged or skip-worktree index entries. Clear them before automatic synchronization.' }
-    return { head: await this.text(this.workspaceRoot, ['rev-parse', '--verify', 'HEAD'], signal), mapping: JSON.stringify(current), trackingRef: current.trackingRef }
+    return { head: await this.text(this.repositoryRoot, ['rev-parse', '--verify', 'HEAD'], signal), mapping: JSON.stringify(current), trackingRef: current.trackingRef }
   }
 
   async close(): Promise<void> {
