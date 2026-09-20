@@ -9,6 +9,7 @@ import {
 import { sessionLinksDocumentSchema } from '../src/main/sessionLinkSchema'
 import { readRecords, recordPath } from '../src/main/remoteConfig/records'
 import { agentHostTargetFixture, createImmutableBindingsFixture, immutableOwner } from './immutable-bindings-fixture'
+import { taskSessionLinks } from '../src/shared/sessionBindings'
 
 const directories: string[] = []
 const backends: Awaited<ReturnType<typeof createImmutableBindingsFixture>>[] = []
@@ -39,11 +40,24 @@ const oldInputs: { name: string; value: unknown }[] = [
 ]
 
 describe('immutable task/session links', () => {
-  it('accepts only v2 logical binding documents and never imports v1 identity', () => {
+  it('accepts only v2.1 session arrays and never migrates v1 or v2 documents', () => {
     const bindings = { 'T-0001': { provider: 'agent-host', ...agentHostTargetFixture() } }
-    expect(sessionLinksDocumentSchema.safeParse({ schemaVersion: 2, bindings }).success).toBe(true)
+    expect(sessionLinksDocumentSchema.safeParse({ schemaVersion: '2.1', bindings }).success).toBe(false)
+    const legacy = { schemaVersion: 2, bindings }
+    const before = JSON.stringify(legacy)
+    expect(() => sessionLinksDocumentSchema.parse(legacy)).toThrow('require schema v2.1')
+    expect(sessionLinksDocumentSchema.safeParse({ schemaVersion: 2, bindings: {} }).success).toBe(false)
+    expect(JSON.stringify(legacy)).toBe(before)
+    expect(sessionLinksDocumentSchema.safeParse({ schemaVersion: '2.1', bindings: { 'T-0001': [bindings['T-0001']] } }).success).toBe(true)
+    for (const schemaVersion of [2.1, 3, '2', '3']) {
+      expect(sessionLinksDocumentSchema.safeParse({ schemaVersion, bindings: { 'T-0001': [bindings['T-0001']] } }).success).toBe(false)
+    }
+    expect(sessionLinksDocumentSchema.safeParse({
+      schemaVersion: '2.1',
+      bindings: { 'T-0001': [bindings['T-0001'], { ...bindings['T-0001'], chatId: 'ahp-chat:/other' }] },
+    }).success).toBe(false)
     expect(sessionLinksDocumentSchema.safeParse({ schemaVersion: 1, bindings }).success).toBe(false)
-    expect(sessionLinksDocumentSchema.safeParse({ schemaVersion: 2, bindings: { 'T-0001': { ...bindings['T-0001'], hostId: 'host-main' } } }).success).toBe(false)
+    expect(sessionLinksDocumentSchema.safeParse({ schemaVersion: '2.1', bindings: { 'T-0001': [{ ...bindings['T-0001'], hostId: 'host-main' }] } }).success).toBe(false)
   })
 
   it('requires a registered backend even for an empty workspace and does not create legacy files', async () => {
@@ -92,14 +106,14 @@ describe('immutable task/session links', () => {
     await expect(readRepositorySessionLinks(root)).rejects.toThrow(noBackend)
     const active = await backend(root)
     const saved = await updateRepositoryAgentHostLink(root, 'T-0001', agentHostTargetFixture(), active.snapshot.revision)
-    expect(saved.document.bindings['T-0001']).toEqual({ provider: 'agent-host', ...agentHostTargetFixture() })
+    expect(taskSessionLinks(saved.document.bindings, 'T-0001')).toEqual([{ provider: 'agent-host', ...agentHostTargetFixture() }])
     expect(await readFile(original, 'utf8')).toBe(content)
     expect(await readdir(outside)).toEqual(['session-bindings.json'])
   })
 
   it.each(oldInputs)('rejects $name rather than accepting an old binding shape', ({ value }) => {
     expect(sessionLinkSchema.safeParse(value).success).toBe(false)
-    expect(sessionLinksDocumentSchema.safeParse({ schemaVersion: 2, bindings: { 'T-0001': value } }).success).toBe(false)
+    expect(sessionLinksDocumentSchema.safeParse({ schemaVersion: '2.1', bindings: { 'T-0001': [value] } }).success).toBe(false)
   })
 
   it('carries exact portable Agent Host ownership in signed immutable records across replicas', async () => {
@@ -107,7 +121,7 @@ describe('immutable task/session links', () => {
     const active = await backend(root)
     const target = agentHostTargetFixture('original')
     const saved = await updateRepositoryAgentHostLink(root, 'T-0001', target, active.snapshot.revision)
-    expect(saved.document.bindings['T-0001']).toEqual({ provider: 'agent-host', ...target })
+    expect(taskSessionLinks(saved.document.bindings, 'T-0001')).toEqual([{ provider: 'agent-host', ...target }])
     const records = await readRecords(active.outboxRoot)
     expect(records).toHaveLength(1)
     const content = await readFile(join(active.outboxRoot, recordPath(records[0])), 'utf8')
@@ -119,10 +133,15 @@ describe('immutable task/session links', () => {
     const pulled = await readRepositorySessionLinks(clone)
     expect(pulled.document).toEqual(saved.document)
     expect((await replica.store.getRecords())[0]).toEqual(records[0])
-    await expect(updateRepositoryAgentHostLink(clone, 'T-0001', {
+    const additionalOwner = {
       ...target, owner: { ...immutableOwner, clientId: '00000000-0000-4000-8000-000000000002' },
-    }, pulled.revision)).rejects.toThrow('ownership')
-    expect(await replica.store.getPendingRecords()).toEqual([])
+    }
+    const expanded = await updateRepositoryAgentHostLink(clone, 'T-0001', additionalOwner, pulled.revision)
+    expect(taskSessionLinks(expanded.document.bindings, 'T-0001')).toEqual([
+      { provider: 'agent-host', ...target },
+      { provider: 'agent-host', ...additionalOwner },
+    ])
+    expect(await replica.store.getPendingRecords()).toHaveLength(1)
     expect(await readdir(root)).toEqual([])
     expect(await readdir(clone)).toEqual([])
   })
@@ -140,11 +159,30 @@ describe('immutable task/session links', () => {
     expect(detached.document.bindings).toEqual({ 'T-0002': second.document.bindings['T-0002'] })
     const records = await active.store.getRecords()
     expect(records).toHaveLength(3)
-    expect(records).toContainEqual(expect.objectContaining({ kind: 'binding', payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0001' } }))
+    expect(records).toContainEqual(expect.objectContaining({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'delete', taskId: 'T-0001' } }))
     expect((await active.store.read()).resolution.entities['binding:T-0001'].state).toBe('deleted')
     const moved = await updateRepositoryAgentHostLink(root, 'T-0003', agentHostTargetFixture('first'), detached.revision)
     expect(moved.document.bindings['T-0002']).toEqual(second.document.bindings['T-0002'])
     expect(moved.document.bindings['T-0003']).toEqual(first.document.bindings['T-0001'])
+  })
+
+  it('adds sessions to one task and requires an exact target when detaching from a multi-session task', async () => {
+    const root = await folder()
+    const active = await backend(root)
+    const firstTarget = agentHostTargetFixture('first')
+    const secondTarget = agentHostTargetFixture('second')
+    const first = await updateRepositoryAgentHostLink(root, 'T-0001', firstTarget, active.snapshot.revision)
+    const second = await updateRepositoryAgentHostLink(root, 'T-0001', secondTarget, first.revision)
+    expect(taskSessionLinks(second.document.bindings, 'T-0001')).toEqual([
+      { provider: 'agent-host', ...firstTarget },
+      { provider: 'agent-host', ...secondTarget },
+    ])
+    await expect(removeRepositorySessionLink(root, 'T-0001', second.revision)).rejects.toThrow('multiple linked sessions')
+    const detached = await removeRepositorySessionLink(root, 'T-0001', second.revision, firstTarget)
+    expect(taskSessionLinks(detached.document.bindings, 'T-0001')).toEqual([{ provider: 'agent-host', ...secondTarget }])
+    expect(await active.store.getRecords()).toContainEqual(expect.objectContaining({
+      payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [{ provider: 'agent-host', ...secondTarget }] },
+    }))
   })
 
   it('distinguishes logical sessions by owner and session while rejecting runtime Host fields', async () => {
@@ -177,9 +215,9 @@ describe('immutable task/session links', () => {
     const root = await folder()
     const active = await backend(root)
     const check = vi.fn(async () => { if (boundary === 'beforeCommit') active.unregister() })
-    await expect(writeRepositorySessionLinks(root, active.snapshot.revision, (document) => {
+    await expect(writeRepositorySessionLinks(root, active.snapshot.revision, () => {
       if (boundary === 'transform') active.unregister()
-      return { ...document, bindings: { 'T-0001': { provider: 'agent-host', ...agentHostTargetFixture() } } }
+      return { schemaVersion: '2.1', bindings: { 'T-0001': [{ provider: 'agent-host', ...agentHostTargetFixture() }] } }
     }, check)).rejects.toThrow('backend changed')
     expect(check).toHaveBeenCalledTimes(boundary === 'beforeCommit' ? 1 : 0)
     expect(await readRecords(active.outboxRoot)).toEqual([])
@@ -193,7 +231,7 @@ describe('immutable task/session links', () => {
     await writeFile(join(root, '.taskcontinuum', '.gitignore'), ignore)
     await writeFile(join(root, '.taskcontinuum', 'session-bindings.lock'), 'old process')
     const active = await backend(root)
-    const update = () => ({ schemaVersion: 2 as const, bindings: { 'T-0001': { provider: 'agent-host' as const, ...agentHostTargetFixture() } } })
+    const update = () => ({ schemaVersion: '2.1' as const, bindings: { 'T-0001': [{ provider: 'agent-host' as const, ...agentHostTargetFixture() }] } })
     await expect(writeRepositorySessionLinks(root, active.snapshot.revision, update, async () => { throw new Error('Authorization revoked') })).rejects.toThrow('Authorization revoked')
     expect(await readRecords(active.outboxRoot)).toEqual([])
     await writeRepositorySessionLinks(root, active.snapshot.revision, update)

@@ -6,6 +6,7 @@ import { afterEach, expect, it } from 'vitest'
 import { canonicalPolicyRoot, recordLocalLink, locallyLinkedAgentHostSessions, unregisteredLocalLinks } from '../src/main/linkedSessionPolicy'
 import { readRepositorySessionLinks, removeRepositorySessionLink, updateRepositoryAgentHostLink } from '../src/main/repositorySessionLinks'
 import { agentHostTargetFixture, createImmutableBindingsFixture, immutableOwner } from './immutable-bindings-fixture'
+import { taskSessionLinks } from '../src/shared/sessionBindings'
 
 const directories: string[] = []
 const backends: Awaited<ReturnType<typeof createImmutableBindingsFixture>>[] = []
@@ -31,11 +32,18 @@ it('requires exact immutable ownership and local receipts without implicitly mov
   await recordLocalLink(profile, root, 'T-0002', saved.document.bindings['T-0002'], owner)
   expect(await locallyLinkedAgentHostSessions(profile, root, owner)).toEqual([target])
   await expect(updateRepositoryAgentHostLink(root, 'T-0003', target, saved.revision)).rejects.toThrow('already linked')
-  await expect(updateRepositoryAgentHostLink(root, 'T-0002', {
+  const anotherOwner = {
     ...target, owner: { ...owner, clientId: '00000000-0000-4000-8000-000000000002' },
-  }, saved.revision)).rejects.toThrow('ownership')
-  await updateRepositoryAgentHostLink(root, 'T-0002', { ...target, chatId: 'ahp-chat:/original/other' }, saved.revision)
-  expect(await locallyLinkedAgentHostSessions(profile, root, owner)).toEqual([])
+  }
+  const expanded = await updateRepositoryAgentHostLink(root, 'T-0002', anotherOwner, saved.revision)
+  expect(taskSessionLinks(expanded.document.bindings, 'T-0002')).toEqual([
+    { provider: 'agent-host', ...target },
+    { provider: 'agent-host', ...anotherOwner },
+  ])
+  await recordLocalLink(profile, root, 'T-0002', { provider: 'agent-host', ...anotherOwner }, owner)
+  expect(await locallyLinkedAgentHostSessions(profile, root, owner)).toEqual([target])
+  await expect(updateRepositoryAgentHostLink(root, 'T-0002', { ...target, chatId: 'ahp-chat:/original/other' }, expanded.revision)).rejects.toThrow('different chat claim')
+  expect(await locallyLinkedAgentHostSessions(profile, root, owner)).toEqual([target])
   expect(JSON.stringify(await backend.store.getRecords())).not.toMatch(/connectionToken|endpoint|profile/)
   expect(await readdir(root)).toEqual(['profile'])
 })
@@ -65,6 +73,25 @@ it('projects participant identity to owner and retries an immutable link written
   expect(await unregisteredLocalLinks(profile, root, foreign.document.bindings, participant)).toEqual([])
   expect(await locallyLinkedAgentHostSessions(profile, root, participant)).toEqual([target])
   expect(await readRepositorySessionLinks(root)).toEqual(foreign)
+})
+
+it('preserves confirmed sibling receipts and never approves newly synced siblings implicitly', async () => {
+  const { root, profile, backend, owner } = await fixture()
+  const firstTarget = agentHostTargetFixture('first', owner)
+  const secondTarget = agentHostTargetFixture('second', owner)
+  const first = await updateRepositoryAgentHostLink(root, 'T-0001', firstTarget, backend.snapshot.revision)
+  await recordLocalLink(profile, root, 'T-0001', taskSessionLinks(first.document.bindings, 'T-0001')[0], owner)
+  const second = await updateRepositoryAgentHostLink(root, 'T-0001', secondTarget, first.revision)
+  expect(await locallyLinkedAgentHostSessions(profile, root, owner)).toEqual([firstTarget])
+  expect((await unregisteredLocalLinks(profile, root, second.document.bindings, owner)).map(([, link]) => link)).toEqual([
+    { provider: 'agent-host', ...secondTarget },
+  ])
+  await recordLocalLink(profile, root, 'T-0001', taskSessionLinks(second.document.bindings, 'T-0001')[1], owner)
+  expect(await locallyLinkedAgentHostSessions(profile, root, owner)).toEqual([firstTarget, secondTarget])
+  const detached = await removeRepositorySessionLink(root, 'T-0001', second.revision, firstTarget)
+  await recordLocalLink(profile, root, 'T-0001', undefined, owner, firstTarget)
+  expect(taskSessionLinks(detached.document.bindings, 'T-0001')).toEqual([{ provider: 'agent-host', ...secondTarget }])
+  expect(await locallyLinkedAgentHostSessions(profile, root, owner)).toEqual([secondTarget])
 })
 
 it('does not carry receipt authority across roots or stable local identities, and honors immutable detach', async () => {

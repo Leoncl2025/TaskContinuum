@@ -46,6 +46,7 @@ function imagesFor(turn: Turn | ActiveTurn): ChatImageAttachment[] {
 type AgentHostPanelProps = {
   target: AgentHostTarget
   connectionRevision?: number
+  active?: boolean
   onClose(): void
   onDevices?(): void
   onSessions?(): void
@@ -54,7 +55,7 @@ type AgentHostPanelProps = {
   prepareFirstMessage?(text: string): Promise<string>
 } & ({ task: TaskRecord; workspace?: never; onDetach(): void } | { task?: never; workspace: Pick<WorkspaceSnapshot, 'id' | 'name'>; onDetach?: never })
 
-export function AgentHostPanel({ task, workspace, target, connectionRevision = 0, onDetach, onClose, onDevices, onSessions, onBusy, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
+export function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, onDetach, onClose, onDevices, onSessions, onBusy, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
   const bridge = window.agentHost
   const { sessionId, chatId } = target
   const { clientId, machineName } = target.owner
@@ -178,16 +179,18 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       if (prepareFirstMessage && !firstMessageSent.current && !view?.chat?.turns.length) command.text = await prepareFirstMessage(command.draft)
       if (!mounted.current) return
       await bridge.send(target, command.id, command.text, command.images.length ? command.images : undefined, { id: modelId, ...(Object.keys(config).length ? { config } : {}) })
-      if (mounted.current) { confirm(command); following.current = true }
-    } catch (failure) { if (mounted.current && attempted.current?.id === command.id) setError(failure instanceof Error ? failure.message : 'Delivery was not confirmed. Inspect the original before retrying.') }
-    finally { operating.current = false; if (mounted.current) setBusy(false) }
+      confirm(command)
+      following.current = true
+    } catch (failure) { if (attempted.current?.id === command.id) setError(failure instanceof Error ? failure.message : 'Delivery was not confirmed. Inspect the original before retrying.') }
+    // Hidden Activities retain state even while their effects are paused.
+    finally { operating.current = false; setBusy(false) }
   }
   async function cancel(): Promise<void> {
     if (!bridge || !activeTurn || view?.readOnly || operating.current) return
     operating.current = true
     setBusy(true)
-    try { await bridge.cancel(target, activeTurn.id) } catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : 'The original turn could not be cancelled.') }
-    finally { operating.current = false; if (mounted.current) setBusy(false) }
+    try { await bridge.cancel(target, activeTurn.id) } catch (failure) { setError(failure instanceof Error ? failure.message : 'The original turn could not be cancelled.') }
+    finally { operating.current = false; setBusy(false) }
   }
   async function reconnect(): Promise<void> {
     if (operating.current) return
@@ -196,10 +199,10 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     setError(undefined)
     try {
       await beforeReconnect?.()
-      if (mounted.current) setRevision((value) => value + 1)
+      setRevision((value) => value + 1)
     } catch (failure) {
-      if (mounted.current) setCatalog({ key: catalogKey, models: [], error: failure instanceof Error ? failure.message : 'The original session could not be verified. Reconnect to retry.' })
-    } finally { operating.current = false; if (mounted.current) setBusy(false) }
+      setCatalog({ key: catalogKey, models: [], error: failure instanceof Error ? failure.message : 'The original session could not be verified. Reconnect to retry.' })
+    } finally { operating.current = false; setBusy(false) }
   }
   const turns = [...view?.chat?.turns ?? [], ...activeTurn ? [activeTurn] : []]
   const stateLabel = !bridge ? 'Desktop update required' : !view && (error || currentCatalog?.error) ? 'Connection failed' : !view || view.state === 'connecting' ? 'Connecting...' : view.state === 'offline' ? 'Offline history' : pending ? 'Delivery pending' : activeTurn ? 'Agent responding' : view.readOnly ? 'Read only' : 'Connected'
@@ -228,7 +231,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       {configErrors.map((message) => <p key={message} className="copilot-error message-notice" role="alert">{message}</p>)}
       <div className="composer">
         <ChatImages images={images} onRemove={imageInput.remove} disabled={busy} />
-        <textarea id="chat-composer" aria-label="Message Agent Host" placeholder="Message original Agent" rows={3} maxLength={4000} value={draft} onChange={(event) => setDraft(event.target.value)} onPaste={imageInput.paste} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} />
+        <textarea id={active ? 'chat-composer' : undefined} aria-label="Message Agent Host" placeholder="Message original Agent" rows={3} maxLength={4000} value={draft} onChange={(event) => setDraft(event.target.value)} onPaste={imageInput.paste} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} />
         <div className="composer-toolbar">
           <ChatImagePicker onFiles={imageInput.add} disabled={busy || imageInput.reading} />
           <div className="ahp-model-controls">

@@ -21,8 +21,8 @@ function attachment(session: string, owner = localOwner): SessionBinding {
   const target = agentHostTargetFixture(session, owner)
   return { id: target.sessionId, title: 'Private title', owner, agentHost: target }
 }
-function linksSnapshot(bindings: Record<string, SessionLink> = {}, revision: string | null = null): SessionLinksSnapshot {
-  return { document: { schemaVersion: 2, bindings }, revision, localOwner }
+function linksSnapshot(bindings: Record<string, SessionLink | SessionLink[]> = {}, revision: string | null = null): SessionLinksSnapshot {
+  return { document: { schemaVersion: '2.1', bindings: Object.fromEntries(Object.entries(bindings).map(([id, link]) => [id, Array.isArray(link) ? link : [link]])) }, revision, localOwner }
 }
 function fixture() {
   const workspace: WorkspaceSnapshot = { id: 'workspace-one', name: 'TaskContinuum-ad', title: 'Task Continuum', root: 'Q:\\src\\Projects\\TaskContinuum-ad', tasks: [fixtureTasks[1]], warnings: [], loadedAt: '2026-09-06T00:00:00Z' }
@@ -40,7 +40,7 @@ function fixture() {
       if (request.sessionId === null) delete bindings[request.taskId]
       else {
         if (!request.agentHost || !request.owner) throw new Error('An owned Agent Host target is required.')
-        bindings[request.taskId] = { provider: 'agent-host', ...request.agentHost, sessionId: request.sessionId, owner: request.owner }
+        bindings[request.taskId] = [{ provider: 'agent-host', ...request.agentHost, sessionId: request.sessionId, owner: request.owner }]
       }
       snapshot = linksSnapshot(bindings, (++version).toString(16).padStart(64, '0'))
       return snapshot
@@ -51,6 +51,62 @@ function fixture() {
 }
 
 describe('repository-backed Agent Host binding state', () => {
+  it('rejects v2 bindings without activating or migrating existing sessions', async () => {
+    const { workspace, bridge } = fixture()
+    const legacy = linksSnapshot({ 'T-0002': link('unsupported') })
+    Reflect.set(legacy.document, 'schemaVersion', 2)
+    const before = JSON.stringify(legacy)
+    vi.mocked(bridge.getSessionLinks).mockResolvedValue(legacy)
+    const { result } = renderHook(() => useSessionLinks(workspace))
+    await waitFor(() => expect(result.current.error).toMatch(/require schema v2\.1.*unsupported.*not migrated/))
+    expect(result.current.ready).toBe(false)
+    expect(result.current.bindings).toEqual({})
+    await expect(result.current.attach('T-0002', attachment('new'))).rejects.toThrow('Reload')
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+    expect(JSON.stringify(legacy)).toBe(before)
+  })
+
+  it('loads multiple owned sessions and detaches only the selected target', async () => {
+    const { workspace, bridge } = fixture()
+    const first = link('first')
+    const second = link('second', remoteOwner)
+    const snapshot: SessionLinksSnapshot = { document: { schemaVersion: '2.1', bindings: { 'T-0002': [first, second] } }, revision: 'a'.repeat(64), localOwner }
+    vi.mocked(bridge.getSessionLinks).mockResolvedValue(snapshot)
+    const { result } = renderHook(() => useSessionLinks(workspace))
+    await waitFor(() => expect(result.current.ready).toBe(true))
+    expect(result.current.bindings['T-0002'].map((binding) => binding.agentHost)).toEqual([
+      agentHostTargetFixture('first', localOwner), agentHostTargetFixture('second', remoteOwner),
+    ])
+    vi.mocked(bridge.updateSessionLink).mockResolvedValue({
+      document: { schemaVersion: '2.1', bindings: { 'T-0002': [second] } }, revision: 'b'.repeat(64), localOwner,
+    })
+    await act(() => result.current.detach('T-0002', result.current.bindings['T-0002'][0]))
+    expect(bridge.updateSessionLink).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: workspace.id, taskId: 'T-0002', sessionId: null,
+      detachTarget: agentHostTargetFixture('first', localOwner), expectedRevision: snapshot.revision,
+    })
+    expect(result.current.bindings['T-0002']).toHaveLength(1)
+    expect(result.current.bindings['T-0002'][0].agentHost).toEqual(agentHostTargetFixture('second', remoteOwner))
+    expect(result.current.bindings['T-0002'][0].ownerIsRemote).toBe(true)
+  })
+
+  it('keeps sibling sessions when an attachment returns the expanded collection', async () => {
+    const { workspace, bridge } = fixture()
+    vi.mocked(bridge.getSessionLinks).mockResolvedValue(linksSnapshot({ 'T-0002': link('first') }, 'a'.repeat(64)))
+    const { result } = renderHook(() => useSessionLinks(workspace))
+    await waitFor(() => expect(result.current.ready).toBe(true))
+    const expanded: SessionLinksSnapshot = {
+      document: { schemaVersion: '2.1', bindings: { 'T-0002': [link('first'), link('second')] } }, revision: 'b'.repeat(64), localOwner,
+    }
+    vi.mocked(bridge.updateSessionLink).mockResolvedValue(expanded)
+    await act(() => result.current.attach('T-0002', attachment('second')))
+    expect(result.current.bindings['T-0002'].map((binding) => binding.id)).toEqual(['copilotcli:/first', 'copilotcli:/second'])
+    vi.mocked(bridge.getSessionLinks).mockResolvedValue(expanded)
+    let reloaded: SessionLinksSnapshot | undefined
+    await act(async () => { reloaded = await result.current.reload() })
+    expect(reloaded).toEqual(expanded)
+  })
+
   it('loads SSH changes immediately and drains notifications received during a save', async () => {
     const { workspace, bridge } = fixture()
     const remote = gitSyncUiFixture()
@@ -60,7 +116,7 @@ describe('repository-backed Agent Host binding state', () => {
     const synced = linksSnapshot({ 'T-0002': link('ssh-change') }, 'c'.repeat(64))
     vi.mocked(bridge.getSessionLinks).mockResolvedValue(synced)
     await act(async () => remote.notify())
-    expect(view.result.current.bindings['T-0002'].agentHost).toEqual(agentHostTargetFixture('ssh-change', localOwner))
+    expect(view.result.current.bindings['T-0002'][0].agentHost).toEqual(agentHostTargetFixture('ssh-change', localOwner))
     let finish!: (value: SessionLinksSnapshot) => void
     vi.mocked(bridge.updateSessionLink).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
     let saving!: Promise<void>
@@ -69,7 +125,7 @@ describe('repository-backed Agent Host binding state', () => {
     vi.mocked(bridge.getSessionLinks).mockResolvedValue(final)
     act(() => remote.notify())
     await act(async () => { finish(synced); await saving })
-    expect(view.result.current.bindings['T-0004'].id).toBe('copilotcli:/newer-ssh-change')
+    expect(view.result.current.bindings['T-0004'][0].id).toBe('copilotcli:/newer-ssh-change')
     expect(bridge.updateSessionLink).toHaveBeenCalledOnce()
     view.unmount()
   })
@@ -83,8 +139,8 @@ describe('repository-backed Agent Host binding state', () => {
       expect(view.result.current.ready).toBe(true)
       vi.mocked(bridge.getSessionLinks).mockResolvedValue(linksSnapshot({ 'T-0002': link('pulled', remoteOwner) }, 'e'.repeat(64)))
       await act(() => vi.advanceTimersByTimeAsync(5000))
-      expect(view.result.current.bindings['T-0002']).toMatchObject({ id: 'copilotcli:/pulled', title: 'Agent Host', owner: remoteOwner, ownerIsRemote: true })
-      expect(view.result.current.bindings['T-0002']).not.toHaveProperty('vscodeWorkspaceStorageId')
+      expect(view.result.current.bindings['T-0002'][0]).toMatchObject({ id: 'copilotcli:/pulled', title: 'Agent Host', owner: remoteOwner, ownerIsRemote: true })
+      expect(view.result.current.bindings['T-0002'][0]).not.toHaveProperty('vscodeWorkspaceStorageId')
       expect(bridge.updateSessionLink).not.toHaveBeenCalled()
     } finally { view.unmount(); vi.useRealTimers() }
   })
@@ -95,10 +151,10 @@ describe('repository-backed Agent Host binding state', () => {
     vi.mocked(bridge.getSessionLinks).mockResolvedValue(snapshot)
     const view = renderHook(() => useSessionLinks(workspace))
     await waitFor(() => expect(view.result.current.ready).toBe(true))
-    expect(view.result.current.bindings['T-0002'].ownerIsRemote).toBe(false)
+    expect(view.result.current.bindings['T-0002'][0].ownerIsRemote).toBe(false)
     vi.mocked(bridge.getSessionLinks).mockResolvedValue({ ...snapshot, localOwner })
     await act(() => view.result.current.reload())
-    expect(view.result.current.bindings['T-0002']).toMatchObject({ owner: remoteOwner, ownerIsRemote: true, agentHost: agentHostTargetFixture('original', remoteOwner) })
+    expect(view.result.current.bindings['T-0002'][0]).toMatchObject({ owner: remoteOwner, ownerIsRemote: true, agentHost: agentHostTargetFixture('original', remoteOwner) })
     expect(bridge.updateSessionLink).not.toHaveBeenCalled()
   })
 
@@ -116,7 +172,7 @@ describe('repository-backed Agent Host binding state', () => {
     expect(result.current.bindings).toEqual({})
     expect(result.current.busy).toBe(true)
     await act(async () => { finish(linksSnapshot({ 'T-0002': link('session-one') }, 'a'.repeat(64))); await writing })
-    expect(result.current.bindings['T-0002'].id).toBe('copilotcli:/session-one')
+    expect(result.current.bindings['T-0002'][0].id).toBe('copilotcli:/session-one')
     expect(bridge.updateSessionLink).toHaveBeenCalledWith({ workspaceId: workspace.id, taskId: 'T-0002', sessionId: 'copilotcli:/session-one', agentHost: { chatId: 'ahp-chat:/session-one' }, owner: localOwner, expectedRevision: null })
     expect(getItem).not.toHaveBeenCalled()
     expect(setItem).not.toHaveBeenCalled()
@@ -176,7 +232,7 @@ describe('repository-backed Agent Host binding state', () => {
     vi.mocked(bridge.getSessionLinks).mockResolvedValue(linksSnapshot({ 'T-0002': link('from-repository') }, 'b'.repeat(64)))
     const { result } = renderHook(() => useSessionLinks(workspace))
     await waitFor(() => expect(result.current.ready).toBe(true))
-    expect(result.current.bindings['T-0002'].id).toBe('copilotcli:/from-repository')
+    expect(result.current.bindings['T-0002'][0].id).toBe('copilotcli:/from-repository')
     expect(localStorage.getItem(key)).toBe(content)
     expect(bridge.updateSessionLink).not.toHaveBeenCalled()
   })
@@ -196,7 +252,7 @@ describe('repository-backed Agent Host binding state', () => {
     await act(async () => remote.notify())
     expect(result.current.ready).toBe(true)
     expect(result.current.error).toBeNull()
-    expect(result.current.bindings['T-0002'].id).toBe('copilotcli:/restored')
+    expect(result.current.bindings['T-0002'][0].id).toBe('copilotcli:/restored')
   })
 
   it('applies a previously empty revision when it becomes authoritative again after a save', async () => {
@@ -206,7 +262,7 @@ describe('repository-backed Agent Host binding state', () => {
     const { result } = renderHook(() => useSessionLinks(workspace))
     await waitFor(() => expect(result.current.ready).toBe(true))
     await act(() => result.current.attach('T-0002', attachment('saved')))
-    expect(result.current.bindings['T-0002'].id).toBe('copilotcli:/saved')
+    expect(result.current.bindings['T-0002'][0].id).toBe('copilotcli:/saved')
     vi.mocked(bridge.getSessionLinks).mockResolvedValue(linksSnapshot())
     await act(async () => remote.notify())
     expect(result.current.bindings).toEqual({})
@@ -224,7 +280,7 @@ describe('repository-backed Agent Host binding state', () => {
     act(() => remote.notify())
     await act(() => result.current.attach('T-0002', attachment('saved')))
     await act(async () => { finish(linksSnapshot()) })
-    expect(result.current.bindings['T-0002'].id).toBe('copilotcli:/saved')
+    expect(result.current.bindings['T-0002'][0].id).toBe('copilotcli:/saved')
     expect(bridge.getSessionLinks).toHaveBeenCalledTimes(3)
     expect(bridge.updateSessionLink).toHaveBeenCalledOnce()
   })
@@ -236,7 +292,7 @@ describe('repository-backed Agent Host binding state', () => {
     const { result } = renderHook(() => useSessionLinks(workspace))
     await waitFor(() => expect(result.current.ready).toBe(true))
     await act(async () => { await expect(result.current.detach('T-0002')).rejects.toThrow('changed on disk') })
-    expect(result.current.bindings['T-0002'].id).toBe('copilotcli:/existing-session')
+    expect(result.current.bindings['T-0002'][0].id).toBe('copilotcli:/existing-session')
     expect(result.current.ready).toBe(false)
     vi.mocked(bridge.getSessionLinks).mockResolvedValue(linksSnapshot({}, 'd'.repeat(64)))
     await act(() => result.current.reload())

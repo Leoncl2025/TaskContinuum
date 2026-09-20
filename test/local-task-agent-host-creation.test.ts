@@ -19,6 +19,7 @@ import { deviceRequest } from '../src/main/vscodeDeviceHttp'
 import type { AgentHostCreateRequest, AgentHostCreation, AgentHostCreationLocation } from '../src/shared/agentHostCreation'
 import { creationFixtureKey, startAgentHostCreationFixture, writeCreationTaskWorkspace } from './agent-host-creation-fixture'
 import { agentHostTargetFixture, createImmutableBindingsFixture } from './immutable-bindings-fixture'
+import { taskSessionLinks } from '../src/shared/sessionBindings'
 
 const cleanups: (() => Promise<void>)[] = []
 const polling = { timeout: 10000, interval: 25 }
@@ -133,7 +134,7 @@ describe('task-local Agent Host creation through the shared worker', () => {
     expect(setup.native.creations).toEqual([{ channel: session.sessionId, provider: 'copilotcli',
       workingDirectories: [pathToFileURL(await canonicalPolicyRoot(setup.root)).href],
       config: { isolation: 'folder', autoApprove: 'default', mode: 'interactive' } }])
-    expect((await readRepositorySessionLinks(setup.root)).document.bindings[setup.request.taskId]).toEqual({ provider: 'agent-host', ...session })
+    expect(taskSessionLinks((await readRepositorySessionLinks(setup.root)).document.bindings, setup.request.taskId)).toEqual([{ provider: 'agent-host', ...session }])
     expect(await locallyLinkedAgentHostSessions(setup.profile, setup.root, setup.owner)).toEqual([session])
     expect(JSON.parse(await readFile(setup.file, 'utf8'))).toMatchObject([{ local: true, pairId: setup.owner.clientId, nativeSessionId: session.sessionId }])
     await expect(readFile(join(setup.profile, 'local-session-link-receipts.json'), 'utf8')).resolves.toContain(session.sessionId)
@@ -167,10 +168,40 @@ describe('task-local Agent Host creation through the shared worker', () => {
     expect(setup.native.creations).toHaveLength(3)
     expect(await setup.manager.localCreations.list(setup.root, setup.authorize)).toEqual([helper])
     expect(await setup.manager.localCreations.status(setup.root, helperRequest.operationId, setup.authorize)).toEqual(helper)
-    expect((await readRepositorySessionLinks(setup.root)).document.bindings).toEqual({
-      'T-0007': { provider: 'agent-host', ...target(first) }, 'T-0008': { provider: 'agent-host', ...target(second) },
-    })
+    const links = (await readRepositorySessionLinks(setup.root)).document.bindings
+    expect(taskSessionLinks(links, 'T-0007')).toEqual([{ provider: 'agent-host', ...target(first) }])
+    expect(taskSessionLinks(links, 'T-0008')).toEqual([{ provider: 'agent-host', ...target(second) }])
     expect(await setup.manager.creations.list(setup.root, setup.request.taskId)).toEqual([])
+  }, 20000)
+
+  it('creates another local session after a completed session is detached and status is reopened', async () => {
+    const setup = await fixture()
+    const first = await create(setup)
+    const firstTarget = target(first)
+    const linked = await readRepositorySessionLinks(setup.root)
+    await removeRepositorySessionLink(setup.root, setup.request.taskId, linked.revision, firstTarget)
+    expect(await status(setup)).toMatchObject({ state: 'ready', session: first.session })
+    expect((await readRepositorySessionLinks(setup.root)).document.bindings).toEqual({})
+    expect(await setup.manager.creations.list(setup.root, setup.request.taskId)).toEqual([])
+    expect(await locallyLinkedAgentHostSessions(setup.profile, setup.root, setup.owner)).toEqual([])
+
+    const secondRequest = {
+      ...setup.request,
+      operationId: randomUUID(),
+      expectedRevision: (await readRepositorySessionLinks(setup.root)).revision,
+    }
+    const second = await create(setup, secondRequest)
+    const secondTarget = target(second)
+    expect(firstTarget.sessionId).not.toBe(secondTarget.sessionId)
+    expect(taskSessionLinks((await readRepositorySessionLinks(setup.root)).document.bindings, setup.request.taskId)).toEqual([
+      { provider: 'agent-host', ...secondTarget },
+    ])
+    expect(await locallyLinkedAgentHostSessions(setup.profile, setup.root, setup.owner)).toEqual([secondTarget])
+    expect(await status(setup)).toMatchObject({ state: 'ready', session: first.session })
+    expect(await status(setup, secondRequest)).toMatchObject({ state: 'ready', session: second.session })
+    await expect(setup.manager.authorize(setup.root, firstTarget)).rejects.toThrow()
+    await expect(setup.manager.authorize(setup.root, secondTarget)).resolves.toBeUndefined()
+    expect(setup.native.creations).toHaveLength(2)
   }, 20000)
 
   it('recovers an unfinished caller assignment after a full stack restart without creating again', async () => {
@@ -186,7 +217,7 @@ describe('task-local Agent Host creation through the shared worker', () => {
     expect(setup.native.creations).toHaveLength(1)
   }, 20000)
 
-  it('preserves a conflicting binding and retries only assignment of the original session', async () => {
+  it('appends beside an existing binding and retries only assignment after a stale revision', async () => {
     const setup = await fixture()
     const gate = setup.native.pauseAcknowledgement()
     await setup.manager.creations.create(setup.root, setup.request, setup.authorize)
@@ -195,11 +226,10 @@ describe('task-local Agent Host creation through the shared worker', () => {
     const changed = await updateRepositoryAgentHostLink(setup.root, setup.request.taskId, conflict, setup.request.expectedRevision)
     gate.resolve()
     const unbound = await settle(setup, 'created-unbound')
-    expect((await readRepositorySessionLinks(setup.root)).document.bindings[setup.request.taskId]).toEqual({ provider: 'agent-host', ...conflict })
-    await expect(setup.manager.creations.bind(setup.root, setup.request.operationId, setup.authorize)).rejects.toThrow('different session')
+    expect(taskSessionLinks((await readRepositorySessionLinks(setup.root)).document.bindings, setup.request.taskId)).toEqual([{ provider: 'agent-host', ...conflict }])
     await setup.restart()
     expect(await status(setup)).toMatchObject({ state: 'created-unbound', session: unbound.session })
-    await removeRepositorySessionLink(setup.root, setup.request.taskId, changed.revision)
+    await removeRepositorySessionLink(setup.root, setup.request.taskId, changed.revision, conflict)
     expect(await status(setup)).toMatchObject({ state: 'created-unbound' })
     expect((await readRepositorySessionLinks(setup.root)).document.bindings).toEqual({})
     const bound = await setup.manager.creations.bind(setup.root, setup.request.operationId, setup.authorize)
@@ -220,18 +250,79 @@ describe('task-local Agent Host creation through the shared worker', () => {
     expect(await missingBackend.manager.creations.list(missingBackend.root, missingBackend.request.taskId)).toEqual([])
   }, 20000)
 
-  it('rejects missing and already-bound tasks before dispatch', async () => {
+  it.each(['[]', '{invalid JSON'])('blocks invalid local receipts before reserving or creating a native session: %s', async (content) => {
+    const setup = await fixture()
+    const file = join(setup.profile, 'local-session-link-receipts.json')
+    await writeFile(file, content)
+    expect(await setup.manager.creations.workers(setup.root, setup.request.taskId, 'local')).toMatchObject([
+      { local: true, state: 'blocked', hosts: [], error: expect.stringContaining('local-session-link-receipts.json') },
+    ])
+    await expect(setup.manager.creations.create(setup.root, setup.request, setup.authorize)).rejects.toThrow('receipts are invalid')
+    await expect(setup.local.create(setup.root, setup.request, setup.authorize)).rejects.toMatchObject({
+      status: 503, code: 'link-receipts-unavailable', message: expect.stringContaining('back up'),
+    })
+    expect(setup.native.creations).toEqual([])
+    expect((await readRepositorySessionLinks(setup.root)).document.bindings).toEqual({})
+    expect(await readFile(file, 'utf8')).toBe(content)
+    await expect(readFile(setup.file)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('rechecks local receipts after preparation before dispatching native creation', async () => {
+    const setup = await fixture()
+    const gate = setup.native.pausePreparation()
+    await setup.manager.creations.create(setup.root, setup.request, setup.authorize)
+    await expect.poll(() => setup.native.calls.some((call) => call.method === 'resolveSessionConfig'), polling).toBe(true)
+    const file = join(setup.profile, 'local-session-link-receipts.json')
+    await writeFile(file, '[]')
+    gate.resolve()
+    const failed = await settle(setup, 'failed')
+    expect(failed.error).toContain('Schema v2 logical session receipts are required')
+    expect(setup.native.creations).toEqual([])
+    expect(await readFile(file, 'utf8')).toBe('[]')
+  })
+
+  it('preserves the receipt failure after binding and retries the same created session after explicit repair', async () => {
+    const setup = await fixture()
+    const file = join(setup.profile, 'local-session-link-receipts.json')
+    const store = setup.bindings!.store
+    const update = store.update.bind(store)
+    vi.spyOn(store, 'update').mockImplementationOnce(async (...args) => {
+      const snapshot = await update(...args)
+      await writeFile(file, '[]')
+      return snapshot
+    })
+    await setup.manager.creations.create(setup.root, setup.request, setup.authorize)
+    const unbound = await settle(setup, 'created-unbound')
+    expect(unbound.session).toBeDefined()
+    expect(unbound.error).toContain('local-session-link-receipts.json')
+    expect(unbound.error).toContain('not a bare array')
+    expect(unbound.error).not.toContain('Refresh the revision')
+    expect(taskSessionLinks((await readRepositorySessionLinks(setup.root)).document.bindings, setup.request.taskId)).toEqual([
+      { provider: 'agent-host', ...target(unbound) },
+    ])
+    expect(await readFile(file, 'utf8')).toBe('[]')
+    await expect(setup.manager.creations.bind(setup.root, setup.request.operationId, setup.authorize)).rejects.toThrow('receipts are invalid')
+    await writeFile(file, JSON.stringify({ schemaVersion: 2, receipts: [] }))
+    const recovered = await setup.manager.creations.bind(setup.root, setup.request.operationId, setup.authorize)
+    expect(recovered).toMatchObject({ state: 'ready', session: unbound.session })
+    expect(await locallyLinkedAgentHostSessions(setup.profile, setup.root, setup.owner)).toEqual([target(unbound)])
+    expect(setup.native.creations).toHaveLength(1)
+    expect(setup.native.calls.some((call) => call.method === 'dispatchAction')).toBe(false)
+  }, 20000)
+
+  it('rejects a missing task but permits creation on an already-bound task', async () => {
     const setup = await fixture()
     const missing = { ...setup.request, taskId: 'T-0999' }
     await expect(setup.manager.creations.create(setup.root, missing, setup.authorize)).rejects.toThrow('no longer exists')
     await expect(setup.local.create(setup.root, missing, setup.authorize)).rejects.toMatchObject({ status: 409 })
     const existing = agentHostTargetFixture('already-bound', setup.owner)
     const changed = await updateRepositoryAgentHostLink(setup.root, setup.request.taskId, existing, setup.request.expectedRevision)
-    const bound = { ...setup.request, expectedRevision: changed.revision }
-    await expect(setup.manager.creations.create(setup.root, bound, setup.authorize)).rejects.toThrow('Detach')
-    await expect(setup.local.create(setup.root, bound, setup.authorize)).rejects.toMatchObject({ status: 409 })
-    expect(setup.native.creations).toEqual([])
-    expect((await readRepositorySessionLinks(setup.root)).document.bindings[setup.request.taskId]).toEqual({ provider: 'agent-host', ...existing })
+    const bound = { ...setup.request, operationId: randomUUID(), expectedRevision: changed.revision }
+    const created = await create(setup, bound)
+    expect(setup.native.creations).toHaveLength(1)
+    expect(taskSessionLinks((await readRepositorySessionLinks(setup.root)).document.bindings, setup.request.taskId)).toEqual([
+      { provider: 'agent-host', ...existing }, { provider: 'agent-host', ...target(created) },
+    ])
   }, 20000)
 
   it('does not substitute an available Host for an unavailable exact selected Host', async () => {

@@ -9,7 +9,7 @@ export interface SessionBinding {
   ownerIsRemote?: boolean
   agentHost: AgentHostTarget
 }
-export type SessionBindings = Record<string, SessionBinding>
+export type SessionBindings = Record<string, SessionBinding[]>
 
 export function sessionBindingKey(binding: Pick<SessionBinding, 'agentHost'>): string {
   return `ahp:${agentHostKey(binding.agentHost)}`

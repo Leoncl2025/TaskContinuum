@@ -29,7 +29,7 @@ import { LocalSettingsFile } from './settingsFile'
 import type { RemoteSettingChanges, RemoteSettings } from './settingsFile'
 import { RemoteConfigStore } from './store'
 import {
-  appendRecord, canonicalJson, parseRecord, readCheckedFile, readRecords, recordClosure, recordPath, RemoteConfigError, resolveRecords, serializeRecord, unionRecords, verifyRecordSignature,
+  appendRecord, bindingTargets, canonicalJson, parseRecord, readCheckedFile, readRecords, recordClosure, recordPath, RemoteConfigError, resolveRecords, serializeRecord, unionRecords, verifyRecordSignature,
 } from './records'
 import type { RecordTrust } from './records'
 
@@ -766,8 +766,10 @@ export class WorkspaceSyncService {
       if (record.kind !== 'binding') continue
       const dependencies = recordClosure(record, snapshot.records)
       const recipients = new Set<string>(runtime.peers.status().map((peer) => peer.deviceId))
-      if (record.payload.action === 'set' && record.payload.target.owner) recipients.add(record.payload.target.owner.clientId)
-      for (const prior of dependencies) if (prior.kind === 'binding' && prior.payload.action === 'set' && prior.payload.target.owner) recipients.add(prior.payload.target.owner.clientId)
+      if (record.payload.action === 'set') for (const target of bindingTargets(record.payload)) recipients.add(target.owner.clientId)
+      for (const prior of dependencies) if (prior.kind === 'binding' && prior.payload.action === 'set') {
+        for (const target of bindingTargets(prior.payload)) recipients.add(target.owner.clientId)
+      }
       await runtime.peers.notify(record.operationId, { operation: record, dependencies }, [...recipients])
     }
   }

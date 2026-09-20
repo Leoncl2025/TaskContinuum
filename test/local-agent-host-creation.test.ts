@@ -90,7 +90,7 @@ describe('private workspace-local native planning sessions', () => {
     expect(setup.devices.agentHostSessions).not.toHaveBeenCalled()
     expect(setup.devices.agentHostTransport).not.toHaveBeenCalled()
     const unregister = await registerRepositorySessionLinksBackend(setup.root, {
-      read: async () => ({ document: { schemaVersion: 2, bindings: { 'T-0001': { provider: 'agent-host', ...target } } }, revision: 'a'.repeat(64) }),
+      read: async () => ({ document: { schemaVersion: '2.1', bindings: { 'T-0001': [{ provider: 'agent-host', ...target }] } }, revision: 'a'.repeat(64) }),
       update: async () => { throw new Error('Local planning must not write shared bindings.') },
     })
     try { expect(await locallyLinkedAgentHostSessions(setup.profile, setup.root, setup.owner)).toEqual([]) }

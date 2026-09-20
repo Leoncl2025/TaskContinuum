@@ -146,10 +146,16 @@ never claim a release is signed unless its signature was verified.
 
 Enable [Automatic workspace links](#automatic-workspace-links) for the selected
 task workspace before reading or writing bindings. Open **Agent Host sessions**
-in the activity bar, allow local Host access once, and select the existing chat.
-Detach a different task binding explicitly before replacing it; detaching never
-deletes native history. The Host and its signed-in provider must already be running.
+in the activity bar to switch the left sidebar from tasks to session management,
+without opening a dialog. **Current** shows the current task's session tree;
+**Link** browses existing sessions (local by default), and **Create** reuses local
+and remote creation. A task can link multiple sessions. Linking adds to its collection;
+**Unlink** confirms removal of just the selected session inline and never deletes
+native history. A native session still belongs to at most one task per workspace.
+The Host and its signed-in provider must already be running.
 Selecting a task or reopening its chat never creates or resumes a CLI session.
+Switching between task sessions preserves their in-memory drafts and images.
+Removing the selected session returns to session selection, not a different send target.
 
 For another desktop, use **Remote devices** and its private Dev Tunnel +
 restricted SSH pairing. B confirms the exact native binding; A selects the task
@@ -158,10 +164,10 @@ or Host-wide credential is required. Workspace read/send policy and B's private
 local confirmation receipt remain mandatory; Git metadata alone is not authority.
 
 Creation is a separate explicit native action, never a fallback for an unavailable
-session. In **Agent Host sessions**, **Execution location** defaults to **Remote
+session. In **Agent Host sessions > Create**, **Execution location** defaults to **Remote
 worker**, using the selected paired worker's shared task workspace and existing
 send permission. Choose **This computer** to create a local native session and bind
-it to the selected unbound task. The local machine and current canonical task
+it to the selected task, including one with existing sessions. The local machine and current canonical task
 workspace are selected automatically; choose the exact available Host, then
 **Create and assign**. Local creation requires local Host consent and the same
 authoritative workspace binding backend as **Link** (currently Automatic workspace
@@ -225,7 +231,11 @@ until corrected, rather than silently changing your choice. Remembering a model 
 sends a message or creates a session. Local preference read/write failures are shown
 beside the composer; an explicit selection can still be used in the current chat.
 
-Binding documents use **schema v2**. Each binding requires `provider: "agent-host"`,
+Binding documents use **schema v2.1** (`"schemaVersion": "2.1"`, a string),
+with an array of session links per task.
+Earlier binding schemas, including v2 single-session records, are unsupported.
+There is no automatic migration or compatibility mode.
+Each session link requires `provider: "agent-host"`,
 `sessionId`, `chatId` and an owner (`clientId`, plus the display `machineName`).
 The stable chat key is `(owner.clientId, sessionId, chatId)`; workspace authorization
 remains mandatory. Runtime `hostId` is rejected in a binding. Native Copilot sessions use
@@ -529,10 +539,18 @@ operations and descendants use the same resolver. Provisional values expire
 after 60 seconds; expiry or restart leaves an explicit awaiting-sync marker and
 disables the affected binding instead of restoring an older route.
 
-Only complete v2 `agent-host` bindings with the original `sessionId`, `chatId`
+Only complete `agent-host` links with the original `sessionId`, `chatId`
 and owner are accepted, including through signed records and SSH notices.
-Signed binding set/delete payloads also require `schemaVersion: 2`; the generic
-immutable operation envelope remains v1. No v1 binding payload is imported.
+Signed binding payloads require schema v2.1 session collections. Historical v1/v2
+bindings are rejected, not converted, skipped or overwritten. Keep the old
+configuration as an archive and use a fresh workspace binding configuration,
+then explicitly link the existing native sessions again. Reopening a v2 workspace
+cannot perform this reset; old records also remain in local caches and outboxes.
+Do not delete individual signed operations or change their version numbers.
+All participating desktops must support v2.1. Native sessions, chat history,
+device keys and creation operation records are not reset by this change.
+The immutable operation envelope remains v1. Concurrency remains task-scoped: competing
+changes to the same task's collection require explicit resolution at the current revision.
 Conflicting heads remain visible and ambiguous bindings are disabled. The same
 canonical session cannot have two active task claims. Resolve known heads by
 explicitly selecting the intended native session or detaching at the current
@@ -547,11 +565,12 @@ or authorization receipts are reported, not reset or imported.
 Local receipts require `{ "schemaVersion": 2, "receipts": [...] }`, with logical
 session/chat identities and no Host instance field. Old arrays, Host-pinned entries
 and mixed-format files are rejected, not ignored, migrated or automatically reset.
-This is a breaking data-model change: update both desktops, use fresh v2 binding
-metadata, and explicitly confirm existing chats again. Old signed binding logs
-must not be edited in place or silently imported. Delivery/cache and private
+Binding schema v2 is not supported; the separate receipt schema remains v2.
+New confirmations preserve sibling session receipts, and
+unlinking revokes only that session's receipt. Signed binding logs
+must not be edited in place. Delivery/cache and private
 creation records also require v2; original chat history and device keys are untouched.
-For a v2 binding without a receipt, use **Review session link** to confirm the
+For a v2.1 binding without a receipt, use **Review session link** to confirm the
 same native Host session.
 Successful confirmation reconnects the chat without clearing its draft. See
 [receipt recovery](docs/remote-vscode.md#local-link-receipt-recovery).

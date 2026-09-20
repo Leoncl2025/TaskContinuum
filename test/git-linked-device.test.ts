@@ -137,8 +137,8 @@ it.each(['vscode-copilot', 'github-copilot'])('preserves old %s data without imp
     await recordLocalLink(profileB, tasksB, 'T-0001', saved.document.bindings['T-0001'], owner)
     expect(await locallyLinkedAgentHostSessions(profileB, tasksB, owner)).toEqual([target])
     expect(await locallyLinkedAgentHostSessions(profileA, tasksA, owner)).toEqual([])
-    expect(await linksB.store.getRecords()).toMatchObject([{ kind: 'binding', payload: { schemaVersion: 2,
-      action: 'set', taskId: 'T-0001', target: { provider: 'agent-host', ...target },
+    expect(await linksB.store.getRecords()).toMatchObject([{ kind: 'binding', payload: { schemaVersion: '2.1',
+      action: 'set', taskId: 'T-0001', targets: [{ provider: 'agent-host', ...target }],
     } }])
     for (const folder of [tasksA, tasksB]) expect(await readFile(join(folder, '.taskcontinuum', 'session-bindings.json'), 'utf8')).toBe(content)
   } finally { await linksA.close(); await linksB.close(); await rm(root, { recursive: true, force: true }) }

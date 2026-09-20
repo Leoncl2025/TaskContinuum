@@ -112,13 +112,13 @@ describe('paired device creation transport', () => {
     await expect(setup.client.agentHostCreate(setup.root, setup.request, async () => {})).rejects.toThrow('send permission')
   })
 
-  it('reports blocked creation records without dropping the authenticated connection or retrying creation', async () => {
+  it.each(['creation-records-unavailable', 'link-receipts-unavailable'] as const)('reports %s without dropping the authenticated connection or retrying creation', async (code) => {
     const setup = await fixture()
-    setup.respond(503, { error: { code: 'creation-records-unavailable' } })
-    const error = agentHostCreationErrorMessages['creation-records-unavailable']
+    setup.respond(503, { error: { code } })
+    const error = agentHostCreationErrorMessages[code]
     expect((await setup.client.agentHostWorkers(setup.root, setup.request.taskId))[0]).toMatchObject({ state: 'blocked', hosts: [], workspaces: [], error })
     await expect(setup.client.agentHostCreationStatus(setup.root, setup.request, async () => {})).rejects.toMatchObject({
-      status: 503, creationCode: 'creation-records-unavailable', message: error,
+      status: 503, creationCode: code, message: error,
     })
     expect(setup.transport).toHaveBeenCalledOnce()
     expect(setup.requests.filter((request) => request.path.endsWith('/create'))).toEqual([])

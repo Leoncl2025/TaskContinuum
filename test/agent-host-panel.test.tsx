@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { Activity } from 'react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ChatState } from '@microsoft/agent-host-protocol'
@@ -35,6 +36,27 @@ function fixture() {
 }
 
 describe('Agent Host chat UI', () => {
+  it('settles an in-flight send while a different session is visible without replaying it', async () => {
+    const { target, bridge } = fixture()
+    let complete!: () => void
+    vi.mocked(bridge.send).mockImplementation(() => new Promise<void>((resolve) => { complete = resolve }))
+    const user = userEvent.setup()
+    const panel = (visible: boolean) => <Activity mode={visible ? 'visible' : 'hidden'}><AgentHostPanel task={demoTasks[1]} target={target} active={visible} onClose={vi.fn()} onDetach={vi.fn()} /></Activity>
+    const view = render(panel(true))
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Agent Host model' }), await screen.findByRole('option', { name: 'GPT-6' }))
+    await user.type(screen.getByRole('textbox', { name: 'Message Agent Host' }), 'Sent before switching')
+    await user.click(screen.getByRole('button', { name: 'Send to Agent Host' }))
+    await waitFor(() => expect(bridge.send).toHaveBeenCalledOnce())
+    view.rerender(panel(false))
+    await act(async () => complete())
+    view.rerender(panel(true))
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue(''))
+    await user.type(screen.getByRole('textbox', { name: 'Message Agent Host' }), 'Next draft')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeEnabled())
+    expect(bridge.send).toHaveBeenCalledOnce()
+    expect(bridge.cancel).not.toHaveBeenCalled()
+  })
+
   it('remembers the explicit model and options when reopening another task chat on the same owner', async () => {
     const setup = fixture()
     vi.mocked(setup.bridge.models).mockResolvedValue([{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli', configSchema: modelConfigFixture }])

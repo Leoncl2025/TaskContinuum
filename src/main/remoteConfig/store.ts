@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { lstat, mkdir, open, realpath, rm } from 'node:fs/promises'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { z } from 'zod'
-import type { SessionLink, SessionLinksDocument } from '../../shared/sessionBindings'
+import { sessionLinkEntries, taskSessionLinks, type SessionLink, type SessionLinksDocument } from '../../shared/sessionBindings'
 import {
   remoteConfigLimits, type BindingNotificationAcknowledgement, type RemoteActor, type RemoteConfigSnapshot,
   type RemoteConfigStoreStatus, type RemotePayloads, type RemoteRecord, type RemoteRecordFile, type RemoteRecordKind,
@@ -43,6 +43,16 @@ interface Journal { schemaVersion: 1; workspaceId: string; operations: RemoteRec
 interface RecordSources { canonical: RemoteRecord[]; outbox: RemoteRecord[] }
 
 function sha(value: unknown): string { return createHash('sha256').update(canonicalJson(value)).digest('hex') }
+function assertNoOwnershipTransfer(previous: SessionLink[], next: SessionLink[]): void {
+  const removed = previous.filter((old) => !next.some((target) => sessionLinkKey(target) === sessionLinkKey(old)))
+  const added = next.filter((target) => !previous.some((old) => sessionLinkKey(old) === sessionLinkKey(target)))
+  for (const old of removed) {
+    if (added.some((target) => old.provider === target.provider && old.sessionId === target.sessionId
+      && old.owner.clientId !== target.owner.clientId)) {
+      throw new RemoteConfigError('ownership-transfer', 'Session ownership cannot be changed by linking.')
+    }
+  }
+}
 
 export class RemoteConfigStore implements RepositorySessionLinksBackend {
   private pending: Promise<unknown> = Promise.resolve()
@@ -163,7 +173,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       if (entity) entity.state = 'blocked'
       resolution.diagnostics.push({ code: 'awaiting-sync', message: 'A provisional binding expired or was recovered after restart. Await the exact canonical operation or explicitly cancel it.', entityKey: `binding:${marker.taskId}`, operationId: marker.operationId })
     }
-    const document: SessionLinksDocument = { schemaVersion: 2, bindings }
+    const document: SessionLinksDocument = { schemaVersion: '2.1', bindings }
     const revision = sha({ resolution: resolution.revision, canonical: canonical.map((record) => record.operationId), overlay: overlay?.revision ?? null, initialized: state.initialized })
     if (state.initialized) {
       const accepted = canonical.map((record) => record.operationId).sort()
@@ -290,11 +300,11 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       const document = sessionLinksDocumentSchema.parse(await transform(structuredClone(before.document)))
       const operations: RemoteRecord[] = []
       for (const taskId of [...new Set([...Object.keys(before.document.bindings), ...Object.keys(document.bindings)])].sort()) {
-        const previous = before.document.bindings[taskId]
-        const target = document.bindings[taskId]
-        if (canonicalJson(previous ?? null) === canonicalJson(target ?? null)) continue
-        if (previous?.owner && target && previous.provider === target.provider && previous.sessionId === target.sessionId && previous.owner.clientId !== target.owner?.clientId) throw new RemoteConfigError('ownership-transfer', 'Session ownership cannot be changed by linking.')
-        operations.push(await this.make('binding', target ? { schemaVersion: 2, action: 'set', taskId, target } : { schemaVersion: 2, action: 'delete', taskId }, before))
+        const previous = taskSessionLinks(before.document.bindings, taskId)
+        const targets = taskSessionLinks(document.bindings, taskId)
+        if (canonicalJson(previous) === canonicalJson(targets)) continue
+        assertNoOwnershipTransfer(previous, targets)
+        operations.push(await this.make('binding', targets.length ? { schemaVersion: '2.1', action: 'set', taskId, targets } : { schemaVersion: '2.1', action: 'delete', taskId }, before))
       }
       if (!operations.length) return { value: before, changed: recovered, snapshot: before }
       await this.validateNew(before, operations)
@@ -311,23 +321,23 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     })
   }
 
-  async writeBinding(taskId: string, target: SessionLink | null, expectedRevision: string | null, beforeWrite?: () => Promise<void>): Promise<RemoteConfigSnapshot> {
+  async writeBinding(taskId: string, targets: SessionLink | SessionLink[] | null, expectedRevision: string | null, beforeWrite?: () => Promise<void>): Promise<RemoteConfigSnapshot> {
     sessionLinkTaskIdSchema.parse(taskId)
-    const selected = target === null ? null : sessionLinkSchema.parse(target)
+    const selected = targets === null ? [] : z.array(sessionLinkSchema).min(1).max(1000).parse(Array.isArray(targets) ? targets : [targets])
     return this.transaction(async (state, recovered) => {
       if (!state.initialized) throw new RemoteConfigError('initialization-required', 'Enable the immutable binding store before writing session bindings.')
       const before = await this.ensureRevision(state, expectedRevision)
       const entity = before.resolution.entities[`binding:${taskId}`]
-      const prior = before.document.bindings[taskId]
-      if (selected && prior?.owner && prior.provider === selected.provider && prior.sessionId === selected.sessionId && prior.owner.clientId !== selected.owner?.clientId) throw new RemoteConfigError('ownership-transfer', 'Session ownership cannot be changed by linking.')
-      if (selected) {
-        const duplicate = Object.entries(before.document.bindings).find(([id, value]) => id !== taskId && sessionLinkKey(value) === sessionLinkKey(selected))?.[0]
+      const prior = taskSessionLinks(before.document.bindings, taskId)
+      assertNoOwnershipTransfer(prior, selected)
+      for (const target of selected) {
+        const duplicate = sessionLinkEntries(before.document.bindings).find(([id, value]) => id !== taskId && sessionLinkKey(value) === sessionLinkKey(target))?.[0]
         if (duplicate) throw new RemoteConfigError('duplicate-session', `This session is already linked to ${duplicate}. Detach it there before moving it.`)
       }
-      if ((selected && entity?.state === 'active' && canonicalJson(prior ?? null) === canonicalJson(selected)) || (!selected && entity?.state === 'deleted')) {
+      if ((selected.length && entity?.state === 'active' && canonicalJson(prior) === canonicalJson(selected)) || (!selected.length && entity?.state === 'deleted')) {
         return { value: before, changed: recovered, snapshot: before }
       }
-      const record = await this.make('binding', selected ? { schemaVersion: 2, action: 'set', taskId, target: selected } : { schemaVersion: 2, action: 'delete', taskId }, before)
+      const record = await this.make('binding', selected.length ? { schemaVersion: '2.1', action: 'set', taskId, targets: selected } : { schemaVersion: '2.1', action: 'delete', taskId }, before)
       await this.validateNew(before, [record])
       await this.ensureRevision(state, expectedRevision)
       if (beforeWrite) {

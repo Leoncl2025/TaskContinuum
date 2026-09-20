@@ -8,6 +8,7 @@ import { agentHostKey, agentHostTargetSchema } from './agentHostProtocol'
 import { canonicalPolicyRoot } from './linkedSessionPolicy'
 import { bindRepositoryAgentHostCreation, readRepositorySessionLinks } from './repositorySessionLinks'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
+import { taskSessionLinks, type SessionLinksDocument } from '../shared/sessionBindings'
 import type { VSCodeDeviceClient } from './vscodeDeviceClient'
 import { readTaskWorkspace } from './workspaceReader'
 
@@ -29,6 +30,10 @@ export type AgentHostCreationDevices = Pick<VSCodeDeviceClient, 'agentHostWorker
 
 function failureMessage(error: unknown): string {
   return (error instanceof Error ? error.message : 'The creation operation could not be confirmed.').slice(0, 2000)
+}
+
+function linkedSession(bindings: SessionLinksDocument['bindings'], taskId: string, target: { sessionId: string; chatId: string; owner: { clientId: string } }) {
+  return taskSessionLinks(bindings, taskId).find((link) => agentHostKey(link) === agentHostKey(target))
 }
 
 export class AgentHostCreationClient {
@@ -146,11 +151,10 @@ export class AgentHostCreationClient {
           if (records.some((item) => item.request.taskId === request.taskId && !item.localBound && item.result.state !== 'failed')) throw new Error('This task has an unresolved creation operation. Check that operation instead of creating another session.')
           await this.knownTask(scope.root, request.taskId)
           const links = await readRepositorySessionLinks(scope.root)
-          if (links.document.bindings[request.taskId]) throw new Error('Detach the current session before creating another session for this task.')
           const worker = await this.devices.agentHostWorker(scope.root, request.workerId, request.taskId)
           const workspace = worker.workspaces.find((item) => item.id === request.workspaceId)
           if (worker.state !== 'connected') throw new Error(worker.error ?? 'The selected worker is not connected.')
-          if (!workspace?.canSend || workspace.taskState !== 'available') throw new Error(workspace?.error ?? 'The selected workspace is not available with send permission for this task.')
+          if (!workspace?.canSend || !['available', 'bound'].includes(workspace.taskState)) throw new Error(workspace?.error ?? 'The selected workspace is not available with send permission for this task.')
           if (workspace.expectedRevision !== request.expectedRevision) throw new Error('The worker task bindings changed. Refresh the worker selection before creating.')
           if (!worker.hosts.some((host) => host.hostId === request.hostId && host.available)) throw new Error('The exact selected Host is unavailable or unsupported.')
           await this.current(authorize)
@@ -166,7 +170,7 @@ export class AgentHostCreationClient {
           await this.current(authorize)
           await this.knownTask(scope.root, request.taskId)
           const links = await readRepositorySessionLinks(scope.root)
-          if (links.revision !== record.expectedRevision || links.document.bindings[request.taskId]) throw new Error('The caller task binding changed before creation. No create request was dispatched.')
+          if (links.revision !== record.expectedRevision) throw new Error('The caller task binding changed before creation. No create request was dispatched.')
           await this.current(authorize)
           dispatched = true
         })
@@ -201,14 +205,15 @@ export class AgentHostCreationClient {
       await this.current(authorize)
       await this.knownTask(record.root, record.request.taskId)
       const before = await readRepositorySessionLinks(record.root)
-      const prior = before.document.bindings[record.request.taskId]
-      if (prior) {
-        if (prior.provider !== 'agent-host' || agentHostKey(prior) !== agentHostKey(result.session)) throw new Error('The task is already bound to a different session. It was not overwritten.')
-      } else {
+      let link = linkedSession(before.document.bindings, record.request.taskId, result.session)
+      if (!link) {
         await this.current(authorize)
         const { sessionId, chatId, owner } = result.session
         await bindRepositoryAgentHostCreation(record.root, record.request.taskId, { sessionId, chatId, owner }, record.expectedRevision, () => this.current(authorize))
+        const current = await readRepositorySessionLinks(record.root)
+        link = linkedSession(current.document.bindings, record.request.taskId, result.session)
       }
+      if (!link) throw new Error('The created session was not present in the task bindings after assignment.')
       record.localBound = true
       record.bindingBlocked = false
       record.result = { ...result, error: undefined }
@@ -247,8 +252,6 @@ export class AgentHostCreationClient {
       await this.current(authorize)
       await this.knownTask(scope.root, record.request.taskId)
       const before = await readRepositorySessionLinks(scope.root)
-      const prior = before.document.bindings[record.request.taskId]
-      if (prior && (prior.provider !== 'agent-host' || agentHostKey(prior) !== agentHostKey(record.result.session))) throw new Error('The task already links a different session. It was not overwritten.')
       const worker = await this.devices.agentHostWorker(scope.root, record.request.workerId, record.request.taskId)
       const workspace = worker.workspaces.find((item) => item.id === record.request.workspaceId)
       if (worker.state !== 'connected' || worker.owner.clientId !== record.owner.clientId || !workspace?.canSend) throw new Error(worker.error ?? 'The original worker workspace is no longer available with send permission.')

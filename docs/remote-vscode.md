@@ -35,10 +35,12 @@ public Task Continuum metadata stays under the selected AgentDesk folder's own
 
 To link an existing session:
 
-1. On B, open the task workspace and **Agent Host sessions**. Approve access once,
-  choose an existing Host chat, and link it to the selected task. A task already
-  linked to another conversation must be explicitly detached first; this does not
-  delete its history. No Host or chat is created automatically.
+1. On B, open the task workspace and **Agent Host sessions > Link** in the left
+  sidebar. Approve access once, choose an existing Host chat, and link it to the
+  selected task. Linking adds to the task's session collection; **Current** shows
+  its session tree and supports opening or individually unlinking its members.
+  Unlink confirmation is inline and never deletes history. No Host or chat is
+  created automatically.
 2. Let **Automatic workspace links** connect the enrolled devices with read
   and send access; no separate session-link permission is needed.
   B's current validated binding **and** private local confirmation receipt
@@ -55,13 +57,13 @@ To link an existing session:
 
 ### Create on This Computer
 
-In **Agent Host sessions**, select an unbound task and change **Execution location**
+In **Agent Host sessions > Create**, select a task and change **Execution location**
 from its default **Remote worker** to **This computer**. The trusted local adapter
 selects this machine and only the current canonical task workspace; the renderer
 cannot supply another folder. Choose the exact available Copilot Host and click
 **Create and assign**. This creates a native local session and assigns its confirmed
 session/chat identity to that task, writing the binding and private owner receipt
-before reporting **Created and assigned**.
+before reporting **Created and assigned**. Existing task sessions remain linked.
 
 The Host must already be running and signed in. Local Host consent, read/send
 access, and the same authoritative workspace binding backend required by **Link**
@@ -84,16 +86,17 @@ helps with workspace setup; **Create and assign** binds a new chat to a selected
 task; **Link** binds an existing chat.
 
 Local and remote creation share durable caller history and a per-task reservation.
-Switching location cannot discard an uncertain operation or allow a second chat
-for that task. The location control is disabled while discovery or an operation is
+Switching location cannot discard an uncertain operation or start another creation
+while that operation is unresolved. After completion, another session can be
+created for the same task. The location control is disabled while discovery or an operation is
 in flight. Reopening the controls checks the same saved operation; **Retry binding**
 only assigns the existing chat. Resolve any pending local or remote operation
 before attempting another creation in either location.
 
 ### Create on a Remote Worker
 
-In **Agent Host sessions**, keep **Execution location** set to **Remote worker**
-and use **Create on remote worker** for an unbound task.
+In **Agent Host sessions > Create**, keep **Execution location** set to **Remote worker**
+and use **Create on remote worker** for the selected task, with or without existing sessions.
 Select a paired worker, one of its shared task workspaces, and the exact available
 Copilot Host. Existing **Read and send** workspace access includes creation:
 there is no separate create permission or approval. Read-only, expired, revoked,
@@ -235,12 +238,28 @@ containing exactly `sessionId` and `chatId`. Bare arrays, `hostId`, old Local
 identities (`nativeSessionId`, `workspaceStorageId`), mixed files and malformed
 data block access. There is no compatibility mode, migration or filtering.
 
+Task-session creation checks this receipt document before offering or dispatching
+native creation. Missing files are initialized on the first explicit confirmation;
+an existing bare `[]`, malformed JSON, or unsupported document blocks creation
+without replacing the file. The error names the receipt file instead of suggesting
+that a binding revision refresh can repair it.
+
+If the receipt file becomes invalid after native creation, the operation remains
+**Created, assignment incomplete** and retains the same native session/chat.
+For a receipt-only failure on an otherwise valid v2.1 workspace, do not recreate
+the workspace or its session. Quit Task Continuum on the execution device, back up
+the receipt file, and explicitly repair it. A known empty `[]` can be replaced with
+`{ "schemaVersion": 2, "receipts": [] }`; preserve valid existing receipts rather
+than clearing them. Reopen the app and use **Retry binding** on the saved operation.
+Only that binding and receipt are retried; no new chat or prompt is created.
+The application never repairs or migrates this file automatically.
+
 This is a breaking upgrade, not a receipt-only migration:
 
 1. Update both desktops and fully quit them before explicitly resetting any
   private state. The default Windows profile is `%APPDATA%\Task Continuum`;
   `TASKCONTINUUM_DATA_DIR` selects another profile for development.
-2. Use fresh Automatic workspace links metadata for v2 bindings. Existing canonical
+2. Use fresh Automatic workspace links metadata for v2.1 bindings. Existing canonical
   logs containing old binding payloads are rejected. Do not modify signed records,
   delete individual operations from an accepted store, or import old authority.
   Archive any retired enrollment out of band and initialize a new workspace
@@ -253,15 +272,15 @@ This is a breaking upgrade, not a receipt-only migration:
   Retire them explicitly if needed; do not replay any uncertain operation or
   message from them. The application does not reset these records automatically.
 5. On the owner, link the existing native chats again through **Agent Host sessions**.
-  For a v2 binding already saved without its receipt, **Review session link**
+  For a v2.1 binding already saved without its receipt, **Review session link**
   confirms the same chat and restores history/models without clearing its draft.
 
 Cleanup removes obsolete authorization metadata only. It does not authorize a
 session, create a chat, detach a task or modify immutable binding history. Do not
 delete the entire profile, device keys or VS Code chat history.
 
-Choosing a session belonging to another task only navigates to that task; it does
-not confirm its access on your behalf.
+Sessions belonging to another task cannot be reassigned from the current task.
+Select their owning task to open them or explicitly unlink before moving them.
 
 The separate **Enable Automatic workspace links** error means the immutable
 binding backend is not ready. Enable it under **Remote devices > Automatic
@@ -321,7 +340,13 @@ pairs can continue independently of another offline device.
 Public data is the `.taskcontinuum/workspace.json` descriptor plus immutable
 signed, hash-addressed operations under `.taskcontinuum/records/v1`. Only four
 public record types exist: **device**, **invitation**, **binding** and **setting**.
-A v2 binding requires `provider: "agent-host"`, `sessionId`, `chatId`
+A v2.1 binding (`"schemaVersion": "2.1"`, a string) stores a collection of links for one task. Earlier signed binding
+schemas, including v2, are rejected without conversion or mutation. There is no
+automatic migration: archive the old binding configuration, initialize fresh
+workspace metadata, and manually link the existing native sessions again.
+The native chats are not recreated or deleted. All desktops need v2.1 support
+before editing these collections. Creation-operation and receipt schemas remain v2.
+Each link requires `provider: "agent-host"`, `sessionId`, `chatId`
 and a stable owner (`clientId`, `machineName`). Ownerless and retired provider
 formats are unsupported even inside signed records or SSH notifications.
 

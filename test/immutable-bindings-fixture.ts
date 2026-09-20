@@ -29,10 +29,10 @@ export function agentHostTargetFixture(session = 'one', owner = immutableOwner):
 }
 
 // Old signed records must reach the parser as untrusted input, not as SessionLink.
-export function signedBindingFixture(target: unknown, author: Pick<ReturnType<typeof immutableRecordSigner>, 'actor' | 'sign'> = immutableRecordSigner(1), workspaceId = immutableWorkspaceId) {
+export function signedBindingFixture(target: unknown, author: Pick<ReturnType<typeof immutableRecordSigner>, 'actor' | 'sign'> = immutableRecordSigner(1), workspaceId = immutableWorkspaceId, payloadVersion?: 2) {
   const body = {
     schemaVersion: 1, workspaceId, kind: 'binding', nonce: randomUUID(), createdAt: '2026-09-14T09:00:00.000Z',
-    actor: author.actor, parents: [], payload: { action: 'set', taskId: 'T-0001', target },
+    actor: author.actor, parents: [], payload: { ...(payloadVersion ? { schemaVersion: payloadVersion } : {}), action: 'set', taskId: 'T-0001', target },
   }
   const signingBytes = Buffer.from(`TaskCon.RemoteConfig.v1\n${canonicalJson(body)}`, 'utf8')
   const signed = { ...body, signature: { algorithm: 'ed25519', value: author.sign(signingBytes).toString('base64') } }

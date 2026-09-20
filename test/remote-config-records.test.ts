@@ -53,33 +53,65 @@ describe('canonical signed immutable remote records', () => {
 
   it('signs canonical bytes once and deduplicates parent ordering and retries', async () => {
     const nonce = randomUUID()
-    const first = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target() }, nonce, parents: ['c'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)] })
-    const second = await make({ parents: ['b'.repeat(64), 'c'.repeat(64)], nonce, payload: { schemaVersion: 2, target: target(), taskId: 'T-0001', action: 'set' }, kind: 'binding' })
+    const first = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target()] }, nonce, parents: ['c'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)] })
+    const second = await make({ parents: ['b'.repeat(64), 'c'.repeat(64)], nonce, payload: { schemaVersion: '2.1', targets: [target()], taskId: 'T-0001', action: 'set' }, kind: 'binding' })
     expect(second).toEqual(first)
     expect(first.parents).toEqual(['b'.repeat(64), 'c'.repeat(64)])
     expect(await verifyRecord(first, trust)).toEqual(first)
     expect(first.operationId).toMatch(/^[a-f0-9]{64}$/)
     expect(serializeRecord(first)).toBe(canonicalJson(first) + '\n')
+    expect(JSON.parse(serializeRecord(first)).payload.schemaVersion).toBe('2.1')
+    for (const schemaVersion of [2, 2.1, 3, '2', '3']) {
+      expect(() => parseRecord({ ...first, payload: { ...first.payload, schemaVersion } })).toThrow()
+    }
+  })
+
+  it('rejects signed v2 history without rewriting it or activating a partial configuration', async () => {
+    const legacy = signedBindingFixture(target('legacy'), a, workspaceId, 2)
+    const { operationId, signature, ...body } = legacy
+    expect(verify(null, Buffer.from(`TaskCon.RemoteConfig.v1\n${canonicalJson(body)}`, 'utf8'), a.verificationKey, Buffer.from(signature.value, 'base64'))).toBe(true)
+    const serialized = canonicalJson(legacy) + '\n'
+    const directory = await folder()
+    const file = join(directory, '.taskcontinuum', 'records', 'v1', 'bindings', 'T-0001', `${operationId}.json`)
+    await mkdir(dirname(file), { recursive: true })
+    await writeFile(file, serialized)
+    expect(() => parseRecord(legacy)).toThrow(/bindings require v2\.1.*not migrated/)
+    await expect(readRecords(directory)).rejects.toThrow('bindings require v2.1')
+    expect(await readFile(file, 'utf8')).toBe(serialized)
+    const current = await make({
+      kind: 'binding',
+      payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0002', targets: [target('first'), target('second')] },
+    })
+    const resolved = await resolveRecords([legacy, current], trust)
+    expect(resolved.blocked).toBe(true)
+    expect(resolved.bindings).toEqual({})
+    expect(canonicalJson(legacy) + '\n').toBe(serialized)
+    expect((await resolveRecords([current], trust)).bindings).toEqual({ 'T-0002': [target('first'), target('second')] })
+    await expect(make({
+      kind: 'binding',
+      payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0003', targets: [target(), { ...target(), chatId: 'ahp-chat:/other' }] },
+    })).rejects.toThrow('same session')
   })
 
   it('rejects forged signatures, changed content, unknown fields and untrusted keys', async () => {
-    const good = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target() } })
+    const good = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target()] } })
     await expect(verifyRecord({ ...good, createdAt: '2026-09-14T08:00:00.000Z' }, trust)).rejects.toThrow('hash')
-    const forged = await createRecord({ kind: 'binding', payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0001' }, workspaceId, actor: a.actor }, () => Buffer.alloc(64))
+    const forged = await createRecord({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'delete', taskId: 'T-0001' }, workspaceId, actor: a.actor }, () => Buffer.alloc(64))
     await expect(verifyRecord(forged, trust)).rejects.toThrow('signature')
     await expect(verifyRecord(good, { ...trust, trustedKey: () => b.publicKey })).rejects.toThrow('fingerprint')
     await expect(verifyRecord(good, { ...trust, trustedKey: () => undefined })).rejects.toThrow('not trusted')
     await expect(verifyRecord(good, { ...trust, workspaceId: b.actor.deviceId })).rejects.toThrow('different')
     await expect(verifyRecord({ ...good, privateKey: 'not-permitted' }, trust)).rejects.toThrow('schema')
     await expect(verifyRecord({ ...good, schemaVersion: 2 }, trust)).rejects.toThrow('schema')
-    if (good.kind === 'binding' && good.payload.action === 'set' && good.payload.target.owner) {
-      const normalized = { ...good, payload: { ...good.payload, target: { ...good.payload.target, owner: { ...good.payload.target.owner, machineName: ' machine-2 ' } } } }
+    if (good.kind === 'binding' && good.payload.action === 'set') {
+      const target = good.payload.targets[0]
+      const normalized = { ...good, payload: { ...good.payload, targets: [{ ...target, owner: { ...target.owner, machineName: ' machine-2 ' } }] } }
       await expect(verifyRecord(normalized, trust)).rejects.toThrow('normalization')
     }
   })
 
   it('accepts only explicitly injected map pins and verifies their fingerprint and editor policy', async () => {
-    const record = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0001' } })
+    const record = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'delete', taskId: 'T-0001' } })
     expect(await verifyRecord(record, { ...trust, trustedKey: new Map([[a.actor.deviceId, a.publicKey]]) })).toEqual(record)
     expect(await verifyRecord(record, { ...trust, trustedKey: new Map([[`${a.actor.deviceId}:${a.actor.keyId}`, a.publicKey]]) })).toEqual(record)
     await expect(verifyRecord(record, { ...trust, trustedKey: new Map() })).rejects.toThrow('not trusted')
@@ -106,9 +138,9 @@ describe('canonical signed immutable remote records', () => {
     expect(resolved.blocked).toBe(true)
     expect(resolved.diagnostics).toContainEqual(expect.objectContaining({ code: 'invalid-record' }))
     await expect(Reflect.apply(createRecord, undefined, [{
-      kind: 'binding', workspaceId, actor: author.actor, payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: invalid },
+      kind: 'binding', workspaceId, actor: author.actor, payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [invalid] },
     }, author.sign])).rejects.toThrow()
-    const modern = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target() } }, author)
+    const modern = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target()] } }, author)
     expect(await verifyRecord(modern, trust)).toEqual(modern)
   })
 
@@ -126,8 +158,8 @@ describe('canonical signed immutable remote records', () => {
   })
 
   it('unions different entity edits identically across independent replicas and orderings', async () => {
-    const first = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target('one') } })
-    const second = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0002', target: target('two') } }, b)
+    const first = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target('one')] } })
+    const second = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0002', targets: [target('two')] } }, b)
     const setting = await make({ kind: 'setting', payload: { action: 'set', scope: 'workspace', settingKey: 'autoLink', value: false } }, c)
     const left = await folder()
     const right = await folder()
@@ -135,33 +167,33 @@ describe('canonical signed immutable remote records', () => {
     const resolved = await resolveRecords(await readRecords(left), trust)
     expect(await resolveRecords(await readRecords(right), trust)).toEqual(resolved)
     expect(Object.keys(resolved.bindings).sort()).toEqual(['T-0001', 'T-0002'])
-    expect(resolved.bindings['T-0001']).toEqual(target('one'))
-    expect(resolved.bindings['T-0002']).toEqual(target('two'))
+    expect(resolved.bindings['T-0001']).toEqual([target('one')])
+    expect(resolved.bindings['T-0002']).toEqual([target('two')])
     expect(resolvedSettings(resolved, a.actor.deviceId).autoLink).toBe(false)
   })
 
   it('keeps same-task conflicts, set/delete races and late offline edits without selecting a clock winner', async () => {
-    const base = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target('old') } })
-    const left = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target('new') }, parents: [base.operationId] })
-    const right = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0001' }, parents: [base.operationId] }, b)
+    const base = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target('old')] } })
+    const left = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target('new')] }, parents: [base.operationId] })
+    const right = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'delete', taskId: 'T-0001' }, parents: [base.operationId] }, b)
     const conflicted = await resolveRecords([base, right, left], trust)
     expect(conflicted.bindings).toEqual({})
     expect(conflicted.entities['binding:T-0001'].state).toBe('needs-resolution')
     expect(conflicted.heads['binding:T-0001']).toEqual([left.operationId, right.operationId].sort())
-    const resolution = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target('resolved') }, parents: conflicted.heads['binding:T-0001'] })
-    expect((await resolveRecords([resolution, right, base, left], trust)).bindings['T-0001']).toEqual(target('resolved'))
-    const late = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target('offline') }, parents: [base.operationId] }, c)
+    const resolution = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target('resolved')] }, parents: conflicted.heads['binding:T-0001'] })
+    expect((await resolveRecords([resolution, right, base, left], trust)).bindings['T-0001']).toEqual([target('resolved')])
+    const late = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target('offline')] }, parents: [base.operationId] }, c)
     expect((await resolveRecords([resolution, right, base, left, late], trust)).bindings).toEqual({})
   })
 
   it('coalesces equal semantic heads while preserving every operation and tombstone', async () => {
-    const one = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target() } })
-    const two = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target() } }, b)
+    const one = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target()] } })
+    const two = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target()] } }, b)
     const equal = await resolveRecords([one, two, one], trust)
     expect(equal.records).toHaveLength(2)
     expect(equal.heads['binding:T-0001']).toHaveLength(2)
-    expect(equal.bindings['T-0001']).toEqual(target())
-    const remove = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0001' }, parents: equal.heads['binding:T-0001'] })
+    expect(equal.bindings['T-0001']).toEqual([target()])
+    const remove = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'delete', taskId: 'T-0001' }, parents: equal.heads['binding:T-0001'] })
     const deleted = await resolveRecords([remove, two, one], trust)
     expect(deleted.bindings).toEqual({})
     expect(deleted.entities['binding:T-0001'].state).toBe('deleted')
@@ -169,38 +201,46 @@ describe('canonical signed immutable remote records', () => {
   })
 
   it('disables every task claiming one canonical session, including different chat IDs', async () => {
-    const one = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target() } })
-    const two = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0002', target: { ...target(), chatId: 'ahp-chat:/different' } } }, b)
-    const separate = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0003', target: target('separate') } })
+    const one = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target()] } })
+    const two = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0002', targets: [{ ...target(), chatId: 'ahp-chat:/different' }] } }, b)
+    const separate = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0003', targets: [target('separate')] } })
     const conflicted = await resolveRecords([one, two, separate], trust)
     expect(Object.keys(conflicted.bindings)).toEqual(['T-0003'])
     expect(conflicted.entities['binding:T-0001'].state).toBe('needs-resolution')
     expect(conflicted.entities['binding:T-0002'].state).toBe('needs-resolution')
-    const remove = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0001' }, parents: [one.operationId] })
-    expect((await resolveRecords([one, two, separate, remove], trust)).bindings['T-0002']).toEqual({ ...target(), chatId: 'ahp-chat:/different' })
-    const concurrent = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target('other') } }, b)
+    const remove = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'delete', taskId: 'T-0001' }, parents: [one.operationId] })
+    expect((await resolveRecords([one, two, separate, remove], trust)).bindings['T-0002']).toEqual([{ ...target(), chatId: 'ahp-chat:/different' }])
+    const concurrent = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target('other')] } }, b)
     expect((await resolveRecords([one, two, concurrent], trust)).bindings).toEqual({})
   })
 
   it('fails closed for unavailable and cross-entity causal dependencies, but preserves unaffected entities', async () => {
-    const good = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target() } })
-    const old = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0002', target: target('old') } })
-    const missing = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0002' }, parents: ['e'.repeat(64)] })
+    const good = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target()] } })
+    const old = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0002', targets: [target('old')] } })
+    const missing = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'delete', taskId: 'T-0002' }, parents: ['e'.repeat(64)] })
     const resolution = await resolveRecords([good, old, missing], trust)
-    expect(resolution.bindings).toEqual({ 'T-0001': target() })
+    expect(resolution.bindings).toEqual({ 'T-0001': [target()] })
     expect(resolution.entities['binding:T-0002'].state).toBe('blocked')
     expect(() => recordClosure(missing, [good, old])).toThrow('closure')
-    const wrong = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0002' }, parents: [good.operationId] })
+    const wrong = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'delete', taskId: 'T-0002' }, parents: [good.operationId] })
     expect((await resolveRecords([good, old, wrong], trust)).entities['binding:T-0002'].state).toBe('blocked')
     expect((await resolveRecords([good, { ...old, schemaVersion: 2 }], trust)).bindings).toEqual({})
     expect(await resolveRecords([missing, old, good], trust)).toEqual(resolution)
   })
 
   it('enforces task, owner and writer permission callbacks and forbids implicit ownership transfer', async () => {
-    const base = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target() } })
+    const base = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target()] } })
     expect((await resolveRecords([base], { ...trust, authorize: () => false })).bindings).toEqual({})
-    const changed = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target('one', c) }, parents: [base.operationId] })
+    const changed = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target('one', c)] }, parents: [base.operationId] })
     expect((await resolveRecords([base, changed], trust)).diagnostics.some((entry) => entry.code === 'ownership-transfer')).toBe(true)
+    const additive = await make({
+      kind: 'binding',
+      payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target(), target('one', c)] },
+      parents: [base.operationId],
+    })
+    const expanded = await resolveRecords([base, additive], trust)
+    expect(expanded.diagnostics.some((entry) => entry.code === 'ownership-transfer')).toBe(false)
+    expect(expanded.bindings['T-0001']).toEqual([target(), target('one', c)])
     const wrongDevice = await make({ kind: 'device', payload: identity(b) })
     await expect(verifyRecord(wrongDevice, trust)).rejects.toThrow('owning device')
     const wrongSetting = await make({ kind: 'setting', payload: { action: 'set', scope: 'device', deviceId: b.actor.deviceId, settingKey: 'autoLink', value: true } })
@@ -246,7 +286,7 @@ describe('canonical signed immutable remote records', () => {
     const original = await make({ kind: 'device', payload: identity(a) })
     const remove = await make({ kind: 'device', payload: { action: 'remove', deviceId: a.actor.deviceId }, parents: [original.operationId] })
     const republish = await make({ kind: 'device', payload: identity(a), parents: [remove.operationId] })
-    const binding = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target('one', a) } }, b)
+    const binding = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target('one', a)] } }, b)
     const blocked = await resolveRecords([original, remove, republish, binding], trust)
     expect(blocked.devices[a.actor.deviceId]).toBeUndefined()
     expect(blocked.bindings).toEqual({})
@@ -269,7 +309,7 @@ describe('canonical signed immutable remote records', () => {
         issuerIdentityRef: old.operationId, recipientIdentityRef: peer.operationId, capability: 'ah-link',
         issuedAt: at, expiresAt: '2026-09-14T10:00:00.000Z', routeRef: { identityRef: old.operationId, routeIndex: 0 },
       } })
-      const bound = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target() } })
+      const bound = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target()] } })
       expect(await verifyRecord(old, trust)).toEqual(old)
       const before = await resolveRecords([old, peer, grant, bound], trust)
       expect(before.records).toContainEqual(old)
@@ -279,7 +319,7 @@ describe('canonical signed immutable remote records', () => {
       expect(before.invitations).toEqual({})
       expect(before.diagnostics).toContainEqual(expect.objectContaining({ code: 'incomplete-device-publication', entityKey: `device:${a.actor.deviceId}` }))
       expect(before.diagnostics).toContainEqual(expect.objectContaining({ code: 'incomplete-link-metadata' }))
-      expect(before.bindings['T-0001']).toEqual(target())
+      expect(before.bindings['T-0001']).toEqual([target()])
       const current = await make({ kind: 'device', payload: identity(a), parents: [old.operationId] })
       const refreshed = await resolveRecords([old, current, peer, grant, bound], trust)
       expect(refreshed.devices[a.actor.deviceId]).toEqual(current)
@@ -292,7 +332,7 @@ describe('canonical signed immutable remote records', () => {
   it('creates exact hash-addressed files only once and refuses collisions, mutations and moved entity paths', async () => {
     const root = await folder()
     expect(await readRecords(join(root, 'not-yet-created-outbox'))).toEqual([])
-    const record = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'set', taskId: 'T-0001', target: target() } })
+    const record = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target()] } })
     expect((await appendRecord(root, record, trust)).created).toBe(true)
     expect((await appendRecord(root, record, trust)).created).toBe(false)
     expect(await readRecords(root, trust)).toEqual([record])
@@ -309,7 +349,7 @@ describe('canonical signed immutable remote records', () => {
     const root = await folder()
     const outside = await folder()
     await symlink(outside, join(root, '.taskcontinuum'), process.platform === 'win32' ? 'junction' : 'dir')
-    const record = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0001' } })
+    const record = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'delete', taskId: 'T-0001' } })
     await expect(appendRecord(root, record)).rejects.toThrow('filesystem links')
     const safe = await folder()
     await appendRecord(safe, record)
@@ -321,10 +361,10 @@ describe('canonical signed immutable remote records', () => {
   })
 
   it('bounds record counts, bytes and notification dependency closures without dropping records', async () => {
-    const record = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0001' } })
+    const record = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'delete', taskId: 'T-0001' } })
     await expect(resolveRecords(Array.from({ length: 10001 }, () => record), trust)).rejects.toThrow('10,000')
     await expect(verifyRecord({ ...record, extra: 'x'.repeat(33000) }, trust)).rejects.toThrow('32 KiB')
-    const child = await make({ kind: 'binding', payload: { schemaVersion: 2, action: 'delete', taskId: 'T-0001' }, parents: [record.operationId] })
+    const child = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'delete', taskId: 'T-0001' }, parents: [record.operationId] })
     expect(() => recordClosure(child, [record], 0)).toThrow('limit')
     const root = await folder()
     await appendRecord(root, record)
