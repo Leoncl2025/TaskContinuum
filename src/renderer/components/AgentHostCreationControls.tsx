@@ -12,6 +12,8 @@ interface CreationControlsProps {
 }
 
 type Lifetime = { active: boolean }
+type Activity = 'foreground' | 'background'
+type RunScope = Lifetime & { mode: Activity }
 
 const stateLabels: Record<AgentHostCreation['state'], string> = {
   creating: 'Creating',
@@ -53,7 +55,7 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
   const [historyError, setHistoryError] = useState<string>()
   const [error, setError] = useState<string>()
   const [busy, setBusy] = useState(false)
-  const running = useRef(false)
+  const running = useRef<RunScope | undefined>(undefined)
   const lifetime = useRef<Lifetime>({ active: false })
   const local = location === 'local'
   const heading = local ? 'Create on this computer' : 'Create on remote worker'
@@ -93,29 +95,32 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
     }
   }
 
-  async function run(action: (scope: Lifetime) => Promise<void>, clearError = true): Promise<void> {
-    const scope = lifetime.current
-    if (!scope.active || !supported || !taskId || running.current) return
-    running.current = true
-    setBusy(true)
+  async function run(action: (scope: Lifetime) => Promise<void>, clearError = true, mode: Activity = 'foreground'): Promise<void> {
+    const previous = running.current
+    if (!lifetime.current.active || !supported || !taskId || (previous && (previous.mode === 'foreground' || mode === 'background'))) return
+    // User actions supersede polling; its late results must not overwrite the new action.
+    if (previous) previous.active = false
+    const scope: RunScope = { active: true, mode }
+    running.current = scope
+    setBusy(mode === 'foreground')
     if (clearError) setError(undefined)
     try { await action(scope) } catch (failure) {
       if (scope.active) setError(failureMessage(failure))
     } finally {
-      if (scope.active) { running.current = false; setBusy(false) }
+      if (scope.active) { scope.active = false; running.current = undefined; setBusy(false) }
     }
   }
 
-  async function refresh(clearError = false, selectedLocation = location): Promise<void> {
+  async function refresh(clearError = false, mode: Activity = 'foreground'): Promise<void> {
     await run(async (scope) => {
       const previouslyPending = new Set(savedOperations.current.filter(pending).map((operation) => operation.operationId))
-      const [catalogue, history] = await Promise.allSettled([selectedLocation === 'local' ? bridge!.creationWorkers(taskId!, 'local') : bridge!.creationWorkers(taskId!), bridge!.creations(taskId!)])
+      const [catalogue, history] = await Promise.allSettled([location === 'local' ? bridge!.creationWorkers(taskId!, 'local') : bridge!.creationWorkers(taskId!), bridge!.creations(taskId!)])
       if (!scope.active) return
       if (catalogue.status === 'fulfilled') {
         const localWorkers = catalogue.value.filter((item) => item.local === true)
-        const availableWorkers = selectedLocation === 'local' ? (localWorkers.length === 1 ? localWorkers : []) : catalogue.value
+        const availableWorkers = location === 'local' ? (localWorkers.length === 1 ? localWorkers : []) : catalogue.value
         setWorkers(availableWorkers)
-        if (selectedLocation === 'local') {
+        if (location === 'local') {
           const localWorker = availableWorkers[0]
           setWorkerId(localWorker?.id ?? '')
           setWorkspaceId(localWorker?.workspaces.length === 1 ? localWorker.workspaces[0].id : '')
@@ -132,23 +137,28 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
         if (!scope.active) return
         await check(operation, scope)
       }
-    }, clearError)
+    }, clearError, mode)
   }
 
-  const refreshFromEffect = useEffectEvent(() => { void refresh() })
+  const refreshFromEffect = useEffectEvent((mode: Activity) => { void refresh(false, mode) })
   useEffect(() => {
     const scope = { active: true }
     lifetime.current = scope
-    running.current = false
-    const tick = () => { if (scope.active) refreshFromEffect() }
-    void Promise.resolve().then(tick)
+    running.current = undefined
+    const tick = () => { if (scope.active) refreshFromEffect('background') }
+    void Promise.resolve().then(() => { if (scope.active) refreshFromEffect('foreground') })
     const timer = setInterval(tick, 5000)
     window.addEventListener('online', tick)
-    return () => { scope.active = false; clearInterval(timer); window.removeEventListener('online', tick) }
-  }, [bridge, taskId, supported])
+    return () => {
+      scope.active = false
+      if (running.current) running.current.active = false
+      clearInterval(timer)
+      window.removeEventListener('online', tick)
+    }
+  }, [bridge, taskId, supported, location])
 
   function changeLocation(nextLocation: AgentHostCreationLocation): void {
-    if (running.current || disabled || nextLocation === location) return
+    if (running.current?.mode === 'foreground' || disabled || nextLocation === location) return
     setLocation(nextLocation)
     setWorkers([])
     setWorkerId('')
@@ -156,11 +166,10 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
     setHostId('')
     setCatalogueLoaded(false)
     setCatalogueError(undefined)
-    void refresh(false, nextLocation)
   }
 
   async function create(): Promise<void> {
-    if (!canCreate || running.current || !worker || !workspace || !host || !taskId) return
+    if (!canCreate || running.current?.mode === 'foreground' || savedOperations.current.some(pending) || !worker || !workspace || !host || !taskId) return
     const request: AgentHostCreateRequest = { operationId: crypto.randomUUID(), taskId, workerId: worker.id, workspaceId: workspace.id, hostId: host.hostId, expectedRevision: workspace.expectedRevision }
     let completed = false
     await run(async (scope) => {
