@@ -338,8 +338,8 @@ pairs can continue independently of another offline device.
 ### Immutable Binding Synchronization
 
 Public data is the `.taskcontinuum/workspace.json` descriptor plus immutable
-signed, hash-addressed operations under `.taskcontinuum/records/v1`. Only four
-public record types exist: **device**, **invitation**, **binding** and **setting**.
+signed, hash-addressed operations under `.taskcontinuum/records/v1`. The public
+record types are **device**, **alias**, **invitation**, **binding** and **setting**.
 A v2.1 binding (`"schemaVersion": "2.1"`, a string) stores a collection of links for one task. Earlier signed binding
 schemas, including v2, are rejected without conversion or mutation. There is no
 automatic migration: archive the old binding configuration, initialize fresh
@@ -349,6 +349,12 @@ before editing these collections. Creation-operation and receipt schemas remain 
 Each link requires `provider: "agent-host"`, `sessionId`, `chatId`
 and a stable owner (`clientId`, `machineName`). Ownerless and retired provider
 formats are unsupported even inside signed records or SSH notifications.
+
+Machine aliases are separate workspace-shared display metadata, editable under
+**Automatic workspace links**. They do not replace the original hostname,
+device ID, SSH identity or session owner. See
+[machine aliases](workspace-git-sync.md#machine-aliases) for naming, clearing,
+conflict recovery and compatible-desktop requirements.
 
 The cadence is fixed at **15 seconds**. Configuration edits durably save their
 operation and immediately schedule Git publication. Binding changes also notify
@@ -483,7 +489,7 @@ explicitly; none triggers an alternate Agent or weaker SSH verification.
 
 ## Storage and Trust
 
-The four public immutable record types described above are the only Git
+The public immutable record types described above are the only Git
 configuration authority. A hostname is metadata, not authentication; the original
 Host/session/chat and stable owner are required. Signed remote data cannot create
 a new local owner receipt, silently transfer ownership or bypass device trust.

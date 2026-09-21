@@ -9,8 +9,10 @@ import { AgentHostPanel } from '../src/renderer/components/AgentHostPanel'
 import { readModelPreference, saveModelPreference } from '../src/renderer/chat/modelPreferences'
 import { fixtureTasks as demoTasks } from './task-fixture'
 import { modelConfigFixture } from './agent-host-model-fixture'
+import { MachineAliasesProvider } from '../src/renderer/MachineAliasesProvider'
+import { gitSyncUiFixture } from './remote-config-ui-fixture'
 
-afterEach(() => { delete window.agentHost; delete window.desktop })
+afterEach(() => { delete window.agentHost; delete window.desktop; delete window.remoteVSCode })
 
 function fixture() {
   const target = { sessionId: 'ahp-session:/original', chatId: 'ahp-chat:/original/main', owner: { clientId: crypto.randomUUID(), machineName: 'Owner-B' } }
@@ -55,6 +57,57 @@ describe('Agent Host chat UI', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeEnabled())
     expect(bridge.send).toHaveBeenCalledOnce()
     expect(bridge.cancel).not.toHaveBeenCalled()
+  })
+
+  it('updates aliases during streaming without restarting watches or changing drafts, models, or protocol targets', async () => {
+    const setup = fixture()
+    const git = gitSyncUiFixture()
+    window.remoteVSCode = git.remote
+    const senderId = crypto.randomUUID()
+    git.setStatus({ ...git.getStatus(), machineAliases: { [setup.target.owner.clientId]: 'Office' } })
+    const user = userEvent.setup()
+    render(<MachineAliasesProvider workspaceId="workspace"><AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} /></MachineAliasesProvider>)
+    await screen.findByText('Copilot @ Office (Owner-B)')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Agent Host model' }), await screen.findByRole('option', { name: 'GPT-6' }))
+    await user.type(screen.getByRole('textbox', { name: 'Message Agent Host' }), 'Keep my next question')
+    const terminal = 'ahp-terminal:/streaming'
+    setup.view.chat!.activeTurn = {
+      id: 'streaming-turn', startedAt: '', message: { text: 'Original request', origin: { kind: 'user' }, _meta: { taskcontinuumActor: { clientId: senderId, username: 'Alice', machineName: 'Sender-A' } } },
+      responseParts: [
+        { kind: 'markdown', id: 'stream', content: 'Streaming answer' },
+        { kind: 'toolCall', toolCall: { toolCallId: 'terminal-tool', toolName: 'terminal', displayName: 'Live checks', status: 'running', content: [{ type: 'terminal', resource: terminal, title: 'Checks', result: { preview: 'Still running' } }] } },
+      ], usage: undefined,
+    } as ChatState['activeTurn']
+    act(() => setup.emit())
+    expect(await screen.findByLabelText('Checks on Office (Owner-B)')).toHaveTextContent('Still running')
+    git.setStatus({ ...git.getStatus(), machineAliases: { [setup.target.owner.clientId]: 'Build station', [senderId]: 'Portable' } })
+    await act(async () => git.notify())
+    expect(screen.getAllByText('Copilot @ Build station (Owner-B)')).toHaveLength(2)
+    expect(screen.getByLabelText('Checks on Build station (Owner-B)')).toHaveTextContent('Still running')
+    expect(within(screen.getByRole('log')).getByText('Portable (Sender-A)')).toBeInTheDocument()
+    expect(screen.getByText('Streaming answer')).toBeInTheDocument()
+    expect(screen.getByRole('textbox')).toHaveValue('Keep my next question')
+    expect(screen.getByRole('combobox', { name: 'Agent Host model' })).toHaveValue('gpt-6')
+    expect(readModelPreference(setup.target.owner.clientId, 'copilotcli')).toEqual({ model: { id: 'gpt-6' } })
+    expect(setup.bridge.watch).toHaveBeenCalledExactlyOnceWith(setup.target)
+    expect(setup.bridge.models).toHaveBeenCalledExactlyOnceWith(setup.target)
+    expect(setup.bridge.unwatch).not.toHaveBeenCalled()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: 'Stop Agent Host response' }))
+    expect(setup.bridge.cancel).toHaveBeenCalledExactlyOnceWith(setup.target, 'streaming-turn')
+    git.setStatus({ ...git.getStatus(), machineAliases: {} })
+    await act(async () => git.notify())
+    expect(screen.getAllByText('Copilot @ Owner-B')).toHaveLength(2)
+    expect(screen.getByLabelText('Checks on Owner-B')).toBeInTheDocument()
+    expect(screen.getByRole('textbox')).toHaveValue('Keep my next question')
+    expect(setup.bridge.watch).toHaveBeenCalledOnce()
+    setup.view.chat!.activeTurn = undefined
+    act(() => setup.emit())
+    await user.click(screen.getByRole('button', { name: 'Send to Agent Host' }))
+    expect(setup.bridge.send).toHaveBeenCalledExactlyOnceWith(setup.target, expect.any(String), 'Keep my next question', undefined, { id: 'gpt-6' })
+    expect(setup.target.owner.machineName).toBe('Owner-B')
+    expect(setup.bridge.create).not.toHaveBeenCalled()
+    expect(setup.bridge.createLocal).not.toHaveBeenCalled()
   })
 
   it('remembers the explicit model and options when reopening another task chat on the same owner', async () => {
@@ -389,7 +442,7 @@ describe('Agent Host chat UI', () => {
     setup.view.chat!.activeTurn = { id: 'turn', startedAt: '', message: { text: 'Run checks', origin: { kind: 'user' } }, responseParts: [{ kind: 'toolCall', toolCall: { toolCallId: 'tool', toolName: 'terminal', displayName: 'Run tests', status: 'running', content: [{ type: 'terminal', resource: terminal, title: 'Tests' }] } }], usage: undefined } as ChatState['activeTurn']
     setup.view.terminals[terminal] = { title: 'Tests', content: [{ type: 'unclassified', value: '\u001b[32mPASS\u001b[0m\n<script>not executable</script>' }], lifecycle: { status: 'running' }, claim: { kind: 'session', session: setup.target.sessionId, chat: setup.target.chatId } } as AgentHostView['terminals'][string]
     const rendered = render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
-    const output = await screen.findByLabelText('Tests')
+    const output = await screen.findByLabelText('Tests on Owner-B')
     expect(output).toHaveTextContent('PASS')
     expect(output).toHaveTextContent('<script>not executable</script>')
     expect(output.textContent).not.toContain('\u001b')

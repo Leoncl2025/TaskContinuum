@@ -15,6 +15,7 @@ import { Icon, IconButton } from './Primitives'
 import { AgentHostModelOptions } from './AgentHostModelConfig'
 import { modelConfigErrors } from '../../shared/agentHostModelConfig'
 import type { ModelConfig } from '../../shared/agentHostModelConfig'
+import { machineLabel, useMachineAliases } from '../machineAliases'
 
 function terminalText(state: TerminalState | undefined): string {
   return state ? stripAnsi(state.content.map((part) => part.type === 'command' ? part.output : part.value).join('')) : ''
@@ -33,7 +34,7 @@ function Response({ part, terminals, owner }: { part: ResponsePart; terminals: R
   return <details className="ahp-tool" open={tool.status === 'running' || pending}>
     <summary><Icon name={tool.status === 'completed' ? 'check' : pending ? 'shield' : 'tools'} /><strong>{tool.displayName || tool.toolName}</strong><span>{tool.status.replaceAll('-', ' ')}</span></summary>
     {pending && <p className="message-notice">Awaiting confirmation on {owner}</p>}
-    {content.map((item, index) => item.type === 'terminal' ? <pre key={index} className="ahp-terminal" aria-label={item.title || 'Terminal output'}>{terminalText(terminals[item.resource]) || stripAnsi(item.result?.preview ?? '') || 'Waiting for terminal output...'}</pre> : item.type === 'text' ? <ChatMarkdown key={index} source={item.text} /> : <p key={index} className="message-notice">{item.type}</p>)}
+    {content.map((item, index) => item.type === 'terminal' ? <pre key={index} className="ahp-terminal" aria-label={`${item.title || 'Terminal output'} on ${owner}`} title={`Terminal on ${owner}`}>{terminalText(terminals[item.resource]) || stripAnsi(item.result?.preview ?? '') || 'Waiting for terminal output...'}</pre> : item.type === 'text' ? <ChatMarkdown key={index} source={item.text} /> : <p key={index} className="message-notice">{item.type}</p>)}
     {'error' in tool && tool.error && <p className="message-notice error">{tool.error.message}</p>}
   </details>
 }
@@ -59,6 +60,8 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const bridge = window.agentHost
   const { sessionId, chatId } = target
   const { clientId, machineName } = target.owner
+  const aliases = useMachineAliases()
+  const ownerLabel = machineLabel(target.owner, aliases)
   const key = agentHostKey(target)
   const contextId = task ? task.id : workspace.id
   const contextLabel = task ? task.id : workspace.name
@@ -211,12 +214,12 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     <header className="panel-header"><span>AGENT HOST</span><div className="header-actions">{onDevices && <IconButton icon="remote" label="Manage devices" onClick={onDevices} />}<IconButton icon="refresh" label="Reconnect Agent Host" disabled={busy} onClick={() => { void reconnect() }} />{onDetach && <IconButton icon="debug-disconnect" label="Detach conversation" disabled={busy || pending} onClick={onDetach} />}{!workspace && <IconButton icon="close" label="Hide chat panel" onClick={onClose} />}</div></header>
     <div className="chat-context"><Icon name="copilot" /><div><strong>{view?.chat?.title || 'Original Host chat'}</strong><span title={sessionId}>{sessionId}</span></div><span className="context-badge">{contextLabel}</span></div>
     <div className="session-toolbar"><span role="status">{stateLabel}</span><span className="muted">AHP 0.9.0</span></div>
-    <div className="vscode-execution-identity"><Icon name="server" /><span>Copilot @ {machineName}</span></div>
+    <div className="vscode-execution-identity"><Icon name="server" /><span title={machineName}>Copilot @ {ownerLabel}</span></div>
     <div className="chat-log" ref={log} role="log" aria-label={`Agent Host conversation for ${contextLabel}`} aria-live="polite" onScroll={() => { if (log.current) following.current = log.current.scrollHeight - log.current.scrollTop - log.current.clientHeight < 60 }}>
       {!turns.length && <p className="muted">{view?.state === 'connected' ? 'No messages.' : 'Waiting for original history...'}</p>}
       {turns.map((turn) => {
-        const actor = turn.message._meta?.taskcontinuumActor as { username?: string; machineName?: string } | undefined
-        return <div key={turn.id} data-turn-id={turn.id}><article className="message message-user"><header><Icon name="account" /><strong>{typeof actor?.username === 'string' ? actor.username : 'User'}</strong>{typeof actor?.machineName === 'string' && <span className="message-model">{actor.machineName}</span>}</header>{turn.message.model && <><p className="message-notice">Requested model: {turn.message.model.id}</p>{Object.keys(turn.message.model.config ?? {}).length > 0 && <p className="message-notice">Requested config: {JSON.stringify(turn.message.model.config)}</p>}</>}<div className="message-text">{turn.message.text}</div><ChatImages images={imagesFor(turn)} /></article><article className="message message-assistant"><header><Icon name="copilot" /><strong>Copilot @ {machineName}</strong></header>{turn.responseParts.map((part, index) => <Response key={index} part={part} terminals={view?.terminals ?? {}} owner={machineName} />)}{activeTurn?.id === turn.id && <p className="message-notice" role="status">Responding...</p>}</article></div>
+        const actor = turn.message._meta?.taskcontinuumActor as { username?: string; machineName?: string; clientId?: string } | undefined
+        return <div key={turn.id} data-turn-id={turn.id}><article className="message message-user"><header><Icon name="account" /><strong>{typeof actor?.username === 'string' ? actor.username : 'User'}</strong>{typeof actor?.machineName === 'string' && <span className="message-model" title={actor.machineName}>{machineLabel({ machineName: actor.machineName, clientId: typeof actor.clientId === 'string' ? actor.clientId : undefined }, aliases)}</span>}</header>{turn.message.model && <><p className="message-notice">Requested model: {turn.message.model.id}</p>{Object.keys(turn.message.model.config ?? {}).length > 0 && <p className="message-notice">Requested config: {JSON.stringify(turn.message.model.config)}</p>}</>}<div className="message-text">{turn.message.text}</div><ChatImages images={imagesFor(turn)} /></article><article className="message message-assistant"><header><Icon name="copilot" /><strong title={machineName}>Copilot @ {ownerLabel}</strong></header>{turn.responseParts.map((part, index) => <Response key={index} part={part} terminals={view?.terminals ?? {}} owner={ownerLabel} />)}{activeTurn?.id === turn.id && <p className="message-notice" role="status">Responding...</p>}</article></div>
       })}
     </div>
     <form className="composer-area" onSubmit={(event) => { event.preventDefault(); void send() }}>

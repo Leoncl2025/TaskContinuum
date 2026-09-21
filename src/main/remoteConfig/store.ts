@@ -4,13 +4,14 @@ import { isAbsolute, join, relative, sep } from 'node:path'
 import { z } from 'zod'
 import { sessionLinkEntries, taskSessionLinks, type SessionLink, type SessionLinksDocument } from '../../shared/sessionBindings'
 import {
-  remoteConfigLimits, type BindingNotificationAcknowledgement, type RemoteActor, type RemoteConfigSnapshot,
+  remoteConfigLimits, type BindingNotificationAcknowledgement, type DeviceAliasPayload, type RemoteActor, type RemoteConfigSnapshot,
   type RemoteConfigStoreStatus, type RemotePayloads, type RemoteRecord, type RemoteRecordFile, type RemoteRecordKind,
   type RemoteSettingChanges, type RemoteSettingsSnapshot, type SettingPayload, type SettingScope,
 } from '../../shared/remoteConfig'
 import type { RepositorySessionLinksBackend } from '../repositorySessionLinks'
 import { sessionLinkKey, sessionLinkSchema, sessionLinksDocumentSchema, sessionLinkTaskIdSchema } from '../sessionLinkSchema'
 import { BindingOverlay } from './overlay'
+import { machineAliasChangeSchema } from './machineAlias'
 import {
   appendRecord, canonicalJson, createRecord, devicePublicationSchema, entityKey, operationIdSchema, parseRecord,
   readCheckedFile, readRecords, recordClosure, recordPath, RemoteConfigError, resolvedSettings, resolveRecords, serializeRecord, unionRecords, verifyRecord, writeLocalState,
@@ -382,6 +383,27 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       await this.commitBatch(state, [record])
       const snapshot = await this.snapshot(state)
       return { value: record, changed: unionRecords(recovered, [record]), snapshot }
+    })
+  }
+
+  async setMachineAlias(deviceId: string, alias: string | null, expectedRevision: string | null): Promise<RemoteConfigSnapshot> {
+    z.uuid().parse(deviceId)
+    const value = machineAliasChangeSchema.parse(alias)
+    return this.transaction(async (state, recovered) => {
+      if (!state.initialized) throw new RemoteConfigError('initialization-required', 'Enable the immutable configuration store before naming machines.')
+      const before = await this.ensureRevision(state, expectedRevision)
+      const existing = before.resolution.entities[`alias:${deviceId}`]
+      if (value === null ? !existing || existing.state === 'deleted'
+        : existing?.state === 'active' && before.resolution.machineAliases[deviceId] === value) {
+        return { value: before, changed: recovered, snapshot: before }
+      }
+      const payload: DeviceAliasPayload = value === null ? { action: 'delete', deviceId } : { action: 'set', deviceId, alias: value }
+      const record = await this.make('alias', payload, before)
+      await this.validateNew(before, [record])
+      await this.ensureRevision(state, expectedRevision)
+      await this.commitBatch(state, [record])
+      const snapshot = await this.snapshot(state)
+      return { value: snapshot, changed: unionRecords(recovered, [record]), snapshot }
     })
   }
 

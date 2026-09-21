@@ -2,6 +2,7 @@ import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import type { AgentHostCreation, AgentHostCreateRequest, AgentHostCreationLocation, AgentHostWorker } from '../../shared/agentHostCreation'
 import type { AgentHostSession } from '../../shared/agentHost'
 import { Icon } from './Primitives'
+import { machineLabel, useMachineAliases } from '../machineAliases'
 import './agent-host-creation.css'
 
 interface CreationControlsProps {
@@ -41,6 +42,7 @@ export function AgentHostCreationControls(props: CreationControlsProps) {
 
 function CreationControls({ taskId, taskReady, disabled = false, onCreated }: CreationControlsProps) {
   const bridge = window.agentHost
+  const aliases = useMachineAliases()
   const supported = Boolean(bridge && ['creationWorkers', 'creations', 'create', 'creationStatus', 'bindCreation'].every((name) => typeof bridge[name as keyof typeof bridge] === 'function'))
   const [location, setLocation] = useState<AgentHostCreationLocation>('remote')
   const [workers, setWorkers] = useState<AgentHostWorker[]>([])
@@ -212,13 +214,13 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
       {catalogueLoaded && !workers.length && (local ? <p role="status">Local task creation is unavailable: the desktop API did not provide a trusted local worker. Update the desktop and check local Host access.</p> : <p className="muted">No paired remote workers are available. Manage devices to connect a worker.</p>)}
     </>}
     <div className="ah-creation-pickers">
-      {!local && <><label className="form-field">Remote worker<select aria-label="Remote worker" value={workerId} disabled={!supported || busy || disabled || !taskId} onChange={(event) => { setWorkerId(event.target.value); setWorkspaceId(''); setHostId('') }}><option value="">Choose a worker</option>{workers.map((item) => <option key={item.id} value={item.id}>{item.owner.machineName} — {item.state} ({item.id})</option>)}</select></label>
+      {!local && <><label className="form-field">Remote worker<select aria-label="Remote worker" value={workerId} disabled={!supported || busy || disabled || !taskId} onChange={(event) => { setWorkerId(event.target.value); setWorkspaceId(''); setHostId('') }}><option value="">Choose a worker</option>{workers.map((item) => <option key={item.id} value={item.id}>{machineLabel(item.owner, aliases)} — {item.state} ({item.id})</option>)}</select></label>
       <label className="form-field">Shared worker workspace<select aria-label="Shared worker workspace" value={workspaceId} disabled={!worker || busy || disabled} onChange={(event) => setWorkspaceId(event.target.value)}><option value="">Choose a workspace</option>{worker?.workspaces.map((item) => <option key={item.id} value={item.id}>{item.name} — {item.canSend ? 'Read and send' : 'Read only'} / task {item.taskState} ({item.id})</option>)}</select></label></>}
       {local && workspace && <p>Current workspace: <strong>{workspace.name}</strong> · <code>{workspace.id}</code></p>}
       <label className="form-field">Exact Agent Host<select aria-label="Exact Agent Host" value={hostId} disabled={!worker || busy || disabled} onChange={(event) => setHostId(event.target.value)}><option value="">Choose a Host</option>{worker?.hosts.map((item) => <option key={item.hostId} value={item.hostId}>{item.name} — {item.available ? 'available' : 'unavailable'} ({item.hostId})</option>)}</select></label>
     </div>
     {worker && <div className="ah-creation-selection">
-      <p>Machine: <strong>{worker.owner.machineName}</strong> · Worker: <code>{worker.id}</code> · Owner: <code>{worker.owner.clientId}</code></p>
+      <p>Machine: <strong title={worker.owner.machineName}>{machineLabel(worker.owner, aliases)}</strong> · Worker: <code>{worker.id}</code> · Owner: <code>{worker.owner.clientId}</code></p>
       {worker.state !== 'connected' && <p role="status">{local ? 'Local task creation is unavailable. Resolve the local Host or workspace error before creating.' : worker.state === 'blocked' ? 'This worker is connected, but its creation records must be repaired before creating.' : worker.state === 'offline' ? 'This worker is offline. Reconnect it in Manage devices, then check the saved operation.' : 'This worker does not support remote chat creation. Update the worker before creating.'}</p>}
       {worker.error && <p className="copilot-error" role="alert">{worker.error}</p>}
       {local && worker.workspaces.length !== 1 && <p role="status">Local task creation requires exactly one verified current workspace. No workspace can be selected manually.</p>}
@@ -239,7 +241,7 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
         const owner = operation.session?.owner ?? source?.owner
         return <section className="ah-creation-operation" key={operation.operationId} aria-label={`Creation ${operation.operationId}`}>
           <h4>{stateLabels[operation.state]} · {operation.taskId}</h4>
-          <dl><div><dt>Machine</dt><dd>{owner?.machineName ?? 'Machine unavailable'}{owner && <> · <code>{owner.clientId}</code></>}</dd></div><div><dt>Worker</dt><dd>{operation.workerId}</dd></div><div><dt>Workspace</dt><dd>{operation.workspaceId}</dd></div><div><dt>Host</dt><dd>{operation.hostId}</dd></div><div><dt>Operation</dt><dd>{operation.operationId}</dd></div>{operation.session && <><div><dt>Session</dt><dd>{operation.session.sessionId}</dd></div><div><dt>Chat</dt><dd>{operation.session.chatId}</dd></div></>}</dl>
+          <dl><div><dt>Machine</dt><dd>{owner ? machineLabel(owner, aliases) : 'Machine unavailable'}{owner && <> · <code>{owner.clientId}</code></>}</dd></div><div><dt>Worker</dt><dd>{operation.workerId}</dd></div><div><dt>Workspace</dt><dd>{operation.workspaceId}</dd></div><div><dt>Host</dt><dd>{operation.hostId}</dd></div><div><dt>Operation</dt><dd>{operation.operationId}</dd></div>{operation.session && <><div><dt>Session</dt><dd>{operation.session.sessionId}</dd></div><div><dt>Chat</dt><dd>{operation.session.chatId}</dd></div></>}</dl>
           {operation.state === 'uncertain' && <p>The worker may have created the chat. Check this same operation after reconnecting; do not create again.</p>}
           {operation.state === 'created-unbound' && <p>The chat exists. Retry only its assignment; no new chat or prompt will be created.</p>}
           {operation.nativeLifecycle === 'creating' && operation.session && <p>The Host acknowledged this chat. Its native agent initializes on the first explicit send; no warm-up prompt was sent.</p>}

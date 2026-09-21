@@ -24,6 +24,8 @@ import { AgentHostPanel } from './components/AgentHostPanel'
 import { AgentHostSessionsSidebar } from './components/AgentHostSessionsSidebar'
 import type { AgentHostSession } from '../shared/agentHost'
 import { agentHostKey } from '../shared/agentHost'
+import { machineLabel, useMachineAliases, useWorkspaceGitSync } from './machineAliases'
+import { MachineAliasesProvider } from './MachineAliasesProvider'
 import appIcon from '../../build/icon.png'
 
 type DialogName = 'quick-open' | 'settings' | 'remote-devices' | null
@@ -32,7 +34,7 @@ export default function App() {
   const workspaces = useWorkspaces()
   const [repositorySetup, setRepositorySetup] = useState<'new' | WorkspaceSnapshot | null>(null)
   return <>
-    <Workbench key={workspaces.state.current?.id ?? 'empty'} workspaces={workspaces} repositorySetupOpen={repositorySetup !== null} onCreateRepository={() => setRepositorySetup('new')} onPublishRepository={setRepositorySetup} />
+    <MachineAliasesProvider workspaceId={workspaces.state.current?.id ?? null}><Workbench key={workspaces.state.current?.id ?? 'empty'} workspaces={workspaces} repositorySetupOpen={repositorySetup !== null} onCreateRepository={() => setRepositorySetup('new')} onPublishRepository={setRepositorySetup} /></MachineAliasesProvider>
     {repositorySetup && <div className="repository-dialog-theme" data-theme={readLayout().theme}><RepositorySetup workspace={repositorySetup === 'new' ? null : repositorySetup} workspaces={workspaces} onClose={() => setRepositorySetup(null)} /></div>}
   </>
 }
@@ -44,6 +46,8 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   onPublishRepository(workspace: WorkspaceSnapshot): void
 }) {
   const workspace = workspaces.state.current
+  const aliases = useMachineAliases()
+  const { error: machineAliasesError, refresh: refreshMachineAliases } = useWorkspaceGitSync()
   const [taskAgentOpen, setTaskAgentOpen] = useState(false)
   const links = useSessionLinks(!taskAgentOpen && workspace?.tasks.length ? workspace : null)
   const bindings = links.bindings
@@ -298,6 +302,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
     </nav>}
 
     {workspaces.error && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{workspaces.error}</span><IconButton icon="close" label="Dismiss workspace error" onClick={() => workspaces.setError(null)} /></div>}
+    {machineAliasesError && dialog !== 'remote-devices' && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{machineAliasesError}</span><IconButton icon="refresh" label="Reload workspace machine aliases" onClick={() => { void refreshMachineAliases() }} /></div>}
     {connectionError && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{connectionError}</span>{links.error ? <IconButton icon="refresh" label="Reload session links" disabled={links.busy || sessionBusy} onClick={() => { setActionError(null); void links.reload() }} /> : <IconButton icon="close" label="Dismiss Agent Host error" onClick={() => setActionError(null)} />}</div>}
     <div className="workbench-body" style={{ '--sidebar-width': `${sizes.sidebar.width}px`, '--details-width': `${sizes.details.width}px` } as CSSProperties}>
       <nav className="activity-bar" aria-label="Workbench navigation">
@@ -366,7 +371,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
       </main></Activity>
     </div>
 
-    <footer className="statusbar" aria-label="Workbench status"><span className="local-status"><Icon name={taskAgentOpen || agentHostBinding ? 'server-environment' : workspace ? 'folder' : 'repo'} />{taskAgentOpen ? 'TASK CREATION' : agentHostBinding ? 'AGENT HOST' : workspace ? 'LOCAL WORKSPACE' : 'NO WORKSPACE'}</span><span><Icon name="checklist" />{tasks.length} tasks</span><span>{selectedId ?? 'No task selected'}</span><span className="statusbar-spacer" /><span className="response-status" role="status">{workspaces.busy ? 'Loading workspace...' : links.busy ? 'Saving or loading session links...' : sessionBusy ? 'Agent Host active' : taskAgentOpen ? 'Local task creation chat' : agentHostBinding ? `Agent Host @ ${agentHostBinding.owner.machineName}` : workspace ? 'Select an Agent Host chat' : 'Create or open a task repository'}</span><button type="button" onClick={taskAgentOpen ? showChat : openAgentHostSessions}><Icon name={taskAgentOpen ? 'comment-discussion' : agentHostBinding ? 'link' : 'plug'} />{taskAgentOpen ? 'Task creation chat' : agentHostBinding ? 'Agent Host linked' : 'No Agent Host linked'}</button><span className="platform-status">{desktopError ? 'Desktop bridge error' : desktop ? `Desktop · ${desktop.version}` : 'Browser preview'}</span></footer>
+    <footer className="statusbar" aria-label="Workbench status"><span className="local-status"><Icon name={taskAgentOpen || agentHostBinding ? 'server-environment' : workspace ? 'folder' : 'repo'} />{taskAgentOpen ? 'TASK CREATION' : agentHostBinding ? 'AGENT HOST' : workspace ? 'LOCAL WORKSPACE' : 'NO WORKSPACE'}</span><span><Icon name="checklist" />{tasks.length} tasks</span><span>{selectedId ?? 'No task selected'}</span><span className="statusbar-spacer" /><span className="response-status" role="status" title={taskAgentOpen ? undefined : agentHostBinding?.owner.machineName}>{workspaces.busy ? 'Loading workspace...' : links.busy ? 'Saving or loading session links...' : sessionBusy ? 'Agent Host active' : taskAgentOpen ? 'Local task creation chat' : agentHostBinding ? `Agent Host @ ${machineLabel(agentHostBinding.owner, aliases)}` : workspace ? 'Select an Agent Host chat' : 'Create or open a task repository'}</span><button type="button" onClick={taskAgentOpen ? showChat : openAgentHostSessions}><Icon name={taskAgentOpen ? 'comment-discussion' : agentHostBinding ? 'link' : 'plug'} />{taskAgentOpen ? 'Task creation chat' : agentHostBinding ? 'Agent Host linked' : 'No Agent Host linked'}</button><span className="platform-status">{desktopError ? 'Desktop bridge error' : desktop ? `Desktop · ${desktop.version}` : 'Browser preview'}</span></footer>
 
     {taskCreationMode && workspace && <TaskCreationDialog workspace={workspace} workspaces={workspaces} initialMode={taskCreationMode} onCreated={taskCreated} onAgent={() => { setTaskCreationMode(null); setTaskAgentOpen(true); showChat() }} onClose={() => setTaskCreationMode(null)} />}
     {dialog === 'quick-open' && <Dialog title="Quick open" className="quick-open" onClose={() => setDialog(null)}><input className="quick-input" aria-label="Find a task" placeholder="Type a task name or ID…" value={quickQuery} onChange={(event) => setQuickQuery(event.target.value)} autoFocus /><div className="quick-results">{filterTasks(tasks, quickQuery, 'all').map((item) => <button type="button" key={item.id} onClick={() => { selectTask(item.id); setDialog(null) }}><Icon name="file-text" /><strong>{item.title}</strong><span>{item.id}</span></button>)}{!filterTasks(tasks, quickQuery, 'all').length && <p>No matching tasks.</p>}</div><p className="dialog-hint">Tab to a result · Enter to open · Esc to close</p></Dialog>}

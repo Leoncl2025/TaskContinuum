@@ -13,6 +13,7 @@ import { devTunnelIdSchema, sshFingerprint, sshPublicKeySchema } from '../devTun
 import { sessionLinkKey, sessionLinkSchema, sessionLinkTaskIdSchema } from '../sessionLinkSchema'
 import { remoteClientSchema, remoteMachineSchema } from '../vscodeRemoteProtocol'
 import { matchesGitText } from '../shared/gitText'
+import { machineAliasSchema } from './machineAlias'
 
 export class RemoteConfigError extends Error {
   constructor(readonly code: string, message: string, readonly entityKey?: string, readonly operationId?: string) {
@@ -48,6 +49,10 @@ export const devicePublicationSchema = z.object({
 const devicePayloadSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('publish'), deviceId: uuidSchema, identity: identitySchema, routes: z.array(routeSchema).min(1).max(8) }).strict(),
   z.object({ action: z.literal('remove'), deviceId: uuidSchema }).strict(),
+])
+const deviceAliasPayloadSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('set'), deviceId: uuidSchema, alias: machineAliasSchema }).strict(),
+  z.object({ action: z.literal('delete'), deviceId: uuidSchema }).strict(),
 ])
 const invitationIdentity = {
   issuerId: uuidSchema, recipientId: uuidSchema, grantId: uuidSchema,
@@ -101,12 +106,14 @@ const signature = z.object({
 }).strict()
 const bodySchema = z.discriminatedUnion('kind', [
   z.object({ ...header, kind: z.literal('device'), payload: devicePayloadSchema }).strict(),
+  z.object({ ...header, kind: z.literal('alias'), payload: deviceAliasPayloadSchema }).strict(),
   z.object({ ...header, kind: z.literal('invitation'), payload: invitationPayloadSchema }).strict(),
   z.object({ ...header, kind: z.literal('binding'), payload: bindingPayloadSchema }).strict(),
   z.object({ ...header, kind: z.literal('setting'), payload: settingPayloadSchema }).strict(),
 ])
 export const remoteRecordSchema = z.discriminatedUnion('kind', [
   z.object({ ...header, kind: z.literal('device'), payload: devicePayloadSchema, operationId: operationIdSchema, signature }).strict(),
+  z.object({ ...header, kind: z.literal('alias'), payload: deviceAliasPayloadSchema, operationId: operationIdSchema, signature }).strict(),
   z.object({ ...header, kind: z.literal('invitation'), payload: invitationPayloadSchema, operationId: operationIdSchema, signature }).strict(),
   z.object({ ...header, kind: z.literal('binding'), payload: bindingPayloadSchema, operationId: operationIdSchema, signature }).strict(),
   z.object({ ...header, kind: z.literal('setting'), payload: settingPayloadSchema, operationId: operationIdSchema, signature }).strict(),
@@ -234,6 +241,7 @@ export async function verifyRecord(input: unknown, trust: RecordTrust): Promise<
 export function entityKey(record: Pick<RemoteRecord, 'kind' | 'payload'>): string {
   const value = record as RemoteRecord
   if (value.kind === 'device') return `device:${value.payload.deviceId}`
+  if (value.kind === 'alias') return `alias:${value.payload.deviceId}`
   if (value.kind === 'invitation') return `invitation:${value.payload.issuerId}:${value.payload.recipientId}`
   if (value.kind === 'binding') return `binding:${value.payload.taskId}`
   return `setting:${value.payload.scope === 'workspace' ? 'workspace' : value.payload.deviceId}:${value.payload.settingKey}`
@@ -281,6 +289,7 @@ export function recordPath(input: RemoteRecord): string {
   const record = parseRecord(input)
   const name = `${record.operationId}.json`
   if (record.kind === 'device') return join(remoteConfigRecordsPath, 'devices', record.payload.deviceId, name)
+  if (record.kind === 'alias') return join(remoteConfigRecordsPath, 'aliases', record.payload.deviceId, name)
   if (record.kind === 'invitation') return join(remoteConfigRecordsPath, 'invitations', record.payload.issuerId, record.payload.recipientId, name)
   if (record.kind === 'binding') return join(remoteConfigRecordsPath, 'bindings', record.payload.taskId, name)
   return join(remoteConfigRecordsPath, 'settings', record.payload.scope === 'workspace' ? 'workspace' : record.payload.deviceId, record.payload.settingKey, name)
@@ -388,7 +397,7 @@ export async function resolveRecords(inputs: readonly unknown[], trust: RecordTr
   }
   for (const record of ordered) if (remaining.get(record.operationId)) diagnostic('causal-cycle', 'The immutable operation graph contains or depends on a cycle.', record)
   const resolution: ResolvedRemoteConfig = {
-    revision: '', records: ordered, entities: {}, heads: {}, devices: {}, invitations: {}, bindings: {},
+    revision: '', records: ordered, entities: {}, heads: {}, devices: {}, machineAliases: {}, invitations: {}, bindings: {},
     settings: { workspace: {}, devices: {} }, diagnostics, blocked: globalBlock || diagnostics.length > 0,
   }
   for (const record of ordered) {
@@ -435,6 +444,7 @@ export async function resolveRecords(inputs: readonly unknown[], trust: RecordTr
       const scope = selected.payload.scope === 'workspace' ? resolution.settings.workspace : resolution.settings.devices[selected.payload.deviceId] ??= {}
       Object.assign(scope, { [selected.payload.settingKey]: selected.payload.value })
     }
+    if (selected.kind === 'alias' && selected.payload.action === 'set') resolution.machineAliases[selected.payload.deviceId] = selected.payload.alias
   }
   for (const entity of Object.values(resolution.entities)) {
     const record = entity.value

@@ -11,7 +11,7 @@ import type { WorkspaceSyncOptions } from '../src/main/remoteConfig/service'
 import { newSshKeyPair, openSessionSshBridge, startSessionSshHost } from '../src/main/devTunnel/sessionSsh'
 import { VSCodeDeviceHost } from '../src/main/vscodeDeviceHost'
 import { VSCodeDeviceClient } from '../src/main/vscodeDeviceClient'
-import { readRepositorySessionLinks, updateRepositoryAgentHostLink, removeRepositorySessionLink } from '../src/main/repositorySessionLinks'
+import { readRepositorySessionLinks, updateRepositoryAgentHostLink, removeRepositorySessionLink, writeRepositorySessionLinks } from '../src/main/repositorySessionLinks'
 import { makeConfig, makeTask } from './taskDocuments/fixtures'
 import type { DevTunnelRoute } from '../src/main/devTunnel/protocol'
 import { LocalEnrollments } from '../src/main/remoteConfig/enrollment'
@@ -272,6 +272,74 @@ it('converges A/B/C over real SSH using only each peer\'s selected checkout', as
     expect((await b.host.list()).some((pair) => pair.workspaces.some((policy) => policy.root.toLowerCase() === b.folder.toLowerCase()))).toBe(false)
   }, { timeout: 15000, interval: 100 })
   b.releasePublication()
+}, 300000)
+
+it.each(['', 'Project With Spaces [AD]/Planning'])('synchronizes machine aliases across desktops and restart without changing connection or multi-session binding identities (%s)', async (folder) => {
+  const { peers } = await fixture(2, folder)
+  const [a, b] = peers
+  await expect(a.service.setMachineAlias(a.folder, a.identity.clientId, 'Office', null)).rejects.toThrow('Enable automatic workspace links')
+  for (const peer of peers) await peer.service.enable(peer.folder)
+  await settle(peers)
+  const target = { sessionId: 'copilotcli:/original-session', chatId: 'ahp-chat:/original-chat', owner: { clientId: b.identity.clientId, machineName: b.identity.machineName } }
+  const bindings = [
+    { provider: 'agent-host' as const, ...target },
+    { provider: 'agent-host' as const, sessionId: 'copilotcli:/second-session', chatId: 'ahp-chat:/second-chat', owner: { clientId: a.identity.clientId, machineName: a.identity.machineName } },
+  ]
+  const initial = await readRepositorySessionLinks(a.folder)
+  await writeRepositorySessionLinks(a.folder, initial.revision, () => ({ schemaVersion: '2.1', bindings: { 'T-0001': bindings } }))
+  await settle(peers)
+  const identityRecords = (await readRecords(a.folder)).filter((record) => record.kind === 'device')
+  const connections = await a.devices.list(a.folder)
+  const before = await a.service.status(a.folder)
+  expect(before.localDevice).toEqual({ deviceId: a.identity.clientId, machineName: a.identity.machineName })
+  await expect(a.service.setMachineAlias(a.folder, randomUUID(), 'Unknown', before.revision)).rejects.toThrow('not enrolled')
+  await a.service.setMachineAlias(a.folder, b.identity.clientId, '  Build workstation  ', before.revision)
+  await settle(peers)
+  for (const peer of peers) {
+    const status = await peer.service.status(peer.folder)
+    expect(status.machineAliases).toEqual({ [b.identity.clientId]: 'Build workstation' })
+    expect(status.peers.every((device) => device.state === 'linked')).toBe(true)
+    expect((await readRepositorySessionLinks(peer.folder)).document).toEqual({ schemaVersion: '2.1', bindings: { 'T-0001': bindings } })
+    if (folder) expect(await present(join(peer.checkout, '.taskcontinuum'))).toBe(false)
+  }
+  expect((await readRecords(a.folder)).filter((record) => record.kind === 'device')).toEqual(identityRecords)
+  expect((await a.devices.list(a.folder)).map(({ id, ownerClientId, machineName }) => ({ id, ownerClientId, machineName })))
+    .toEqual(connections.map(({ id, ownerClientId, machineName }) => ({ id, ownerClientId, machineName })))
+  await expect(a.service.setMachineAlias(a.folder, b.identity.clientId, 'Stale name', before.revision)).rejects.toThrow('changed on disk')
+  a.service = await a.restart()
+  expect((await a.service.status(a.folder)).machineAliases).toEqual({ [b.identity.clientId]: 'Build workstation' })
+  await settle(peers)
+  const localEdit = await b.service.status(b.folder)
+  await b.service.setMachineAlias(b.folder, b.identity.clientId, 'Office laptop', localEdit.revision)
+  await settle(peers)
+  expect((await a.service.status(a.folder)).machineAliases?.[b.identity.clientId]).toBe('Office laptop')
+  for (const peer of peers) peer.holdPublication()
+  const concurrent = await Promise.all(peers.map((peer) => peer.service.status(peer.folder)))
+  await a.service.setMachineAlias(a.folder, b.identity.clientId, 'Office', concurrent[0].revision)
+  await b.service.setMachineAlias(b.folder, b.identity.clientId, 'Laptop', concurrent[1].revision)
+  for (const peer of peers) peer.releasePublication()
+  await settle(peers)
+  for (const peer of peers) {
+    const status = await peer.service.status(peer.folder)
+    expect(status.machineAliases).toEqual({})
+    expect(status.conflicts).toEqual([`alias:${b.identity.clientId}`])
+    expect(status.peers.every((device) => device.state === 'linked')).toBe(true)
+    expect(status.settings).toMatchObject({ autoLink: true, tunnelEnabled: true })
+    expect(status.peers[0].machineName).toBe(peer === a ? b.identity.machineName : a.identity.machineName)
+    expect((await readRepositorySessionLinks(peer.folder)).document.bindings['T-0001']).toEqual(bindings)
+  }
+  const clear = await a.service.status(a.folder)
+  await a.service.setMachineAlias(a.folder, b.identity.clientId, null, clear.revision)
+  await settle(peers)
+  for (const peer of peers) {
+    const status = await peer.service.status(peer.folder)
+    expect(status.machineAliases).toEqual({})
+    expect(status.conflicts).toEqual([])
+    expect(status.peers[0].machineName).toBe(peer === a ? b.identity.machineName : a.identity.machineName)
+    expect((await readRepositorySessionLinks(peer.folder)).document.bindings['T-0001']).toEqual(bindings)
+  }
+  await a.service.disable(a.folder)
+  await expect(a.service.setMachineAlias(a.folder, a.identity.clientId, 'Paused', (await a.service.status(a.folder)).revision)).rejects.toThrow('Enable automatic workspace links')
 }, 300000)
 
 it('upgrades saved enrolled links and creates and assigns with write access without another permission step', async () => {
@@ -607,11 +675,22 @@ it('scopes nested workspace sync identity, backend paths, and immutable metadata
   expect(await readRepositorySessionLinks(sibling)).toMatchObject({ document: { bindings: {} } })
   await expect(readRepositorySessionLinks(c.checkout)).rejects.toThrow('Enable Automatic workspace links')
 
+  await settle([a, b])
+  const aliasRevision = (await a.service.status(a.folder)).revision
+  await a.service.setMachineAlias(a.folder, a.identity.clientId, 'Nested workstation', aliasRevision)
+  await settle([a, b])
+  await c.service.syncNow(sibling)
+  expect((await b.service.status(b.folder)).machineAliases).toEqual({ [a.identity.clientId]: 'Nested workstation' })
+  expect((await c.service.status(sibling)).machineAliases).toEqual({})
+  expect((await readRecords(c.folder)).some((record) => record.kind === 'alias')).toBe(true)
+
   const tracked = (await git(remote, '--git-dir', remote, 'ls-tree', '-r', '--name-only', 'main')).split('\n').filter(Boolean)
   expect(tracked).toContain('Project/.taskcontinuum/workspace.json')
   expect(tracked).toContain('Sibling/.taskcontinuum/workspace.json')
   expect(tracked.some((path) => path.startsWith('Project/.taskcontinuum/records/v1/devices/'))).toBe(true)
   expect(tracked.some((path) => path.startsWith('Sibling/.taskcontinuum/records/v1/devices/'))).toBe(true)
+  expect(tracked.some((path) => path.startsWith(`Project/.taskcontinuum/records/v1/aliases/${a.identity.clientId}/`))).toBe(true)
+  expect(tracked.some((path) => path.startsWith('Sibling/.taskcontinuum/records/v1/aliases/'))).toBe(false)
   expect(tracked.some((path) => path === '.taskcontinuum/workspace.json' || path.startsWith('.taskcontinuum/records/v1/'))).toBe(false)
 
   const projectDescriptor = JSON.parse(await readFile(join(a.folder, '.taskcontinuum', 'workspace.json'), 'utf8'))
@@ -622,4 +701,4 @@ it('scopes nested workspace sync identity, backend paths, and immutable metadata
   expect(await present(join(c.checkout, '.taskcontinuum'))).toBe(false)
   expect(await git(a.checkout, 'status', '--porcelain')).toBe('')
   expect(await git(c.checkout, 'status', '--porcelain')).toBe('')
-}, 120000)
+}, 300000)

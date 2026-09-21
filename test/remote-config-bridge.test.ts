@@ -27,6 +27,7 @@ function setup() {
   const service: GitSyncActions = {
     status: vi.fn(async () => status), enable: vi.fn(async () => {}), disable: vi.fn(async () => {}),
     syncNow: vi.fn(async () => {}), revokeDevice: vi.fn(async () => {}), setSettings: vi.fn(async () => {}),
+    setMachineAlias: vi.fn(async () => {}),
   }
   const currentRoot = vi.fn(async () => 'Q:\\workspace')
   const requireWindow = vi.fn(() => new BrowserWindow())
@@ -72,6 +73,28 @@ describe('Git synchronization IPC boundary', () => {
     await expect(invoke('setting', { key: 'connectTimeoutMs', value: 999999, expectedRevision: null })).rejects.toThrow()
     await expect(invoke('setting', { key: 'autoLink', value: 10, expectedRevision: null })).rejects.toThrow()
     expect(service.setSettings).toHaveBeenCalledTimes(1)
+  })
+
+  it('validates machine aliases and binds edits to the active workspace and observed revision', async () => {
+    const { service, invoke, requireWindow } = setup()
+    const deviceId = '10000000-0000-4000-8000-000000000002'
+    const expectedRevision = 'a'.repeat(64)
+    await invoke('machine-alias', { deviceId, alias: '  Build workstation  ', expectedRevision })
+    expect(service.setMachineAlias).toHaveBeenCalledExactlyOnceWith('Q:\\workspace', deviceId, 'Build workstation', expectedRevision)
+    await invoke('machine-alias', { deviceId, alias: '   ', expectedRevision })
+    await invoke('machine-alias', { deviceId, alias: null, expectedRevision })
+    expect(service.setMachineAlias).toHaveBeenLastCalledWith('Q:\\workspace', deviceId, null, expectedRevision)
+    expect(requireWindow).toHaveBeenCalledTimes(3)
+    for (const alias of ['x'.repeat(81), 'First\nSecond', '\nName', 'Name\n', 'Name\0', 'Name\u0085', 'Name\u2028', 42, {}, undefined]) {
+      await expect(invoke('machine-alias', { deviceId, alias, expectedRevision })).rejects.toThrow()
+    }
+    await expect(invoke('machine-alias', { deviceId: 'machine-name', alias: 'Name', expectedRevision })).rejects.toThrow()
+    await expect(invoke('machine-alias', { deviceId, alias: 'Name', expectedRevision: 'stale' })).rejects.toThrow()
+    await expect(invoke('machine-alias', { deviceId, alias: 'Name', expectedRevision, root: 'Q:\\different' })).rejects.toThrow()
+    expect(service.setMachineAlias).toHaveBeenCalledTimes(3)
+    vi.mocked(service.setMachineAlias).mockRejectedValueOnce(new Error('The configuration changed on disk.'))
+    await expect(invoke('machine-alias', { deviceId, alias: 'Name', expectedRevision })).rejects.toThrow('changed on disk')
+    expect(service.enable).not.toHaveBeenCalled()
   })
 
   it('opens only the server-selected local editor and surfaces native failures', async () => {

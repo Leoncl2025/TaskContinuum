@@ -105,6 +105,19 @@ describe('native-only preload boundary', () => {
     ])
   })
 
+  it('forwards display-only machine alias edits separately from authenticated session targets', async () => {
+    const bridge = window.remoteVSCode?.gitSync
+    if (!bridge) throw new Error('Workspace synchronization preload API missing.')
+    const deviceId = crypto.randomUUID()
+    const revision = 'a'.repeat(64)
+    await bridge.setMachineAlias(deviceId, 'Build workstation', revision)
+    await bridge.setMachineAlias(deviceId, null, revision)
+    expect(ipc.invoke.mock.calls).toEqual([
+      ['remote-vscode:git-machine-alias', { deviceId, alias: 'Build workstation', expectedRevision: revision }],
+      ['remote-vscode:git-machine-alias', { deviceId, alias: null, expectedRevision: revision }],
+    ])
+  })
+
   it('retains device connections, automatic revocation, Dev Tunnel controls and binding notification cleanup', async () => {
     const bridge = window.remoteVSCode
     if (!bridge?.devices || !bridge.devTunnels || !bridge.gitSync) throw new Error('Remote device preload APIs missing.')

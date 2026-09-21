@@ -6,6 +6,7 @@ import { sessionBindingKey } from '../chat/sessionBindings'
 import type { SessionBinding, SessionBindings } from '../chat/sessionBindings'
 import { Icon, IconButton } from './Primitives'
 import { AgentHostCreationControls } from './AgentHostCreationControls'
+import { machineLabel, useMachineAliases } from '../machineAliases'
 
 type SessionView = 'current' | 'link' | 'create'
 interface Props {
@@ -29,6 +30,7 @@ interface Props {
 function SessionTree({ taskId, title, bindings, activeKey, sessions, disabled, onSelect, onUnlink }: {
   taskId: string; title: string; bindings: SessionBinding[]; activeKey?: string; sessions: AgentHostSession[]; disabled: boolean; onSelect?(binding: SessionBinding): void; onUnlink?(binding: SessionBinding): void
 }) {
+  const aliases = useMachineAliases()
   const [expanded, setExpanded] = useState(true)
   const [focused, setFocused] = useState<string>()
   const elements = useRef(new Map<string, HTMLLIElement>())
@@ -69,7 +71,7 @@ function SessionTree({ taskId, title, bindings, activeKey, sessions, disabled, o
             tabIndex={tabStop === key ? 0 : -1} ref={(element) => { if (element) elements.current.set(key, element); else elements.current.delete(key) }}
             onFocus={(event) => { if (event.target === event.currentTarget) setFocused(key) }} onKeyDown={(event) => navigate(event, key)}>
             <div className={`session-tree-row ${key === activeKey ? 'is-selected' : ''}`}><button type="button" tabIndex={-1} className="session-row" aria-label={`Open ${label}`} onClick={() => { focus(key); onSelect?.(binding) }}>
-              <Icon name={key === activeKey ? 'comment-discussion' : 'comment'} /><span className="session-copy"><strong>{label}</strong><span className="session-directory" title={binding.id}>{binding.id}</span><span className="session-source">{binding.ownerIsRemote ? 'Remote' : 'Local'} / {binding.owner.machineName}</span><span className="session-source">{discovered ? discovered.canSend ? 'Read and send' : 'Read only' : 'Not in discovery list'}</span>{key === activeKey && <span className="session-task-link">Current session</span>}</span>
+              <Icon name={key === activeKey ? 'comment-discussion' : 'comment'} /><span className="session-copy"><strong>{label}</strong><span className="session-directory" title={binding.id}>{binding.id}</span><span className="session-source" title={binding.owner.machineName}>{binding.ownerIsRemote ? 'Remote' : 'Local'} / {machineLabel(binding.owner, aliases)}</span><span className="session-source">{discovered ? discovered.canSend ? 'Read and send' : 'Read only' : 'Not in discovery list'}</span>{key === activeKey && <span className="session-task-link">Current session</span>}</span>
             </button>{onUnlink && <IconButton icon="debug-disconnect" label={`Unlink ${label}`} disabled={disabled} onClick={() => onUnlink(binding)} />}</div>
           </li>
         })}
@@ -80,6 +82,7 @@ function SessionTree({ taskId, title, bindings, activeKey, sessions, disabled, o
 
 export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, activeKey, localOwnerId, busy = false, initialView = 'current', onSelect, onDetach, onLink, onCreated, onDevices, onClose, onTasks }: Props) {
   const bridge = window.agentHost
+  const aliases = useMachineAliases()
   const [view, setView] = useState<SessionView>(initialView)
   const [sessions, setSessions] = useState<AgentHostSession[]>([])
   const [warnings, setWarnings] = useState<string[]>([])
@@ -116,7 +119,7 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
     setView('current')
   }
   const filtered = sessions.filter((session) => (location === 'all' || !localOwnerId || session.owner.clientId === localOwnerId)
-    && `${session.title} ${session.sessionId} ${session.owner.machineName}`.toLowerCase().includes(query.toLowerCase()))
+    && `${session.title} ${session.sessionId} ${machineLabel(session.owner, aliases)}`.toLowerCase().includes(query.toLowerCase()))
   return <aside className="sidebar session-sidebar" aria-label="Agent Host sessions">
     <header className="panel-header"><span>AGENT HOST SESSIONS</span><div className="header-actions"><IconButton icon="refresh" label="Refresh Agent Host sessions" disabled={loading || operating} onClick={() => { setLoading(true); setRevision((value) => value + 1) }} /><IconButton icon="layout-sidebar-left-off" label="Hide session sidebar" onClick={onClose} /></div></header>
     <div className="session-task-context"><span className="muted">Current task</span><strong>{taskId ? `${taskId} - ${taskTitle ?? taskId}` : 'No task selected'}</strong>{onTasks && <button type="button" className="text-button" onClick={onTasks}>Back to tasks</button>}</div>
@@ -147,7 +150,7 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
         {!loading && !catalogueError && !filtered.length && <p className="muted">No available Agent Host sessions.</p>}
         {filtered.map((session) => {
           const assigned = Object.entries(bindings).find(([, members]) => members.some((member) => member.owner.clientId === session.owner.clientId && member.id === session.sessionId))?.[0]
-          return <section key={agentHostKey(session)} className="ahp-catalog-item" aria-label={`Host session ${session.title}`}><div><strong><Icon name="copilot" />{session.title}</strong><p className="muted">{session.owner.machineName} / {session.canSend ? 'Read and send' : 'Read only'}</p><span className="muted ahp-session-id">{session.sessionId}</span>{assigned && <p className="muted">Linked to {assigned}</p>}</div><IconButton icon="link" label={`Link ${session.title} to ${taskId ?? 'task'}`} disabled={loading || operating || busy || !taskReady || !taskId || Boolean(assigned && assigned !== taskId)} onClick={() => { void run(async () => { await onLink(session); setView('current') }) }} /></section>
+          return <section key={agentHostKey(session)} className="ahp-catalog-item" aria-label={`Host session ${session.title}`}><div><strong><Icon name="copilot" />{session.title}</strong><p className="muted" title={session.owner.machineName}>{machineLabel(session.owner, aliases)} / {session.canSend ? 'Read and send' : 'Read only'}</p><span className="muted ahp-session-id">{session.sessionId}</span>{assigned && <p className="muted">Linked to {assigned}</p>}</div><IconButton icon="link" label={`Link ${session.title} to ${taskId ?? 'task'}`} disabled={loading || operating || busy || !taskReady || !taskId || Boolean(assigned && assigned !== taskId)} onClick={() => { void run(async () => { await onLink(session); setView('current') }) }} /></section>
         })}
       </>}
       {view === 'create' && <AgentHostCreationControls taskId={taskId} taskReady={taskReady} disabled={operating || busy} onCreated={created} />}
