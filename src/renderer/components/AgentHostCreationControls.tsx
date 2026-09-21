@@ -12,6 +12,7 @@ interface CreationControlsProps {
 }
 
 type Lifetime = { active: boolean }
+type Activity = 'foreground' | 'background'
 
 const stateLabels: Record<AgentHostCreation['state'], string> = {
   creating: 'Creating',
@@ -52,9 +53,11 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
   const [catalogueError, setCatalogueError] = useState<string>()
   const [historyError, setHistoryError] = useState<string>()
   const [error, setError] = useState<string>()
-  const [busy, setBusy] = useState(false)
-  const running = useRef(false)
+  const [activity, setActivity] = useState<Activity>()
+  const running = useRef<Activity | undefined>(undefined)
   const lifetime = useRef<Lifetime>({ active: false })
+  const busy = activity !== undefined
+  const pickersBusy = activity === 'foreground'
   const local = location === 'local'
   const heading = local ? 'Create on this computer' : 'Create on remote worker'
   const worker = workers.find((item) => item.id === workerId)
@@ -93,29 +96,29 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
     }
   }
 
-  async function run(action: (scope: Lifetime) => Promise<void>, clearError = true): Promise<void> {
+  async function run(action: (scope: Lifetime) => Promise<void>, clearError = true, mode: Activity = 'foreground'): Promise<void> {
     const scope = lifetime.current
     if (!scope.active || !supported || !taskId || running.current) return
-    running.current = true
-    setBusy(true)
+    running.current = mode
+    setActivity(mode)
     if (clearError) setError(undefined)
     try { await action(scope) } catch (failure) {
       if (scope.active) setError(failureMessage(failure))
     } finally {
-      if (scope.active) { running.current = false; setBusy(false) }
+      if (scope.active) { running.current = undefined; setActivity(undefined) }
     }
   }
 
-  async function refresh(clearError = false, selectedLocation = location): Promise<void> {
+  async function refresh(clearError = false, mode: Activity = 'foreground'): Promise<void> {
     await run(async (scope) => {
       const previouslyPending = new Set(savedOperations.current.filter(pending).map((operation) => operation.operationId))
-      const [catalogue, history] = await Promise.allSettled([selectedLocation === 'local' ? bridge!.creationWorkers(taskId!, 'local') : bridge!.creationWorkers(taskId!), bridge!.creations(taskId!)])
+      const [catalogue, history] = await Promise.allSettled([location === 'local' ? bridge!.creationWorkers(taskId!, 'local') : bridge!.creationWorkers(taskId!), bridge!.creations(taskId!)])
       if (!scope.active) return
       if (catalogue.status === 'fulfilled') {
         const localWorkers = catalogue.value.filter((item) => item.local === true)
-        const availableWorkers = selectedLocation === 'local' ? (localWorkers.length === 1 ? localWorkers : []) : catalogue.value
+        const availableWorkers = location === 'local' ? (localWorkers.length === 1 ? localWorkers : []) : catalogue.value
         setWorkers(availableWorkers)
-        if (selectedLocation === 'local') {
+        if (location === 'local') {
           const localWorker = availableWorkers[0]
           setWorkerId(localWorker?.id ?? '')
           setWorkspaceId(localWorker?.workspaces.length === 1 ? localWorker.workspaces[0].id : '')
@@ -132,23 +135,23 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
         if (!scope.active) return
         await check(operation, scope)
       }
-    }, clearError)
+    }, clearError, mode)
   }
 
-  const refreshFromEffect = useEffectEvent(() => { void refresh() })
+  const refreshFromEffect = useEffectEvent((mode: Activity) => { void refresh(false, mode) })
   useEffect(() => {
     const scope = { active: true }
     lifetime.current = scope
-    running.current = false
-    const tick = () => { if (scope.active) refreshFromEffect() }
-    void Promise.resolve().then(tick)
+    running.current = undefined
+    const tick = () => { if (scope.active) refreshFromEffect('background') }
+    void Promise.resolve().then(() => { if (scope.active) refreshFromEffect('foreground') })
     const timer = setInterval(tick, 5000)
     window.addEventListener('online', tick)
     return () => { scope.active = false; clearInterval(timer); window.removeEventListener('online', tick) }
-  }, [bridge, taskId, supported])
+  }, [bridge, taskId, supported, location])
 
   function changeLocation(nextLocation: AgentHostCreationLocation): void {
-    if (running.current || disabled || nextLocation === location) return
+    if (running.current === 'foreground' || disabled || nextLocation === location) return
     setLocation(nextLocation)
     setWorkers([])
     setWorkerId('')
@@ -156,7 +159,6 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
     setHostId('')
     setCatalogueLoaded(false)
     setCatalogueError(undefined)
-    void refresh(false, nextLocation)
   }
 
   async function create(): Promise<void> {
@@ -189,9 +191,9 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
     })
   }
 
-  return <section className="ah-creation" aria-label={heading} aria-busy={busy}>
+  return <section className="ah-creation" aria-label={heading} aria-busy={pickersBusy}>
     <h3><Icon name="server-environment" />{heading}</h3>
-    <label className="form-field">Execution location<select aria-label="Execution location" value={location} disabled={!supported || busy || disabled || !taskId} onChange={(event) => { if (event.target.value === 'local' || event.target.value === 'remote') changeLocation(event.target.value) }}><option value="remote">Remote worker</option><option value="local">This computer</option></select></label>
+    <label className="form-field">Execution location<select aria-label="Execution location" value={location} disabled={!supported || pickersBusy || disabled || !taskId} onChange={(event) => { if (event.target.value === 'local' || event.target.value === 'remote') changeLocation(event.target.value) }}><option value="remote">Remote worker</option><option value="local">This computer</option></select></label>
     <p className="muted">{local ? 'Creates and assigns a native chat in this task\'s current workspace using Folder isolation (no worktree). Local Host access and the same authoritative workspace binding backend as Link are required. No networking or remote pairing is enabled. Native tool approvals remain on this computer.' : 'Read and send access includes creation in the same shared workspace. Creates in the selected workspace folder (no worktree). Native tool approvals remain on the worker.'} No prompt is sent. Other Host settings keep their native defaults. The native agent may initialize on the first explicit send. Choose a model when sending.</p>
     {!supported && <p role="status">{local ? 'Local' : 'Remote'} creation is unavailable in this version of the desktop Agent Host API.</p>}
     {!taskId ? <p role="status">Select a task in a real workspace to create and assign a chat.</p> : !taskReady && <p role="status">Wait for the selected task and its session links to finish loading before creating a chat.</p>}
@@ -203,10 +205,10 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
       {catalogueLoaded && !workers.length && (local ? <p role="status">Local task creation is unavailable: the desktop API did not provide a trusted local worker. Update the desktop and check local Host access.</p> : <p className="muted">No paired remote workers are available. Manage devices to connect a worker.</p>)}
     </>}
     <div className="ah-creation-pickers">
-      {!local && <><label className="form-field">Remote worker<select aria-label="Remote worker" value={workerId} disabled={!supported || busy || disabled || !taskId} onChange={(event) => { setWorkerId(event.target.value); setWorkspaceId(''); setHostId('') }}><option value="">Choose a worker</option>{workers.map((item) => <option key={item.id} value={item.id}>{item.owner.machineName} — {item.state} ({item.id})</option>)}</select></label>
-      <label className="form-field">Shared worker workspace<select aria-label="Shared worker workspace" value={workspaceId} disabled={!worker || busy || disabled} onChange={(event) => setWorkspaceId(event.target.value)}><option value="">Choose a workspace</option>{worker?.workspaces.map((item) => <option key={item.id} value={item.id}>{item.name} — {item.canSend ? 'Read and send' : 'Read only'} / task {item.taskState} ({item.id})</option>)}</select></label></>}
+      {!local && <><label className="form-field">Remote worker<select aria-label="Remote worker" value={workerId} disabled={!supported || pickersBusy || disabled || !taskId} onChange={(event) => { setWorkerId(event.target.value); setWorkspaceId(''); setHostId('') }}><option value="">Choose a worker</option>{workers.map((item) => <option key={item.id} value={item.id}>{item.owner.machineName} — {item.state} ({item.id})</option>)}</select></label>
+      <label className="form-field">Shared worker workspace<select aria-label="Shared worker workspace" value={workspaceId} disabled={!worker || pickersBusy || disabled} onChange={(event) => setWorkspaceId(event.target.value)}><option value="">Choose a workspace</option>{worker?.workspaces.map((item) => <option key={item.id} value={item.id}>{item.name} — {item.canSend ? 'Read and send' : 'Read only'} / task {item.taskState} ({item.id})</option>)}</select></label></>}
       {local && workspace && <p>Current workspace: <strong>{workspace.name}</strong> · <code>{workspace.id}</code></p>}
-      <label className="form-field">Exact Agent Host<select aria-label="Exact Agent Host" value={hostId} disabled={!worker || busy || disabled} onChange={(event) => setHostId(event.target.value)}><option value="">Choose a Host</option>{worker?.hosts.map((item) => <option key={item.hostId} value={item.hostId}>{item.name} — {item.available ? 'available' : 'unavailable'} ({item.hostId})</option>)}</select></label>
+      <label className="form-field">Exact Agent Host<select aria-label="Exact Agent Host" value={hostId} disabled={!worker || pickersBusy || disabled} onChange={(event) => setHostId(event.target.value)}><option value="">Choose a Host</option>{worker?.hosts.map((item) => <option key={item.hostId} value={item.hostId}>{item.name} — {item.available ? 'available' : 'unavailable'} ({item.hostId})</option>)}</select></label>
     </div>
     {worker && <div className="ah-creation-selection">
       <p>Machine: <strong>{worker.owner.machineName}</strong> · Worker: <code>{worker.id}</code> · Owner: <code>{worker.owner.clientId}</code></p>

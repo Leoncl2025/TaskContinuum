@@ -528,6 +528,136 @@ describe('explicit remote Agent Host creation', () => {
     expect(bridge.bindCreation).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['remote', 'Execution location'],
+    ['remote', 'Remote worker'],
+    ['remote', 'Shared worker workspace'],
+    ['remote', 'Exact Agent Host'],
+    ['local', 'Exact Agent Host'],
+  ] as const)('keeps the %s %s picker interactive throughout background refreshes', async (location, label) => {
+    vi.useFakeTimers()
+    const { bridge, worker, localWorker } = localFixture()
+    await act(async () => { render(<AgentHostCreationControls taskId="T-0002" taskReady />) })
+    if (location === 'local') {
+      await act(async () => { fireEvent.change(screen.getByRole('combobox', { name: 'Execution location' }), { target: { value: 'local' } }) })
+    } else {
+      fireEvent.change(screen.getByRole('combobox', { name: 'Remote worker' }), { target: { value: worker.id } })
+      fireEvent.change(screen.getByRole('combobox', { name: 'Shared worker workspace' }), { target: { value: worker.workspaces[0].id } })
+    }
+    const selectedWorker = location === 'local' ? localWorker : worker
+    fireEvent.change(screen.getByRole('combobox', { name: 'Exact Agent Host' }), { target: { value: selectedWorker.hosts[0].hostId } })
+    const picker = screen.getByRole('combobox', { name: label })
+    const options = within(picker).getAllByRole('option')
+    act(() => { picker.focus() })
+    vi.mocked(bridge.creationWorkers).mockClear()
+
+    for (const trigger of ['timer', 'online'] as const) {
+      let finish!: (workers: AgentHostWorker[]) => void
+      vi.mocked(bridge.creationWorkers).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+      await act(async () => {
+        if (trigger === 'timer') await vi.advanceTimersByTimeAsync(5000)
+        else window.dispatchEvent(new Event('online'))
+      })
+      expect(picker).toBeEnabled()
+      expect(picker).toHaveFocus()
+      expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+      await act(async () => { finish([structuredClone(selectedWorker)]) })
+      expect(screen.getByRole('combobox', { name: label })).toBe(picker)
+      expect(picker).toBeEnabled()
+      expect(picker).toHaveFocus()
+      within(picker).getAllByRole('option').forEach((option, index) => expect(option).toBe(options[index]))
+      expect(screen.getByRole('combobox', { name: 'Execution location' })).toHaveValue(location)
+      expect(screen.getByRole('combobox', { name: 'Exact Agent Host' })).toHaveValue(selectedWorker.hosts[0].hostId)
+      if (location === 'remote') {
+        expect(screen.getByRole('combobox', { name: 'Remote worker' })).toHaveValue(worker.id)
+        expect(screen.getByRole('combobox', { name: 'Shared worker workspace' })).toHaveValue(worker.workspaces[0].id)
+      }
+      expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeEnabled()
+    }
+    expect(bridge.creationWorkers).toHaveBeenCalledTimes(2)
+    expect(bridge.create).not.toHaveBeenCalled()
+    expect(bridge.bindCreation).not.toHaveBeenCalled()
+  })
+
+  it('retains choices made during a slow poll without overlapping requests or creating early', async () => {
+    vi.useFakeTimers()
+    const { bridge, worker } = fixture()
+    worker.hosts.push({ hostId: 'second-host', name: 'Second native Host', available: true })
+    await act(async () => { render(<AgentHostCreationControls taskId="T-0002" taskReady />) })
+    let finish!: (workers: AgentHostWorker[]) => void
+    vi.mocked(bridge.creationWorkers).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    for (const picker of screen.getAllByRole('combobox')) {
+      if (picker.getAttribute('aria-label') === 'Execution location' || picker.getAttribute('aria-label') === 'Remote worker') expect(picker).toBeEnabled()
+    }
+    fireEvent.change(screen.getByRole('combobox', { name: 'Remote worker' }), { target: { value: worker.id } })
+    expect(screen.getByRole('combobox', { name: 'Shared worker workspace' })).toBeEnabled()
+    fireEvent.change(screen.getByRole('combobox', { name: 'Shared worker workspace' }), { target: { value: worker.workspaces[0].id } })
+    expect(screen.getByRole('combobox', { name: 'Exact Agent Host' })).toBeEnabled()
+    fireEvent.change(screen.getByRole('combobox', { name: 'Exact Agent Host' }), { target: { value: 'second-host' } })
+    const create = screen.getByRole('button', { name: 'Create and assign to T-0002' })
+    expect(create).toBeDisabled()
+    fireEvent.click(create)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000)
+      window.dispatchEvent(new Event('online'))
+    })
+    expect(bridge.creationWorkers).toHaveBeenCalledTimes(2)
+    expect(bridge.create).not.toHaveBeenCalled()
+    await act(async () => { finish([structuredClone(worker)]) })
+    expect(screen.getByRole('combobox', { name: 'Remote worker' })).toHaveValue(worker.id)
+    expect(screen.getByRole('combobox', { name: 'Shared worker workspace' })).toHaveValue(worker.workspaces[0].id)
+    expect(screen.getByRole('combobox', { name: 'Exact Agent Host' })).toHaveValue('second-host')
+    expect(create).toBeEnabled()
+    await act(async () => { fireEvent.click(create) })
+    expect(bridge.create).toHaveBeenCalledExactlyOnceWith({
+      operationId: expect.any(String), taskId: 'T-0002', workerId: worker.id,
+      workspaceId: worker.workspaces[0].id, hostId: 'second-host', expectedRevision: worker.workspaces[0].expectedRevision,
+    })
+  })
+
+  it('discards an old background catalogue when the execution location changes', async () => {
+    vi.useFakeTimers()
+    const { bridge, worker, localWorker } = localFixture()
+    await act(async () => { render(<AgentHostCreationControls taskId="T-0002" taskReady />) })
+    let finish!: (workers: AgentHostWorker[]) => void
+    vi.mocked(bridge.creationWorkers).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    const picker = screen.getByRole('combobox', { name: 'Execution location' })
+    expect(picker).toBeEnabled()
+    await act(async () => { fireEvent.change(picker, { target: { value: 'local' } }) })
+    expect(bridge.creationWorkers).toHaveBeenLastCalledWith('T-0002', 'local')
+    fireEvent.change(screen.getByRole('combobox', { name: 'Exact Agent Host' }), { target: { value: localWorker.hosts[0].hostId } })
+    await act(async () => { finish([worker]) })
+    expect(picker).toHaveValue('local')
+    expect(screen.getByText('Current task project')).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /Native Host/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Exact Agent Host' })).toHaveValue(localWorker.hosts[0].hostId)
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeEnabled()
+    expect(bridge.create).not.toHaveBeenCalled()
+  })
+
+  it.each(['offline', 'read-only', 'unavailable Host'] as const)('still disables creation when a background refresh reports %s', async (reason) => {
+    vi.useFakeTimers()
+    const { bridge, worker } = fixture()
+    await act(async () => { render(<AgentHostCreationControls taskId="T-0002" taskReady />) })
+    fireEvent.change(screen.getByRole('combobox', { name: 'Remote worker' }), { target: { value: worker.id } })
+    fireEvent.change(screen.getByRole('combobox', { name: 'Shared worker workspace' }), { target: { value: worker.workspaces[0].id } })
+    fireEvent.change(screen.getByRole('combobox', { name: 'Exact Agent Host' }), { target: { value: worker.hosts[0].hostId } })
+    const create = screen.getByRole('button', { name: 'Create and assign to T-0002' })
+    expect(create).toBeEnabled()
+    const updatedWorker = structuredClone(worker)
+    if (reason === 'offline') updatedWorker.state = 'offline'
+    if (reason === 'read-only') updatedWorker.workspaces[0].canSend = false
+    if (reason === 'unavailable Host') updatedWorker.hosts[0].available = false
+    vi.mocked(bridge.creationWorkers).mockResolvedValue([updatedWorker])
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    expect(create).toBeDisabled()
+    for (const picker of screen.getAllByRole('combobox')) expect(picker).toBeEnabled()
+    expect(screen.getAllByRole('status').length).toBeGreaterThan(0)
+    expect(bridge.create).not.toHaveBeenCalled()
+  })
+
   it('retries only binding for a created-unbound session and retains binding failures', async () => {
     const { bridge, operation } = fixture()
     const unbound = operation('created-unbound')
