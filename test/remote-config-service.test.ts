@@ -336,6 +336,31 @@ it('does not start Git enrollment or publication just by opening an unconfigured
   await expect(readRepositorySessionLinks(peer.folder)).rejects.toThrow('Enable Automatic workspace links')
 }, 30000)
 
+it('enables a fresh workspace after legacy v2 bindings were deleted before enrollment', async () => {
+  const { root, peers, remote } = await fixture(1)
+  const [peer] = peers
+  const seed = join(root, 'seed')
+  const legacyPath = `.taskcontinuum/records/v1/bindings/T-0001/${'a'.repeat(64)}.json`
+  await mkdir(join(seed, '.taskcontinuum', 'records', 'v1', 'bindings', 'T-0001'), { recursive: true })
+  await writeFile(join(seed, ...legacyPath.split('/')), JSON.stringify({ kind: 'binding', payload: { schemaVersion: '2' } }))
+  await git(seed, 'add', legacyPath)
+  await git(seed, 'commit', '-m', 'Legacy v2 binding')
+  await git(seed, 'rm', legacyPath)
+  await git(seed, 'commit', '-m', 'Clean old binding configuration')
+  await git(seed, 'push')
+  const cleanupHead = await git(seed, 'rev-parse', 'HEAD')
+
+  await peer.service.enable(peer.folder)
+  await peer.service.whenConnectionsSettled(peer.folder)
+  await peer.service.syncNow(peer.folder)
+  expect(await peer.service.status(peer.folder)).toMatchObject({ enabled: true, pending: 0, error: undefined })
+  expect((await readRepositorySessionLinks(peer.folder)).document.bindings).toEqual({})
+  expect(await present(join(peer.folder, ...legacyPath.split('/')))).toBe(false)
+  expect(await git(remote, '--git-dir', remote, 'merge-base', '--is-ancestor', cleanupHead, 'main')).toBe('')
+  expect((await readRecords(peer.folder)).some((record) => record.kind === 'device')).toBe(true)
+  expect(await git(peer.folder, 'status', '--porcelain')).toBe('')
+}, 60000)
+
 it('rejects old replica state without migrating, deleting, or publishing it', async () => {
   const { peers, remote } = await fixture(1)
   const [peer] = peers

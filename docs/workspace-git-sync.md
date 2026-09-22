@@ -201,9 +201,17 @@ not migrated, reused or automatically cleared. Start with a fresh Task Continuum
 data directory and explicitly enable automatic links again. Existing old files
 and pending operations are left untouched for manual recovery; they are not
 silently imported into the new state. No new replica is created.
-Force pushes,
-record mutation/removal, invalid signatures and unsupported records block
-synchronization with an actionable error.
+The first synchronization with an upstream target validates its **current
+configuration snapshot** and establishes a baseline. Record deletions or reverted
+edits before that baseline do not block a new enrollment solely because they
+appear in Git history. This does not migrate old records, clear device trust or
+import missing historical authorization: review the current configuration when
+enabling links. Invalid signatures, unsupported records and missing dependencies
+in the current snapshot still block synchronization.
+
+After a target has an accepted baseline, force pushes and immutable record
+mutation/removal after that baseline still block synchronization. Existing
+enrollments do not silently reset their accepted history or pending records.
 
 ## Checks
 

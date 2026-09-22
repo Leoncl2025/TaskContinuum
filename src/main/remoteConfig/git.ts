@@ -686,7 +686,8 @@ export class GitReplica {
     const remoteHead = await this.ref('FETCH_HEAD', signal)
     if (!remoteHead) throw new GitSyncError('upstream', 'The selected upstream branch no longer exists.')
     if (targetAccepted && !await this.ancestor(targetAccepted, remoteHead, signal)) integrity('The upstream history was rewritten or rolled back. The accepted configuration frontier for this target was retained.')
-    await this.history(targetAccepted ? `${targetAccepted}..${remoteHead}` : remoteHead, true, signal)
+    // A new target starts from its current snapshot, not its entire pre-enrollment history.
+    if (targetAccepted) await this.history(`${targetAccepted}..${remoteHead}`, true, signal)
     // Never publish user commits merely because their tree is metadata-only.
     // Only the exact commit durably journaled by this engine may be replayed.
     if (previous && !await this.ancestor(previous, remoteHead, signal)) {

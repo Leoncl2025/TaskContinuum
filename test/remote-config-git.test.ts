@@ -400,6 +400,29 @@ describe('single selected checkout Git synchronization', () => {
     expect(await git(setup.remote, 'rev-parse', BRANCH)).toBe(pendingHead)
   }, 90000)
 
+  it.each(['remove', 'reverted-modification'] as const)('accepts the first snapshot after pre-enrollment %s without rewriting history', async (kind) => {
+    const setup = await fixture()
+    const file = record('before-enrollment')
+    await writeRecord(setup.seed, file)
+    await git(setup.seed, 'add', file.path)
+    await git(setup.seed, 'commit', '--quiet', '-m', 'Old configuration')
+    if (kind === 'remove') await git(setup.seed, 'rm', '--quiet', file.path)
+    else { await writeRecord(setup.seed, { ...file, content: '{"changed":true}\n' }); await git(setup.seed, 'add', file.path) }
+    await git(setup.seed, 'commit', '--quiet', '-m', 'Historical configuration cleanup')
+    if (kind === 'reverted-modification') { await writeRecord(setup.seed, file); await git(setup.seed, 'commit', '--quiet', '-am', 'Restore configuration') }
+    await git(setup.seed, 'push', '--quiet')
+    const head = await git(setup.remote, 'rev-parse', BRANCH)
+    const app = await setup.replica()
+    expect(await git(app.root, 'rev-parse', 'HEAD')).toBe(head)
+    expect(await git(setup.remote, 'rev-parse', BRANCH)).toBe(head)
+    expect(await git(app.root, 'status', '--porcelain')).toBe('')
+    if (kind === 'remove') expect(await present(join(app.root, ...file.path.split('/')))).toBe(false)
+    else expect(await readFile(join(app.root, ...file.path.split('/')), 'utf8')).toBe(file.content)
+    await app.close()
+    const reopened = await setup.replica(0, false)
+    expect((await reopened.sync()).head).toBe(head)
+  }, 60000)
+
   it.each(['modify', 'remove', 'reverted-modification'] as const)('retains immutable history rejection for %s', async (kind) => {
     const setup = await fixture()
     const app = await setup.replica()
