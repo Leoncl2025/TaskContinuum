@@ -85,7 +85,8 @@ function creationFixture() {
       for (const listener of listeners) listener({ id, view })
       return id
     }),
-    unwatch: vi.fn(async (id) => { watched.delete(id) }), send: vi.fn(async () => {}), cancel: vi.fn(async () => {}),
+    unwatch: vi.fn(async (id) => { watched.delete(id) }), terminal: vi.fn(async () => {}), releaseTerminal: vi.fn(async () => {}),
+    send: vi.fn(async () => {}), cancel: vi.fn(async () => {}),
     onView: (listener) => { listeners.add(listener); return () => { listeners.delete(listener) } },
   }
   window.agentHost = agentHost

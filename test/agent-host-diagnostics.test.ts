@@ -112,7 +112,7 @@ describe('Agent Host diagnostic logs', () => {
     }
   }, 25000)
 
-  it('correlates a slow owner model lookup with the queued gateway heartbeat', async () => {
+  it('keeps ping responsive while an owner model lookup is blocked', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-ahp-diagnostics-'))
     const host = await startAgentHostFixture()
     const target = { sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
@@ -157,15 +157,16 @@ describe('Agent Host diagnostic logs', () => {
       await upstreamStarted
       const ping = client.ping()
       await new Promise<void>((resolve) => setTimeout(resolve, 60))
+      await ping
       release()
-      await Promise.all([models, ping])
+      await models
       expect(host.dispatches).toHaveLength(0)
       await flushAgentHostDiagnostics()
       const records = (await readFile(join(directory, 'agent-host-diagnostics', 'agent-host.jsonl'), 'utf8'))
         .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>)
-      const delayedPing = records.find((record) => record.event === 'gateway.request' && record.method === 'ping' && record.status === 'ok')
-      expect(delayedPing).toMatchObject({ traceId, channel: 'root', queueMs: expect.any(Number) })
-      expect(delayedPing?.queueMs).toBeGreaterThanOrEqual(40)
+      const responsivePing = records.find((record) => record.event === 'gateway.request' && record.method === 'ping' && record.status === 'ok')
+      expect(responsivePing).toMatchObject({ traceId, channel: 'root', queueMs: expect.any(Number) })
+      expect(responsivePing?.queueMs).toBeLessThan(500)
       expect(records).toContainEqual(expect.objectContaining({ event: 'gateway.models', traceId, status: 'ok', step: 'native' }))
       expect(records).toContainEqual(expect.objectContaining({ event: 'connection.models', parentTraceId: traceId, status: 'ok' }))
     } finally {

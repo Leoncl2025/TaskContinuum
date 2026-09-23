@@ -214,6 +214,9 @@ approvals or create a new conversation.
 For recurring remote model timeouts, use the
 [opt-in Agent Host diagnostic logs](docs/remote-vscode.md#diagnosing-agent-host-timeouts)
 on both desktops; retrying model loading does not send a message.
+Completed tool terminals load only when their output is expanded. A preview
+remains visible if the owner Host cannot provide the full output, with an
+explicit error and manual retry instead of repeatedly replaying old requests.
 
 The toolbar shows a short options summary, such as **Medium · 872K**. Click it
 to open **Model options** above the input without shrinking the conversation.

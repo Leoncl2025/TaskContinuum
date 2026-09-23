@@ -20,22 +20,94 @@ function terminalText(state: TerminalState | undefined): string {
   return state ? stripAnsi(state.content.map((part) => part.type === 'command' ? part.output : part.value).join('')) : ''
 }
 
-function Response({ part, terminals, owner }: { part: ResponsePart; terminals: Record<string, TerminalState>; owner: string }) {
+type TerminalStatus = NonNullable<AgentHostView['terminalStatus']>
+
+function ToolResponse({ part, terminals, terminalStatus, owner, bridge, watchId }: {
+  part: Extract<ResponsePart, { kind: 'toolCall' }>
+  terminals: Record<string, TerminalState>
+  terminalStatus: TerminalStatus
+  owner: string
+  bridge: AgentHostBridge | undefined
+  watchId: string | undefined
+}) {
+  const tool = part.toolCall
+  const content = 'content' in tool ? tool.content ?? [] : []
+  const pending = tool.status === 'pending-confirmation' || tool.status === 'pending-result-confirmation' || tool.status === 'auth-required'
+  const [openChoice, setOpenChoice] = useState<boolean>()
+  const expanded = openChoice ?? (tool.status === 'running' || pending)
+  const [requests, setRequests] = useState<Record<string, { state: 'loading' | 'ready' | 'error'; error?: string }>>({})
+  const [leaseId] = useState(() => crypto.randomUUID())
+  const resources = [...new Set(content.flatMap((item) => item.type === 'terminal' ? [item.resource] : []))]
+  const resourcesKey = JSON.stringify(resources)
+
+  useEffect(() => {
+    if (!expanded || !bridge || !watchId) return
+    const resources = JSON.parse(resourcesKey) as string[]
+    let cancelled = false
+    for (const resource of resources) {
+      void bridge.terminal(watchId, resource, leaseId).then(() => {
+        if (!cancelled) setRequests((current) => ({ ...current, [resource]: { state: 'ready' } }))
+      }).catch((failure: unknown) => {
+        if (!cancelled) setRequests((current) => ({ ...current, [resource]: { state: 'error', error: failure instanceof Error ? failure.message : 'Terminal output is unavailable.' } }))
+      })
+    }
+    return () => {
+      cancelled = true
+      for (const resource of resources) void bridge.releaseTerminal(watchId, resource, leaseId).catch(() => { console.error('Could not release Agent Host terminal output.') })
+    }
+  }, [bridge, watchId, expanded, resourcesKey, leaseId])
+
+  const retry = (resource: string) => {
+    if (!bridge || !watchId) return
+    setRequests((current) => ({ ...current, [resource]: { state: 'loading' } }))
+    void bridge.terminal(watchId, resource, leaseId, true).then(() => {
+      setRequests((current) => ({ ...current, [resource]: { state: 'ready' } }))
+    }).catch((failure: unknown) => {
+      setRequests((current) => ({ ...current, [resource]: { state: 'error', error: failure instanceof Error ? failure.message : 'Terminal output is unavailable.' } }))
+    })
+  }
+
+  return <details className="ahp-tool" open={expanded}>
+    <summary onClick={(event) => {
+      event.preventDefault()
+      if (!expanded) setRequests((current) => Object.fromEntries(resources.map((resource) => [resource, current[resource]?.state === 'error' ? current[resource] : { state: 'loading' as const }])))
+      setOpenChoice(!expanded)
+    }}><Icon name={tool.status === 'completed' ? 'check' : pending ? 'shield' : 'tools'} /><strong>{tool.displayName || tool.toolName}</strong><span>{tool.status.replaceAll('-', ' ')}</span></summary>
+    {pending && <p className="message-notice">Awaiting confirmation on {owner}</p>}
+    {content.map((item, index) => {
+      if (item.type === 'text') return <ChatMarkdown key={index} source={item.text} />
+      if (item.type !== 'terminal') return <p key={index} className="message-notice">{item.type}</p>
+      const state = terminals[item.resource]
+      const status = terminalStatus[item.resource]
+      const request = requests[item.resource]
+      const preview = stripAnsi(item.result?.preview ?? '')
+      const failure = status?.state === 'error' ? status.error : request?.state === 'error' ? request.error : undefined
+      const loading = status?.state === 'loading' || request?.state === 'loading' && !state || !state && !failure && !request && expanded && Boolean(watchId)
+      const needsRetry = !state && request?.state === 'ready' && !loading
+      return <div key={`${item.resource}:${index}`} className="ahp-terminal-output">
+        <pre className="ahp-terminal" aria-label={item.title || 'Terminal output'}>{terminalText(state) || preview || (state ? 'No terminal output yet.' : 'No terminal output loaded.')}</pre>
+        {!state && preview && <p className="message-notice">Preview only - full terminal output has not loaded.</p>}
+        {loading && <p className="message-notice" role="status">Loading terminal output...</p>}
+        {failure && <p className="message-notice error" role="alert">{failure}</p>}
+        {needsRetry && !failure && <p className="message-notice" role="status">Terminal output was not restored after reconnect.</p>}
+        {(failure || needsRetry) && <button type="button" className="text-button" disabled={!watchId || loading} onClick={() => retry(item.resource)}>Retry terminal output</button>}
+      </div>
+    })}
+    {'error' in tool && tool.error && <p className="message-notice error">{tool.error.message}</p>}
+  </details>
+}
+
+function Response({ part, terminals, terminalStatus, owner, bridge, watchId }: {
+  part: ResponsePart; terminals: Record<string, TerminalState>; terminalStatus: TerminalStatus
+  owner: string; bridge: AgentHostBridge | undefined; watchId: string | undefined
+}) {
   if (part.kind === 'markdown') return <ChatMarkdown source={part.content} />
   if (part.kind === 'reasoning') return <details className="ahp-tool"><summary><Icon name="lightbulb" />Reasoning</summary><ChatMarkdown source={part.content} /></details>
   if (part.kind === 'error') return <p className="message-notice error" role="alert">{part.error.message}</p>
   if (part.kind === 'inputRequest') return <div className="ahp-tool"><strong>{part.response ? 'Input completed' : `Input required on ${owner}`}</strong>{typeof part.request.message === 'string' && <p>{part.request.message}</p>}</div>
   if (part.kind === 'systemNotification') return <p className="message-notice">{typeof part.content === 'string' ? part.content : part.content.markdown}</p>
   if (part.kind !== 'toolCall') return <p className="message-notice">Referenced output</p>
-  const tool = part.toolCall
-  const content = 'content' in tool ? tool.content ?? [] : []
-  const pending = tool.status === 'pending-confirmation' || tool.status === 'pending-result-confirmation' || tool.status === 'auth-required'
-  return <details className="ahp-tool" open={tool.status === 'running' || pending}>
-    <summary><Icon name={tool.status === 'completed' ? 'check' : pending ? 'shield' : 'tools'} /><strong>{tool.displayName || tool.toolName}</strong><span>{tool.status.replaceAll('-', ' ')}</span></summary>
-    {pending && <p className="message-notice">Awaiting confirmation on {owner}</p>}
-    {content.map((item, index) => item.type === 'terminal' ? <pre key={index} className="ahp-terminal" aria-label={item.title || 'Terminal output'}>{terminalText(terminals[item.resource]) || stripAnsi(item.result?.preview ?? '') || 'Waiting for terminal output...'}</pre> : item.type === 'text' ? <ChatMarkdown key={index} source={item.text} /> : <p key={index} className="message-notice">{item.type}</p>)}
-    {'error' in tool && tool.error && <p className="message-notice error">{tool.error.message}</p>}
-  </details>
+  return <ToolResponse part={part} terminals={terminals} terminalStatus={terminalStatus} owner={owner} bridge={bridge} watchId={watchId} />
 }
 
 function imagesFor(turn: Turn | ActiveTurn): ChatImageAttachment[] {
@@ -63,6 +135,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const contextId = task ? task.id : workspace.id
   const contextLabel = task ? task.id : workspace.name
   const [view, setView] = useState<AgentHostView>()
+  const [watch, setWatch] = useState<{ key: string; id: string }>()
   const [error, setError] = useState<string>()
   const [draft, setDraft] = useState('')
   const [images, setImages] = useState<ChatImageAttachment[]>([])
@@ -72,6 +145,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const [catalog, setCatalog] = useState<{ key: string; models: Awaited<ReturnType<AgentHostBridge['models']>>; error?: string }>()
   const [selection, setSelection] = useState<{ key: string; provider: string; id: string; config?: ModelConfig; preferenceError?: string }>()
   const currentCatalog = catalog?.key === catalogKey ? catalog : undefined
+  const watchId = watch?.key === catalogKey ? watch.id : undefined
   const models = currentCatalog?.models ?? []
   const modelId = selection?.key === key ? selection.id : ''
   const selectedModel = models.find((model) => model.id === modelId && model.provider === selection?.provider)
@@ -137,7 +211,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       }
     })
     loadModels()
-    void bridge.watch(selected).then((id) => { if (active) { watchId = id; setError(undefined) } else void bridge.unwatch(id).catch(() => undefined) }).catch((failure: unknown) => { if (active) setError(failure instanceof Error ? failure.message : 'Agent Host access is unavailable.') })
+    void bridge.watch(selected).then((id) => { if (active) { watchId = id; setWatch({ key: catalogKey, id }); setError(undefined) } else void bridge.unwatch(id).catch(() => undefined) }).catch((failure: unknown) => { if (active) setError(failure instanceof Error ? failure.message : 'Agent Host access is unavailable.') })
     return () => { active = false; unlisten(); if (watchId) void bridge.unwatch(watchId).catch(() => undefined) }
   }, [bridge, sessionId, chatId, clientId, machineName, catalogKey, key])
   const activeTurn = view?.chat?.activeTurn
@@ -216,7 +290,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       {!turns.length && <p className="muted">{view?.state === 'connected' ? 'No messages.' : 'Waiting for original history...'}</p>}
       {turns.map((turn) => {
         const actor = turn.message._meta?.taskcontinuumActor as { username?: string; machineName?: string } | undefined
-        return <div key={turn.id} data-turn-id={turn.id}><article className="message message-user"><header><Icon name="account" /><strong>{typeof actor?.username === 'string' ? actor.username : 'User'}</strong>{typeof actor?.machineName === 'string' && <span className="message-model">{actor.machineName}</span>}</header>{turn.message.model && <><p className="message-notice">Requested model: {turn.message.model.id}</p>{Object.keys(turn.message.model.config ?? {}).length > 0 && <p className="message-notice">Requested config: {JSON.stringify(turn.message.model.config)}</p>}</>}<div className="message-text">{turn.message.text}</div><ChatImages images={imagesFor(turn)} /></article><article className="message message-assistant"><header><Icon name="copilot" /><strong>Copilot @ {machineName}</strong></header>{turn.responseParts.map((part, index) => <Response key={index} part={part} terminals={view?.terminals ?? {}} owner={machineName} />)}{activeTurn?.id === turn.id && <p className="message-notice" role="status">Responding...</p>}</article></div>
+        return <div key={turn.id} data-turn-id={turn.id}><article className="message message-user"><header><Icon name="account" /><strong>{typeof actor?.username === 'string' ? actor.username : 'User'}</strong>{typeof actor?.machineName === 'string' && <span className="message-model">{actor.machineName}</span>}</header>{turn.message.model && <><p className="message-notice">Requested model: {turn.message.model.id}</p>{Object.keys(turn.message.model.config ?? {}).length > 0 && <p className="message-notice">Requested config: {JSON.stringify(turn.message.model.config)}</p>}</>}<div className="message-text">{turn.message.text}</div><ChatImages images={imagesFor(turn)} /></article><article className="message message-assistant"><header><Icon name="copilot" /><strong>Copilot @ {machineName}</strong></header>{turn.responseParts.map((part, index) => <Response key={index} part={part} terminals={view?.terminals ?? {}} terminalStatus={view?.terminalStatus ?? {}} owner={machineName} bridge={bridge} watchId={watchId} />)}{activeTurn?.id === turn.id && <p className="message-notice" role="status">Responding...</p>}</article></div>
       })}
     </div>
     <form className="composer-area" onSubmit={(event) => { event.preventDefault(); void send() }}>

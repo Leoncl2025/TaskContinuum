@@ -207,6 +207,31 @@ revalidate active sockets immediately; each outgoing batch and control also chec
 the current policy and local owner receipt. Disconnect/Stop in **Remote devices**
 stays authoritative.
 
+Opening a chat restores the session and chat without subscribing to completed
+tool terminals from its history. Running tool terminals still stream live.
+Expanding a completed tool requests its full terminal output on demand; closing
+it releases that view's subscription. A repeated request for the same resource
+shares an in-flight native fetch. A preview is labeled as a preview when the
+full output is missing, and errors show a manual **Retry terminal output**
+action. Failed historical subscriptions are not replayed on reconnect.
+The owner rechecks the terminal's chat reference and native session/chat claim
+before returning a snapshot; terminal failures do not take down the chat.
+
+The gateway uses separate per-connection async budgets: P0 has two slots for
+ping/unsubscribe, P1 has two for models, session/chat and running terminals
+(at most one running terminal may occupy P1 at a time), P3 has one for
+on-demand historical terminals, and ordered send/cancel execution has its
+own single slot. Across connections, the respective budgets are 16, 16
+(at most eight running terminals), four and eight. The gateway caps each
+connection at 32 pending requests, 16 MiB and 32 retained terminal
+subscriptions; all connections are capped at 128 pending requests, 32 MiB
+and 128 retained terminals. Queued requests expire after 10 seconds, before the
+existing 15-second client RPC timeout; overloaded connections fail rather
+than accumulating stale work. Initialization is a barrier for subsequent
+requests. Every processed request still checks current authorization before
+work and before its response; send/cancel additionally recheck send access
+before dispatch. Snapshot responses precede buffered incremental events.
+
 Reconnection refreshes **state**, not execution. Delivery UUID/hash records are
 persisted before dispatch; uncertain outcomes survive desktop restart and are never
 resent automatically. Busy/queued/owner-draft states block sends. Offline history
@@ -268,7 +293,7 @@ $files = Get-ChildItem -LiteralPath $dir -Filter 'agent-host*.jsonl' -File
 Get-Content -LiteralPath $files.FullName | ConvertFrom-Json |
   Where-Object { $_.event -in 'ipc.models', 'device.transport', 'connection.open', 'connection.models', 'connection.subscribe', 'connection.heartbeat', 'connection.offline', 'connection.retry', 'gateway.upgrade', 'gateway.models', 'gateway.request', 'gateway.socket' } |
   Sort-Object timeUtc |
-  Select-Object timeUtc, event, status, traceId, parentTraceId, targetHash, step, method, channel, elapsedMs, queueMs, authMs, pending, reason, retryMs, errorKind, errorMethod, timeoutMs
+  Select-Object timeUtc, event, status, traceId, parentTraceId, targetHash, step, method, channel, elapsedMs, queueMs, authMs, pending, reason, retryMs, errorKind, rpcCode, errorMethod, timeoutMs
 ```
 
 Use the overridden data directory instead of `$env:APPDATA` if
@@ -283,14 +308,20 @@ machines, but does not reveal its session URI. Compare UTC timestamps and
 
 - No matching B `gateway.upgrade`: inspect A's `device.transport` stage
   (`workspace-recovery`, `tunnel`, or `websocket`) and B's gateway authorization.
-- High B `gateway.request.queueMs`: another request is blocking the serialized
-  gateway queue. High `authMs` instead points to authorization/revalidation.
+- High B `gateway.request.queueMs`: check that method's bounded lane and the
+  global load limits. Historical terminal requests use P3 and cannot occupy
+  the P0 heartbeat or the P1 model slots. High `authMs` instead points to
+  authorization/revalidation.
 - B `gateway.models` and native `connection.models` both show a root timeout:
   inspect the original Host on B. Compare preceding `connection.subscribe`
   terminal errors and `connection.heartbeat` failures; a connected chat is not
   proof that the model catalog is responsive.
 - B finishes `gateway.models` successfully but A times out: inspect the B
   response/authorization time, then the paired route back to A.
+
+A native terminal subscription reporting RPC `-32001` establishes only that
+the Host rejected that subscription. It does not prove that the terminal
+expired; the original Host's error text is needed to determine its cause.
 
 Logs contain only fixed event/status/channel categories, timings, counts, safe
 error kinds/codes, random connection trace IDs, and SHA-256-derived target/owner

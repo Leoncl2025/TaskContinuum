@@ -4,15 +4,16 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import type { AgentHostTarget } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
-import { agentHostModelSelectionSchema, agentHostTargetSchema } from './agentHostProtocol'
+import { agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminalIdSchema } from './agentHostProtocol'
 import { logAgentHostDiagnostic } from './agentHostDiagnostics'
 import type { AgentHostManager } from './agentHostManager'
+import type { AgentHostConnection } from './agentHostConnection'
 import { readClientIdentity } from './clientIdentity'
 import { agentHostCreateRequestSchema, creationLocationSchema, creationTaskIdSchema } from './agentHostCreationProtocol'
 import { localAgentHostCreateRequestSchema } from './localAgentHostCreationService'
 
 export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>, manager: AgentHostManager) {
-  const watches = new Map<string, { window: BrowserWindow; close(): void }>()
+  const watches = new Map<string, { window: BrowserWindow; root: string; target: AgentHostTarget; connection: AgentHostConnection; leases: Map<string, Set<string>>; close(): void }>()
   let consenting: Promise<void> | undefined
   async function current(event: IpcMainInvokeEvent, window: BrowserWindow, root: string, target?: AgentHostTarget): Promise<void> {
     if (window.isDestroyed() || window.webContents.isDestroyed() || requireWindow(event) !== window || await currentRoot() !== root) throw new Error('The workspace or window changed. No message was sent.')
@@ -111,6 +112,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     let timer: ReturnType<typeof setTimeout> | undefined
     let stopped = false
     let refreshing = false
+    const leases = new Map<string, Set<string>>()
     const publish = async () => {
       timer = undefined
       if (stopped || refreshing) return
@@ -123,8 +125,16 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     }
     const schedule = () => { if (!timer && !stopped) timer = setTimeout(() => { void publish() }, 25) }
     const unlisten = connection.listen(schedule)
-    const close = () => { stopped = true; clearTimeout(timer); unlisten(); watches.delete(id) }
-    watches.set(id, { window, close })
+    const close = () => {
+      if (stopped) return
+      stopped = true
+      clearTimeout(timer)
+      unlisten()
+      watches.delete(id)
+      for (const [resource, owners] of leases) owners.forEach(() => connection.releaseTerminal(resource))
+      leases.clear()
+    }
+    watches.set(id, { window, root, target, connection, leases, close })
     schedule()
     void connection.open().catch(schedule)
     return id
@@ -134,6 +144,49 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     const watch = watches.get(z.uuid().parse(value))
     if (watch && watch.window !== window) throw new Error('This view belongs to another window.')
     watch?.close()
+  })
+  ipcMain.handle('agent-host:terminal', async (event, watchValue: unknown, resourceValue: unknown, leaseValue: unknown, retryValue?: unknown) => {
+    const window = requireWindow(event)
+    const id = z.uuid().parse(watchValue)
+    const resource = agentHostTerminalIdSchema.parse(resourceValue)
+    const lease = z.uuid().parse(leaseValue)
+    const retry = z.boolean().optional().parse(retryValue) ?? false
+    const watch = watches.get(id)
+    if (!watch || watch.window !== window) throw new Error('This Agent Host view is no longer active.')
+    const verify = async () => {
+      try { await current(event, window, watch.root, watch.target) }
+      catch (error) { watch.close(); throw error }
+    }
+    await verify()
+    await watch.connection.open()
+    await verify()
+    if (watches.get(id) !== watch) throw new Error('This Agent Host view is no longer active.')
+    let owners = watch.leases.get(resource)
+    if (!owners?.has(lease)) {
+      if (watch.leases.size >= 32 && !owners || [...watch.leases.values()].reduce((total, group) => total + group.size, 0) >= 64) throw new Error('Too many terminal outputs are open in this view.')
+      watch.connection.retainTerminal(resource)
+      owners ??= new Set<string>()
+      owners.add(lease)
+      watch.leases.set(resource, owners)
+    }
+    let failure: unknown
+    try { await watch.connection.terminal(resource, retry) }
+    catch (error) { failure = error }
+    await verify()
+    if (watches.get(id) !== watch) throw new Error('This Agent Host view is no longer active.')
+    if (failure) throw new Error('The owner Host could not load this terminal output. Retry manually.')
+  })
+  ipcMain.handle('agent-host:release-terminal', (event, watchValue: unknown, resourceValue: unknown, leaseValue: unknown) => {
+    const window = requireWindow(event)
+    const watch = watches.get(z.uuid().parse(watchValue))
+    const resource = agentHostTerminalIdSchema.parse(resourceValue)
+    const lease = z.uuid().parse(leaseValue)
+    if (watch && watch.window !== window) throw new Error('This Agent Host view belongs to another window.')
+    const owners = watch?.leases.get(resource)
+    if (watch && owners?.delete(lease)) {
+      watch.connection.releaseTerminal(resource)
+      if (!owners.size) watch.leases.delete(resource)
+    }
   })
   ipcMain.handle('agent-host:models', async (event, value: unknown) => {
     const window = requireWindow(event)

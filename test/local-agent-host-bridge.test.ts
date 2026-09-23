@@ -21,7 +21,7 @@ beforeEach(() => { vi.clearAllMocks(); ipc.handlers.clear() })
 function fixture() {
   let root = 'Q:\\workspace'
   let destroyed = false, webDestroyed = false, wrongWindow = false
-  const window = { isDestroyed: () => destroyed, webContents: { isDestroyed: () => webDestroyed } } as BrowserWindow
+  const window = { isDestroyed: () => destroyed, webContents: { isDestroyed: () => webDestroyed, send: vi.fn() } } as unknown as BrowserWindow
   const requireWindow = vi.fn(() => wrongWindow ? {} as BrowserWindow : window)
   const currentRoot = vi.fn(async () => root)
   const request = { operationId: randomUUID(), hostId: 'local-host-123' }
@@ -47,6 +47,24 @@ function fixture() {
     } }
 }
 
+function terminalFixture() {
+  const setup = fixture()
+  const target = { sessionId: 'copilotcli:/original', chatId: 'ahp-chat:/original', owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+  const connection = {
+    view: { target, state: 'connected' },
+    open: vi.fn(async () => {}),
+    listen: vi.fn(() => () => {}),
+    retainTerminal: vi.fn(),
+    terminal: vi.fn(async () => {}),
+    releaseTerminal: vi.fn(),
+  }
+  const manager = Object.assign(setup.manager, {
+    authorize: vi.fn(async () => {}),
+    connection: vi.fn(async () => connection),
+  })
+  return { ...setup, target, connection, manager }
+}
+
 describe('local planning creation IPC', () => {
   it('derives the current root in main and forwards only the exact local creation contract', async () => {
     const setup = fixture()
@@ -59,6 +77,48 @@ describe('local planning creation IPC', () => {
     expect(setup.manager.creations.create).not.toHaveBeenCalled()
     expect(setup.manager.allow).not.toHaveBeenCalled()
     expect(ipc.dialog).not.toHaveBeenCalled()
+  })
+
+  describe('on-demand terminal IPC', () => {
+    it('checks the linked watch, validates resources and balances leases across collapse and unwatch', async () => {
+      const setup = terminalFixture()
+      const id = await setup.invoke('watch', setup.target) as string
+      const resource = 'ahp-terminal:/original'
+      const first = randomUUID(), second = randomUUID()
+      await expect(setup.invoke('terminal', id, 'ahp-chat:/private-other', first)).rejects.toThrow()
+      expect(setup.connection.retainTerminal).not.toHaveBeenCalled()
+      await setup.invoke('terminal', id, resource, first)
+      await setup.invoke('terminal', id, resource, first)
+      await setup.invoke('terminal', id, resource, second)
+      expect(setup.connection.retainTerminal).toHaveBeenCalledTimes(2)
+      await setup.invoke('release-terminal', id, resource, first)
+      await setup.invoke('release-terminal', id, resource, first)
+      expect(setup.connection.releaseTerminal).toHaveBeenCalledOnce()
+      await setup.invoke('unwatch', id)
+      expect(setup.connection.releaseTerminal).toHaveBeenCalledTimes(2)
+      await expect(setup.invoke('terminal', id, resource, first)).rejects.toThrow('no longer active')
+      expect(setup.connection.terminal).toHaveBeenCalledTimes(3)
+    })
+
+    it('revokes a pending terminal result and releases its lease when authorization changes', async () => {
+      const setup = terminalFixture()
+      const id = await setup.invoke('watch', setup.target) as string
+      const resource = 'ahp-terminal:/original'
+      let finish!: () => void
+      let entered!: () => void
+      const started = new Promise<void>((resolve) => { entered = resolve })
+      setup.connection.terminal.mockImplementationOnce(async () => {
+        entered()
+        await new Promise<void>((resolve) => { finish = resolve })
+      })
+      const pending = setup.invoke('terminal', id, resource, randomUUID())
+      await started
+      setup.manager.authorize.mockRejectedValue(new Error('Access revoked.'))
+      finish()
+      await expect(pending).rejects.toThrow('Access revoked.')
+      expect(setup.connection.releaseTerminal).toHaveBeenCalledOnce()
+      expect(setup.connection.terminal).toHaveBeenCalledOnce()
+    })
   })
 
   describe('task-local creation IPC', () => {

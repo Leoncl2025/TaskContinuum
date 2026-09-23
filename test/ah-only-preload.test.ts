@@ -73,6 +73,22 @@ describe('native-only preload boundary', () => {
     ])
   })
 
+  it('scopes terminal requests to a view and a single lease', async () => {
+    const bridge = window.agentHost
+    if (!bridge) throw new Error('Agent Host preload API missing.')
+    const view = crypto.randomUUID()
+    const lease = crypto.randomUUID()
+    const resource = 'ahp-terminal:/existing'
+    await bridge.terminal(view, resource, lease)
+    await bridge.terminal(view, resource, lease, true)
+    await bridge.releaseTerminal(view, resource, lease)
+    expect(ipc.invoke.mock.calls).toEqual([
+      ['agent-host:terminal', view, resource, lease, undefined],
+      ['agent-host:terminal', view, resource, lease, true],
+      ['agent-host:release-terminal', view, resource, lease],
+    ])
+  })
+
   it('exposes root-scoped local creation without caller-selected paths, tasks, or remote workers', async () => {
     const bridge = window.agentHost
     if (!bridge) throw new Error('Agent Host preload API missing.')

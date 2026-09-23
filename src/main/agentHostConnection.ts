@@ -30,6 +30,12 @@ export class AgentHostConnection {
   private readonly snapshots = new Map<string, Snapshot>()
   private readonly listeners = new Set<(event: AgentHostEvent) => void>()
   private readonly subscribing = new Set<string>()
+  private readonly terminalSubscriptions = new Map<string, Subscription>()
+  private readonly terminalRequests = new Map<string, Promise<Snapshot>>()
+  private readonly terminalLeases = new Map<string, number>()
+  private readonly terminalStatus = new Map<string, { state: 'loading' | 'error'; error?: string }>()
+  private referencedTerminals = new Set<string>()
+  private activeTerminals = new Set<string>()
   private commands: Command[] = []
   private loaded?: Promise<void>
   private writing: Promise<void> = Promise.resolve()
@@ -55,7 +61,8 @@ export class AgentHostConnection {
     const pending = this.commands.find((command) => command.state === 'pending' || command.state === 'uncertain')
     const readOnly = this.initialized?._meta?.taskcontinuumCanSend === false || chat?.interactivity === 'read-only' || chat?.interactivity === 'hidden'
     return { target: this.target, state: this.connected ? 'connected' : this.opening ? 'connecting' : 'offline', chat,
-      terminals: Object.fromEntries([...this.snapshots].filter(([resource]) => agentHostTerminalIdSchema.safeParse(resource).success).map(([resource, snapshot]) => [resource, structuredClone(snapshot.state) as TerminalState])),
+      terminals: Object.fromEntries([...this.snapshots].filter(([resource]) => this.referencedTerminals.has(resource)).map(([resource, snapshot]) => [resource, structuredClone(snapshot.state) as TerminalState])),
+      terminalStatus: Object.fromEntries([...this.terminalStatus].filter(([resource]) => this.referencedTerminals.has(resource))),
       canSend: this.connected && !readOnly && !pending && !this.sending && !chat?.activeTurn && !chat?.draft?.text && !chat?.draft?.attachments?.length && !chat?.queuedMessages?.length, readOnly,
       error: this.error, ...(pending ? { pendingTurn: { id: pending.id, state: pending.state as 'pending' | 'uncertain' } } : {}) }
   }
@@ -76,7 +83,55 @@ export class AgentHostConnection {
     return structuredClone(snapshot)
   }
 
-  allowedChannel(resource: string): boolean { return resource === this.target.sessionId || resource === this.target.chatId || this.terminalResources().includes(resource) }
+  allowedChannel(resource: string): boolean { return resource === this.target.sessionId || resource === this.target.chatId || this.referencedTerminals.has(resource) }
+
+  isActiveTerminal(resource: string): boolean { return this.activeTerminals.has(resource) }
+
+  retainTerminal(resource: string): void {
+    if (!agentHostTerminalIdSchema.safeParse(resource).success || !this.allowedChannel(resource)) throw new Error('Channel not authorized.')
+    this.terminalLeases.set(resource, (this.terminalLeases.get(resource) ?? 0) + 1)
+  }
+
+  releaseTerminal(resource: string): void {
+    const count = this.terminalLeases.get(resource)
+    if (!count) return
+    if (count > 1) { this.terminalLeases.set(resource, count - 1); return }
+    this.terminalLeases.delete(resource)
+    if (!this.activeTerminals.has(resource) && !this.terminalRequests.has(resource)) this.stopTerminal(resource)
+  }
+
+  async terminal(resource: string, retry = false): Promise<Snapshot> {
+    await this.open()
+    if (!agentHostTerminalIdSchema.safeParse(resource).success || !this.allowedChannel(resource)) throw new Error('Channel not authorized.')
+    const active = this.current
+    if (!active || !this.connected) throw new Error('Agent Host is offline.')
+    const pending = this.terminalRequests.get(resource)
+    if (pending) return pending
+    const cached = this.terminalSubscriptions.has(resource) ? this.snapshots.get(resource) : undefined
+    if (cached) return structuredClone(cached)
+    if (this.terminalStatus.get(resource)?.state === 'error' && !retry) throw new Error('Terminal output is unavailable. Retry manually.')
+    this.terminalStatus.set(resource, { state: 'loading' })
+    this.emit({ type: 'state' })
+    const operation = this.subscribe(resource, active).then(() => {
+        if (this.current !== active || !this.connected) throw new Error('Agent Host connection changed.')
+        return this.snapshot(resource)
+      }).catch((error: unknown) => {
+        if (this.current === active && this.allowedChannel(resource)) {
+          this.terminalStatus.set(resource, { state: 'error', error: 'The owner Host could not load this terminal output. Retry manually.' })
+          this.emit({ type: 'state' })
+        }
+        throw error
+      }).finally(() => {
+        if (this.terminalRequests.get(resource) === operation) this.terminalRequests.delete(resource)
+        if (this.current === active) {
+          if (this.terminalStatus.get(resource)?.state === 'loading') this.terminalStatus.delete(resource)
+          if (!this.terminalLeases.has(resource) && !this.activeTerminals.has(resource)) this.stopTerminal(resource)
+          this.emit({ type: 'state' })
+        }
+      })
+    this.terminalRequests.set(resource, operation)
+    return operation
+  }
 
   listen(listener: (event: AgentHostEvent) => void): () => void {
     this.listeners.add(listener)
@@ -95,6 +150,7 @@ export class AgentHostConnection {
       try {
         const saved = z.object({ schemaVersion: z.literal(2), target: agentHostTargetSchema, chat: z.unknown() }).strict().parse(await readJsonBounded(`${this.file}.cache.json`, 16 * 1024 * 1024))
         if (agentHostKey(saved.target) === agentHostKey(this.target)) this.chat.snapshot(saved.chat as Snapshot)
+        this.refreshTerminals()
       } catch { this.error = 'No verified offline history is available yet.' }
     })()
     return this.loaded
@@ -145,6 +201,11 @@ export class AgentHostConnection {
         advance('session')
         this.snapshots.clear()
         this.subscribing.clear()
+        this.terminalSubscriptions.clear()
+        this.terminalRequests.clear()
+        this.terminalStatus.clear()
+        this.referencedTerminals.clear()
+        this.activeTerminals.clear()
         this.chat = new AgentHostChatState(this.target.chatId)
         await this.subscribe(this.target.sessionId, active)
         advance('chat')
@@ -156,7 +217,7 @@ export class AgentHostConnection {
         this.error = undefined
         await this.reconcile()
         this.emit({ type: 'state' })
-        this.discoverTerminals(active)
+        this.discoverActiveTerminals()
         this.heartbeat = setInterval(() => {
           const sent = performance.now()
           void client.ping().then(() => {
@@ -197,17 +258,27 @@ export class AgentHostConnection {
     this.subscribing.add(resource)
     try {
       const { result, subscription } = await active.client.subscribe(resource, { delivery: { maxLatencyMs: 25 } })
-      if (this.current !== active) {
-        await subscription.close()
-        this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'closed', channel, reason: 'transport-closed', elapsedMs: performance.now() - started })
-        return
+      try {
+        if (this.current !== active) {
+          this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'closed', channel, reason: 'transport-closed', elapsedMs: performance.now() - started })
+          return
+        }
+        if (!result.snapshot || result.snapshot.resource !== resource) throw new Error('Agent Host did not return the requested snapshot.')
+        this.acceptSnapshot(result.snapshot)
+        if (agentHostTerminalIdSchema.safeParse(resource).success) this.terminalSubscriptions.set(resource, subscription)
+        this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'ok', channel, elapsedMs: performance.now() - started })
+        void this.pump(subscription, active, resource)
+      } catch (error) {
+        if (this.current === active) {
+          try { await active.client.unsubscribe(resource) }
+          catch (failure) { this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'error', channel, step: 'response', error: failure }) }
+        }
+        throw error
+      } finally {
+        if (this.current !== active || !this.subscribing.has(resource)) await subscription.close()
       }
-      if (!result.snapshot || result.snapshot.resource !== resource) throw new Error('Agent Host did not return the requested snapshot.')
-      this.acceptSnapshot(result.snapshot)
-      this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'ok', channel, elapsedMs: performance.now() - started })
-      void this.pump(subscription, active, resource)
     } catch (error) {
-      this.subscribing.delete(resource)
+      if (this.current === active) this.subscribing.delete(resource)
       this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'error', channel, elapsedMs: performance.now() - started, error })
       throw error
     }
@@ -223,17 +294,22 @@ export class AgentHostConnection {
     }
     if (snapshot.resource === this.target.chatId) this.chat.snapshot(snapshot)
     this.snapshots.set(snapshot.resource, structuredClone(snapshot))
+    if (snapshot.resource === this.target.chatId) this.refreshTerminals()
     this.emit({ type: 'snapshot', snapshot })
   }
 
   private async pump(subscription: Subscription, active: NonNullable<typeof this.current>, resource: string): Promise<void> {
     const channel = agentHostDiagnosticChannel(resource, this.target)
+    const terminal = agentHostTerminalIdSchema.safeParse(resource).success
     try {
       for await (const event of subscription) {
-        if (this.current !== active) return
+        if (this.current !== active || terminal && this.terminalSubscriptions.get(resource) !== subscription) return
         if (event.type === 'authRequired') {
           this.diagnose('connection.stream', { traceId: active.traceId, status: 'error', channel, reason: 'auth-required' })
-          this.error = 'Authentication is required in the owner Agent Host.'
+          if (this.terminalSubscriptions.get(resource) === subscription) {
+            this.terminalStatus.set(resource, { state: 'error', error: 'Terminal output requires attention on the owner Host. Retry manually.' })
+            this.stopTerminal(resource)
+          } else this.error = 'Authentication is required in the owner Agent Host.'
           this.emit({ type: 'state' })
           continue
         }
@@ -253,25 +329,62 @@ export class AgentHostConnection {
           if (terminal.claim.kind !== 'session' || terminal.claim.session !== this.target.sessionId || terminal.claim.chat !== this.target.chatId) throw new Error('The terminal changed ownership.')
         }
         this.snapshots.set(envelope.channel, { resource: envelope.channel, fromSeq: envelope.serverSeq, state })
+        if (envelope.channel === this.target.chatId) this.refreshTerminals()
         this.emit({ type: 'action', envelope })
         void this.reconcile().catch(() => { this.error = 'Delivery confirmation could not be saved. Inspect the owner before retrying.'; this.emit({ type: 'state' }) })
-        this.discoverTerminals(active)
+        if (envelope.channel === this.target.chatId) this.discoverActiveTerminals()
       }
       this.diagnose('connection.stream', { traceId: active.traceId, status: 'closed', channel, reason: 'stream-ended' })
-      this.offline(active, 'stream-ended')
+      if (terminal) {
+        if (this.terminalSubscriptions.get(resource) === subscription) this.failTerminalStream(resource)
+      } else this.offline(active, 'stream-ended')
     } catch (error) {
       this.diagnose('connection.stream', { traceId: active.traceId, status: 'error', channel, reason: 'stream-error', error })
-      this.offline(active, 'stream-error')
+      if (terminal) {
+        if (this.terminalSubscriptions.get(resource) === subscription) this.failTerminalStream(resource)
+      } else this.offline(active, 'stream-error')
     }
   }
 
-  private terminalResources(): string[] {
+  private refreshTerminals(): void {
     const chat = this.chat.value
-    return [...new Set([...chat?.turns ?? [], ...chat?.activeTurn ? [chat.activeTurn] : []].flatMap((turn) => turn.responseParts.flatMap((part) => part.kind === 'toolCall' && 'content' in part.toolCall ? (part.toolCall.content ?? []).flatMap((content) => content.type === 'terminal' && agentHostTerminalIdSchema.safeParse(content.resource).success ? [content.resource] : []) : [])))].slice(-16)
+    const referenced = new Set<string>()
+    const active = new Set<string>()
+    const currentTurn = chat?.activeTurn
+    for (const turn of [...chat?.turns ?? [], ...currentTurn ? [currentTurn] : []]) for (const part of turn.responseParts) {
+      if (part.kind !== 'toolCall' || !('content' in part.toolCall)) continue
+      for (const content of part.toolCall.content ?? []) if (content.type === 'terminal' && agentHostTerminalIdSchema.safeParse(content.resource).success) {
+        referenced.add(content.resource)
+        if (turn === currentTurn && (part.toolCall.status === 'running' || part.toolCall.status === 'auth-required')) active.add(content.resource)
+      }
+    }
+    this.referencedTerminals = referenced
+    this.activeTerminals = active
+    for (const resource of this.terminalSubscriptions.keys()) if (!referenced.has(resource) || !active.has(resource) && !this.terminalLeases.has(resource)) this.stopTerminal(resource)
+    for (const resource of this.terminalStatus.keys()) if (!referenced.has(resource)) this.terminalStatus.delete(resource)
   }
 
-  private discoverTerminals(active: NonNullable<typeof this.current>): void {
-    for (const resource of this.terminalResources()) if (!this.subscribing.has(resource)) void this.subscribe(resource, active).catch(() => { if (this.current === active) { this.error = 'Some terminal output is unavailable.'; this.emit({ type: 'state' }) } })
+  private discoverActiveTerminals(): void {
+    for (const resource of this.activeTerminals) if (!this.subscribing.has(resource) && !this.terminalRequests.has(resource) && this.terminalStatus.get(resource)?.state !== 'error') {
+      void this.terminal(resource).catch(() => {})
+    }
+  }
+
+  private stopTerminal(resource: string): void {
+    const subscription = this.terminalSubscriptions.get(resource)
+    if (!subscription) return
+    this.terminalSubscriptions.delete(resource)
+    this.subscribing.delete(resource)
+    this.snapshots.delete(resource)
+    const active = this.current
+    void subscription.close().catch((error: unknown) => { this.diagnose('connection.subscribe', { traceId: active?.traceId, status: 'error', channel: 'terminal', step: 'response', error }) })
+    if (active) void active.client.unsubscribe(resource).catch((error: unknown) => { this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'error', channel: 'terminal', step: 'response', error }) })
+    this.emit({ type: 'state' })
+  }
+
+  private failTerminalStream(resource: string): void {
+    this.terminalStatus.set(resource, { state: 'error', error: 'The terminal output stream stopped. Retry manually.' })
+    this.stopTerminal(resource)
   }
 
   private async reconcile(): Promise<void> {
@@ -406,6 +519,9 @@ export class AgentHostConnection {
     clearInterval(this.heartbeat)
     active.abort.abort()
     void active.client.shutdown()
+    this.terminalSubscriptions.clear()
+    this.terminalRequests.clear()
+    this.subscribing.clear()
     for (const command of this.commands) if (command.state === 'pending') command.state = 'uncertain'
     void this.save().catch(() => undefined)
     this.error = 'Agent Host disconnected. Restoring state only; messages are never replayed.'

@@ -28,11 +28,21 @@ function fixture() {
     bindCreation: vi.fn(async () => { throw new Error('No creation operation in the chat panel.') }),
     models: vi.fn(async () => [{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }]),
     watch: vi.fn(async () => { watchId = crypto.randomUUID(); for (const listener of listeners) listener({ id: watchId, view: structuredClone(view) }); return watchId }),
-    unwatch: vi.fn(async () => {}), send: vi.fn(async () => {}), cancel: vi.fn(async () => {}),
+    unwatch: vi.fn(async () => {}), terminal: vi.fn(async () => {}), releaseTerminal: vi.fn(async () => {}),
+    send: vi.fn(async () => {}), cancel: vi.fn(async () => {}),
     onView: (listener) => { listeners.add(listener); return () => listeners.delete(listener) },
   }
   window.agentHost = bridge
   return { target, bridge, view, emit: () => { for (const listener of listeners) listener({ id: watchId, view: structuredClone(view) }) } }
+}
+
+function historicalOutput(view: AgentHostView, resource: string, duplicate = false): void {
+  const content = { type: 'terminal', resource, title: 'Historical output', result: { preview: 'Preview before loading' } }
+  view.chat!.turns = [{
+    id: 'previous-turn', state: 'complete', message: { text: 'Prior request', origin: { kind: 'user' } },
+    responseParts: [{ kind: 'toolCall', toolCall: { toolCallId: 'previous-tool', toolName: 'terminal', displayName: 'Previous command',
+      status: 'completed', content: duplicate ? [content, content] : [content] } }], usage: undefined,
+  }] as ChatState['turns']
 }
 
 describe('Agent Host chat UI', () => {
@@ -395,5 +405,73 @@ describe('Agent Host chat UI', () => {
     expect(output.textContent).not.toContain('\u001b')
     expect(rendered.container.querySelector('script')).toBeNull()
     expect(within(screen.getByRole('log')).getByText('Run tests')).toBeInTheDocument()
+  })
+
+  it('loads historical output only when expanded, deduplicates repeated resources and releases on collapse', async () => {
+    const setup = fixture()
+    const resource = 'ahp-terminal:/previous-command'
+    historicalOutput(setup.view, resource, true)
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByText('Previous command')
+    expect(setup.bridge.terminal).not.toHaveBeenCalled()
+    await user.click(screen.getByText('Previous command'))
+    await waitFor(() => expect(setup.bridge.terminal).toHaveBeenCalledOnce())
+    expect(setup.bridge.terminal).toHaveBeenCalledWith(expect.any(String), resource, expect.any(String))
+    setup.view.terminals[resource] = { title: 'Historical output', content: [{ type: 'unclassified', value: 'Full output <script>inert</script>' }],
+      lifecycle: { status: 'exited' }, claim: { kind: 'session', session: setup.target.sessionId, chat: setup.target.chatId } } as AgentHostView['terminals'][string]
+    act(() => setup.emit())
+    await waitFor(() => expect(screen.getAllByLabelText('Historical output')).toHaveLength(2))
+    expect(screen.getAllByLabelText('Historical output')[0]).toHaveTextContent('Full output <script>inert</script>')
+    expect(document.querySelector('script')).toBeNull()
+    await user.click(screen.getByText('Previous command'))
+    await waitFor(() => expect(setup.bridge.releaseTerminal).toHaveBeenCalledOnce())
+    expect(setup.bridge.releaseTerminal).toHaveBeenCalledWith(expect.any(String), resource, vi.mocked(setup.bridge.terminal).mock.calls[0][2])
+  })
+
+  it('shows the preview and a failed state until the user explicitly retries the terminal', async () => {
+    const setup = fixture()
+    const resource = 'ahp-terminal:/failed-command'
+    historicalOutput(setup.view, resource)
+    vi.mocked(setup.bridge.terminal).mockRejectedValueOnce(new Error('The owner Host could not load this terminal output. Retry manually.'))
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await user.click(await screen.findByText('Previous command'))
+    await screen.findByRole('alert', { name: '' })
+    expect(screen.getByLabelText('Historical output')).toHaveTextContent('Preview before loading')
+    expect(screen.getByText('Preview only - full terminal output has not loaded.')).toBeInTheDocument()
+    act(() => { setup.emit(); setup.emit() })
+    expect(setup.bridge.terminal).toHaveBeenCalledOnce()
+    await user.click(screen.getByRole('button', { name: 'Retry terminal output' }))
+    await waitFor(() => expect(setup.bridge.terminal).toHaveBeenCalledTimes(2))
+    expect(setup.bridge.terminal).toHaveBeenLastCalledWith(expect.any(String), resource, vi.mocked(setup.bridge.terminal).mock.calls[0][2], true)
+    setup.view.terminals[resource] = { title: 'Historical output', content: [{ type: 'unclassified', value: 'Loaded on retry' }],
+      lifecycle: { status: 'exited' }, claim: { kind: 'session', session: setup.target.sessionId, chat: setup.target.chatId } } as AgentHostView['terminals'][string]
+    act(() => setup.emit())
+    await waitFor(() => expect(screen.getByLabelText('Historical output')).toHaveTextContent('Loaded on retry'))
+    expect(screen.queryByText('Preview only - full terminal output has not loaded.')).not.toBeInTheDocument()
+  })
+
+  it('does not automatically retry historical output after reconnect', async () => {
+    const setup = fixture()
+    const resource = 'ahp-terminal:/reconnect-command'
+    historicalOutput(setup.view, resource)
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await user.click(await screen.findByText('Previous command'))
+    await waitFor(() => expect(setup.bridge.terminal).toHaveBeenCalledOnce())
+    setup.view.terminals[resource] = { title: 'Historical output', content: [{ type: 'unclassified', value: 'Old output' }],
+      lifecycle: { status: 'exited' }, claim: { kind: 'session', session: setup.target.sessionId, chat: setup.target.chatId } } as AgentHostView['terminals'][string]
+    act(() => setup.emit())
+    act(() => {
+      setup.view.state = 'offline'
+      setup.view.terminals = {}
+      setup.emit()
+    })
+    act(() => { setup.view.state = 'connected'; setup.emit() })
+    expect(setup.bridge.terminal).toHaveBeenCalledOnce()
+    await screen.findByText('Terminal output was not restored after reconnect.')
+    await user.click(screen.getByRole('button', { name: 'Retry terminal output' }))
+    expect(setup.bridge.terminal).toHaveBeenLastCalledWith(expect.any(String), resource, expect.any(String), true)
   })
 })
