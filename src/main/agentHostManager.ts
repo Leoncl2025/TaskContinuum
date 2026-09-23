@@ -4,6 +4,7 @@ import { z } from 'zod'
 import type { AgentHostTarget } from '../shared/agentHost'
 import type { SessionOwner } from '../shared/sessionBindings'
 import { AgentHostConnection } from './agentHostConnection'
+import { logAgentHostDiagnostic } from './agentHostDiagnostics'
 import type { AgentHostRegistry } from './agentHostRegistry'
 import type { VSCodeDeviceClient } from './vscodeDeviceClient'
 import { agentHostKey, agentHostTargetSchema } from './agentHostProtocol'
@@ -79,9 +80,16 @@ export class AgentHostManager {
     let connection = this.remote.get(key)
     if (!connection) {
       if (this.remote.size >= 32) throw new Error('Remote Agent Host connection limit reached.')
-      connection = new AgentHostConnection(target, join(this.directory, 'agent-host-remotes', scope), async (signal) => {
-        await this.authorize(root, target)
-        return this.devices.agentHostTransport(root, target, signal)
+      connection = new AgentHostConnection(target, join(this.directory, 'agent-host-remotes', scope), async (signal, traceId) => {
+        const started = performance.now()
+        try {
+          await this.authorize(root, target)
+          logAgentHostDiagnostic('device.transport', { target, traceId, status: 'ok', step: 'authorization', elapsedMs: performance.now() - started })
+        } catch (error) {
+          logAgentHostDiagnostic('device.transport', { target, traceId, status: 'error', step: 'authorization', elapsedMs: performance.now() - started, error })
+          throw error
+        }
+        return this.devices.agentHostTransport(root, target, signal, traceId)
       })
       this.remote.set(key, connection)
     }

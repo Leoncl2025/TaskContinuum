@@ -192,9 +192,10 @@ still apply. An interrupted image submission is not replayed automatically.
 ### Access and Recovery
 
 The session-stream gateway accepts only initialize, snapshot recovery, ping,
-allowed subscriptions and guarded send/cancel for the pinned chat. It rejects
-root/other-chat subscriptions, filesystem access, arbitrary tools, arbitrary Host
-configuration and raw session creation.
+allowed subscriptions and guarded send/cancel for the pinned chat. Its root
+subscription returns only the original provider's enabled model catalog; other
+root data and sibling chats are not exposed. It rejects filesystem access,
+arbitrary tools, arbitrary Host configuration and raw session creation.
 The separate device creation/status/bind commands are restricted to the paired
 worker's existing send-scoped workspaces; they do not forward arbitrary AHP RPCs.
 Native endpoints remain under `/device/agent-host/*`. The authenticated
@@ -229,6 +230,76 @@ Native VS Code Copilot session resources use `copilotcli:/<id>` and a default
 `ahp-chat://default/<encoded-session>` chat, not the PoC's manually chosen
 `ahp-session:/<id>`. Both session formats are accepted with exact verified chat
 membership. This build lists only the verified `copilotcli` provider.
+
+### Diagnosing Agent Host timeouts
+
+To distinguish a paired-device transport failure from an owner gateway backlog
+or a slow native Host, enable **opt-in diagnostic logging on both desktops**.
+Wait for active turns to finish, exit Task Continuum on each computer, rebuild
+both copies, and launch them from PowerShell with
+`$env:TASKCONTINUUM_AHP_DIAGNOSTICS='1'` set **in the same shell**. For a source
+checkout, run `npm run build` and then `npm run start`; for an installed build,
+launch its executable instead. An already-running primary instance will not
+inherit the new setting. Leave VS Code and the original Agent Host running;
+no session, task binding or configuration needs to be cleared. Logging is off
+by default; unset the variable and restart to turn it off. If logging cannot
+start, the launch fails explicitly rather than silently running without logs.
+
+From each built source checkout, the launch commands are:
+
+```powershell
+$env:TASKCONTINUUM_AHP_DIAGNOSTICS = '1'
+npm run start
+```
+
+Each desktop writes private JSON Lines under its Electron `userData` directory:
+`%APPDATA%\Task Continuum\agent-host-diagnostics\agent-host.jsonl` by default,
+or `<TASKCONTINUUM_DATA_DIR>\agent-host-diagnostics\agent-host.jsonl` when the
+data directory is overridden. The active file and two rotated files are capped
+at **2 MiB each** (6 MiB total). Where supported, the directory and new files
+use owner-only permissions; on Windows they inherit the user profile ACL.
+Write failures and dropped entries are reported to the launching process's
+stderr, not silently treated as successful logging. Keep these files private.
+To inspect just the timing and failure fields on either computer:
+
+```powershell
+$dir = Join-Path $env:APPDATA 'Task Continuum\agent-host-diagnostics'
+$files = Get-ChildItem -LiteralPath $dir -Filter 'agent-host*.jsonl' -File
+Get-Content -LiteralPath $files.FullName | ConvertFrom-Json |
+  Where-Object { $_.event -in 'ipc.models', 'device.transport', 'connection.open', 'connection.models', 'connection.subscribe', 'connection.heartbeat', 'connection.offline', 'connection.retry', 'gateway.upgrade', 'gateway.models', 'gateway.request', 'gateway.socket' } |
+  Sort-Object timeUtc |
+  Select-Object timeUtc, event, status, traceId, parentTraceId, targetHash, step, method, channel, elapsedMs, queueMs, authMs, pending, reason, retryMs, errorKind, errorMethod, timeoutMs
+```
+
+Use the overridden data directory instead of `$env:APPDATA` if
+`TASKCONTINUUM_DATA_DIR` is set.
+
+Reproduce the issue with **Retry loading models**, not a new message. Match
+the A-side `connection.models` event to the B-side `gateway.models` event by
+`traceId`; B's native `connection.models` event carries the same value as
+`parentTraceId`. `targetHash` is the same for the exact linked chat on both
+machines, but does not reveal its session URI. Compare UTC timestamps and
+`elapsedMs`, `queueMs`, `authMs`, `step` and `errorKind`:
+
+- No matching B `gateway.upgrade`: inspect A's `device.transport` stage
+  (`workspace-recovery`, `tunnel`, or `websocket`) and B's gateway authorization.
+- High B `gateway.request.queueMs`: another request is blocking the serialized
+  gateway queue. High `authMs` instead points to authorization/revalidation.
+- B `gateway.models` and native `connection.models` both show a root timeout:
+  inspect the original Host on B. Compare preceding `connection.subscribe`
+  terminal errors and `connection.heartbeat` failures; a connected chat is not
+  proof that the model catalog is responsive.
+- B finishes `gateway.models` successfully but A times out: inspect the B
+  response/authorization time, then the paired route back to A.
+
+Logs contain only fixed event/status/channel categories, timings, counts, safe
+error kinds/codes, random connection trace IDs, and SHA-256-derived target/owner
+fingerprints. They do **not** record chat text, model IDs/configuration, terminal
+content, workspace paths, endpoint URLs, SSH keys, authorization headers,
+tokens, or raw exception messages. A `RpcTimeoutError` is logged as
+`errorKind: "timeout"` with its safe `errorMethod` and `timeoutMs`. If one side
+still runs an older build, trace propagation may be absent there; do not treat
+missing logs alone as proof that a request never arrived.
 
 ### Local link receipt recovery
 

@@ -19,6 +19,7 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
   const subscriptions = new Map<import('ws').WebSocket, Set<string>>()
   const dispatches: unknown[] = []
   let loseNextSend = false
+  let stallRoot = false
   const root: RootState = { agents: [
     { provider: 'copilotcli', displayName: 'Copilot', description: '', models: [{ id: 'owner-model', name: 'Owner model', provider: 'copilotcli' }, { id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli', configSchema: modelConfigFixture }, { id: 'disabled-model', name: 'Disabled', provider: 'copilotcli', policyState: 'disabled' as RootState['agents'][number]['models'][number]['policyState'] }] },
     { provider: 'private-provider', displayName: 'Private provider', description: '', models: [{ id: 'private-model', name: 'Private model', provider: 'private-provider' }] },
@@ -37,7 +38,11 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
       let result: unknown = {}
       if (message.method === 'initialize') result = { protocolVersion: '0.9.0', serverSeq: sequence, snapshots: [], ...(initializeMeta ? { _meta: initializeMeta } : {}) }
       else if (message.method === 'listSessions') result = { items: [{ resource: sessionId, ...session, createdAt: chat.modifiedAt, modifiedAt: chat.modifiedAt }] }
-      else if (message.method === 'subscribe') { subscriptions.get(socket)!.add(message.params.channel); result = { snapshot: snapshot(message.params.channel) } }
+      else if (message.method === 'subscribe') {
+        if (stallRoot && message.params.channel === 'ahp-root://') return
+        subscriptions.get(socket)!.add(message.params.channel)
+        result = { snapshot: snapshot(message.params.channel) }
+      }
       else if (message.method === 'unsubscribe') subscriptions.get(socket)!.delete(message.params.channel)
       else if (message.method === 'dispatchAction') {
         dispatches.push(message.params.action)
@@ -50,5 +55,5 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   const endpoint: AgentHostEndpoint = { schemaVersion: 2, type: 'standalone', pid: process.pid, instanceId: hostId, connectionToken: randomUUID(), protocolVersion: '0.9.0', endpoint: { type: 'tcp', host: '127.0.0.1', port: (server.address() as { port: number }).port } }
-  return { endpoint, hostId, sessionId, chatId, dispatches, action, snapshot, drop: () => { for (const socket of sockets.clients) socket.terminate() }, loseNextSend: () => { loseNextSend = true }, draft: (text: string, selection: Pick<Message, 'model' | 'agent'> = {}) => { chat = { ...chat, draft: { ...selection, text, origin: { kind: MessageKind.User } } } }, close: async () => { for (const socket of sockets.clients) socket.terminate(); sockets.close(); await new Promise<void>((resolve) => server.close(() => resolve())) } }
+  return { endpoint, hostId, sessionId, chatId, dispatches, action, snapshot, drop: () => { for (const socket of sockets.clients) socket.terminate() }, loseNextSend: () => { loseNextSend = true }, stallRoot: () => { stallRoot = true }, draft: (text: string, selection: Pick<Message, 'model' | 'agent'> = {}) => { chat = { ...chat, draft: { ...selection, text, origin: { kind: MessageKind.User } } } }, close: async () => { for (const socket of sockets.clients) socket.terminate(); sockets.close(); await new Promise<void>((resolve) => server.close(() => resolve())) } }
 }

@@ -13,6 +13,7 @@ import { readRepositorySessionLinks, removeRepositorySessionLink, updateReposito
 import { canonicalPolicyRoot, locallyLinkedAgentHostSessions, recordLocalLink } from '../src/main/linkedSessionPolicy'
 import { AgentHostRegistry } from '../src/main/agentHostRegistry'
 import { AgentHostConnection } from '../src/main/agentHostConnection'
+import { flushAgentHostDiagnostics, startAgentHostDiagnostics, stopAgentHostDiagnostics } from '../src/main/agentHostDiagnostics'
 import { startAgentHostFixture } from './agent-host-fixture'
 import { AhpClient } from '@microsoft/agent-host-protocol/client'
 import { modelConfigFixture } from './agent-host-model-fixture'
@@ -36,8 +37,9 @@ it('streams the exact AHP chat through paired SSH with immutable bindings and re
   const transport = vi.fn(async (invitation, signal) => openSessionSshBridge(createConnection(ssh.port, '127.0.0.1'), { key, hostPublicKey: ssh.publicKey, grantId: invitation.id, targetPort: invitation.port, signal }))
   const client = new VSCodeDeviceClient(join(root, 'profile-a'), protector, transport, async () => {})
   const target = { sessionId: fixture.sessionId, chatId: fixture.chatId, owner }
-  const connection = new AgentHostConnection(target, join(root, 'profile-a'), (signal) => client.agentHostTransport(tasksA, target, signal))
+  const connection = new AgentHostConnection(target, join(root, 'profile-a'), (signal, traceId) => client.agentHostTransport(tasksA, target, signal, traceId))
   let raw: AhpClient | undefined
+  await startAgentHostDiagnostics(join(root, 'diagnostic-profile'))
   try {
     const pair = await host.pair(participant, key.publicKey)
     await host.setWorkspace(pair.id, await canonicalPolicyRoot(tasksB), true)
@@ -73,6 +75,17 @@ it('streams the exact AHP chat through paired SSH with immutable bindings and re
     fixture.draft('', selection)
     const id = randomUUID()
     expect(await connection.models()).toContainEqual({ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli', configSchema: modelConfigFixture })
+    await flushAgentHostDiagnostics()
+    const diagnostics = (await readFile(join(root, 'diagnostic-profile', 'agent-host-diagnostics', 'agent-host.jsonl'), 'utf8'))
+      .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>)
+    const gateway = diagnostics.find((entry) => entry.event === 'gateway.models' && entry.status === 'ok')
+    const caller = diagnostics.find((entry) => entry.event === 'connection.models' && entry.status === 'ok' && entry.traceId === gateway?.traceId && !entry.parentTraceId)
+    const native = diagnostics.find((entry) => entry.event === 'connection.models' && entry.status === 'ok' && entry.parentTraceId === gateway?.traceId)
+    expect(gateway).toMatchObject({ step: 'native', targetHash: expect.stringMatching(/^[0-9a-f]{16}$/) })
+    expect(caller).toMatchObject({ targetHash: gateway?.targetHash })
+    expect(native).toMatchObject({ targetHash: gateway?.targetHash })
+    expect(diagnostics).toContainEqual(expect.objectContaining({ event: 'gateway.request', traceId: gateway?.traceId, method: 'subscribe', channel: 'root', status: 'ok', queueMs: expect.any(Number), authMs: expect.any(Number) }))
+    expect(diagnostics).toContainEqual(expect.objectContaining({ event: 'device.transport', traceId: gateway?.traceId, step: 'websocket', status: 'ok' }))
     const remoteModel = { id: 'gpt-6', config: { thinkingLevel: 'max', contextSize: 872000 } }
     await connection.send(id, 'Original over SSH', undefined, async () => {}, undefined, remoteModel)
     expect(fixture.dispatches).toEqual([expect.objectContaining({ type: 'chat/turnStarted', turnId: id, message: expect.objectContaining({ ...selection, model: remoteModel }) })])
@@ -106,7 +119,7 @@ it('streams the exact AHP chat through paired SSH with immutable bindings and re
     await linksA.importRecords(await linksB.store.getRecords())
     expect((await readRepositorySessionLinks(tasksA)).document.bindings).toEqual({})
     await expect(readFile(join(tasksA, '.taskcontinuum', 'session-bindings.json'))).rejects.toMatchObject({ code: 'ENOENT' })
-  } finally { await raw?.shutdown(); await connection.close(); client.close(); await host.close(); await registry.close(); await ssh.close(); await fixture.close(); await linksA.close(); await linksB.close(); await rm(root, { recursive: true, force: true }) }
+  } finally { await raw?.shutdown(); await connection.close(); client.close(); await host.close(); await registry.close(); await ssh.close(); await fixture.close(); await linksA.close(); await linksB.close(); await stopAgentHostDiagnostics(); await rm(root, { recursive: true, force: true }) }
 }, 20000)
 
 it.each(['vscode-copilot', 'github-copilot'])('preserves old %s data without importing bindings or granting Agent Host access', async (provider) => {

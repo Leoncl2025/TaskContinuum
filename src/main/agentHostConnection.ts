@@ -10,6 +10,8 @@ import { chatSubmissionSchema } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
 import { modelConfigErrors } from '../shared/agentHostModelConfig'
 import { AgentHostChatState } from './agentHostState'
+import { agentHostDiagnosticChannel, logAgentHostDiagnostic } from './agentHostDiagnostics'
+import type { AgentHostDiagnosticDetails, AgentHostDiagnosticEvent } from './agentHostDiagnostics'
 import { agentHostKey, agentHostModelInfoSchema, agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminalIdSchema } from './agentHostProtocol'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 
@@ -19,7 +21,7 @@ const ledgerSchema = z.object({ schemaVersion: z.literal(2), target: agentHostTa
 type Command = z.infer<typeof commandSchema>
 
 export class AgentHostConnection {
-  private current?: { client: AhpClient; abort: AbortController }
+  private current?: { client: AhpClient; abort: AbortController; traceId: string }
   private opening?: Promise<void>
   private closed = false
   private connected = false
@@ -38,10 +40,14 @@ export class AgentHostConnection {
   private readonly file: string
   private initialized?: InitializeResult
 
-  constructor(readonly target: AgentHostTarget, directory: string, private readonly transport: (signal: AbortSignal) => Promise<AhpTransport>) {
+  constructor(readonly target: AgentHostTarget, directory: string, private readonly transport: (signal: AbortSignal, traceId: string) => Promise<AhpTransport>) {
     agentHostTargetSchema.parse(target)
     this.chat = new AgentHostChatState(target.chatId)
     this.file = join(directory, 'agent-host', createHash('sha256').update(agentHostKey(target)).digest('hex'))
+  }
+
+  private diagnose(event: AgentHostDiagnosticEvent, details: AgentHostDiagnosticDetails): void {
+    logAgentHostDiagnostic(event, { target: this.target, ...details })
   }
 
   get view(): AgentHostView {
@@ -107,24 +113,43 @@ export class AgentHostConnection {
     if (this.opening) return this.opening
     clearTimeout(this.retry)
     this.retry = undefined
+    const traceId = randomUUID()
+    const started = performance.now()
+    this.diagnose('connection.open', { traceId, status: 'begin', step: 'load' })
     const operation = (async () => {
-      await this.load()
+      try { await this.load() }
+      catch (error) {
+        this.diagnose('connection.open', { traceId, status: 'error', step: 'load', elapsedMs: performance.now() - started, error })
+        throw error
+      }
+      this.diagnose('connection.open', { traceId, status: 'ok', step: 'load', elapsedMs: performance.now() - started })
       if (this.closed) throw new Error('Agent Host view is closed.')
       const abort = new AbortController()
       let active: typeof this.current
+      let step: NonNullable<AgentHostDiagnosticDetails['step']> = 'transport'
+      let stepStarted = performance.now()
+      const advance = (next: NonNullable<AgentHostDiagnosticDetails['step']>) => {
+        this.diagnose('connection.open', { traceId, status: 'ok', step, elapsedMs: performance.now() - stepStarted })
+        step = next
+        stepStarted = performance.now()
+      }
       try {
-        const client = new AhpClient(await this.transport(abort.signal), { requestTimeoutMs: 15000, subscriptionBuffer: 4096 })
-        active = { client, abort }
+        const client = new AhpClient(await this.transport(abort.signal, traceId), { requestTimeoutMs: 15000, subscriptionBuffer: 4096 })
+        active = { client, abort, traceId }
         if (this.closed) { abort.abort(); await client.shutdown(); throw new Error('Agent Host view is closed.') }
+        advance('initialize')
         this.current = active
         client.connect()
         this.initialized = await client.initialize({ clientId: randomUUID(), protocolVersions: ['0.9.0'] })
         if (this.initialized.protocolVersion !== '0.9.0') throw new Error('Unsupported Agent Host protocol.')
+        advance('session')
         this.snapshots.clear()
         this.subscribing.clear()
         this.chat = new AgentHostChatState(this.target.chatId)
         await this.subscribe(this.target.sessionId, active)
+        advance('chat')
         await this.subscribe(this.target.chatId, active)
+        advance('reconcile')
         if (this.current !== active || abort.signal.aborted) throw new Error('Agent Host connection changed.')
         this.connected = true
         this.failures = 0
@@ -132,11 +157,22 @@ export class AgentHostConnection {
         await this.reconcile()
         this.emit({ type: 'state' })
         this.discoverTerminals(active)
-        this.heartbeat = setInterval(() => { void client.ping().catch(() => this.offline(active!)) }, 15000)
+        this.heartbeat = setInterval(() => {
+          const sent = performance.now()
+          void client.ping().then(() => {
+            if (this.current === active) this.diagnose('connection.heartbeat', { traceId, status: 'ok', elapsedMs: performance.now() - sent })
+          }).catch((error: unknown) => {
+            this.diagnose('connection.heartbeat', { traceId, status: 'error', elapsedMs: performance.now() - sent, error })
+            this.offline(active!, 'heartbeat-failed')
+          })
+        }, 15000)
         this.heartbeat.unref()
-        void (async () => { for await (const state of client.stateChanges()) if (state.status === 'closed') this.offline(active!) })()
+        void (async () => { for await (const state of client.stateChanges()) if (state.status === 'closed') this.offline(active!, 'transport-closed') })()
+        advance('response')
+        this.diagnose('connection.open', { traceId, status: 'ok', step: 'response', elapsedMs: performance.now() - started })
       } catch (error) {
-        if (active) { this.offline(active); await active.client.shutdown() }
+        this.diagnose('connection.open', { traceId, status: 'error', step, elapsedMs: performance.now() - stepStarted, error })
+        if (active) { this.offline(active, 'stream-error'); await active.client.shutdown() }
         else abort.abort()
         this.error = 'Agent Host is unavailable, unsupported, or no longer authorized. No session was created and no message was replayed.'
         this.emit({ type: 'state' })
@@ -150,15 +186,31 @@ export class AgentHostConnection {
 
   private async subscribe(resource: string, active: NonNullable<typeof this.current>): Promise<void> {
     if (this.subscribing.has(resource)) return
-    if (!this.allowedChannel(resource)) throw new Error('This channel does not belong to the linked chat.')
+    const channel = agentHostDiagnosticChannel(resource, this.target)
+    const started = performance.now()
+    this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'begin', channel })
+    if (!this.allowedChannel(resource)) {
+      const error = new Error('This channel does not belong to the linked chat.')
+      this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'error', channel, elapsedMs: performance.now() - started, error })
+      throw error
+    }
     this.subscribing.add(resource)
     try {
       const { result, subscription } = await active.client.subscribe(resource, { delivery: { maxLatencyMs: 25 } })
-      if (this.current !== active) { await subscription.close(); return }
+      if (this.current !== active) {
+        await subscription.close()
+        this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'closed', channel, reason: 'transport-closed', elapsedMs: performance.now() - started })
+        return
+      }
       if (!result.snapshot || result.snapshot.resource !== resource) throw new Error('Agent Host did not return the requested snapshot.')
       this.acceptSnapshot(result.snapshot)
-      void this.pump(subscription, active)
-    } catch (error) { this.subscribing.delete(resource); throw error }
+      this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'ok', channel, elapsedMs: performance.now() - started })
+      void this.pump(subscription, active, resource)
+    } catch (error) {
+      this.subscribing.delete(resource)
+      this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'error', channel, elapsedMs: performance.now() - started, error })
+      throw error
+    }
   }
 
   private acceptSnapshot(snapshot: Snapshot): void {
@@ -174,11 +226,17 @@ export class AgentHostConnection {
     this.emit({ type: 'snapshot', snapshot })
   }
 
-  private async pump(subscription: Subscription, active: NonNullable<typeof this.current>): Promise<void> {
+  private async pump(subscription: Subscription, active: NonNullable<typeof this.current>, resource: string): Promise<void> {
+    const channel = agentHostDiagnosticChannel(resource, this.target)
     try {
       for await (const event of subscription) {
         if (this.current !== active) return
-        if (event.type === 'authRequired') { this.error = 'Authentication is required in the owner Agent Host.'; this.emit({ type: 'state' }); continue }
+        if (event.type === 'authRequired') {
+          this.diagnose('connection.stream', { traceId: active.traceId, status: 'error', channel, reason: 'auth-required' })
+          this.error = 'Authentication is required in the owner Agent Host.'
+          this.emit({ type: 'state' })
+          continue
+        }
         if (event.type !== 'action') continue
         const envelope = event.params
         const prior = this.snapshots.get(envelope.channel)
@@ -199,8 +257,12 @@ export class AgentHostConnection {
         void this.reconcile().catch(() => { this.error = 'Delivery confirmation could not be saved. Inspect the owner before retrying.'; this.emit({ type: 'state' }) })
         this.discoverTerminals(active)
       }
-      this.offline(active)
-    } catch { this.offline(active) }
+      this.diagnose('connection.stream', { traceId: active.traceId, status: 'closed', channel, reason: 'stream-ended' })
+      this.offline(active, 'stream-ended')
+    } catch (error) {
+      this.diagnose('connection.stream', { traceId: active.traceId, status: 'error', channel, reason: 'stream-error', error })
+      this.offline(active, 'stream-error')
+    }
   }
 
   private terminalResources(): string[] {
@@ -219,31 +281,56 @@ export class AgentHostConnection {
     if (changed) { await this.save(); this.emit({ type: 'state' }) }
   }
 
-  async models() {
-    await this.open()
-    const active = this.current!
-    if (this.initialized?._meta?.taskcontinuumCanSend !== undefined && this.initialized._meta.taskcontinuumModelSelection !== true) throw new Error('Update Task Continuum on the owner device to select remote models.')
-    const { result, subscription } = await active.client.subscribe('ahp-root://')
+  async models(parentTraceId?: string) {
+    const started = performance.now()
+    let step: NonNullable<AgentHostDiagnosticDetails['step']> = 'load'
+    let traceId = this.current?.traceId
+    this.diagnose('connection.models', { traceId, parentTraceId, status: 'begin', step })
     try {
-      if (this.current !== active || result.snapshot?.resource !== 'ahp-root://') throw new Error('The model catalog is unavailable.')
-      const root = z.object({ agents: z.array(z.object({ provider: z.string(), models: z.array(agentHostModelInfoSchema).max(1000) })).max(100) }).parse(result.snapshot.state)
-      const provider = (this.snapshots.get(this.target.sessionId)?.state as SessionState | undefined)?.provider
-      const agent = root.agents.find((item) => item.provider === provider)
-      if (!agent) throw new Error('The original session provider has no model catalog.')
-      return agent.models.filter((model) => model.provider === provider && model.policyState !== 'disabled').map(({ id, name, provider, configSchema }) => ({ id, name, provider, ...(configSchema ? { configSchema } : {}) }))
-    } finally { await subscription.close() }
+      await this.open()
+      const active = this.current!
+      traceId = active.traceId
+      if (this.initialized?._meta?.taskcontinuumCanSend !== undefined && this.initialized._meta.taskcontinuumModelSelection !== true) throw new Error('Update Task Continuum on the owner device to select remote models.')
+      step = 'root'
+      const { result, subscription } = await active.client.subscribe('ahp-root://')
+      let models
+      try {
+        if (this.current !== active || result.snapshot?.resource !== 'ahp-root://') throw new Error('The model catalog is unavailable.')
+        const root = z.object({ agents: z.array(z.object({ provider: z.string(), models: z.array(agentHostModelInfoSchema).max(1000) })).max(100) }).parse(result.snapshot.state)
+        const provider = (this.snapshots.get(this.target.sessionId)?.state as SessionState | undefined)?.provider
+        const agent = root.agents.find((item) => item.provider === provider)
+        if (!agent) throw new Error('The original session provider has no model catalog.')
+        models = agent.models.filter((model) => model.provider === provider && model.policyState !== 'disabled').map(({ id, name, provider, configSchema }) => ({ id, name, provider, ...(configSchema ? { configSchema } : {}) }))
+      } finally { await subscription.close() }
+      this.diagnose('connection.models', { traceId: active.traceId, parentTraceId, status: 'ok', step, elapsedMs: performance.now() - started, count: models.length })
+      return models
+    } catch (error) {
+      this.diagnose('connection.models', { traceId, parentTraceId, status: 'error', step, elapsedMs: performance.now() - started, error })
+      throw error
+    }
   }
 
   async send(id: string, text: string, images: ChatImageAttachment[] | undefined, authorize: () => Promise<void>, actor?: { clientId: string; machineName: string; username?: string }, model?: ModelSelection): Promise<void> {
     const command = { ...chatSubmissionSchema.parse({ id, text, ...(images?.length ? { images } : {}) }), ...(model === undefined ? {} : { model: agentHostModelSelectionSchema.parse(model) }) }
-    if (this.sending) throw new Error('Another message is being submitted to this chat.')
+    if (this.sending) {
+      const error = new Error('Another message is being submitted to this chat.')
+      this.diagnose('connection.send', { traceId: this.current?.traceId, status: 'error', step: 'validation', dispatched: false, error })
+      throw error
+    }
     this.sending = true
+    const started = performance.now()
+    let step: NonNullable<AgentHostDiagnosticDetails['step']> = 'load'
+    let traceId = this.current?.traceId
+    this.diagnose('connection.send', { traceId, status: 'begin', step, dispatched: false })
     let record: Command | undefined
     let dispatched = false
     try {
       await this.open()
+      traceId = this.current?.traceId
+      step = 'authorization'
       await authorize()
       if (command.model) {
+        step = 'models'
         const modelId = command.model.id
         const selected = (await this.models()).find((item) => item.id === modelId)
         if (!selected) throw new Error('The selected model is no longer available. Refresh the model list and choose another model.')
@@ -252,16 +339,19 @@ export class AgentHostConnection {
         if (errors.length) throw new Error(errors.join(' '))
       }
       const active = this.current!
+      step = 'snapshot'
       const fresh = await active.client.request('subscribe', { channel: this.target.chatId })
       if (this.current !== active || !fresh.snapshot) throw new Error('The connection changed before sending. Nothing was sent.')
       this.acceptSnapshot(fresh.snapshot)
       await this.reconcile()
+      step = 'validation'
       const hash = createHash('sha256').update(JSON.stringify(command)).digest('hex')
       const prior = this.commands.find((item) => item.id === id)
       if (prior) { if (prior.hash !== hash) throw new Error('This message ID belongs to different content.'); if (prior.state === 'confirmed') return; throw new Error('This message was already attempted. Inspect the original; it was not replayed.') }
       const chat = this.chat.value!
       if (this.initialized?._meta?.taskcontinuumCanSend === false || this.commands.some((item) => item.state === 'pending' || item.state === 'uncertain') || chat.activeTurn || chat.draft?.text || chat.draft?.attachments?.length || chat.queuedMessages?.length || chat.interactivity === 'read-only' || chat.interactivity === 'hidden') throw new Error('The original chat is busy, has a draft, is read-only, or has an uncertain delivery.')
       if (this.commands.length >= 1000) throw new Error('Delivery record limit reached. No message was sent.')
+      step = 'ledger'
       record = { id, hash, state: 'pending' }
       this.commands.push(record)
       await this.save()
@@ -273,11 +363,15 @@ export class AgentHostConnection {
       const selectedModel = command.model ?? selection?.model
       const attachments: MessageEmbeddedResourceAttachment[] | undefined = command.images?.map((image) => ({ type: 'embeddedResource' as MessageEmbeddedResourceAttachment['type'], label: image.name, displayKind: 'image', contentType: image.mimeType, data: image.data, _meta: { taskcontinuumImageId: image.id } }))
       const action: ChatTurnStartedAction = { type: 'chat/turnStarted' as ChatTurnStartedAction['type'], turnId: id, startedAt: new Date().toISOString(), message: { text: command.text, origin: { kind: MessageKind.User }, ...(attachments?.length ? { attachments } : {}), ...(selection?.agent ? { agent: selection.agent } : {}), ...(selectedModel ? { model: selectedModel } : {}), ...(actor ? { _meta: { taskcontinuumActor: actor } } : {}) } }
+      step = 'dispatch'
       dispatched = true
       active.client.dispatch(this.target.chatId, action)
       this.emit({ type: 'state' })
+      step = 'confirmation'
       await this.waitForTurn(id, active)
+      this.diagnose('connection.send', { traceId: active.traceId, status: 'ok', step, elapsedMs: performance.now() - started, dispatched })
     } catch (error) {
+      this.diagnose('connection.send', { traceId, status: 'error', step, elapsedMs: performance.now() - started, dispatched, error })
       if (record && record.state !== 'confirmed') { record.state = dispatched ? 'uncertain' : 'failed'; await this.save() }
       throw error
     } finally { this.sending = false; this.emit({ type: 'state' }) }
@@ -304,8 +398,9 @@ export class AgentHostConnection {
     active.client.dispatch(this.target.chatId, { type: 'chat/turnCancelled' as ChatTurnCancelledAction['type'], turnId, duration: 0 })
   }
 
-  private offline(active: NonNullable<typeof this.current>): void {
+  private offline(active: NonNullable<typeof this.current>, reason: NonNullable<AgentHostDiagnosticDetails['reason']>): void {
     if (this.current !== active) return
+    this.diagnose('connection.offline', { traceId: active.traceId, status: 'closed', reason })
     this.current = undefined
     this.connected = false
     clearInterval(this.heartbeat)
@@ -320,7 +415,10 @@ export class AgentHostConnection {
 
   private scheduleRecovery(): void {
     if (this.closed || this.retry || !this.listeners.size) return
-    this.retry = setTimeout(() => { this.retry = undefined; void this.open().catch(() => undefined) }, Math.min(30000, 1000 * 2 ** Math.min(this.failures++, 5)))
+    const attempt = this.failures + 1
+    const retryMs = Math.min(30000, 1000 * 2 ** Math.min(this.failures++, 5))
+    this.diagnose('connection.retry', { status: 'scheduled', attempt, retryMs })
+    this.retry = setTimeout(() => { this.retry = undefined; void this.open().catch(() => undefined) }, retryMs)
     this.retry.unref()
   }
 
@@ -328,11 +426,12 @@ export class AgentHostConnection {
     this.closed = true
     clearTimeout(this.retry)
     clearInterval(this.heartbeat)
-    if (this.current) this.offline(this.current)
+    if (this.current) this.offline(this.current, 'shutdown')
     await this.opening?.catch(() => undefined)
     await this.writing
     const chat = this.snapshots.get(this.target.chatId)
     if (chat && Buffer.byteLength(JSON.stringify(chat)) < 15 * 1024 * 1024) await writeJsonAtomic(`${this.file}.cache.json`, { schemaVersion: 2, target: this.target, chat })
     this.listeners.clear()
+    this.diagnose('connection.close', { status: 'closed', reason: 'shutdown' })
   }
 }

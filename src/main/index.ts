@@ -8,6 +8,7 @@ import { registerWorkspaceBridge } from './workspaceBridge'
 import { registerRemoteVSCodeBridge } from './remoteVSCodeBridge'
 import { registerWindowZoom, WindowZoomPreferences } from './windowZoom'
 import { registerAgentHostBridge } from './agentHostBridge'
+import { startAgentHostDiagnostics, stopAgentHostDiagnostics } from './agentHostDiagnostics'
 
 app.setName('Task Continuum')
 if (process.platform === 'win32') app.setAppUserModelId('com.leoncl2025.taskcontinuum')
@@ -28,6 +29,15 @@ let remoteVSCode: ReturnType<typeof registerRemoteVSCodeBridge> | undefined
 let windowZoom: WindowZoomPreferences | undefined
 let quitting = false
 let cleanupComplete = false
+const primaryInstance = app.requestSingleInstanceLock()
+
+if (!primaryInstance) app.quit()
+else app.on('second-instance', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+})
 
 function requireTrustedWindow(event: IpcMainInvokeEvent): BrowserWindow {
   if (!mainWindow || mainWindow.isDestroyed()
@@ -109,6 +119,11 @@ async function createWindow(): Promise<void> {
 }
 
 void app.whenReady().then(async () => {
+  if (!primaryInstance) return
+  if (process.env.TASKCONTINUUM_AHP_DIAGNOSTICS && !['0', '1'].includes(process.env.TASKCONTINUUM_AHP_DIAGNOSTICS)) {
+    throw new Error('TASKCONTINUUM_AHP_DIAGNOSTICS must be 1 or 0.')
+  }
+  if (process.env.TASKCONTINUUM_AHP_DIAGNOSTICS === '1') await startAgentHostDiagnostics(app.getPath('userData'))
   Menu.setApplicationMenu(null)
   const rendererRoot = join(__dirname, '../renderer')
   protocol.handle('taskcontinuum', async (request) => {
@@ -149,7 +164,7 @@ app.on('before-quit', (event) => {
   if (quitting) return
   quitting = true
   agentHost?.close()
-  void Promise.all([remoteVSCode?.close(), windowZoom?.flush()]).catch((error: unknown) => console.error(error)).finally(() => {
+  void Promise.all([remoteVSCode?.close(), windowZoom?.flush()]).finally(() => stopAgentHostDiagnostics()).catch((error: unknown) => console.error(error)).finally(() => {
     cleanupComplete = true
     app.quit()
   })

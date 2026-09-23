@@ -5,6 +5,7 @@ import { z } from 'zod'
 import type { AgentHostTarget } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
 import { agentHostModelSelectionSchema, agentHostTargetSchema } from './agentHostProtocol'
+import { logAgentHostDiagnostic } from './agentHostDiagnostics'
 import type { AgentHostManager } from './agentHostManager'
 import { readClientIdentity } from './clientIdentity'
 import { agentHostCreateRequestSchema, creationLocationSchema, creationTaskIdSchema } from './agentHostCreationProtocol'
@@ -138,11 +139,22 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     const window = requireWindow(event)
     const root = await currentRoot()
     const target = agentHostTargetSchema.parse(value)
-    const connection = await manager.connection(root, target)
-    await current(event, window, root, target)
-    const models = await connection.models()
-    await current(event, window, root, target)
-    return models
+    const started = performance.now()
+    let step: 'authorization' | 'root' = 'authorization'
+    logAgentHostDiagnostic('ipc.models', { target, status: 'begin', step })
+    try {
+      const connection = await manager.connection(root, target)
+      await current(event, window, root, target)
+      step = 'root'
+      const models = await connection.models()
+      step = 'authorization'
+      await current(event, window, root, target)
+      logAgentHostDiagnostic('ipc.models', { target, status: 'ok', step, elapsedMs: performance.now() - started, count: models.length })
+      return models
+    } catch (error) {
+      logAgentHostDiagnostic('ipc.models', { target, status: 'error', step, elapsedMs: performance.now() - started, error })
+      throw error
+    }
   })
   ipcMain.handle('agent-host:send', async (event, value: unknown, id: unknown, text: unknown, images: unknown, model: unknown) => {
     const window = requireWindow(event)

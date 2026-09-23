@@ -211,6 +211,9 @@ turn shows its requested model ID, not a guarantee of the provider's actual mode
 Both desktops need this update for remote model selection; an older owner gateway
 is rejected with an update message. Model selection does not change native tool
 approvals or create a new conversation.
+For recurring remote model timeouts, use the
+[opt-in Agent Host diagnostic logs](docs/remote-vscode.md#diagnosing-agent-host-timeouts)
+on both desktops; retrying model loading does not send a message.
 
 The toolbar shows a short options summary, such as **Medium · 872K**. Click it
 to open **Model options** above the input without shrinking the conversation.
