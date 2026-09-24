@@ -25,7 +25,7 @@ const recordSchema = z.object({
   if (record.result.session && record.result.session.owner.clientId !== record.owner.clientId) context.addIssue({ code: 'custom', message: 'Creation record owner changed.' })
 })
 type CreationRecord = z.infer<typeof recordSchema>
-export type AgentHostCreationDevices = Pick<VSCodeDeviceClient, 'agentHostWorkers' | 'agentHostWorker' | 'agentHostCreate' | 'agentHostCreationStatus' | 'agentHostBindCreation'> & {
+export type AgentHostCreationDevices = Pick<VSCodeDeviceClient, 'agentHostWorkers' | 'agentHostWorker' | 'agentHostCreate' | 'agentHostCreationStatus' | 'agentHostBindCreation' | 'agentHostAbandonCreation'> & {
   localAgentHostWorkers?(root: string, taskId: string): Promise<AgentHostWorker[]>
 }
 
@@ -117,7 +117,7 @@ export class AgentHostCreationClient {
 
   async list(root: string, taskId: string): Promise<AgentHostCreation[]> {
     creationTaskIdSchema.parse(taskId)
-    return (await this.records(root)).filter((record) => record.request.taskId === taskId && !record.localBound).map((record) => this.result(record))
+    return (await this.records(root)).filter((record) => record.request.taskId === taskId && !record.localBound && record.result.state !== 'abandoned').map((record) => this.result(record))
   }
 
   private result(record: CreationRecord): CreationRecord['result'] {
@@ -149,7 +149,7 @@ export class AgentHostCreationClient {
           existing = true
         } else {
           if (records.length >= 1000) throw new Error('The session creation history limit was reached.')
-          if (records.some((item) => item.request.taskId === request.taskId && !item.localBound && item.result.state !== 'failed')) throw new Error('This task has an unresolved creation operation. Check that operation instead of creating another session.')
+          if (records.some((item) => item.request.taskId === request.taskId && !item.localBound && !['failed', 'abandoned'].includes(item.result.state))) throw new Error('This task has an unresolved creation operation. Check that operation instead of creating another session.')
           await this.knownTask(scope.root, request.taskId)
           const links = await readRepositorySessionLinks(scope.root)
           const worker = await this.devices.agentHostWorker(scope.root, request.workerId, request.taskId)
@@ -238,7 +238,7 @@ export class AgentHostCreationClient {
   }
 
   private async refresh(record: CreationRecord, authorize: () => Promise<void>): Promise<AgentHostCreation> {
-    if (record.localBound || record.result.state === 'failed') return record.result
+    if (record.localBound || record.result.state === 'failed' || record.result.state === 'abandoned') return record.result
     try {
       await this.current(authorize)
       const result = await this.devices.agentHostCreationStatus(record.root, record.request, () => this.current(authorize))
@@ -259,6 +259,7 @@ export class AgentHostCreationClient {
     const scope = await this.scope(root)
     return this.operation(scope.root, id, async () => {
       const record = await this.record(scope.root, id)
+      if (record.result.state === 'abandoned') throw new Error('This creation operation was abandoned. Link the existing chat explicitly instead of retrying its binding.')
       if (record.localBound) return record.result
       if (!record.result.session || record.result.state !== 'created-unbound') throw new Error('Confirm the original created session before retrying its binding.')
       await this.current(authorize)
@@ -278,6 +279,23 @@ export class AgentHostCreationClient {
         await this.save(record)
         return record.result
       }
+    })
+  }
+
+  async abandon(root: string, id: string, authorize: () => Promise<void>): Promise<AgentHostCreation> {
+    const scope = await this.scope(root)
+    return this.operation(scope.root, id, async () => {
+      await this.current(authorize)
+      const record = await this.record(scope.root, id)
+      if (record.result.state === 'abandoned') return record.result
+      // A definitive failure has no unresolved worker reservation. Other outcomes
+      // require a durable worker acknowledgement before the caller clears them.
+      const result = record.result.state === 'failed'
+        ? { ...record.result, state: 'abandoned' as const, error: undefined }
+        : await this.devices.agentHostAbandonCreation(scope.root, record.request, () => this.current(authorize))
+      await this.current(authorize)
+      if (result.state !== 'abandoned') throw new Error('The worker did not confirm abandonment. The creation record was not cleared.')
+      return this.accept(record, result, authorize)
     })
   }
 

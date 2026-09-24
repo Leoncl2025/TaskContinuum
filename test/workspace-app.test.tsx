@@ -77,6 +77,7 @@ function creationFixture() {
     }),
     creationStatus: vi.fn(async (id) => saved.get(id)!),
     bindCreation: vi.fn(async (id) => saved.get(id)!),
+    abandonCreation: vi.fn(async () => { throw new Error('No creation cleanup in this fixture.') }),
     models: vi.fn(async () => [{ id: 'ui-model', name: 'UI model', provider: 'copilotcli' }]),
     watch: vi.fn(async (target: AgentHostTarget) => {
       const id = crypto.randomUUID()

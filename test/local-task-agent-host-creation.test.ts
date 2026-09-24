@@ -118,6 +118,28 @@ function target(result: AgentHostCreation) {
 }
 
 describe('task-local Agent Host creation through the shared worker', () => {
+  it('clears local task creation without removing its chat, binding or receipt, including after restart', async () => {
+    const setup = await fixture()
+    const remoteAbandon = vi.spyOn(setup.devices, 'agentHostAbandonCreation')
+    const created = await create(setup)
+    const links = await readRepositorySessionLinks(setup.root)
+    const receipts = await locallyLinkedAgentHostSessions(setup.profile, setup.root, setup.owner)
+    expect(await setup.manager.creations.abandon(setup.root, setup.request.operationId, setup.authorize)).toMatchObject({ state: 'abandoned', session: created.session })
+    expect(await setup.manager.creations.list(setup.root, 'T-0007')).toEqual([])
+    expect(await readRepositorySessionLinks(setup.root)).toEqual(links)
+    expect(await locallyLinkedAgentHostSessions(setup.profile, setup.root, setup.owner)).toEqual(receipts)
+    await setup.restart()
+    expect((await status(setup)).state).toBe('abandoned')
+    expect(await setup.manager.creations.list(setup.root, 'T-0007')).toEqual([])
+    await expect(setup.manager.creations.bind(setup.root, setup.request.operationId, setup.authorize)).rejects.toThrow('abandoned')
+    const next = { ...setup.request, operationId: randomUUID(), expectedRevision: links.revision }
+    await create(setup, next)
+    expect(setup.native.creations).toHaveLength(2)
+    expect(setup.native.calls.some((call) => call.method === 'deleteSession' || call.method === 'dispatchAction')).toBe(false)
+    expect(remoteAbandon).not.toHaveBeenCalled()
+    expect(setup.transport).not.toHaveBeenCalled()
+  })
+
   it('creates and assigns locally without device discovery, pairing, transport, or an initial send', async () => {
     const setup = await fixture()
     const workers = await setup.manager.creations.workers(setup.root, setup.request.taskId, 'local')

@@ -40,6 +40,7 @@ export interface AgentHostBridge {
   create(request: AgentHostCreateRequest): Promise<AgentHostCreation>
   creationStatus(operationId: string): Promise<AgentHostCreation>
   bindCreation(operationId: string): Promise<AgentHostCreation>
+  abandonCreation(operationId: string): Promise<AgentHostCreation>
   models(target: AgentHostTarget): Promise<Pick<SessionModelInfo, 'id' | 'name' | 'provider' | 'configSchema'>[]>
   watch(target: AgentHostTarget): Promise<string>
   unwatch(id: string): Promise<void>

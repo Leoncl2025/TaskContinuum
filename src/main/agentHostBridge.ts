@@ -92,13 +92,13 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     await current(event, window, root)
     return result
   })
-  for (const [channel, bind] of [['creation-status', false], ['bind-creation', true]] as const) {
+  for (const [channel, method] of [['creation-status', 'status'], ['bind-creation', 'bind'], ['abandon-creation', 'abandon']] as const) {
     ipcMain.handle(`agent-host:${channel}`, async (event, value: unknown) => {
       const window = requireWindow(event)
       const root = await currentRoot()
       const id = z.uuid().parse(value)
       await current(event, window, root)
-      const result = await (bind ? manager.creations.bind(root, id, () => current(event, window, root)) : manager.creations.status(root, id, () => current(event, window, root)))
+      const result = await manager.creations[method](root, id, () => current(event, window, root))
       await current(event, window, root)
       return result
     })

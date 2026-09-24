@@ -469,7 +469,7 @@ export class VSCodeDeviceClient {
     return workers
   }
 
-  private async creationRequest(root: string, value: AgentHostCreateRequest, path: '/device/agent-host/create' | '/device/agent-host/creation-status' | '/device/agent-host/creation-bind', body: unknown, authorize: () => Promise<void>): Promise<AgentHostCreation> {
+  private async creationRequest(root: string, value: AgentHostCreateRequest, path: '/device/agent-host/create' | '/device/agent-host/creation-status' | '/device/agent-host/creation-bind' | '/device/agent-host/creation-abandon', body: unknown, authorize: () => Promise<void>): Promise<AgentHostCreation> {
     const request = agentHostCreateRequestSchema.parse(value)
     const peer = await this.creationPeer(root, request.workerId)
     const active = this.active.get(peer.id)
@@ -504,6 +504,11 @@ export class VSCodeDeviceClient {
 
   agentHostBindCreation(root: string, request: AgentHostCreateRequest, revision: string | null, authorize: () => Promise<void>): Promise<AgentHostCreation> {
     return this.creationRequest(root, request, '/device/agent-host/creation-bind', { operationId: request.operationId, workspaceId: request.workspaceId, expectedRevision: creationRevisionSchema.parse(revision) }, authorize)
+  }
+
+  agentHostAbandonCreation(root: string, value: AgentHostCreateRequest, authorize: () => Promise<void>): Promise<AgentHostCreation> {
+    const { workerId, ...command } = agentHostCreateRequestSchema.parse(value)
+    return this.creationRequest(root, { ...command, workerId }, '/device/agent-host/creation-abandon', agentHostCreateCommandSchema.parse(command), authorize)
   }
 
   close(): void { this.closed = true; this.lifetime.abort(new Error('Device client is closed.')); for (const peer of this.peers) this.drop(peer.id, 'shutdown') }

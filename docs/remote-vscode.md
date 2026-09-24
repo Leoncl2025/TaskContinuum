@@ -175,6 +175,25 @@ only retries binding, not creation. A completed operation does not silently
 restore a binding that was later detached. Private creation/status operation
 records remain outside Git and do not grant access after send permission is removed.
 
+To stop recovering an operation, choose **Abandon and clear** on its card, then
+**Confirm abandonment**. **Keep record** cancels the confirmation. Clearing hides
+the card persistently and releases its per-task creation reservation on both the
+caller and execution worker. It does **not** delete or cancel a native chat, send
+a prompt, or remove existing task links or local link receipts. An uncertain
+operation may already have created a chat; creating again can produce a duplicate.
+Use **Link** to attach a preserved chat later instead of retrying an abandoned
+operation's binding.
+
+The worker must acknowledge abandonment before an unresolved record disappears.
+Reconnect the original worker and restore send permission if needed; older workers
+without this endpoint must be updated. An actively executing creation cannot be
+abandoned until it settles. Failed attempts can be cleared locally. Status and
+binding requests are serialized with abandonment so late replies cannot restore
+the operation. Private `abandoned` tombstones remain for auditing and replay
+protection, including when the original create request never reached the worker.
+Clearing does not erase the private history or reset its size limit. No new chat
+is created until you explicitly choose **Create and assign** again.
+
 Creation operation records require `schemaVersion: 2` and logical session
 identities. Missing versions, Host-pinned session identities, mixed-format files,
 and unknown versions are rejected. Unsupported records are not migrated,

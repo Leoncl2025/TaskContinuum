@@ -50,7 +50,7 @@ async function installCreationMock(app: ElectronApplication, files: MockFiles, w
         return JSON.parse(fs.readFileSync(files.bindingSnapshot, 'utf8')) as SessionLinksSnapshot
       },
       'agent-host:creation-workers': (taskId) => record('agent-host:creation-workers', [taskId]).workers,
-      'agent-host:creations': (taskId) => record('agent-host:creations', [taskId]).operations.filter((operation) => operation.taskId === taskId),
+      'agent-host:creations': (taskId) => record('agent-host:creations', [taskId]).operations.filter((operation) => operation.taskId === taskId && operation.state !== 'abandoned'),
       'agent-host:create': (value) => {
         const request = value as AgentHostCreateRequest
         const state = record('agent-host:create', [request])
@@ -59,7 +59,7 @@ async function installCreationMock(app: ElectronApplication, files: MockFiles, w
         const host = worker?.hosts.find((item) => item.hostId === request.hostId)
         if (request.taskId !== 'T-0001' || worker?.state !== 'connected' || !workspace?.canSend || workspace.taskState !== 'available' || !host?.available || request.expectedRevision !== workspace.expectedRevision) throw new Error('The UI sent an ineligible or incorrectly scoped creation request.')
         if (Object.keys(request).sort().join(',') !== 'expectedRevision,hostId,operationId,taskId,workerId,workspaceId') throw new Error('Creation must not include a prompt, model, or guessed path.')
-        if (state.operations.some((operation) => operation.taskId === request.taskId && operation.state !== 'failed')) throw new Error('A second creation was attempted while the original operation was unresolved.')
+        if (state.operations.some((operation) => operation.taskId === request.taskId && !['failed', 'abandoned'].includes(operation.state))) throw new Error('A second creation was attempted while the original operation was unresolved.')
         const operation: AgentHostCreation = {
           operationId: request.operationId, taskId: request.taskId, workerId: request.workerId, workspaceId: request.workspaceId, hostId: request.hostId,
           state: 'uncertain', error: 'The acknowledgement was lost. Check this saved operation after reconnecting.',
@@ -71,6 +71,15 @@ async function installCreationMock(app: ElectronApplication, files: MockFiles, w
       'agent-host:creation-status': (id) => {
         const operation = record('agent-host:creation-status', [id]).operations.find((item) => item.operationId === id)
         if (!operation) throw new Error('Unknown saved creation operation.')
+        return operation
+      },
+      'agent-host:abandon-creation': (id) => {
+        const state = record('agent-host:abandon-creation', [id])
+        const operation = state.operations.find((item) => item.operationId === id)
+        if (!operation) throw new Error('Unknown saved creation operation.')
+        operation.state = 'abandoned'
+        delete operation.error
+        save(state)
         return operation
       },
       'agent-host:bind-creation': (id) => {
@@ -323,6 +332,38 @@ test('creates explicitly through sandboxed IPC and recovers the same operation a
     await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
     expect(await calls('agent-host:create')).toHaveLength(1)
     expect(await calls('agent-host:bind-creation')).toHaveLength(1)
+    expect(errors).toEqual([])
+    expect(externalRequests).toEqual([])
+
+    // A stale caller record may still need cleanup while its original chat is open.
+    await app!.evaluate((_, { file, id }) => {
+      const fs = process.getBuiltinModule('fs')
+      const state = JSON.parse(fs.readFileSync(file, 'utf8')) as MockLedger
+      state.operations.find((item) => item.operationId === id)!.state = 'created-unbound'
+      fs.writeFileSync(file, JSON.stringify(state))
+    }, { file: files.ledger, id: operation.operationId })
+    picker = await openPicker()
+    await row().getByRole('button', { name: 'Abandon and clear', exact: true }).click()
+    await expect(row().getByRole('group', { name: 'Confirm creation abandonment' })).toContainText('Any existing chat and task links will be kept')
+    await row().getByRole('button', { name: 'Keep record', exact: true }).click()
+    expect(await calls('agent-host:abandon-creation')).toEqual([])
+    await expect(row()).toBeVisible()
+    await row().getByRole('button', { name: 'Abandon and clear', exact: true }).click()
+    await row().getByRole('button', { name: 'Confirm abandonment', exact: true }).click()
+    await expect(row()).toHaveCount(0)
+    expect(await calls('agent-host:abandon-creation')).toEqual([{ channel: 'agent-host:abandon-creation', args: [operation.operationId] }])
+    expect((await ledger()).operations.find((item) => item.operationId === operation.operationId)).toMatchObject({ state: 'abandoned', session: createdSession })
+    expect(JSON.parse(await readFile(files.bindingSnapshot, 'utf8'))).toEqual(snapshot)
+    await page!.reload()
+    await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
+    picker = await openPicker()
+    await expect(row()).toHaveCount(0)
+    await selectTarget(picker, 'send-worker', 'send-workspace', 'selected-exact-host')
+    await expect(create()).toBeEnabled()
+    expect(await calls('agent-host:create')).toHaveLength(1)
+    expect(await calls('agent-host:bind-creation')).toHaveLength(1)
+    expect(await calls('agent-host:send')).toEqual([])
+    expect(await calls('agent-host:cancel')).toEqual([])
     expect(errors).toEqual([])
     expect(externalRequests).toEqual([])
   } finally {

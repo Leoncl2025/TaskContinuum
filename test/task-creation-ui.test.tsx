@@ -31,6 +31,7 @@ async function setup(mode: 'form' | 'agent' = 'form', configure?: (agent: AgentH
     create: vi.fn(async () => { throw new Error('Remote creation must not be used.') }),
     creationStatus: vi.fn(async () => { throw new Error('Remote creation must not be used.') }),
     bindCreation: vi.fn(async () => { throw new Error('Task binding must not be used.') }),
+    abandonCreation: vi.fn(async () => { throw new Error('Task creation cleanup must not be used.') }),
     localCreationHosts: vi.fn(async () => [{ hostId: 'local-host', name: 'Local VS Code', available: true }]),
     localCreations: vi.fn(async () => structuredClone(saved)),
     createLocal: vi.fn(async (request) => {

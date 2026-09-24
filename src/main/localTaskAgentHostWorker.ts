@@ -81,6 +81,12 @@ export class LocalTaskAgentHostWorker {
     }, 'local')
     return { ...result, workerId: request.workerId }
   }
+
+  async abandon(root: string, value: AgentHostCreateRequest, authorize: Guard): Promise<AgentHostCreation> {
+    const { workerId, ...command } = await this.context(root, value, authorize)
+    const result = await this.service().abandon(workerId, agentHostCreateCommandSchema.parse(command), 'local')
+    return { ...result, workerId }
+  }
 }
 
 export function routeAgentHostCreations(devices: AgentHostCreationDevices, local: LocalTaskAgentHostWorker): AgentHostCreationDevices {
@@ -91,5 +97,6 @@ export function routeAgentHostCreations(devices: AgentHostCreationDevices, local
     agentHostCreate: async (root, request, authorize) => await local.owns(request.workerId) ? local.create(root, request, authorize) : devices.agentHostCreate(root, request, authorize),
     agentHostCreationStatus: async (root, request, authorize) => await local.owns(request.workerId) ? local.status(root, request, authorize) : devices.agentHostCreationStatus(root, request, authorize),
     agentHostBindCreation: async (root, request, revision, authorize) => await local.owns(request.workerId) ? local.bind(root, request, revision, authorize) : devices.agentHostBindCreation(root, request, revision, authorize),
+    agentHostAbandonCreation: async (root, request, authorize) => await local.owns(request.workerId) ? local.abandon(root, request, authorize) : devices.agentHostAbandonCreation(root, request, authorize),
   }
 }

@@ -50,6 +50,90 @@ async function records(worker: Fixture) {
 }
 
 describe('worker-authoritative native Agent Host creation', () => {
+  it('abandons an unbound creation without deleting its chat or links, survives restart, and releases the reservation', async () => {
+    const worker = await fixture()
+    const caller = await callerFixture(worker)
+    try {
+      const selected = (await caller.client.workers(caller.workspace, 'T-0007'))[0]
+      const request = { ...worker.request, workerId: selected.id }
+      const acknowledgement = worker.native.pauseAcknowledgement()
+      await caller.client.create(caller.workspace, request, async () => {})
+      await expect.poll(() => worker.native.creations.length).toBe(1)
+      const conflict = await updateRepositoryAgentHostLink(worker.workspace, 'T-0007', agentHostTargetFixture('existing-original', worker.owner), worker.bindings.snapshot.revision)
+      acknowledgement.resolve()
+      await expect.poll(async () => (await caller.client.status(caller.workspace, request.operationId, async () => {})).state).toBe('created-unbound')
+      const original = await caller.client.status(caller.workspace, request.operationId, async () => {})
+      expect(await caller.client.abandon(caller.workspace, request.operationId, async () => {})).toMatchObject({ state: 'abandoned', session: original.session })
+      expect(await caller.client.list(caller.workspace, 'T-0007')).toEqual([])
+      expect((await readRepositorySessionLinks(worker.workspace)).document).toEqual(conflict.document)
+      expect((await readRepositorySessionLinks(caller.workspace)).document.bindings).toEqual({})
+      const calls = worker.native.calls.length
+      expect((await worker.status()).state).toBe('abandoned')
+      expect((await worker.begin()).state).toBe('abandoned')
+      expect((await worker.abandon()).state).toBe('abandoned')
+      await expect(worker.bind(conflict.revision)).rejects.toMatchObject({ status: 409 })
+      expect(worker.native.calls).toHaveLength(calls)
+      await caller.restart()
+      expect(await caller.client.list(caller.workspace, 'T-0007')).toEqual([])
+    } finally { await caller.close() }
+    await worker.restart()
+    expect((await worker.status()).state).toBe('abandoned')
+    const next = { ...worker.request, operationId: randomUUID(), expectedRevision: (await readRepositorySessionLinks(worker.workspace)).revision }
+    expect((await worker.begin(next)).state).toBe('creating')
+    await expect.poll(async () => (await worker.status(next)).state).toBe('ready')
+    expect(worker.native.creations).toHaveLength(2)
+    expect(worker.native.calls.some((call) => call.method === 'deleteSession' || call.method === 'dispatchAction')).toBe(false)
+  })
+
+  it('tombstones an undelivered request so a late create cannot dispatch', async () => {
+    const worker = await fixture()
+    expect((await worker.abandon()).state).toBe('abandoned')
+    await worker.restart()
+    expect((await worker.begin()).state).toBe('abandoned')
+    expect((await worker.status()).state).toBe('abandoned')
+    expect(worker.native.creations).toEqual([])
+    expect((await readRepositorySessionLinks(worker.workspace)).document.bindings).toEqual({})
+  })
+
+  it('does not clear an active creation or abandon a changed request or unauthorized workspace', async () => {
+    const worker = await fixture()
+    const acknowledgement = worker.native.pauseAcknowledgement()
+    try {
+      await worker.begin()
+      await expect.poll(() => worker.native.creations.length).toBe(1)
+      await expect(worker.abandon()).rejects.toMatchObject({ status: 409 })
+    } finally { acknowledgement.resolve() }
+    const session = await ready(worker)
+    await expect(worker.abandon({ ...worker.request, taskId: 'T-0099' })).rejects.toMatchObject({ status: 409 })
+    await expect(worker.abandon({ ...worker.request, workspaceId: 'a'.repeat(64) })).rejects.toMatchObject({ status: 403 })
+    await worker.host.setWorkspace(worker.pair.id, await canonicalPolicyRoot(worker.workspace), false)
+    await expect(worker.abandon()).rejects.toMatchObject({ status: 403 })
+    expect((await records(worker))[0].result.state).toBe('ready')
+    expect(taskSessionLinks((await readRepositorySessionLinks(worker.workspace)).document.bindings, 'T-0007')[0].sessionId).toBe(session.sessionId)
+  })
+
+  it('serializes abandonment behind an in-flight status check and never inspects again afterward', async () => {
+    const worker = await fixture()
+    worker.native.setLifecycle('creating')
+    await worker.begin()
+    const session = await ready(worker)
+    const started = deferred(), release = deferred()
+    const inspect = vi.spyOn(worker.registry, 'inspectCreation').mockImplementationOnce(async () => {
+      started.resolve()
+      await release.promise
+      return { state: 'ready', session, nativeLifecycle: 'creating' }
+    })
+    const status = worker.status()
+    await started.promise
+    const abandoned = worker.abandon()
+    release.resolve()
+    await status
+    expect((await abandoned).state).toBe('abandoned')
+    const calls = inspect.mock.calls.length
+    expect((await worker.status()).state).toBe('abandoned')
+    expect(inspect).toHaveBeenCalledTimes(calls)
+  })
+
   it('reports invalid owner receipts through the remote API before creating or rewriting any session', async () => {
     const worker = await fixture()
     const file = join(worker.profile, 'local-session-link-receipts.json')

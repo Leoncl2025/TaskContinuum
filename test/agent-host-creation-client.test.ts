@@ -46,7 +46,8 @@ async function fixture() {
     agentHostCreate: vi.fn(async (_root, _request, authorize) => { await authorize(); return result }),
     agentHostCreationStatus: vi.fn(async () => result),
     agentHostBindCreation: vi.fn(async (_root, _request, _revision, authorize) => { await authorize(); return result }),
-  } satisfies Pick<VSCodeDeviceClient, 'agentHostWorkers' | 'agentHostWorker' | 'agentHostCreate' | 'agentHostCreationStatus' | 'agentHostBindCreation'>
+    agentHostAbandonCreation: vi.fn(async (_root, _request, authorize): Promise<AgentHostCreation> => { await authorize(); return { ...result, state: 'abandoned', error: undefined } }),
+  } satisfies Pick<VSCodeDeviceClient, 'agentHostWorkers' | 'agentHostWorker' | 'agentHostCreate' | 'agentHostCreationStatus' | 'agentHostBindCreation' | 'agentHostAbandonCreation'>
   const profile = join(root, 'profile')
   const client = new AgentHostCreationClient(profile, devices)
   clients.push(client)
@@ -54,6 +55,54 @@ async function fixture() {
 }
 
 describe('durable remote creation on the caller', () => {
+  it('clears an unbound record durably without binding, and permits a fresh operation', async () => {
+    const setup = await fixture()
+    setup.result.state = 'created-unbound'
+    await setup.client.create(setup.root, setup.request, setup.authorize)
+    expect(await setup.client.abandon(setup.root, setup.request.operationId, setup.authorize)).toMatchObject({ state: 'abandoned', session: setup.result.session })
+    expect(await setup.client.list(setup.root, setup.request.taskId)).toEqual([])
+    expect((await readRepositorySessionLinks(setup.root)).revision).toBe(setup.bindings.snapshot.revision)
+    await setup.client.close()
+    const restarted = new AgentHostCreationClient(setup.profile, setup.devices)
+    clients.push(restarted)
+    expect(await restarted.list(setup.root, setup.request.taskId)).toEqual([])
+    expect((await restarted.status(setup.root, setup.request.operationId, setup.authorize)).state).toBe('abandoned')
+    expect((await restarted.create(setup.root, setup.request, setup.authorize)).state).toBe('abandoned')
+    await expect(restarted.bind(setup.root, setup.request.operationId, setup.authorize)).rejects.toThrow('abandoned')
+    expect((await restarted.abandon(setup.root, setup.request.operationId, setup.authorize)).state).toBe('abandoned')
+    expect(setup.devices.agentHostAbandonCreation).toHaveBeenCalledOnce()
+    expect(setup.devices.agentHostCreationStatus).not.toHaveBeenCalled()
+    expect(setup.devices.agentHostBindCreation).not.toHaveBeenCalled()
+    const next = { ...setup.request, operationId: randomUUID() }
+    setup.devices.agentHostCreate.mockResolvedValueOnce({ ...setup.result, operationId: next.operationId })
+    expect((await restarted.create(setup.root, next, setup.authorize)).operationId).toBe(next.operationId)
+    expect(setup.devices.agentHostCreate).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['offline', 'mismatch', 'unconfirmed', 'unauthorized'] as const)('retains the caller record when abandonment is %s', async (reason) => {
+    const setup = await fixture()
+    setup.result.state = 'created-unbound'
+    await setup.client.create(setup.root, setup.request, setup.authorize)
+    const before = await setup.client.list(setup.root, setup.request.taskId)
+    if (reason === 'offline') setup.devices.agentHostAbandonCreation.mockRejectedValueOnce(new Error('Worker offline'))
+    if (reason === 'mismatch') setup.devices.agentHostAbandonCreation.mockResolvedValueOnce({ ...setup.result, state: 'abandoned', operationId: randomUUID() })
+    if (reason === 'unconfirmed') setup.devices.agentHostAbandonCreation.mockResolvedValueOnce(setup.result)
+    if (reason === 'unauthorized') setup.authorize.mockRejectedValueOnce(new Error('Access revoked'))
+    await expect(setup.client.abandon(setup.root, setup.request.operationId, setup.authorize)).rejects.toThrow()
+    expect(await setup.client.list(setup.root, setup.request.taskId)).toEqual(before)
+    await expect(setup.client.create(setup.root, { ...setup.request, operationId: randomUUID() }, setup.authorize)).rejects.toThrow('unresolved')
+    expect(setup.devices.agentHostCreate).toHaveBeenCalledOnce()
+  })
+
+  it('clears a definitive failure without needing an online worker', async () => {
+    const setup = await fixture()
+    setup.devices.agentHostCreate.mockRejectedValueOnce(new Error('Not dispatched'))
+    expect((await setup.client.create(setup.root, setup.request, setup.authorize)).state).toBe('failed')
+    expect((await setup.client.abandon(setup.root, setup.request.operationId, setup.authorize)).state).toBe('abandoned')
+    expect(setup.devices.agentHostAbandonCreation).not.toHaveBeenCalled()
+    expect(await setup.client.list(setup.root, setup.request.taskId)).toEqual([])
+  })
+
   it('does not fall back to remote discovery when local task creation is unavailable', async () => {
     const setup = await fixture()
     await expect(setup.client.workers(setup.root, setup.request.taskId, 'local')).rejects.toThrow('Local task creation is not available')

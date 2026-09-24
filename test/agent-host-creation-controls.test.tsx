@@ -42,6 +42,12 @@ function fixture() {
       saved.set(id, ready)
       return ready
     }),
+    abandonCreation: vi.fn(async (id) => {
+      const operation = saved.get(id)
+      if (!operation) throw new Error('No saved creation to abandon.')
+      saved.delete(id)
+      return { ...operation, state: 'abandoned' as const, error: undefined }
+    }),
     models: vi.fn(async () => []), watch: vi.fn(async () => 'watch'),
     unwatch: vi.fn(async () => {}), terminal: vi.fn(async () => {}), releaseTerminal: vi.fn(async () => {}),
     send: vi.fn(async () => {}), resolveDelivery: vi.fn(async () => 'not-found' as const), cancel: vi.fn(async () => {}),
@@ -84,6 +90,69 @@ async function selectLocation(user: ReturnType<typeof userEvent.setup>, location
 }
 
 describe('explicit task-local Agent Host creation', () => {
+  it.each(['local', 'remote'] as const)('confirms clearing a %s operation, preserves the chat, and stays cleared after remount', async (location) => {
+    const { bridge, operation, saved } = localFixture()
+    const original = operation('created-unbound')
+    const user = userEvent.setup()
+    const view = render(<AgentHostCreationControls taskId="T-0002" taskReady />)
+    if (location === 'local') await selectLocation(user, 'local')
+    else await choose(user)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Abandon and clear' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Abandon and clear' }))
+    expect(screen.getByRole('group', { name: 'Confirm creation abandonment' })).toHaveTextContent('Any existing chat and task links will be kept')
+    await user.click(screen.getByRole('button', { name: 'Keep record' }))
+    expect(bridge.abandonCreation).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Abandon and clear' }))
+    await user.click(screen.getByRole('button', { name: 'Confirm abandonment' }))
+    await waitFor(() => expect(screen.queryByRole('region', { name: `Creation ${original.operationId}` })).not.toBeInTheDocument())
+    expect(bridge.abandonCreation).toHaveBeenCalledExactlyOnceWith(original.operationId)
+    expect(saved.size).toBe(0)
+    if (location === 'local') await user.selectOptions(screen.getByRole('combobox', { name: 'Exact Agent Host' }), 'local-native-host')
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeEnabled()
+    view.unmount()
+    render(<AgentHostCreationControls taskId="T-0002" taskReady />)
+    await choose(user)
+    expect(screen.queryByRole('region', { name: `Creation ${original.operationId}` })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeEnabled()
+    expect(bridge.create).not.toHaveBeenCalled()
+    expect(bridge.bindCreation).not.toHaveBeenCalled()
+    expect(bridge.send).not.toHaveBeenCalled()
+    expect(bridge.cancel).not.toHaveBeenCalled()
+  })
+
+  it.each(['offline', 'mismatch', 'unconfirmed'] as const)('keeps the record and shows an error when clearing is %s', async (reason) => {
+    const { bridge, operation } = fixture()
+    const original = operation('uncertain')
+    if (reason === 'offline') vi.mocked(bridge.abandonCreation).mockRejectedValueOnce(new Error('Worker offline'))
+    else vi.mocked(bridge.abandonCreation).mockResolvedValueOnce({ ...original, state: reason === 'unconfirmed' ? 'uncertain' : 'abandoned', operationId: reason === 'mismatch' ? 'different-operation' : original.operationId })
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskReady />)
+    await choose(user)
+    await user.click(screen.getByRole('button', { name: 'Abandon and clear' }))
+    await user.click(screen.getByRole('button', { name: 'Confirm abandonment' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(reason === 'offline' ? 'Worker offline' : 'not confirmed')
+    expect(screen.getByRole('region', { name: `Creation ${original.operationId}` })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    expect(bridge.create).not.toHaveBeenCalled()
+  })
+
+  it('does not resurrect a cleared record from an in-flight background status check', async () => {
+    const { bridge, operation } = fixture()
+    const original = operation('created-unbound')
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskReady />)
+    await choose(user)
+    let finish!: (value: AgentHostCreation) => void
+    vi.mocked(bridge.creationStatus).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    await act(async () => { window.dispatchEvent(new Event('online')) })
+    await user.click(screen.getByRole('button', { name: 'Abandon and clear' }))
+    await user.click(screen.getByRole('button', { name: 'Confirm abandonment' }))
+    await act(async () => { finish(original) })
+    expect(screen.queryByRole('region', { name: `Creation ${original.operationId}` })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeEnabled()
+  })
+
   it('creates locally while unrelated existing-session discovery is still pending', async () => {
     const { bridge, session, localWorker } = localFixture()
     let finishList!: (result: Awaited<ReturnType<AgentHostBridge['list']>>) => void

@@ -51,7 +51,7 @@ export interface AgentHostCreation {
   workerId: string
   workspaceId: string
   hostId: string
-  state: 'creating' | 'uncertain' | 'failed' | 'created-unbound' | 'ready'
+  state: 'creating' | 'uncertain' | 'failed' | 'created-unbound' | 'ready' | 'abandoned'
   nativeLifecycle?: 'creating' | 'ready' | 'failed'
   session?: AgentHostSession
   error?: string

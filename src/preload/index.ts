@@ -27,6 +27,7 @@ const agentHost: AgentHostBridge = {
   create: (request) => ipcRenderer.invoke('agent-host:create', request),
   creationStatus: (operationId) => ipcRenderer.invoke('agent-host:creation-status', operationId),
   bindCreation: (operationId) => ipcRenderer.invoke('agent-host:bind-creation', operationId),
+  abandonCreation: (operationId) => ipcRenderer.invoke('agent-host:abandon-creation', operationId),
   models: (target) => ipcRenderer.invoke('agent-host:models', target),
   watch: (target) => ipcRenderer.invoke('agent-host:watch', target),
   unwatch: (id) => ipcRenderer.invoke('agent-host:unwatch', id),

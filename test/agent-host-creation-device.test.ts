@@ -73,12 +73,15 @@ describe('paired device creation transport', () => {
     expect(created).toEqual({ ...setup.result, workerId: setup.request.workerId })
     await setup.client.agentHostCreationStatus(setup.root, setup.request, authorize)
     await setup.client.agentHostBindCreation(setup.root, setup.request, 'c'.repeat(64), authorize)
-    expect(setup.requests.map((request) => request.path)).toEqual(['/device/identity', '/device/agent-host/workers', '/device/agent-host/create', '/device/agent-host/creation-status', '/device/agent-host/creation-bind'])
+    setup.result.state = 'abandoned'
+    expect((await setup.client.agentHostAbandonCreation(setup.root, setup.request, authorize)).state).toBe('abandoned')
+    expect(setup.requests.map((request) => request.path)).toEqual(['/device/identity', '/device/agent-host/workers', '/device/agent-host/create', '/device/agent-host/creation-status', '/device/agent-host/creation-bind', '/device/agent-host/creation-abandon'])
     expect(setup.requests[2].body).toEqual({ operationId: setup.request.operationId, taskId: 'T-0007', workspaceId: setup.request.workspaceId, hostId: setup.request.hostId, expectedRevision: null })
     expect(setup.requests[3].body).toEqual({ operationId: setup.request.operationId, workspaceId: setup.request.workspaceId })
     expect(setup.requests[4].body.expectedRevision).toBe('c'.repeat(64))
+    expect(setup.requests[5].body).toEqual(setup.requests[2].body)
     expect(setup.transport).toHaveBeenCalledOnce()
-    expect(authorize).toHaveBeenCalledTimes(3)
+    expect(authorize).toHaveBeenCalledTimes(4)
   })
 
   it.each(['operation', 'owner', 'provider'])('rejects a mismatched %s from the worker without replay', async (changed) => {

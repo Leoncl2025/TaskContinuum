@@ -21,6 +21,7 @@ const stateLabels: Record<AgentHostCreation['state'], string> = {
   failed: 'Creation failed',
   'created-unbound': 'Created, assignment incomplete',
   ready: 'Created and assigned',
+  abandoned: 'Creation abandoned',
 }
 
 function pending(operation: AgentHostCreation): boolean {
@@ -55,6 +56,7 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
   const [historyError, setHistoryError] = useState<string>()
   const [error, setError] = useState<string>()
   const [busy, setBusy] = useState(false)
+  const [confirmAbandon, setConfirmAbandon] = useState<string>()
   const running = useRef<RunScope | undefined>(undefined)
   const lifetime = useRef<Lifetime>({ active: false })
   const local = location === 'local'
@@ -72,7 +74,7 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
     if (operation.taskId !== taskId) throw new Error('The creation response belongs to a different task.')
     const previous = savedOperations.current.find((item) => item.operationId === operation.operationId)
     if (previous && !sameOperation(previous, operation)) throw new Error('The creation response does not match the original worker, workspace, and Host.')
-    savedOperations.current = [...savedOperations.current.filter((item) => item.operationId !== operation.operationId), operation]
+    savedOperations.current = [...savedOperations.current.filter((item) => item.operationId !== operation.operationId), ...(operation.state === 'abandoned' ? [] : [operation])]
     setOperations(savedOperations.current)
   }
 
@@ -211,6 +213,16 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
     })
   }
 
+  async function abandon(operation: AgentHostCreation): Promise<void> {
+    await run(async (scope) => {
+      const result = await bridge!.abandonCreation(operation.operationId)
+      if (!scope.active) return
+      if (!sameOperation(operation, result) || result.state !== 'abandoned') throw new Error('Abandonment was not confirmed for this creation operation. The record was not cleared.')
+      save(result)
+      setConfirmAbandon(undefined)
+    })
+  }
+
   async function reuseChoices(operation: AgentHostCreation): Promise<void> {
     if (disabled || !historyLoaded || historyError || savedOperations.current.some(pending) || operation.state !== 'failed') return
     await run(async (scope) => {
@@ -282,7 +294,15 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
             {pending(operation) && <button type="button" className="secondary-button" disabled={busy} onClick={() => { void run((scope) => check(operation, scope)) }}>Check status</button>}
             {operation.state === 'created-unbound' && <button type="button" className="primary-button" disabled={busy || !taskReady} onClick={() => { void retryBinding(operation) }}>Retry binding</button>}
             {operation.state === 'ready' && onCreated && <button type="button" className="primary-button" disabled={busy} onClick={() => { void run((scope) => openCreated(operation, scope)) }}>Open created chat</button>}
+            {typeof bridge?.abandonCreation === 'function' && <button type="button" className="secondary-button" disabled={busy || disabled} onClick={() => setConfirmAbandon(operation.operationId)}>Abandon and clear</button>}
           </div>
+          {confirmAbandon === operation.operationId && <div role="group" aria-label="Confirm creation abandonment">
+            <p>Clear this creation record and allow a new creation? Any existing chat and task links will be kept. This does not cancel native creation or delete a chat. An uncertain operation may already have created one; starting another can create a duplicate. Private audit records are retained to prevent replay.</p>
+            <div className="ah-creation-actions">
+              <button type="button" className="secondary-button" disabled={busy} onClick={() => setConfirmAbandon(undefined)}>Keep record</button>
+              <button type="button" className="primary-button" disabled={busy || disabled} onClick={() => { void abandon(operation) }}>Confirm abandonment</button>
+            </div>
+          </div>}
         </section>
       })}
     </div>

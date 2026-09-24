@@ -202,6 +202,7 @@ export async function createPairedAgentHostCreationFixture() {
     get port() { return port },
     begin: (value = request) => call('/device/agent-host/create', value).then((result) => agentHostCreationResultSchema.parse(result)),
     status: (value = request) => call('/device/agent-host/creation-status', { operationId: value.operationId, workspaceId: value.workspaceId }).then((result) => agentHostCreationResultSchema.parse(result)),
+    abandon: (value = request) => call('/device/agent-host/creation-abandon', value).then((result) => agentHostCreationResultSchema.parse(result)),
     bind: (revision: string | null, value = request) => call('/device/agent-host/creation-bind', { operationId: value.operationId, workspaceId: value.workspaceId, expectedRevision: revision }).then((result) => agentHostCreationResultSchema.parse(result)),
     restart: async (beforeStart?: () => Promise<void>) => {
       await host.close()

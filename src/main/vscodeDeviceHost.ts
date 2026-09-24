@@ -282,7 +282,7 @@ export class VSCodeDeviceHost {
             return
           }
           const body = await this.body(request)
-          const creationRoute = ['/device/agent-host/workers', '/device/agent-host/create', '/device/agent-host/creation-status', '/device/agent-host/creation-bind'].includes(request.url ?? '')
+          const creationRoute = ['/device/agent-host/workers', '/device/agent-host/create', '/device/agent-host/creation-status', '/device/agent-host/creation-bind', '/device/agent-host/creation-abandon'].includes(request.url ?? '')
           pair = this.state!.pairs.find((item) => item.id === pair!.id)
           if (!pair) { response.writeHead(403).end(); return }
           if (!this.permitted(pair.id)) { response.writeHead(403).end(); return }
@@ -292,6 +292,7 @@ export class VSCodeDeviceHost {
             if (request.url === '/device/agent-host/workers') result = await this.agentHostWorkers(pair, z.object({ taskId: creationTaskIdSchema }).strict().parse(body).taskId)
             else if (request.url === '/device/agent-host/create') result = await this.agentHostCreations.begin(pair.id, agentHostCreateCommandSchema.parse(body))
             else if (request.url === '/device/agent-host/creation-status') result = await this.agentHostCreations.status(pair.id, agentHostCreationLookupSchema.parse(body))
+            else if (request.url === '/device/agent-host/creation-abandon') result = await this.agentHostCreations.abandon(pair.id, agentHostCreateCommandSchema.parse(body))
             else result = await this.agentHostCreations.bind(pair.id, agentHostCreationBindSchema.parse(body))
           } else if (request.url === '/device/identity') {
             z.object({}).strict().parse(body)

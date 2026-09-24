@@ -26,6 +26,7 @@ function fixture() {
     create: vi.fn(async () => { throw new Error('The chat panel must not create a session.') }),
     creationStatus: vi.fn(async () => { throw new Error('No creation operation in the chat panel.') }),
     bindCreation: vi.fn(async () => { throw new Error('No creation operation in the chat panel.') }),
+    abandonCreation: vi.fn(async () => { throw new Error('No creation operation in the chat panel.') }),
     models: vi.fn(async () => [{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }]),
     watch: vi.fn(async () => { watchId = crypto.randomUUID(); for (const listener of listeners) listener({ id: watchId, view: structuredClone(view) }); return watchId }),
     unwatch: vi.fn(async () => {}), terminal: vi.fn(async () => {}), releaseTerminal: vi.fn(async () => {}),

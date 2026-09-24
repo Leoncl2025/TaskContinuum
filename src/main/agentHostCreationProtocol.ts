@@ -36,7 +36,7 @@ export const agentHostCreationLookupSchema = z.object({
 }).strict()
 export const agentHostCreationBindSchema = agentHostCreationLookupSchema.extend({ expectedRevision: creationRevisionSchema }).strict()
 export const agentHostCreationResultSchema = agentHostCreateCommandSchema.omit({ expectedRevision: true }).extend({
-  state: z.enum(['creating', 'uncertain', 'failed', 'created-unbound', 'ready']),
+  state: z.enum(['creating', 'uncertain', 'failed', 'created-unbound', 'ready', 'abandoned']),
   nativeLifecycle: z.enum(['creating', 'ready', 'failed']).optional(),
   session: agentHostSessionSchema.extend({ provider: z.literal('copilotcli') }).optional(), error: errorSchema.optional(),
 }).strict().superRefine((result, context) => {
