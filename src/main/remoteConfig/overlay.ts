@@ -119,6 +119,7 @@ export class BindingOverlay {
   }
   private async reconcileCurrent(canonical: readonly RemoteRecord[], trust: RecordTrust): Promise<boolean> {
     this.expire()
+    if (!this.markers.size) return false
     const resolution = await resolveRecords(canonical, trust)
     const synced = new Set(canonical.filter((record) => record.kind === 'binding'
       && resolution.entities[`binding:${record.payload.taskId}`]?.state !== 'blocked').map((record) => record.operationId))

@@ -128,6 +128,11 @@ binding operation and private owner receipt. The caller then saves only the
 matching task binding under its own revision check. Other bindings are not
 overwritten. Binding publication uses the same Automatic workspace links path
 as other configuration edits; it does not stage unrelated task or code changes.
+If synchronization installs that exact created session before the caller's write
+and causes a stale-revision conflict, the caller rechecks authorization, task
+existence and the current binding read-only. Only an exact session/chat/owner match
+completes assignment; other conflicts still require explicit binding recovery.
+No second write or native creation is attempted.
 
 Native preparation keeps its connection open while final task, owner, revision
 and send-permission checks run. The 10-second WebSocket handshake deadline is
@@ -268,6 +273,17 @@ authorization lease: ordinary requests and outgoing event batches check the live
 pairing, expiry, exact chat and read/send scope without rereading those files or
 waiting behind read-only synchronization transactions.
 
+Remote reconnection waits only for the exact owner in the selected workspace.
+An already-known trusted owner can reconnect while global startup restoration,
+other peers and Git synchronization are still busy. A missing owner/invitation
+waits for relevant metadata or connection changes, not for the whole workspace's
+synchronization queue to become idle. Recovery is coalesced per workspace/owner,
+cancellable, and bounded by the existing 45-second deadline; readiness can release
+it immediately instead of waiting out that deadline. The recipient, pinned keys,
+current grant, expiry, enabled state and exact workspace/owner are still checked
+across awaits. Replacing or revoking the selected peer cannot silently switch a
+pending connection to another identity. No session or message is replayed.
+
 Binding writes and receipt edits invalidate leases in-process; trust-version
 changes, backend removal and monotonic provisional expiry are checked in memory.
 Filesystem notifications invalidate leases when externally modified records,
@@ -275,6 +291,18 @@ durable policy inputs or receipts change. Monitoring failure disables cached
 access. Changed inputs require full verification again, never an automatic grant.
 Unversioned policy providers retain the full verification path. Transaction locks
 are never deleted to recover access.
+
+On invalidation, unchanged verified inputs can be revalidated without waiting for
+an unrelated in-process read-only configuration transaction. This requires the
+exact owned lock, unchanged input metadata/trust/overlay/expiry and no queued
+mutations; pending writes and external locks cannot use this path. Configuration
+snapshots also reuse their verified result across unchanged reads and repeated
+binding revision checks, rather than rescanning and verifying the same history.
+Reuse is versioned and copy-isolated: changes, corruption, links, trust revocation,
+expiry and unresolved provisional state still require verification or deny access.
+Record leaf reads have a bounded I/O budget; empty overlays do not independently
+resolve the complete canonical history. Per-request and pre-dispatch access checks
+remain in place, and no timeout or grant lifetime is extended.
 
 With capable gateways, a remote send uses its continuously subscribed chat state
 instead of making another cross-device chat-snapshot request first. The owner still
@@ -395,13 +423,32 @@ To inspect just the timing and failure fields on either computer:
 $dir = Join-Path $env:APPDATA 'Task Continuum\agent-host-diagnostics'
 $files = Get-ChildItem -LiteralPath $dir -Filter 'agent-host*.jsonl' -File
 Get-Content -LiteralPath $files.FullName | ConvertFrom-Json |
-  Where-Object { $_.event -in 'ipc.models', 'device.transport', 'connection.open', 'connection.models', 'connection.subscribe', 'connection.send', 'connection.send.phase', 'connection.heartbeat', 'connection.offline', 'connection.retry', 'gateway.upgrade', 'gateway.models', 'gateway.request', 'gateway.socket' } |
+  Where-Object { $_.event -in 'ipc.models', 'device.identity', 'device.transport', 'device.disconnect', 'connection.open', 'connection.models', 'connection.subscribe', 'connection.send', 'connection.send.phase', 'connection.heartbeat', 'connection.offline', 'connection.retry', 'gateway.upgrade', 'gateway.models', 'gateway.request', 'gateway.socket', 'creation.prepare', 'creation.execute', 'authorization.acquire', 'authorization.store', 'configuration.transaction', 'configuration.snapshot' } |
   Sort-Object timeUtc |
-  Select-Object timeUtc, event, status, traceId, parentTraceId, targetHash, step, method, channel, elapsedMs, queueMs, authMs, pending, reason, retryMs, errorKind, rpcCode, errorMethod, timeoutMs
+  Select-Object timeUtc, event, status, traceId, parentTraceId, targetHash, scopeHash, step, method, channel, elapsedMs, queueMs, authMs, count, pending, reason, attempt, retryMs, errorKind, rpcCode, errorMethod, timeoutMs
 ```
 
 Use the overridden data directory instead of `$env:APPDATA` if
 `TASKCONTINUUM_DATA_DIR` is set.
+
+Authorization misses now log `authorization.acquire` phases for binding authority,
+owner identity and private receipts. `authorization.store` separates waiting for
+configuration transactions (`queue`), input metadata scans (`inputs`), overlay
+checks, cache hits/misses and retries. `configuration.transaction` separates queue,
+lock, journal, state, pre-write validation guards and notification work. The nested
+`upstream` step identifies local Git upstream checks inside those guards;
+`configuration.snapshot` separates
+record reads, overlay reconciliation and record resolution. Nested spans use
+`traceId`/`parentTraceId`, with gateway-triggered rebuilds linked to the original
+connection trace. `scopeHash` identifies a local workspace without exposing its
+path. Cache-hit connected-session checks do not emit a full rebuild log.
+These spans nest and overlap: do not sum parent and child elapsed times.
+`device.disconnect` records sanitized drop reasons so an invitation replacement
+or explicit disconnect can be distinguished from a socket closing downstream.
+Target-owner recovery uses `device.transport` / `workspace-recovery`; overlapping
+observers log `coalesced`. `device.identity` / `configuration` with `reimport`
+identifies invitation replacement before a transport drop. Follow `ownerHash`
+and the original connection `traceId`, without exposing device keys or tokens.
 
 `connection.send` retains its overall send-to-turn-confirmation duration.
 `connection.send.phase` adds non-overlapping per-phase durations for load,

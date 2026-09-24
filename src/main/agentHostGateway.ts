@@ -7,7 +7,7 @@ import type { AgentHostTarget } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
 import { agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminalIdSchema } from './agentHostProtocol'
-import { AGENT_HOST_TRACE_HEADER, agentHostDiagnosticChannel, agentHostDiagnosticMethod, logAgentHostDiagnostic } from './agentHostDiagnostics'
+import { AGENT_HOST_TRACE_HEADER, agentHostDiagnosticChannel, agentHostDiagnosticMethod, logAgentHostDiagnostic, withAgentHostDiagnosticTrace } from './agentHostDiagnostics'
 import type { AgentHostDiagnosticDetails } from './agentHostDiagnostics'
 import type { AgentHostConnection } from './agentHostConnection'
 import { isAgentHostTurnBoundary } from './agentHostConnection'
@@ -57,12 +57,12 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
         target = selectedTarget
         const token = request.headers.authorization?.replace(/^Bearer /, '') ?? ''
         advance('authorization')
-        await options.authorize(token, selectedTarget, false)
+        await withAgentHostDiagnosticTrace(traceId, () => options.authorize(token, selectedTarget, false))
         advance('native')
         const connection = await options.connection(selectedTarget)
         await connection.open()
         advance('authorization')
-        const access = await options.authorize(token, selectedTarget, false)
+        const access = await withAgentHostDiagnosticTrace(traceId, () => options.authorize(token, selectedTarget, false))
         if (socket.destroyed) {
           logAgentHostDiagnostic('gateway.upgrade', { target: selectedTarget, traceId, status: 'closed', step, reason: 'client-closed', elapsedMs: performance.now() - started })
           return
@@ -100,7 +100,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
     let pendingRequests = 0
     let closeReason: AgentHostDiagnosticDetails['reason']
     const authorize = async (send: boolean) => {
-      const access = await options.authorize(token, target, send)
+      const access = await withAgentHostDiagnosticTrace(traceId, () => options.authorize(token, target, send))
       if (closed || socket.readyState !== WebSocket.OPEN || access.canSend !== initialAccess.canSend) throw new Error('Access changed.')
       return access
     }

@@ -181,6 +181,38 @@ describe('durable remote creation on the caller', () => {
     expect(setup.devices.agentHostBindCreation).toHaveBeenCalledOnce()
   })
 
+  it.each(['exact', 'different-chat', 'different-owner', 'revoked', 'deleted-task'] as const)('rechecks a raced binding read-only after stale revision: %s', async (race) => {
+    const setup = await fixture()
+    const originalWrite = setup.bindings.store.writeBinding.bind(setup.bindings.store)
+    const originalUpdate = setup.bindings.store.update.bind(setup.bindings.store)
+    const session = setup.result.session!
+    const target = { sessionId: session.sessionId, chatId: session.chatId, owner: session.owner }
+    const synced = race === 'different-chat' ? { ...target, chatId: 'ahp-chat:/different' }
+      : race === 'different-owner' ? { ...target, owner: { ...target.owner, clientId: randomUUID() } } : target
+    const write = vi.spyOn(setup.bindings.store, 'update').mockImplementationOnce(async (revision, transform, beforeWrite) => {
+      await originalWrite(setup.request.taskId, { provider: 'agent-host', ...synced }, revision)
+      if (race === 'revoked') setup.authorize.mockRejectedValue(new Error('Creation access revoked.'))
+      if (race === 'deleted-task') await rm(setup.taskFile)
+      return originalUpdate(revision, transform, beforeWrite)
+    })
+    const result = await setup.client.create(setup.root, setup.request, setup.authorize)
+    expect(result.state).toBe(race === 'exact' ? 'ready' : 'created-unbound')
+    expect(write).toHaveBeenCalledOnce()
+    expect(setup.devices.agentHostCreate).toHaveBeenCalledOnce()
+    expect(setup.devices.agentHostBindCreation).not.toHaveBeenCalled()
+    expect(taskSessionLinks((await readRepositorySessionLinks(setup.root)).document.bindings, setup.request.taskId))
+      .toEqual([{ provider: 'agent-host', ...synced }])
+    expect(await setup.bindings.store.getRecords()).toHaveLength(1)
+    if (race === 'exact') {
+      expect(result.error).toBeUndefined()
+      expect(await setup.client.list(setup.root, setup.request.taskId)).toEqual([])
+      expect((await setup.client.status(setup.root, setup.request.operationId, setup.authorize)).state).toBe('ready')
+    } else {
+      expect(result.error).toBeDefined()
+      expect(await setup.client.list(setup.root, setup.request.taskId)).toHaveLength(1)
+    }
+  })
+
   it('keeps an intentionally detached completed operation historically complete without rebinding it', async () => {
     const setup = await fixture()
     await setup.client.create(setup.root, setup.request, setup.authorize)

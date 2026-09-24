@@ -35,10 +35,7 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     async (invitation) => {
       if (JSON.stringify(invitation.participant) !== JSON.stringify(await clientIdentity()) || invitation.devTunnel.clientPublicKey !== (await keys.get('client')).publicKey) throw new Error('This invitation belongs to a different device identity.')
     },
-    async (root): Promise<void> => {
-      await recovery
-      await gitSync.whenConnectionsSettled(root)
-    })
+    (root, owner, signal): Promise<void> => gitSync.whenOwnerConnected(root, owner, signal))
   const files = new FileTransferService(app.getPath('userData'), fileSource, devices, fileBudget)
   const filesReady = startFileTransferMcpBridge(app.getPath('userData'), (root) => files.forWorkspace(root))
   void filesReady.catch(() => console.error('The local file transfer MCP bridge could not start.'))

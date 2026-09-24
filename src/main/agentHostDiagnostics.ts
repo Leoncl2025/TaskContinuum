@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { constants } from 'node:fs'
 import { lstat, mkdir, open, realpath, rename, rm } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
@@ -13,6 +14,7 @@ const ACTIVE_FILE = 'agent-host.jsonl'
 const MAX_FILE_BYTES = 2 * 1024 * 1024
 const MAX_QUEUED = 1024
 const MAX_CAPTURE_BYTES = 3 * MAX_FILE_BYTES
+const diagnosticTrace = new AsyncLocalStorage<string>()
 export const AGENT_HOST_TRACE_HEADER = 'x-taskcontinuum-ahp-trace'
 
 export interface AgentHostDiagnosticCapture {
@@ -33,16 +35,20 @@ const captureRecordSchema = z.object({
     'connection.open', 'connection.subscribe', 'connection.models', 'connection.heartbeat',
     'connection.stream', 'connection.send', 'connection.send.phase', 'connection.offline', 'connection.retry', 'connection.close',
     'gateway.upgrade', 'gateway.request', 'gateway.models', 'gateway.socket', 'creation.prepare', 'creation.execute',
+    'authorization.acquire', 'authorization.store', 'configuration.transaction', 'configuration.snapshot', 'device.disconnect',
   ]),
   targetHash: z.string().regex(/^[a-f0-9]{16}$/).optional(),
   ownerHash: z.string().regex(/^[a-f0-9]{16}$/).optional(),
+  scopeHash: z.string().regex(/^[a-f0-9]{16}$/).optional(),
   traceId: z.uuid().optional(), parentTraceId: z.uuid().optional(),
   status: z.enum(['begin', 'ok', 'error', 'closed', 'scheduled']).optional(),
   step: z.enum(['load', 'transport', 'initialize', 'identity', 'session', 'chat', 'terminal', 'root',
     'reconcile', 'authorization', 'workspace-recovery', 'tunnel', 'websocket', 'native', 'queue',
-    'response', 'heartbeat', 'validation', 'models', 'snapshot', 'snapshot-apply', 'ledger', 'dispatch', 'confirmation', 'configuration', 'binding']).optional(),
+    'response', 'heartbeat', 'validation', 'models', 'snapshot', 'snapshot-apply', 'ledger', 'dispatch', 'confirmation', 'configuration', 'binding',
+    'inputs', 'records', 'overlay', 'resolution', 'receipts', 'trust', 'cache', 'notify', 'lock', 'journal', 'state', 'retry', 'upstream']).optional(),
   reason: z.enum(['heartbeat-failed', 'transport-closed', 'stream-ended', 'stream-error', 'access-changed',
-    'owner-offline', 'backpressure', 'queue-limit', 'client-closed', 'invalid-frame', 'shutdown', 'auth-required']).optional(),
+    'owner-offline', 'backpressure', 'queue-limit', 'client-closed', 'invalid-frame', 'shutdown', 'auth-required',
+    'reimport', 'owner-disabled', 'identity-failed', 'coalesced', 'inputs-changed', 'generation-changed', 'cache-hit', 'cache-miss', 'retry-exhausted']).optional(),
   method: z.enum(['initialize', 'reconnect', 'ping', 'subscribe', 'unsubscribe', 'dispatchAction', 'other']).optional(),
   channel: z.enum(['root', 'session', 'chat', 'terminal', 'other']).optional(),
   elapsedMs: z.number().int().min(0).max(1e9).optional(),
@@ -58,7 +64,7 @@ const captureRecordSchema = z.object({
   dispatched: z.boolean().optional(),
   errorKind: z.enum(['unknown', 'timeout', 'rpc-error', 'transport-closed', 'transport-io', 'transport-protocol',
     'transport-other', 'aborted', 'invalid-data', 'client-closed', 'ECONNRESET', 'ECONNREFUSED',
-    'ETIMEDOUT', 'EPIPE', 'EACCES', 'other']).optional(),
+    'ETIMEDOUT', 'EPIPE', 'EACCES', 'store-busy', 'authorization-changed', 'other']).optional(),
   errorMethod: z.enum(['initialize', 'reconnect', 'ping', 'subscribe', 'unsubscribe', 'dispatchAction', 'other']).optional(),
 })
 
@@ -69,20 +75,24 @@ export type AgentHostDiagnosticEvent =
   | 'connection.stream' | 'connection.send' | 'connection.send.phase' | 'connection.offline' | 'connection.retry' | 'connection.close'
   | 'gateway.upgrade' | 'gateway.request' | 'gateway.models' | 'gateway.socket'
   | 'creation.prepare' | 'creation.execute'
+  | 'authorization.acquire' | 'authorization.store' | 'configuration.transaction' | 'configuration.snapshot' | 'device.disconnect'
 type Status = 'begin' | 'ok' | 'error' | 'closed' | 'scheduled'
 type Step = 'load' | 'transport' | 'initialize' | 'identity' | 'session' | 'chat' | 'terminal' | 'root'
   | 'reconcile' | 'authorization' | 'workspace-recovery' | 'tunnel' | 'websocket'
   | 'native' | 'queue' | 'response' | 'heartbeat' | 'validation' | 'models'
   | 'snapshot' | 'snapshot-apply' | 'ledger' | 'dispatch' | 'confirmation' | 'configuration' | 'binding'
+  | 'inputs' | 'records' | 'overlay' | 'resolution' | 'receipts' | 'trust' | 'cache' | 'notify' | 'lock' | 'journal' | 'state' | 'retry' | 'upstream'
 type Reason = 'heartbeat-failed' | 'transport-closed' | 'stream-ended' | 'stream-error'
   | 'access-changed' | 'owner-offline' | 'backpressure' | 'queue-limit' | 'client-closed'
   | 'invalid-frame' | 'shutdown' | 'auth-required'
+  | 'reimport' | 'owner-disabled' | 'identity-failed' | 'coalesced' | 'inputs-changed' | 'generation-changed' | 'cache-hit' | 'cache-miss' | 'retry-exhausted'
 type Method = 'initialize' | 'reconnect' | 'ping' | 'subscribe' | 'unsubscribe' | 'dispatchAction' | 'other'
 type Channel = 'root' | 'session' | 'chat' | 'terminal' | 'other'
 
 export interface AgentHostDiagnosticDetails {
   target?: AgentHostTarget
   ownerId?: string
+  scope?: string
   traceId?: string
   parentTraceId?: string
   status?: Status
@@ -111,6 +121,10 @@ function safeUuid(value: string | undefined): string | undefined {
 }
 function errorKind(error: unknown): string {
   if (!(error instanceof Error)) return 'unknown'
+  if (error.name === 'RemoteConfigError') {
+    const code = (error as Error & { code?: unknown }).code
+    if (code === 'store-busy' || code === 'authorization-changed') return code
+  }
   if (error.name === 'RpcTimeoutError' || error.name === 'TimeoutError') return 'timeout'
   if (error.name === 'RpcError') return 'rpc-error'
   if (error.name === 'TransportError') {
@@ -140,7 +154,7 @@ export function agentHostDiagnosticChannel(value: unknown, target: AgentHostTarg
 }
 
 function entry(event: AgentHostDiagnosticEvent, details: AgentHostDiagnosticDetails, runId: string): string {
-  const traceId = safeUuid(details.traceId)
+  const traceId = safeUuid(details.traceId ?? diagnosticTrace.getStore())
   const parentTraceId = safeUuid(details.parentTraceId)
   const error = details.error
   const timeout = error instanceof Error && error.name === 'RpcTimeoutError' ? safeNumber((error as Error & { timeoutMs?: number }).timeoutMs) : undefined
@@ -150,6 +164,7 @@ function entry(event: AgentHostDiagnosticEvent, details: AgentHostDiagnosticDeta
     schemaVersion: 1, timeUtc: new Date().toISOString(), processId: process.pid, runId, event,
     ...(details.target ? { targetHash: fingerprint(agentHostKey(details.target)) } : {}),
     ...(details.ownerId ? { ownerHash: fingerprint(details.ownerId) } : {}),
+    ...(details.scope ? { scopeHash: fingerprint(process.platform === 'win32' ? details.scope.toLowerCase() : details.scope) } : {}),
     ...(traceId ? { traceId } : {}),
     ...(parentTraceId ? { parentTraceId } : {}),
     ...(details.status ? { status: details.status } : {}),
@@ -369,6 +384,30 @@ export async function startAgentHostDiagnostics(userData: string, maxFileBytes?:
 
 export function logAgentHostDiagnostic(event: AgentHostDiagnosticEvent, details: AgentHostDiagnosticDetails = {}): void {
   active?.record(event, details)
+}
+
+export function withAgentHostDiagnosticTrace<T>(traceId: string | undefined, action: () => T): T {
+  const valid = active && safeUuid(traceId)
+  return valid ? diagnosticTrace.run(valid, action) : action()
+}
+
+export async function measureAgentHostDiagnostic<T>(event: AgentHostDiagnosticEvent, details: AgentHostDiagnosticDetails, action: () => Promise<T>): Promise<T> {
+  if (!active) return action()
+  const traceId = details.traceId ?? randomUUID()
+  const parentTraceId = details.parentTraceId ?? diagnosticTrace.getStore()
+  const fields = { ...details, traceId, parentTraceId: parentTraceId === traceId ? undefined : parentTraceId }
+  const started = performance.now()
+  logAgentHostDiagnostic(event, { ...fields, status: 'begin' })
+  return diagnosticTrace.run(traceId, async () => {
+    try {
+      const result = await action()
+      logAgentHostDiagnostic(event, { ...fields, status: 'ok', elapsedMs: performance.now() - started })
+      return result
+    } catch (error) {
+      logAgentHostDiagnostic(event, { ...fields, status: 'error', elapsedMs: performance.now() - started, error })
+      throw error
+    }
+  })
 }
 
 export async function flushAgentHostDiagnostics(): Promise<void> { await active?.flush() }

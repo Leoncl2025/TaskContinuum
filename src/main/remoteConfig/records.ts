@@ -558,20 +558,22 @@ export async function readRecords(root: string, trust?: RecordTrust): Promise<Re
   const result: RemoteRecord[] = []
   let totalBytes = 0
   let entries = 0
+  let files = 0
   async function visit(directory: string, depth: number): Promise<void> {
     if (depth > 4) throw new RemoteConfigError('unsafe-path', 'The record store has an unexpected directory depth.')
-    for (const entry of (await readdir(directory, { withFileTypes: true })).sort((left, right) => left.name < right.name ? -1 : 1)) {
-      if (++entries > remoteConfigLimits.records * 5) throw new RemoteConfigError('resource-limit', 'The record store has too many directory entries.')
-      const file = join(directory, entry.name)
-      const info = await lstat(file)
-      if (info.isSymbolicLink()) throw new RemoteConfigError('unsafe-path', 'The record store cannot contain filesystem links.')
-      if (info.isDirectory()) {
-        const parts = relative(await realpath(root), file).split(sep)
-        await checkedDirectory(root, parts)
-        await visit(file, depth + 1)
-      } else {
+    const children = (await readdir(directory, { withFileTypes: true })).sort((left, right) => left.name < right.name ? -1 : 1)
+    entries += children.length
+    if (entries > remoteConfigLimits.records * 5) throw new RemoteConfigError('resource-limit', 'The record store has too many directory entries.')
+    // Bounded leaf I/O; directory traversal remains serial, and dynamic trust callbacks retain serial execution.
+    const concurrency = trust ? 1 : 16
+    for (let index = 0; index < children.length; index += concurrency) {
+      const batch = await Promise.allSettled(children.slice(index, index + concurrency).map(async (entry) => {
+        const file = join(directory, entry.name)
+        const info = await lstat(file)
+        if (info.isSymbolicLink()) throw new RemoteConfigError('unsafe-path', 'The record store cannot contain filesystem links.')
+        if (info.isDirectory()) return file
         if (!/^[a-f0-9]{64}\.json$/.test(entry.name)) throw new RemoteConfigError('invalid-path', 'The record store contains a non-operation file.')
-        if (result.length >= remoteConfigLimits.records) throw new RemoteConfigError('resource-limit', 'Remote configuration exceeds the 10,000-record limit.')
+        if (++files > remoteConfigLimits.records) throw new RemoteConfigError('resource-limit', 'Remote configuration exceeds the 10,000-record limit.')
         const content = await readCheckedFile(root, file, remoteConfigLimits.recordBytes)
         totalBytes += content.byteLength
         if (totalBytes > remoteConfigLimits.totalBytes) throw new RemoteConfigError('resource-limit', 'Remote configuration exceeds the 64 MiB limit.')
@@ -581,6 +583,14 @@ export async function readRecords(root: string, trust?: RecordTrust): Promise<Re
         if (relative(await realpath(root), file) !== recordPath(record)) throw new RemoteConfigError('invalid-path', 'The immutable operation filename, entity path and payload disagree.', entityKey(record), record.operationId)
         if (!matchesGitText(content, serializeRecord(record))) throw new RemoteConfigError('noncanonical-record', 'Immutable operation bytes must use canonical JSON with one trailing LF or CRLF newline.', entityKey(record), record.operationId)
         result.push(record)
+        return undefined
+      }))
+      for (const item of batch) {
+        if (item.status === 'rejected') throw item.reason
+        if (!item.value) continue
+        const parts = relative(await realpath(root), item.value).split(sep)
+        await checkedDirectory(root, parts)
+        await visit(item.value, depth + 1)
       }
     }
   }

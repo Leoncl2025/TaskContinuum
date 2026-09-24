@@ -3,9 +3,8 @@ import { promisify } from 'node:util'
 import { createConnection } from 'node:net'
 import { createHash, randomUUID } from 'node:crypto'
 import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { WorkspaceSyncService } from '../src/main/remoteConfig/service'
 import type { WorkspaceSyncOptions } from '../src/main/remoteConfig/service'
 import { newSshKeyPair, openSessionSshBridge, startSessionSshHost } from '../src/main/devTunnel/sessionSsh'
@@ -17,6 +16,7 @@ import type { DevTunnelRoute } from '../src/main/devTunnel/protocol'
 import { LocalEnrollments } from '../src/main/remoteConfig/enrollment'
 import { WorkspaceGitReplica as GitReplica } from '../src/main/remoteConfig/workspaceGit'
 import { RemoteConfigStore } from '../src/main/remoteConfig/store'
+import { RemoteSyncScheduler } from '../src/main/remoteConfig/scheduler'
 import { canonicalPolicyRoot, locallyLinkedAgentHostSessions, recordLocalLink } from '../src/main/linkedSessionPolicy'
 import { readRecords, recordPath, resolveRecords } from '../src/main/remoteConfig/records'
 import { AgentHostRegistry } from '../src/main/agentHostRegistry'
@@ -27,9 +27,25 @@ import { startAgentHostCreationFixture } from './agent-host-creation-fixture'
 const execute = promisify(execFile)
 const roots: string[] = []
 const cleanup: (() => Promise<void>)[] = []
+beforeEach(() => {
+  // These fixtures drive synchronization explicitly; periodic ticks must not add
+  // unrelated Git cycles or race the revision selected by a test.
+  const request = RemoteSyncScheduler.prototype.request
+  vi.spyOn(RemoteSyncScheduler.prototype, 'request').mockImplementation(function (this: RemoteSyncScheduler, reason) {
+    if (reason !== 'interval') request.call(this, reason)
+  })
+})
 afterEach(async () => {
-  for (const close of cleanup.splice(0).reverse()) await close()
-  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
+  const failures: unknown[] = []
+  try {
+    for (const close of cleanup.splice(0).reverse()) {
+      try { await close() } catch (error) { failures.push(error) }
+    }
+    for (const root of roots.splice(0)) {
+      try { await rm(root, { recursive: true, force: true }) } catch (error) { failures.push(error) }
+    }
+  } finally { vi.restoreAllMocks() }
+  if (failures.length) throw new AggregateError(failures, 'Workspace synchronization fixture cleanup failed.')
 })
 async function git(root: string, ...args: string[]) {
   return (await execute('git', ['--no-pager', '-c', 'core.autocrlf=false', '-c', 'commit.gpgSign=false', ...args], { cwd: root, timeout: 30000 })).stdout.trim()
@@ -53,7 +69,7 @@ async function workspace(root: string, workspaceDirectory = '') {
 }
 
 async function fixture(count: number, workspaceDirectory = '', additionalWorkspaceDirectories: string[] = []) {
-  const root = await mkdtemp(join(tmpdir(), 'taskcon-full-sync-'))
+  const root = await mkdtemp(join(process.cwd(), '.test-full-sync-'))
   roots.push(root)
   const remote = join(root, 'remote.git')
   await git(root, 'init', '--bare', '--initial-branch=main', remote)
@@ -122,7 +138,7 @@ async function fixture(count: number, workspaceDirectory = '', additionalWorkspa
     const devices = new VSCodeDeviceClient(data, protector, (invitation, signal) => tunnels.connect(invitation.devTunnel, invitation.id, invitation.port, signal), async (invitation) => {
       expect(invitation.participant).toEqual(identity)
       expect(invitation.devTunnel.clientPublicKey).toBe(clientKey.publicKey)
-    })
+    }, (root, owner, signal) => service.whenOwnerConnected(root, owner, signal))
     cleanup.push(async () => devices.close())
     const onChange = vi.fn()
     let publicationGate: Promise<void> | undefined
@@ -311,12 +327,32 @@ it('upgrades saved enrolled links and creates and assigns with write access with
   const workspaceId = await agentHostCreationWorkspaceId(b.folder)
   const workspace = worker.workspaces.find((entry) => entry.id === workspaceId)!
   expect(workspace).toMatchObject({ canSend: true, taskState: 'available' })
+  const bindingFailures: string[] = []
+  const update = RemoteConfigStore.prototype.update
+  const updates = vi.spyOn(RemoteConfigStore.prototype, 'update').mockImplementation(async function (this: RemoteConfigStore, ...args) {
+    try { return await update.apply(this, args) } catch (error) {
+      const code = error instanceof Error && 'code' in error ? error.code : undefined
+      bindingFailures.push(typeof code === 'string' && /^[a-z-]{1,40}$/.test(code) ? code : 'other')
+      throw error
+    }
+  })
+  cleanup.push(async () => { updates.mockRestore() })
   const started = await client.create(a.folder, {
     operationId: randomUUID(), taskId: 'T-0001', workerId: worker.id, workspaceId: workspace.id,
     hostId: native.hostId, expectedRevision: workspace.expectedRevision,
   }, async () => {})
-  await expect.poll(async () => (await client.status(a.folder, started.operationId, async () => {})).state, { timeout: 15000, interval: 100 }).toBe('ready')
+  await expect.poll(async () => {
+    const result = await client.status(a.folder, started.operationId, async () => {})
+    return ['ready', 'created-unbound', 'failed'].includes(result.state)
+  }, { timeout: 15000, interval: 100 }).toBe(true)
   const result = await client.status(a.folder, started.operationId, async () => {})
+  const created = result.session
+  const callerHasCreatedSession = !!created && ((await readRepositorySessionLinks(a.folder)).document.bindings['T-0001']?.some((binding) => binding.provider === 'agent-host'
+    && binding.sessionId === created.sessionId && binding.chatId === created.chatId
+    && binding.owner.clientId === created.owner.clientId && binding.owner.machineName === created.owner.machineName) ?? false)
+  expect(bindingFailures.filter((code) => code !== 'stale-revision')).toEqual([])
+  expect({ state: result.state, error: result.error, callerHasCreatedSession })
+    .toEqual({ state: 'ready', error: undefined, callerHasCreatedSession: true })
   expect(native.creations).toHaveLength(1)
   expect(native.calls.some((call) => call.method === 'dispatchAction')).toBe(false)
   const { sessionId, chatId, owner: sessionOwner } = result.session!

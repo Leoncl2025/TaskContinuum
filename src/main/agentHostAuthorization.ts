@@ -6,6 +6,7 @@ import { acquireRepositorySessionAuthorization } from './repositorySessionLinks'
 import { canonicalPolicyRoot, onLocalSessionLinkChange, readLocalSessionLinkReceipts } from './linkedSessionPolicy'
 import { sessionLinkEntries } from '../shared/sessionBindings'
 import { AuthorizationWatch } from './shared/authorizationWatch'
+import { logAgentHostDiagnostic, measureAgentHostDiagnostic } from './agentHostDiagnostics'
 
 export interface AgentHostAuthorizationLease {
   owner: SessionOwner
@@ -34,9 +35,10 @@ export class AgentHostAuthorization {
     let loading = this.pending.get(key)
     if (!loading) {
       if (!this.leases.has(key) && this.leases.size + this.pending.size >= 32) throw new Error('Too many Agent Host authorization scopes.')
-      loading = this.load(root).then((lease) => { this.leases.set(key, lease); return lease }).finally(() => { this.pending.delete(key) })
+      loading = measureAgentHostDiagnostic('authorization.acquire', { scope: root, step: 'load' }, () => this.load(root))
+        .then((lease) => { this.leases.set(key, lease); return lease }).finally(() => { this.pending.delete(key) })
       this.pending.set(key, loading)
-    }
+    } else logAgentHostDiagnostic('authorization.acquire', { scope: root, step: 'cache', status: 'scheduled', reason: 'coalesced' })
     return loading
   }
 
@@ -50,10 +52,15 @@ export class AgentHostAuthorization {
     for (let attempt = 0; attempt < 3; attempt++) {
       const unchanged = this.watch.checkpoint()
       const [binding, owner, receipts] = await Promise.all([
-        acquireRepositorySessionAuthorization(canonical), this.owner(), readLocalSessionLinkReceipts(this.directory),
+        measureAgentHostDiagnostic('authorization.acquire', { scope: canonical, step: 'binding' }, () => acquireRepositorySessionAuthorization(canonical)),
+        measureAgentHostDiagnostic('authorization.acquire', { scope: canonical, step: 'identity' }, () => this.owner()),
+        measureAgentHostDiagnostic('authorization.acquire', { scope: canonical, step: 'receipts' }, () => readLocalSessionLinkReceipts(this.directory)),
       ])
       if (this.closed) throw new Error('Agent Host authorization is closed.')
-      if (!unchanged()) continue
+      if (!unchanged()) {
+        logAgentHostDiagnostic('authorization.acquire', { scope: canonical, step: 'retry', status: 'scheduled', attempt: attempt + 1, reason: 'inputs-changed' })
+        continue
+      }
       const links = sessionLinkEntries(binding.snapshot.document.bindings)
       const targets = links.map(([, link]) => ({ sessionId: link.sessionId, chatId: link.chatId, owner: link.owner }))
       const localTargets = links.flatMap(([taskId, link]) => link.owner.clientId === owner.clientId && receipts.some((receipt) =>

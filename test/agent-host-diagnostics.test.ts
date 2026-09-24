@@ -16,11 +16,44 @@ import { startAgentHostFixture } from './agent-host-fixture'
 import {
   agentHostDiagnosticChannel, agentHostDiagnosticMethod, flushAgentHostDiagnostics,
   logAgentHostDiagnostic, startAgentHostDiagnostics, stopAgentHostDiagnostics, captureAgentHostDiagnostics,
+  measureAgentHostDiagnostic, withAgentHostDiagnosticTrace,
 } from '../src/main/agentHostDiagnostics'
 
 afterEach(async () => { await stopAgentHostDiagnostics() })
 
 describe('Agent Host diagnostic logs', () => {
+  it('keeps parallel latency spans correlated and exports only hashed scopes and safe phase metadata', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-ahp-auth-phase-'))
+    const parents = [randomUUID(), randomUUID()]
+    try {
+      await startAgentHostDiagnostics(directory)
+      await Promise.all(parents.map((parent) => withAgentHostDiagnosticTrace(parent, () =>
+        measureAgentHostDiagnostic('authorization.acquire', { step: 'load', scope: 'C:\\private-workspace' }, async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 5))
+          return measureAgentHostDiagnostic('authorization.store', { step: 'inputs', scope: 'C:\\private-workspace' }, async () => {
+            await new Promise<void>((resolve) => setTimeout(resolve, 5))
+            return 1
+          })
+        }))))
+      await expect(measureAgentHostDiagnostic('configuration.transaction', { step: 'lock', scope: 'C:\\private-workspace' }, async () => {
+        const error = new Error('private-token-and-file')
+        error.name = 'RemoteConfigError'
+        throw Object.assign(error, { code: 'store-busy' })
+      })).rejects.toThrow('private-token')
+      const capture = await captureAgentHostDiagnostics(directory, {}, new AbortController().signal)
+      expect(capture.truncated).toBe(false)
+      const text = capture.jsonl.toString('utf8')
+      for (const secret of ['C:\\private-workspace', 'private-token-and-file']) expect(text).not.toContain(secret)
+      const events = text.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>)
+      for (const parentTraceId of parents) {
+        const span = events.find((event) => event.event === 'authorization.acquire' && event.parentTraceId === parentTraceId && event.status === 'ok')
+        expect(span).toMatchObject({ elapsedMs: expect.any(Number), scopeHash: expect.stringMatching(/^[a-f0-9]{16}$/) })
+        expect(events).toContainEqual(expect.objectContaining({ event: 'authorization.store', status: 'ok', parentTraceId: span!.traceId }))
+      }
+      expect(events).toContainEqual(expect.objectContaining({ event: 'configuration.transaction', step: 'lock', status: 'error', errorKind: 'store-busy' }))
+    } finally { await stopAgentHostDiagnostics(); await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('exports separate send-phase timings without messages, model IDs or raw errors', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-ahp-send-phase-'))
     const host = await startAgentHostFixture()

@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, sep } from 'node:path'
 import ssh2 from 'ssh2'
 import { z } from 'zod'
 import type { WorkspaceGitSyncStatus } from '../../shared/gitSync'
+import type { AgentHostTarget } from '../../shared/agentHost'
 import type { DeviceRecord, RemoteConfigSnapshot, RemoteRecord } from '../../shared/remoteConfig'
 import { readClientIdentity } from '../clientIdentity'
 import type { DeviceSshKeys } from '../devTunnel/identity'
@@ -13,6 +14,8 @@ import { canonicalPolicyRoot } from '../linkedSessionPolicy'
 import { registerRepositorySessionLinksBackend } from '../repositorySessionLinks'
 import { readJsonBounded, writeJsonAtomic } from '../shared/storage'
 import { deviceInvitationSchema } from '../vscodeDeviceProtocol'
+import { agentHostTargetSchema } from '../agentHostProtocol'
+import { logAgentHostDiagnostic, measureAgentHostDiagnostic } from '../agentHostDiagnostics'
 import type { VSCodeDeviceClient } from '../vscodeDeviceClient'
 import type { VSCodeDeviceHost } from '../vscodeDeviceHost'
 import { LocalEnrollments, initialWorkspaceId } from './enrollment'
@@ -22,7 +25,7 @@ import type { WorkspaceGitOptions as GitReplicaOptions } from './workspaceGit'
 import { GitSyncError } from './git'
 import { BindingOverlay } from './overlay'
 import { PeerLinks } from './peers'
-import type { PublicPeer, PublicPeerGrant } from './peers'
+import type { PeerConnection, PublicPeer, PublicPeerGrant } from './peers'
 import { PeerControlError, PeerControlServer, callPeer } from './peerControl'
 import { RemoteSyncScheduler } from './scheduler'
 import { LocalSettingsFile } from './settingsFile'
@@ -49,6 +52,7 @@ interface Runtime {
   metadata: RuntimeMetadata
   enrollment: WorkspaceEnrollment
   local: Awaited<ReturnType<typeof readClientIdentity>>
+  localClientKey: Awaited<ReturnType<DeviceSshKeys['get']>>
   store: RemoteConfigStore
   scheduler: RemoteSyncScheduler
   control: PeerControlServer
@@ -65,6 +69,8 @@ interface Runtime {
   network: Set<Promise<void>>
   peerWork?: Promise<void>
   peerAgain: boolean
+  peerConnections: Map<string, Promise<PeerConnection>>
+  recoveredOwners: Set<string>
   closed: boolean
   generation: number
   grantWork: Set<Promise<unknown>>
@@ -77,10 +83,20 @@ export interface WorkspaceSyncOptions {
   keys: Pick<DeviceSshKeys, 'get'>
   tunnels: Pick<ManagedDevTunnels, 'publish' | 'publicEndpoint' | 'authorize' | 'revoke' | 'connect'>
   host: Pick<VSCodeDeviceHost, 'pair' | 'setWorkspace' | 'start' | 'ownerId' | 'list' | 'revoke'>
-  devices: Pick<VSCodeDeviceClient, 'import' | 'connectOwner' | 'disconnectOwner' | 'ownerConnected' | 'publicIdentities'>
+  devices: Pick<VSCodeDeviceClient, 'import' | 'connectOwner' | 'reconnectOwner' | 'disconnectOwner' | 'ownerConnected' | 'publicIdentities'>
   identity?(): Promise<Awaited<ReturnType<typeof readClientIdentity>>>
   createReplica?(options: GitReplicaOptions): Promise<Replica>
   onChange(root: string): void
+}
+
+function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const cancelled = () => { signal.removeEventListener('abort', cancelled); reject(signal.reason) }
+    if (signal.aborted) cancelled()
+    else signal.addEventListener('abort', cancelled, { once: true })
+    void work.then((value) => { signal.removeEventListener('abort', cancelled); resolve(value) },
+      (error: unknown) => { signal.removeEventListener('abort', cancelled); reject(error) })
+  })
 }
 
 export class WorkspaceSyncService {
@@ -88,10 +104,17 @@ export class WorkspaceSyncService {
   private readonly runtimes = new Map<string, Runtime>()
   private readonly starting = new Map<string, Promise<Runtime | undefined>>()
   private readonly blockedBackends = new Map<string, () => void>()
+  private readonly connectionChanges = new Map<string, Set<() => void>>()
+  private readonly ownerRecoveries = new Map<string, { abort: AbortController; work: Promise<void>; users: number }>()
+  private readonly lifetime = new AbortController()
   private restoring = false
   private closed = false
 
   constructor(private readonly options: WorkspaceSyncOptions) { this.enrollments = new LocalEnrollments(options.directory) }
+
+  private connectionsChanged(root: string): void {
+    for (const notify of this.connectionChanges.get(root) ?? []) notify()
+  }
 
   private networkAllowed(runtime: Runtime, generation = runtime.generation): boolean {
     const localIdentity = runtime.snapshot?.resolution.entities[`device:${runtime.local.clientId}`]
@@ -131,7 +154,11 @@ export class WorkspaceSyncService {
     if (changed) this.options.onChange(runtime.root)
   }
   private async checkUpstream(runtime: Runtime, opening = false): Promise<void> {
-    try { await runtime.replica?.assertUpstream() } catch (error) {
+    try {
+      await measureAgentHostDiagnostic('configuration.transaction', { scope: runtime.root, step: 'upstream' }, async () => {
+        await runtime.replica?.assertUpstream()
+      })
+    } catch (error) {
       if (!(error instanceof GitSyncError) || error.code !== 'upstream' && !(opening && error.code === 'upstream-changed')) throw error
       // Missing upstream pauses Git, not cached configuration access or durable local edits.
       this.error(runtime, error)
@@ -174,7 +201,10 @@ export class WorkspaceSyncService {
       }
     }
     runtime.status.peers = [...peers.values()]
-    if (before !== JSON.stringify(runtime.status)) this.options.onChange(runtime.root)
+    if (before !== JSON.stringify(runtime.status)) {
+      this.connectionsChanged(runtime.root)
+      this.options.onChange(runtime.root)
+    }
     return snapshot
   }
 
@@ -239,6 +269,128 @@ export class WorkspaceSyncService {
     await runtime.peerWork
     await runtime.scheduler.whenIdle()
     await runtime.peerWork
+  }
+
+  /** A reconnect follows only this owner's authenticated link, never the scheduler or other peers. */
+  async whenOwnerConnected(root: string, value: AgentHostTarget['owner'], signal: AbortSignal): Promise<void> {
+    const owner = agentHostTargetSchema.shape.owner.parse(value)
+    signal.throwIfAborted()
+    const canonical = await abortable(canonicalPolicyRoot(root), AbortSignal.any([signal, this.lifetime.signal]))
+    const key = JSON.stringify([canonical, owner.clientId, owner.machineName.toLowerCase()])
+    let recovery = this.ownerRecoveries.get(key)
+    if (!recovery) {
+      const abort = new AbortController()
+      const current = AbortSignal.any([abort.signal, this.lifetime.signal])
+      const timeout = setTimeout(() => abort.abort(new DOMException('The selected Agent Host owner did not reconnect in time.', 'TimeoutError')), 45000)
+      timeout.unref?.()
+      const started = performance.now()
+      logAgentHostDiagnostic('device.transport', { ownerId: owner.clientId, status: 'begin', step: 'workspace-recovery' })
+      const work = this.recoverOwner(canonical, owner, current).then(() => {
+        logAgentHostDiagnostic('device.transport', { ownerId: owner.clientId, status: 'ok', step: 'workspace-recovery', elapsedMs: performance.now() - started })
+      }, (error: unknown) => {
+        logAgentHostDiagnostic('device.transport', { ownerId: owner.clientId, status: 'error', step: 'workspace-recovery', elapsedMs: performance.now() - started, error })
+        throw error
+      }).finally(() => {
+        clearTimeout(timeout)
+        if (this.ownerRecoveries.get(key)?.abort === abort) this.ownerRecoveries.delete(key)
+      })
+      recovery = { abort, work, users: 0 }
+      this.ownerRecoveries.set(key, recovery)
+    } else {
+      logAgentHostDiagnostic('device.transport', { ownerId: owner.clientId, status: 'begin', step: 'workspace-recovery', reason: 'coalesced', count: recovery.users + 1 })
+    }
+    recovery.users++
+    try { await abortable(recovery.work, signal) } finally {
+      if (--recovery.users === 0) {
+        recovery.abort.abort(new DOMException('Agent Host owner recovery was cancelled.', 'AbortError'))
+        if (this.ownerRecoveries.get(key) === recovery) this.ownerRecoveries.delete(key)
+      }
+    }
+  }
+
+  private async recoverOwner(root: string, owner: AgentHostTarget['owner'], signal: AbortSignal): Promise<void> {
+    const runtime = await abortable(this.ensure(root, false), signal)
+    if (!runtime) return
+    await abortable(this.refresh(runtime), signal)
+    const generation = runtime.generation
+    let identityRevision: string | undefined
+    let grantRevision: string | undefined
+    const invalid = new AbortController()
+    const current = AbortSignal.any([signal, runtime.connectionAbort.signal, invalid.signal])
+    const selected = () => {
+      current.throwIfAborted()
+      if (!this.networkAllowed(runtime, generation)) throw new Error('Automatic workspace connections are disabled or changed.')
+      const snapshot = runtime.snapshot!
+      const pin = runtime.enrollment.pins[owner.clientId]
+      const entity = snapshot.resolution.entities[`device:${owner.clientId}`]
+      const record = snapshot.resolution.devices[owner.clientId]
+      if (pin?.blocked || entity && entity.state !== 'active') throw new Error('The selected owner is revoked, conflicted, or inactive.')
+      const peer = record && this.publicPeer(runtime, record)
+      if (identityRevision && peer?.identityRevision !== identityRevision) throw new Error('The selected owner identity changed while reconnecting.')
+      if (!peer) return undefined
+      if (!pin || pin.clientPublicKey !== peer.clientPublicKey || pin.hostPublicKey !== peer.hostPublicKey
+        || peer.machineName.toLowerCase() !== owner.machineName.toLowerCase()) throw new Error('The selected owner does not match the pinned device identity.')
+      identityRevision ??= peer.identityRevision
+      const own = snapshot.resolution.devices[runtime.local.clientId]
+      const invitation = Object.values(snapshot.resolution.invitations).find((record) => record.payload.action === 'grant'
+        && record.payload.issuerId === owner.clientId && record.payload.recipientId === runtime.local.clientId)
+      const grant = invitation?.payload.action === 'grant' && Date.parse(invitation.payload.expiresAt) > Date.now()
+        && invitation.payload.issuerIdentityRef === peer.identityRevision && invitation.payload.recipientIdentityRef === own?.operationId
+        ? { operationId: invitation.operationId, ...invitation.payload } : undefined
+      if (grantRevision && grant?.operationId !== grantRevision) throw new Error('The selected owner grant changed while reconnecting.')
+      if (grant) grantRevision ??= grant.operationId
+      return { peer, grant }
+    }
+    let version = 0
+    let wake: (() => void) | undefined
+    const changed = () => {
+      version++
+      try { selected() } catch (error) { invalid.abort(error) }
+      wake?.()
+    }
+    const listeners = this.connectionChanges.get(root) ?? new Set<() => void>()
+    listeners.add(changed)
+    this.connectionChanges.set(root, listeners)
+    let requested = false
+    try {
+      for (;;) {
+        const before = version
+        const target = selected()
+        if (target?.grant) {
+          const identities = await abortable(this.options.devices.publicIdentities(root), current)
+          const known = identities.filter((identity) => identity.deviceId === owner.clientId)
+          if (known.length > 1 || known.some((identity) => identity.hostPublicKey !== target.peer.hostPublicKey
+            || identity.machineName.toLowerCase() !== owner.machineName.toLowerCase())) throw new Error('The imported owner does not match the pinned device identity.')
+          selected()
+          // A targeted startup may authenticate before PeerLinks has registered this owner.
+          runtime.recoveredOwners.add(owner.clientId)
+          if (!await abortable(this.options.devices.reconnectOwner(root, owner, current), current)) {
+            await abortable(this.connectPeer(runtime, target.peer, target.grant), current)
+          }
+          selected()
+          if (!await abortable(this.options.devices.ownerConnected(root, owner.clientId), current)) throw new Error('The selected owner did not establish an authenticated device connection.')
+          selected()
+          return
+        }
+        if (!requested) {
+          requested = true
+          this.reconcilePeers(runtime)
+          runtime.scheduler.start()
+          runtime.scheduler.request('owner-recovery')
+        }
+        if (before !== version) continue
+        await abortable(new Promise<void>((resolve) => { wake = resolve; if (before !== version) resolve() }), current)
+        wake = undefined
+        await abortable(this.refresh(runtime), current)
+      }
+    } catch (error) {
+      if (invalid.signal.aborted || !this.networkAllowed(runtime, generation)) await this.options.devices.disconnectOwner(root, owner.clientId)
+      throw error
+    } finally {
+      listeners.delete(changed)
+      if (!listeners.size) this.connectionChanges.delete(root)
+      wake = undefined
+    }
   }
 
   async restoreControlGrants(): Promise<void> {
@@ -356,7 +508,7 @@ export class WorkspaceSyncService {
         this.options.onChange(root)
       },
     })
-    const changed = () => this.options.onChange(root)
+    const changed = () => { this.connectionsChanged(root); this.options.onChange(root) }
     const overlay = new BindingOverlay({
       workspaceId: enrollment.workspaceId, recipientId: local.clientId, trust,
       markerFile: join(directory, 'store', 'binding-overlays.json'),
@@ -369,6 +521,7 @@ export class WorkspaceSyncService {
       onLocalChange: (records, snapshot) => {
         runtime.snapshot = snapshot
         runtime.status.settings = this.settings(snapshot, local.clientId)
+        this.connectionsChanged(root)
         scheduler.request('configuration-change')
         this.track(runtime, Promise.resolve().then(() => this.notify(runtime, records)))
         if (records.some((record) => record.kind === 'setting')) {
@@ -403,46 +556,11 @@ export class WorkspaceSyncService {
         if (!pin || pin.blocked || pin.clientPublicKey !== peer.clientPublicKey || pin.hostPublicKey !== peer.hostPublicKey) throw new Error('The peer does not match the local pinned identity.')
       },
       issue: (peer) => this.issue(runtime, peer),
-      connect: async (peer, grant) => {
-        const generation = runtime.generation
-        if (!this.networkAllowed(runtime, generation)) throw new Error('Automatic workspace connections are disabled.')
-        const options = {
-          workspaceId: runtime.enrollment.workspaceId, local: { deviceId: local.clientId, keyPair: client },
-          recipient: { deviceId: peer.deviceId, clientPublicKey: peer.clientPublicKey, hostPublicKey: peer.hostPublicKey },
-          grantId: grant.grantId, expiresAt: grant.expiresAt,
-          route: { kind: 'dev-tunnel' as const, tunnelId: peer.route.tunnelId, sshPort: peer.route.sshPort, hostPublicKey: peer.hostPublicKey, clientPublicKey: client.publicKey },
-          targetPort: peer.route.controlPort, transport: this.options.tunnels,
-          timeoutMs: runtime.status.settings?.connectTimeoutMs ?? 45000,
-        }
-        const signal = runtime.connectionAbort.signal
-        const invitation = deviceInvitationSchema.parse(await callPeer(options, 'link', {}, signal))
-        if (!this.networkAllowed(runtime, generation)) throw new Error('Automatic workspace connections changed while linking.')
-        if (invitation.ownerClientId !== peer.deviceId || invitation.devTunnel.hostPublicKey !== peer.hostPublicKey) throw new Error('The metadata endpoint returned a different device owner.')
-        if (runtime.importedGrants.get(peer.deviceId) !== grant.operationId) {
-          await this.options.devices.import(root, invitation, true)
-          runtime.importedGrants.set(peer.deviceId, grant.operationId)
-        }
-        if (!this.networkAllowed(runtime, generation)) {
-          await this.options.devices.disconnectOwner(root, peer.deviceId)
-          throw new Error('Automatic workspace connections changed while importing the peer.')
-        }
-        await this.options.devices.connectOwner(root, peer.deviceId)
-        return {
-          connected: () => this.options.devices.ownerConnected(root, peer.deviceId),
-          notify: async (payload: unknown) => {
-            const operationId = parseRecord(z.object({ operation: z.unknown() }).passthrough().parse(payload).operation).operationId
-            const response = z.object({
-              workspaceId: z.uuid(), operationId: z.string().regex(/^[a-f0-9]{64}$/),
-              result: z.enum(['provisional', 'already-synced', 'awaiting-sync', 'conflict', 'rejected']), reason: z.string().optional(),
-            }).strict().parse(await callPeer({ ...options, timeoutMs: runtime.status.settings?.connectTimeoutMs ?? options.timeoutMs }, 'binding.changed', payload, signal))
-            if (response.workspaceId !== runtime.enrollment.workspaceId || response.operationId !== operationId) throw new Error('Binding acknowledgement belongs to another workspace or operation.')
-            if (response.result === 'rejected') throw new Error(response.reason ?? 'The peer rejected the binding notification.')
-            return response
-          },
-          close: () => {},
-        }
+      connect: (peer, grant) => this.connectPeer(runtime, peer, grant),
+      disconnected: (id) => {
+        logAgentHostDiagnostic('device.disconnect', { ownerId: id, status: 'closed', step: 'reconcile', reason: 'access-changed' })
+        return this.options.devices.disconnectOwner(root, id)
       },
-      disconnected: (id) => this.options.devices.disconnectOwner(root, id),
       onChanged: () => { runtime.status.peers = peers.status(); changed() },
       onError: (error) => this.error(runtime, error),
     })
@@ -478,9 +596,9 @@ export class WorkspaceSyncService {
       onError: (error) => this.error(runtime, error),
     })
     const runtime: Runtime = {
-      root, directory, metadata, enrollment, local, store: config, scheduler, control, peers, settings, replica,
+      root, directory, metadata, enrollment, local, localClientKey: client, store: config, scheduler, control, peers, settings, replica,
       disposeBackend: () => {}, status: { enabled: enrollment.enabled, workspaceId: enrollment.workspaceId, intervalMs: 15000, state: 'starting', pending: 0, provisionalTasks: [], conflicts: [], peers: [], revision: null, settingsFile: settings.file },
-      ownRevision: '', grants: new Map(), grantedPairs: new Map(Object.entries(metadata.managedPairs)), importedGrants: new Map(), network: new Set(), peerAgain: false, closed: false, generation: 0, grantWork: new Set(), connectionAbort: new AbortController(),
+      ownRevision: '', grants: new Map(), grantedPairs: new Map(Object.entries(metadata.managedPairs)), importedGrants: new Map(), network: new Set(), peerAgain: false, peerConnections: new Map(), recoveredOwners: new Set(), closed: false, generation: 0, grantWork: new Set(), connectionAbort: new AbortController(),
     }
     try {
       await mkdir(config.options.outboxRoot, { recursive: true })
@@ -560,6 +678,8 @@ export class WorkspaceSyncService {
     if (!runtime) throw new Error('This workspace is not enrolled.')
     runtime.enrollment.enabled = false
     runtime.status.enabled = false
+    logAgentHostDiagnostic('device.disconnect', { status: 'closed', step: 'workspace-recovery', reason: 'owner-disabled' })
+    this.connectionsChanged(runtime.root)
     await runtime.scheduler.stop()
     await this.disconnect(runtime)
     await this.enrollments.disable(root)
@@ -682,6 +802,76 @@ export class WorkspaceSyncService {
     this.track(runtime, work)
   }
 
+  private connectPeer(runtime: Runtime, peer: PublicPeer, grant: PublicPeerGrant): Promise<PeerConnection> {
+    const generation = runtime.generation
+    const key = JSON.stringify([peer.deviceId, peer.identityRevision, grant.operationId, generation])
+    const prior = runtime.peerConnections.get(key)
+    if (prior) return prior
+    const check = () => {
+      if (!this.networkAllowed(runtime, generation) || runtime.connectionAbort.signal.aborted) throw new Error('Automatic workspace connections changed while linking.')
+      const pin = runtime.enrollment.pins[peer.deviceId]
+      const snapshot = runtime.snapshot!
+      const identity = snapshot.resolution.devices[peer.deviceId]
+      const local = snapshot.resolution.devices[runtime.local.clientId]
+      if (!pin || pin.blocked || pin.clientPublicKey !== peer.clientPublicKey || pin.hostPublicKey !== peer.hostPublicKey
+        || identity?.operationId !== peer.identityRevision || local?.operationId !== grant.recipientIdentityRef) throw new Error('The selected owner identity changed while linking.')
+      if (Date.parse(grant.expiresAt) <= Date.now() || !Object.values(snapshot.resolution.invitations).some((item) => item.operationId === grant.operationId && item.payload.action === 'grant')) throw new Error('The selected owner grant expired or changed while linking.')
+    }
+    const work = Promise.resolve().then(async (): Promise<PeerConnection> => {
+      check()
+      const client = runtime.localClientKey
+      const options = {
+        workspaceId: runtime.enrollment.workspaceId, local: { deviceId: runtime.local.clientId, keyPair: client },
+        recipient: { deviceId: peer.deviceId, clientPublicKey: peer.clientPublicKey, hostPublicKey: peer.hostPublicKey },
+        grantId: grant.grantId, expiresAt: grant.expiresAt,
+        route: { kind: 'dev-tunnel' as const, tunnelId: peer.route.tunnelId, sshPort: peer.route.sshPort, hostPublicKey: peer.hostPublicKey, clientPublicKey: client.publicKey },
+        targetPort: peer.route.controlPort, transport: this.options.tunnels,
+        timeoutMs: runtime.status.settings?.connectTimeoutMs ?? 45000,
+      }
+      const signal = runtime.connectionAbort.signal
+      const invitation = deviceInvitationSchema.parse(await callPeer(options, 'link', {}, signal))
+      check()
+      if (invitation.ownerClientId !== peer.deviceId || invitation.machineName.toLowerCase() !== peer.machineName.toLowerCase()
+        || invitation.devTunnel.hostPublicKey !== peer.hostPublicKey || invitation.devTunnel.clientPublicKey !== client.publicKey
+        || JSON.stringify(invitation.participant) !== JSON.stringify(runtime.local)) throw new Error('The metadata endpoint returned a different device owner or recipient.')
+      let imported = false
+      try {
+        const known = (await this.options.devices.publicIdentities(runtime.root)).some((identity) => identity.deviceId === peer.deviceId)
+        check()
+        if (!known || runtime.importedGrants.get(peer.deviceId) !== grant.operationId) {
+          logAgentHostDiagnostic('device.identity', { ownerId: peer.deviceId, status: 'begin', step: 'configuration', reason: 'reimport' })
+          await this.options.devices.import(runtime.root, invitation, true)
+          imported = true
+          check()
+          runtime.importedGrants.set(peer.deviceId, grant.operationId)
+        }
+        check()
+        await this.options.devices.connectOwner(runtime.root, peer.deviceId)
+        check()
+      } catch (error) {
+        if (imported || !this.networkAllowed(runtime, generation) || runtime.enrollment.pins[peer.deviceId]?.blocked) await this.options.devices.disconnectOwner(runtime.root, peer.deviceId)
+        throw error
+      }
+      return {
+        connected: () => this.options.devices.ownerConnected(runtime.root, peer.deviceId),
+        notify: async (payload: unknown) => {
+          const operationId = parseRecord(z.object({ operation: z.unknown() }).passthrough().parse(payload).operation).operationId
+          const response = z.object({
+            workspaceId: z.uuid(), operationId: z.string().regex(/^[a-f0-9]{64}$/),
+            result: z.enum(['provisional', 'already-synced', 'awaiting-sync', 'conflict', 'rejected']), reason: z.string().optional(),
+          }).strict().parse(await callPeer({ ...options, timeoutMs: runtime.status.settings?.connectTimeoutMs ?? options.timeoutMs }, 'binding.changed', payload, signal))
+          if (response.workspaceId !== runtime.enrollment.workspaceId || response.operationId !== operationId) throw new Error('Binding acknowledgement belongs to another workspace or operation.')
+          if (response.result === 'rejected') throw new Error(response.reason ?? 'The peer rejected the binding notification.')
+          return response
+        },
+        close: () => {},
+      }
+    }).finally(() => { if (runtime.peerConnections.get(key) === work) runtime.peerConnections.delete(key) })
+    runtime.peerConnections.set(key, work)
+    this.track(runtime, work.then(() => undefined))
+    return work
+  }
+
   private publicPeer(runtime: Runtime, record: DeviceRecord): PublicPeer | undefined {
     if (record.payload.action !== 'publish' || record.payload.deviceId === runtime.local.clientId || runtime.enrollment.pins[record.payload.deviceId]?.blocked) return undefined
     const { identity } = record.payload
@@ -790,6 +980,8 @@ export class WorkspaceSyncService {
     if (!pin) throw new Error('This device is not enrolled.')
     const snapshot = runtime.snapshot
     pin.blocked = true
+    logAgentHostDiagnostic('device.disconnect', { ownerId: deviceId, status: 'closed', step: 'authorization', reason: 'access-changed' })
+    this.connectionsChanged(runtime.root)
     pin.acceptedOperations = snapshot?.records.filter((record) => record.actor.deviceId === deviceId).map((record) => record.operationId) ?? []
     for (const [grantId, peerId] of runtime.grants) if (peerId === deviceId) {
       runtime.control.revoke(grantId); this.options.tunnels.revoke(grantId); runtime.grants.delete(grantId)
@@ -824,7 +1016,7 @@ export class WorkspaceSyncService {
     for (const row of await this.enrollments.list()) {
       if (!row.pins[deviceId]) continue
       const runtime = this.runtimes.get(row.root)
-      if (runtime) runtime.enrollment.pins[deviceId].blocked = true
+      if (runtime) { runtime.enrollment.pins[deviceId].blocked = true; this.connectionsChanged(runtime.root) }
       await this.enrollments.revoke(row.root, deviceId, runtime?.snapshot?.records.filter((record) => record.actor.deviceId === deviceId).map((record) => record.operationId) ?? [])
       if (runtime?.enrollment.enabled) {
         try { await this.revokeDevice(row.root, deviceId) } catch (error) { this.error(runtime, error) }
@@ -836,11 +1028,13 @@ export class WorkspaceSyncService {
     if (runtime.disconnecting) return runtime.disconnecting
     runtime.generation++
     runtime.connectionAbort.abort()
+    this.connectionsChanged(runtime.root)
     for (const id of runtime.grants.keys()) { runtime.control.revoke(id); this.options.tunnels.revoke(id) }
     runtime.grants.clear()
     for (const pair of runtime.grantedPairs.values()) this.options.tunnels.revoke(pair)
     const work = (async () => {
-      await runtime.peers.pause()
+      await Promise.all([runtime.peers.pause(), ...[...runtime.recoveredOwners].map((id) => this.options.devices.disconnectOwner(runtime.root, id))])
+      runtime.recoveredOwners.clear()
       await Promise.allSettled([...runtime.grantWork])
       for (const pair of runtime.grantedPairs.values()) {
         if ((await this.options.host.list()).some((entry) => entry.id === pair)) await this.options.host.setWorkspace(pair, runtime.root, null)
@@ -851,10 +1045,13 @@ export class WorkspaceSyncService {
   }
   async close(): Promise<void> {
     this.closed = true
+    this.lifetime.abort(new Error('Workspace synchronization is closed.'))
     await Promise.all([...this.starting.values()])
     for (const runtime of this.runtimes.values()) {
       runtime.closed = true
       runtime.connectionAbort.abort()
+      await Promise.all([...runtime.recoveredOwners].map((id) => this.options.devices.disconnectOwner(runtime.root, id)))
+      runtime.recoveredOwners.clear()
       await runtime.scheduler.stop()
       await runtime.peers.close()
       await runtime.control.close()

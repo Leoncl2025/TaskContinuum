@@ -4,8 +4,10 @@ import { join } from 'node:path'
 import { remoteConfigLimits } from '../../shared/remoteConfig'
 import { checkedDirectory, RemoteConfigError } from './records'
 
+export interface AuthorizationTransactionLock { dev: bigint; ino: bigint }
+
 /** Metadata is only a cache invalidator; a changed input always needs the full verified store read. */
-export async function authorizationInputs(recordsRoot: string, outboxRoot: string, stateDirectory: string): Promise<string> {
+export async function authorizationInputs(recordsRoot: string, outboxRoot: string, stateDirectory: string, ownedLock?: AuthorizationTransactionLock): Promise<string> {
   const rows: string[] = []
   let entries = 0
   async function stamp(path: string, directory: boolean): Promise<boolean> {
@@ -54,8 +56,13 @@ export async function authorizationInputs(recordsRoot: string, outboxRoot: strin
   rows.push(`${stateDirectory}:${canonicalState}:${state.dev}:${state.ino}:${state.mode}`)
   await Promise.all(['store.json', 'pending-operations.json'].map((name) => stamp(join(stateDirectory, name), false)))
   try {
-    await lstat(join(stateDirectory, 'store.lock'))
-    throw new RemoteConfigError('store-busy', 'A configuration transaction is in progress. Retry authorization after it finishes.')
-  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    const lock = await lstat(join(stateDirectory, 'store.lock'), { bigint: true })
+    if (!ownedLock || !lock.isFile() || lock.isSymbolicLink() || lock.nlink !== 1n || lock.dev !== ownedLock.dev || lock.ino !== ownedLock.ino) {
+      throw new RemoteConfigError('store-busy', 'A configuration transaction is in progress. Retry authorization after it finishes.')
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    if (ownedLock) throw new RemoteConfigError('store-busy', 'The configuration transaction lock was removed during validation.')
+  }
   return createHash('sha256').update(rows.sort().join('\n')).digest('hex')
 }

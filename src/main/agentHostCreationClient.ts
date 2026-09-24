@@ -11,6 +11,7 @@ import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 import { taskSessionLinks, type SessionLinksDocument } from '../shared/sessionBindings'
 import type { VSCodeDeviceClient } from './vscodeDeviceClient'
 import { readTaskWorkspace } from './workspaceReader'
+import { RemoteConfigError } from './remoteConfig/records'
 
 const recordSchema = z.object({
   schemaVersion: z.literal(2), root: z.string().min(1).max(4096), createdAt: z.iso.datetime(),
@@ -209,9 +210,20 @@ export class AgentHostCreationClient {
       if (!link) {
         await this.current(authorize)
         const { sessionId, chatId, owner } = result.session
-        await bindRepositoryAgentHostCreation(record.root, record.request.taskId, { sessionId, chatId, owner }, record.expectedRevision, () => this.current(authorize))
+        let conflict: RemoteConfigError | undefined
+        try {
+          await bindRepositoryAgentHostCreation(record.root, record.request.taskId, { sessionId, chatId, owner }, record.expectedRevision, () => this.current(authorize))
+        } catch (error) {
+          if (!(error instanceof RemoteConfigError) || error.code !== 'stale-revision') throw error
+          conflict = error
+          await this.knownTask(record.root, record.request.taskId)
+        }
+        // Synchronization can assign this exact created chat before the caller's write wins.
+        await this.current(authorize)
         const current = await readRepositorySessionLinks(record.root)
+        await this.current(authorize)
         link = linkedSession(current.document.bindings, record.request.taskId, result.session)
+        if (!link && conflict) throw conflict
       }
       if (!link) throw new Error('The created session was not present in the task bindings after assignment.')
       record.localBound = true

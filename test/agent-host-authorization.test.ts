@@ -19,12 +19,13 @@ import { newSshKeyPair } from '../src/main/devTunnel/sessionSsh'
 import { connectAgentHostWebSocket, connectLocalAgentHost } from '../src/main/agentHostTransport'
 import { startAgentHostFixture } from './agent-host-fixture'
 import { AhpClient } from '@microsoft/agent-host-protocol/client'
-import { flushAgentHostDiagnostics, startAgentHostDiagnostics, stopAgentHostDiagnostics } from '../src/main/agentHostDiagnostics'
+import { captureAgentHostDiagnostics, flushAgentHostDiagnostics, startAgentHostDiagnostics, stopAgentHostDiagnostics } from '../src/main/agentHostDiagnostics'
 import { AgentHostAuthorization } from '../src/main/agentHostAuthorization'
 import { AgentHostManager } from '../src/main/agentHostManager'
 import { AgentHostRegistry as NativeRegistry } from '../src/main/agentHostRegistry'
 import { VSCodeDeviceClient } from '../src/main/vscodeDeviceClient'
 import { AuthorizationWatch } from '../src/main/shared/authorizationWatch'
+import * as inputChecks from '../src/main/remoteConfig/authorizationInputs'
 
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
@@ -131,6 +132,194 @@ describe('verified Agent Host authorization fast path', () => {
     await expect.poll(() => fileLease.current()).toBe(false)
     await expect(access.acquire(f.root)).rejects.toThrow()
   })
+
+  it('revalidates an invalidated lease without waiting for an unrelated read-only transaction', async () => {
+    const f = await fixture({ count: 32 })
+    await recordLocalLink(f.profile, f.root, 'T-0001', { provider: 'agent-host', ...f.target }, f.target.owner)
+    const access = new AgentHostAuthorization(f.profile, async () => f.target.owner)
+    cleanup.push(async () => access.close())
+    const lease = await access.acquire(f.root)
+    f.read.mockClear()
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const authorize = f.trust.authorize
+    f.trust.authorize = async (record) => { entered(); await gate; return authorize(record) }
+    const sync = f.store.read()
+    await started
+    try {
+      await writeFile(join(f.root, 'unrelated.txt'), 'This file grants no access.')
+      await expect.poll(() => lease.current()).toBe(false)
+      const before = performance.now()
+      const pending = access.acquire(f.root)
+      let completed = false
+      void pending.then(() => { completed = true }, () => { completed = true })
+      await expect.poll(() => completed, { timeout: 1000 }).toBe(true)
+      const current = await pending
+      expect(performance.now() - before).toBeLessThan(1000)
+      expect(current.current()).toBe(true)
+      expect(current.localTargets).toEqual([f.target])
+      expect(f.read).toHaveBeenCalledOnce() // Only the still-blocked sync.
+    } finally { release(); await sync }
+  }, 10000)
+
+  it('does not bypass a queued mutation while revalidating an invalidated lease', async () => {
+    const f = await fixture()
+    const access = new AgentHostAuthorization(f.profile, async () => f.target.owner)
+    cleanup.push(async () => access.close())
+    const lease = await access.acquire(f.root)
+    const revision = (await f.store.acquireAuthorization()).snapshot.revision
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const authorize = f.trust.authorize
+    f.trust.authorize = async (record) => { entered(); await gate; return authorize(record) }
+    const sync = f.store.read()
+    await started
+    const update = f.store.writeBinding('T-0001', null, revision)
+    let completed = false
+    let authorization: ReturnType<AgentHostAuthorization['acquire']> | undefined
+    try {
+      await writeFile(join(f.root, 'unrelated.txt'), 'No authority.')
+      await expect.poll(() => lease.current()).toBe(false)
+      authorization = access.acquire(f.root).then((result) => { completed = true; return result })
+      await new Promise<void>((resolve) => setTimeout(resolve, 40))
+      expect(completed).toBe(false)
+      release()
+      await update
+      expect((await authorization).targets).toEqual([])
+    } finally { release(); await sync; await update; await authorization }
+  }, 10000)
+
+  it('retries instead of reporting a busy store when a read-only lock closes during input validation', async () => {
+    const f = await fixture()
+    const access = new AgentHostAuthorization(f.profile, async () => f.target.owner)
+    cleanup.push(async () => access.close())
+    const lease = await access.acquire(f.root)
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const authorize = f.trust.authorize
+    f.trust.authorize = async (record) => { entered(); await gate; return authorize(record) }
+    const sync = f.store.read()
+    await started
+    try {
+      await writeFile(join(f.root, 'unrelated.txt'), 'No authority.')
+      await expect.poll(() => lease.current()).toBe(false)
+      const original = inputChecks.authorizationInputs
+      const inputs = vi.spyOn(inputChecks, 'authorizationInputs').mockImplementationOnce(async (...args) => {
+        expect(args[3]).toBeDefined()
+        release()
+        await sync
+        return original(...args)
+      })
+      expect((await access.acquire(f.root)).targets).toEqual([f.target])
+      expect(inputs).toHaveBeenCalled()
+    } finally { release(); await sync }
+  }, 10000)
+
+  it('reuses fully verified configuration snapshots across unchanged reads without extending trust or file validity', async () => {
+    const f = await fixture({ count: 32 })
+    const before = await f.store.read()
+    await f.store.read()
+    f.authorize.mockClear()
+    const start = performance.now()
+    const cached = await f.store.read()
+    expect(cached).toEqual(before)
+    expect(f.authorize).not.toHaveBeenCalled()
+    expect(performance.now() - start).toBeLessThan(1000)
+    cached.document.bindings = {}
+    expect((await f.store.read()).document.bindings).toEqual(before.document.bindings)
+    f.deny()
+    expect((await f.store.read()).document.bindings).toEqual({})
+    f.allow()
+    await f.store.read()
+    const path = join(f.recordsRoot, recordPath(f.records[0]))
+    const info = await stat(path)
+    const bytes = await readFile(path, 'utf8')
+    await writeFile(path, bytes.replace('T-0001', 'T-0002'))
+    await utimes(path, info.atime, info.mtime)
+    await expect(f.store.read()).rejects.toThrow()
+  }, 10000)
+
+  it('keeps verified authorization inputs reusable after an unchanged full read', async () => {
+    const f = await fixture()
+    const initial = await readRepositorySessionLinksForAuthorization(f.root)
+    await f.store.read()
+    f.read.mockClear()
+    f.authorize.mockClear()
+    expect(await readRepositorySessionLinksForAuthorization(f.root)).toEqual(initial)
+    expect(f.read).not.toHaveBeenCalled()
+    expect(f.authorize).not.toHaveBeenCalled()
+  })
+
+  it('expires cached invitation resolution and rechecks changed lifetime policy even with unchanged files', async () => {
+    const f = await fixture()
+    const peer = immutableRecordSigner(2)
+    let now = Date.parse('2026-09-24T10:00:00.000Z')
+    f.trust.now = () => now
+    f.trust.trustedKey = (actor) => [f.author, peer].find((item) => item.actor.deviceId === actor.deviceId)?.publicKey
+    const devices = await Promise.all([f.author, peer].map((author) => createRecord({
+      workspaceId: f.workspaceId, actor: author.actor, kind: 'device', createdAt: new Date(now).toISOString(),
+      payload: { action: 'publish', deviceId: author.actor.deviceId, identity: {
+        username: 'Fixture-user', machineName: `Pinned-device-${author.actor.deviceId.at(-1)}`, clientPublicKey: author.publicKey, hostPublicKey: author.publicKey,
+        clientKeyId: author.actor.keyId, hostKeyId: author.actor.keyId,
+      }, routes: [{ kind: 'dev-tunnel', tunnelId: 'fixture-route.use', sshPort: 2200, controlPort: 2201 }] },
+    }, author.sign)))
+    const grant = await createRecord({ workspaceId: f.workspaceId, actor: f.author.actor, kind: 'invitation', createdAt: new Date(now).toISOString(),
+      payload: { action: 'grant', issuerId: f.author.actor.deviceId, recipientId: peer.actor.deviceId, grantId: randomUUID(),
+        issuerIdentityRef: devices[0].operationId, recipientIdentityRef: devices[1].operationId, capability: 'ah-link',
+        issuedAt: new Date(now).toISOString(), expiresAt: new Date(now + 1000).toISOString(),
+        routeRef: { identityRef: devices[0].operationId, routeIndex: 0 },
+      } }, f.author.sign)
+    for (const record of [...devices, grant]) await appendRecord(f.recordsRoot, record)
+    await f.store.read()
+    await f.store.read()
+    f.authorize.mockClear()
+    expect(Object.values((await f.store.read()).resolution.invitations)).toEqual([grant])
+    expect(f.authorize).not.toHaveBeenCalled()
+    now += 1001
+    expect((await f.store.read()).resolution.invitations).toEqual({})
+    expect(f.authorize).toHaveBeenCalled()
+    f.trust.maximumInvitationLifetimeMs = 500
+    expect((await f.store.read()).resolution.blocked).toBe(true)
+  })
+
+  it('exports nested timings that separate queued authorization from record resolution without private data', async () => {
+    const f = await fixture()
+    await recordLocalLink(f.profile, f.root, 'T-0001', { provider: 'agent-host', ...f.target }, f.target.owner)
+    const access = new AgentHostAuthorization(f.profile, async () => f.target.owner)
+    cleanup.push(async () => access.close())
+    await startAgentHostDiagnostics(f.profile)
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const before = await f.store.read()
+    const update = f.store.writeBinding('T-0001', null, before.revision, async () => { entered(); await gate })
+    await started
+    const authorizing = access.acquire(f.root)
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, 40))
+      release()
+      await update
+      expect((await authorizing).targets).toEqual([])
+      const capture = await captureAgentHostDiagnostics(f.profile, {}, new AbortController().signal)
+      expect(capture.truncated).toBe(false)
+      const text = capture.jsonl.toString('utf8')
+      for (const secret of [f.root, f.profile, f.workspaceId, f.target.sessionId, f.author.publicKey]) expect(text).not.toContain(secret)
+      const events = text.trim().split('\n').map((line) => JSON.parse(line) as { event: string; step: string; status: string; elapsedMs?: number; traceId?: string; parentTraceId?: string; scopeHash?: string })
+      for (const step of ['binding', 'identity', 'receipts']) expect(events).toContainEqual(expect.objectContaining({ event: 'authorization.acquire', step, status: 'ok', scopeHash: expect.stringMatching(/^[a-f0-9]{16}$/) }))
+      for (const step of ['inputs', 'records', 'resolution']) expect(events).toContainEqual(expect.objectContaining({ event: 'configuration.snapshot', step, status: 'ok' }))
+      const queue = events.find((event) => event.event === 'authorization.store' && event.step === 'queue' && event.status === 'ok' && event.elapsedMs! >= 35)
+      expect(queue).toBeDefined()
+      expect(queue?.parentTraceId).toMatch(/^[0-9a-f-]{36}$/)
+      expect(events.some((event) => event.traceId === queue?.parentTraceId)).toBe(true)
+    } finally { release(); await update; await authorizing; await stopAgentHostDiagnostics() }
+  }, 10000)
 
   it('invalidates in-memory leases for committed unlinks and expired provisional bindings', async () => {
     const f = await fixture({ overlay: true })
