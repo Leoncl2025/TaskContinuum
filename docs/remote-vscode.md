@@ -198,6 +198,12 @@ root data and sibling chats are not exposed. It rejects filesystem access,
 arbitrary tools, arbitrary Host configuration and raw session creation.
 The separate device creation/status/bind commands are restricted to the paired
 worker's existing send-scoped workspaces; they do not forward arbitrary AHP RPCs.
+Trusted-device file transfer is a separate `/device/files/*` service, not an AHP
+command. Existing live workspace pairing authorizes ordinary local file reads,
+including files outside the shared workspace, without per-file prompts on the
+source device. Application credentials, SSH material, links and special files
+are excluded. Only expose the file MCP to agents you trust with this access.
+See [file transfer MCP](file-transfer-mcp.md) for setup, quotas and revocation.
 Native endpoints remain under `/device/agent-host/*`. The authenticated
 `/device/identity` handshake checks device liveness and identity pins; it is not
 a session catalog or a substitute for session authorization.
@@ -430,6 +436,13 @@ locally confirmed sessions, including explicit **Create and assign**. Write acce
 is sufficient for association; there is no separate link permission or read-only
 selector. Saved read-only grants for these enrolled peers are upgraded during
 reconciliation, including after restart, without granting other workspaces access.
+
+With file-transfer-capable builds on both desktops, an existing workspace pairing
+also grants read-only file transfer under the source desktop's OS account; chat
+send permission is not required. This is device trust, not a filesystem sandbox
+at the workspace root. Disconnect or revoke an untrusted device to prevent further
+reads. Files already read or copied cannot be recalled. The source desktop needs
+no new file UI, command, or approval for individual requests.
 
 Enrollment does not create a session or send a prompt by itself, approve tools,
 grant OS shell access or replace a local owner receipt. It still requires enabling

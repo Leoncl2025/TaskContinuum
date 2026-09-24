@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { createServer } from 'node:http'
-import type { IncomingMessage } from 'node:http'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { join } from 'node:path'
 import { z } from 'zod'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
@@ -16,6 +16,9 @@ import { AgentHostCreationRequestError, AgentHostCreationService, agentHostCreat
 import { agentHostCreateCommandSchema, agentHostCreationBindSchema, agentHostCreationLookupSchema, agentHostWorkerCatalogSchema, creationTaskIdSchema } from './agentHostCreationProtocol'
 import { canonicalPolicyRoot } from './linkedSessionPolicy'
 import type { AgentHostCreationWorkspace } from '../shared/agentHostCreation'
+import type { FileTransferSource } from './fileTransferSource'
+import { chunkRequestSchema, exportRequestSchema, FileTransferError, transferFailure, transferLookupSchema } from '../shared/fileTransfer'
+import { FileTransferBudget } from './fileTransferBudget'
 
 const workspacePolicySchema = z.object({ root: z.string().min(1), canSend: z.boolean() }).strict()
 const pairingSchema = z.object({ id: z.uuid(), participant: remoteClientSchema, publicKey: sshPublicKeySchema,
@@ -39,8 +42,16 @@ export class VSCodeDeviceHost {
   private agentHosts?: { registry: AgentHostRegistry; linked(root: string): Promise<AgentHostTarget[]> }
   private agentHostGateway?: ReturnType<typeof attachAgentHostGateway>
   private agentHostCreations?: AgentHostCreationService
+  private fileSource?: FileTransferSource
+  private fileBudget = new FileTransferBudget()
 
   constructor(private readonly directory: string, private readonly protector: DeviceProtector) {}
+
+  setFileTransferSource(source: FileTransferSource, budget = new FileTransferBudget()): void {
+    if (this.server) throw new Error('File transfers must be configured before device publication.')
+    this.fileSource = source
+    this.fileBudget = budget
+  }
 
   setAgentHostAccess(registry: AgentHostRegistry, linked: (root: string) => Promise<AgentHostTarget[]>,
     authorizeLocal?: (ownerId: string, workspaceId: string) => Promise<string>): void {
@@ -191,6 +202,60 @@ export class VSCodeDeviceHost {
     return !this.closed && !!pair && Date.parse(pair.expiresAt) > Date.now()
   }
 
+  private async fileRequest(request: IncomingMessage, response: ServerResponse, pair: Pairing): Promise<void> {
+    if (!this.fileSource) throw new FileTransferError('UNSUPPORTED', 'Update Task Continuum on the source device to enable file transfers.')
+    const source = this.fileSource
+    let release: (() => void) | undefined
+    const abort = new AbortController()
+    const disconnected = () => { if (!response.writableFinished) abort.abort() }
+    request.once('aborted', disconnected)
+    response.once('close', disconnected)
+    const signal = AbortSignal.any([this.abort.signal, abort.signal])
+    const authorize = async () => {
+      signal.throwIfAborted()
+      await this.writing
+      const current = this.state?.pairs.find((item) => item.id === pair.id)
+      if (!current || current.token !== pair.token || !this.permitted(pair.id) || !current.workspaces.length) {
+        throw new FileTransferError('ACCESS_DENIED', 'The trusted device pairing is unavailable, revoked or expired.')
+      }
+    }
+    try {
+      await authorize()
+      const body = await this.body(request, 64 * 1024)
+      await authorize()
+      if (request.url === '/device/files/prepare' || request.url === '/device/files/chunk') release = this.fileBudget.acquire(pair.participant.clientId)
+      let result: unknown
+      if (request.url === '/device/files/capabilities') {
+        z.object({}).strict().parse(body)
+        result = { protocolVersion: 1, ownerId: this.state!.ownerId, pairId: pair.id }
+      } else if (request.url === '/device/files/prepare') result = await source.prepare(pair.id, exportRequestSchema.parse(body), authorize, signal)
+      else if (request.url === '/device/files/chunk') {
+        const value = chunkRequestSchema.parse(body)
+        result = await source.chunk(pair.id, value.transferId, value.fileId, value.offset, authorize, signal)
+      } else if (request.url === '/device/files/release') {
+        await source.release(pair.id, transferLookupSchema.parse(body).transferId, authorize)
+        result = {}
+      } else throw new FileTransferError('NOT_FOUND', 'File transfer operation not found.')
+      await authorize()
+      if (Buffer.isBuffer(result)) response.setHeader('Content-Type', 'application/octet-stream')
+      else response.setHeader('Content-Type', 'application/json')
+      response.setHeader('Cache-Control', 'no-store')
+      await new Promise<void>((resolve, reject) => {
+        const finished = () => { cleanup(); resolve() }
+        const interrupted = () => { cleanup(); reject(new FileTransferError('UNAVAILABLE', 'File transfer connection closed before delivery.')) }
+        const cleanup = () => { response.off('finish', finished); response.off('close', interrupted); response.off('error', interrupted) }
+        response.once('finish', finished)
+        response.once('close', interrupted)
+        response.once('error', interrupted)
+        response.end(Buffer.isBuffer(result) ? result : JSON.stringify(result))
+      })
+    } finally {
+      release?.()
+      request.off('aborted', disconnected)
+      response.off('close', disconnected)
+    }
+  }
+
   async start(): Promise<number> {
     if (this.closed) throw new Error('Device host is closed.')
     this.starting ??= (async () => {
@@ -201,6 +266,10 @@ export class VSCodeDeviceHost {
           const bearer = request.headers.authorization?.replace(/^Bearer /, '') ?? ''
           let pair = this.state!.pairs.find((item) => Buffer.byteLength(bearer) === Buffer.byteLength(item.token) && timingSafeEqual(Buffer.from(bearer), Buffer.from(item.token)))
           if (!pair || !this.permitted(pair.id)) { response.writeHead(403).end(); return }
+          if (request.url?.startsWith('/device/files/')) {
+            await this.fileRequest(request, response, pair)
+            return
+          }
           const body = await this.body(request)
           const creationRoute = ['/device/agent-host/workers', '/device/agent-host/create', '/device/agent-host/creation-status', '/device/agent-host/creation-bind'].includes(request.url ?? '')
           pair = this.state!.pairs.find((item) => item.id === pair!.id)
@@ -227,6 +296,13 @@ export class VSCodeDeviceHost {
           response.setHeader('Content-Type', 'application/json')
           response.end(JSON.stringify(result))
         })().catch((error: unknown) => {
+          if (request.url?.startsWith('/device/files/') && !response.headersSent) {
+            const failure = transferFailure(error)
+            const status = failure.code === 'ACCESS_DENIED' ? 403 : failure.code === 'UNSUPPORTED' ? 404 : failure.code === 'BUSY' ? 429 : 400
+            response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+            response.end(JSON.stringify({ error: failure }))
+            return
+          }
           if (!response.headersSent) {
             const status = error instanceof DeviceRequestError || error instanceof AgentHostCreationRequestError ? error.status : error instanceof z.ZodError ? 400 : 503
             if (error instanceof AgentHostCreationRequestError && error.code) {
@@ -253,10 +329,10 @@ export class VSCodeDeviceHost {
     })().catch((error) => { this.starting = undefined; this.server?.close(); throw error })
     return this.starting
   }
-  private async body(request: IncomingMessage): Promise<unknown> {
+  private async body(request: IncomingMessage, maximum = 32768): Promise<unknown> {
     const chunks: Buffer[] = []
     let size = 0
-    for await (const chunk of request) { size += chunk.length; if (size > 32768) throw new Error('Request too large.'); chunks.push(chunk) }
+    for await (const chunk of request) { size += chunk.length; if (size > maximum) throw new Error('Request too large.'); chunks.push(chunk) }
     return JSON.parse(Buffer.concat(chunks).toString('utf8'))
   }
   async close(): Promise<void> {

@@ -62,6 +62,9 @@ required for repository operations; the standalone task CLI requires Node.js 24.
 Native chat and remote transport still require the separately installed and
 authorized services described below.
 
+For explicitly requested file/log transfers through an actual MCP-capable
+Host/client, see [File transfer MCP setup and trust boundaries](docs/file-transfer-mcp.md).
+
 ## Requirements
 
 - Node.js 24 LTS and npm. Verified with Node 24.14.1 and npm 11.11.0 on Windows.

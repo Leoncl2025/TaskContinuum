@@ -13,6 +13,10 @@ import { connectAgentHostWebSocket } from './agentHostTransport'
 import { AGENT_HOST_TRACE_HEADER, logAgentHostDiagnostic } from './agentHostDiagnostics'
 import type { AgentHostCreateRequest, AgentHostCreation, AgentHostWorker } from '../shared/agentHostCreation'
 import { agentHostCreateCommandSchema, agentHostCreateRequestSchema, agentHostCreationResultSchema, agentHostWorkerCatalogSchema, creationTaskIdSchema, creationRevisionSchema } from './agentHostCreationProtocol'
+import { fileDeviceRequest } from './fileTransferHttp'
+import type { FileRoute } from './fileTransferHttp'
+import { FileTransferError, transferFailure } from '../shared/fileTransfer'
+import type { TransferDevice } from '../shared/fileTransfer'
 
 const peerSchema = z.object({ id: z.uuid(), root: z.string().min(1), invitation: deviceInvitationSchema,
   enabled: z.boolean(),
@@ -224,7 +228,50 @@ export class VSCodeDeviceClient {
         sessions.push(...catalog.sessions)
       } catch { warnings.push(`Agent Host sessions on ${peer.invitation.machineName} are unavailable or not shared.`) }
     }
+
     return { sessions, warnings }
+  }
+
+  async fileDevices(root: string): Promise<TransferDevice[]> {
+    const peers = await this.list(root)
+    return Promise.all(peers.map(async (peer) => {
+      let fileTransfer: TransferDevice['fileTransfer'] = 'unknown'
+      let error: string | undefined
+      if (peer.enabled) {
+        try { await this.fileRequest(root, peer.id, 'capabilities', {}, new AbortController().signal); fileTransfer = 'available' }
+        catch (failure) {
+          if (failure instanceof FileTransferError && failure.code === 'UNSUPPORTED') fileTransfer = 'unsupported'
+          error = transferFailure(failure).message
+        }
+      }
+      return { deviceId: peer.id, machineName: peer.machineName, state: fileTransfer === 'available' ? 'connected' : peer.state, enabled: peer.enabled, fileTransfer, ...(error ? { error } : {}) }
+    }))
+  }
+
+  async fileRequest(root: string, peerId: string, route: FileRoute, body: unknown, signal: AbortSignal): Promise<unknown | Buffer> {
+    signal.throwIfAborted()
+    const peer = await this.peer(root, z.uuid().parse(peerId))
+    if (this.closed || !peer.enabled || !peer.invitation.ownerClientId || Date.parse(peer.invitation.expiresAt) <= Date.now()) {
+      throw new FileTransferError('ACCESS_DENIED', 'The selected trusted device is disabled, expired or unavailable.')
+    }
+    await this.validateRecipient(peer.invitation)
+    await this.connecting.get(peer.id)
+    if (!this.active.has(peer.id)) await this.ensure(peer)
+    const active = this.active.get(peer.id)
+    this.currentPeer(peer, active)
+    const result = await fileDeviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, route, body, AbortSignal.any([signal, active.abort.signal]))
+    this.currentPeer(peer, active)
+    if (route === 'capabilities') {
+      const identity = z.object({ protocolVersion: z.literal(1), ownerId: z.uuid(), pairId: z.uuid() }).strict().parse(result)
+      if (identity.ownerId !== peer.invitation.ownerId || identity.pairId !== peer.invitation.id) throw new FileTransferError('ACCESS_DENIED', 'The file source returned a different authenticated device identity.')
+    }
+    return result
+  }
+
+  async fileDeviceKey(root: string, peerId: string): Promise<string> {
+    const peer = await this.peer(root, z.uuid().parse(peerId))
+    if (this.closed || !peer.enabled || !peer.invitation.ownerClientId || Date.parse(peer.invitation.expiresAt) <= Date.now()) throw new FileTransferError('ACCESS_DENIED', 'The trusted file device is not available.')
+    return peer.invitation.ownerClientId
   }
 
   async agentHostTransport(root: string, value: AgentHostTarget, signal: AbortSignal, traceId?: string) {

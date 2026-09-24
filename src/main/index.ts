@@ -148,6 +148,7 @@ void app.whenReady().then(async () => {
   remoteVSCode = registerRemoteVSCodeBridge(requireTrustedWindow, workspaces.currentRoot, () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('remote-vscode:git-bindings-changed')
   })
+  await remoteVSCode.filesReady
   agentHost = registerAgentHostBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.agentHosts)
   await createWindow()
   app.on('activate', () => {

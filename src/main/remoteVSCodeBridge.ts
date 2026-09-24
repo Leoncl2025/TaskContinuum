@@ -13,6 +13,10 @@ import { LocalTaskAgentHostWorker } from './localTaskAgentHostWorker'
 import { locallyLinkedAgentHostSessions } from './linkedSessionPolicy'
 import { WorkspaceSyncService } from './remoteConfig/service'
 import { registerGitSyncBridge } from './remoteConfig/bridge'
+import { FileTransferSource } from './fileTransferSource'
+import { FileTransferService } from './fileTransferService'
+import { startFileTransferMcpBridge } from './fileTransferMcpBridge'
+import { FileTransferBudget } from './fileTransferBudget'
 
 export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>, onConfigurationChanged: () => void = () => {}) {
   const protector = {
@@ -23,6 +27,9 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
   const tunnels = new ManagedDevTunnels(app.getPath('userData'), keys)
   const clientIdentity = () => readClientIdentity(app.getPath('userData'))
   const host = new VSCodeDeviceHost(app.getPath('userData'), protector)
+  const fileBudget = new FileTransferBudget()
+  const fileSource = new FileTransferSource(app.getPath('userData'), app.getVersion())
+  host.setFileTransferSource(fileSource, fileBudget)
   const devices = new VSCodeDeviceClient(app.getPath('userData'), protector,
     (invitation, signal) => tunnels.connect(invitation.devTunnel, invitation.id, invitation.port, signal),
     async (invitation) => {
@@ -32,6 +39,9 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
       await recovery
       await gitSync.whenConnectionsSettled(root)
     })
+  const files = new FileTransferService(app.getPath('userData'), fileSource, devices, fileBudget)
+  const filesReady = startFileTransferMcpBridge(app.getPath('userData'), (root) => files.forWorkspace(root))
+  void filesReady.catch(() => console.error('The local file transfer MCP bridge could not start.'))
   const discovery = !app.isPackaged && process.env.TASKCONTINUUM_AGENT_HOST_DISCOVERY ? [process.env.TASKCONTINUUM_AGENT_HOST_DISCOVERY]
     : ['Code', 'Code - Insiders'].map((name) => join(app.getPath('appData'), name, 'agent-host', 'local-endpoint', 'entries'))
   const registry = new AgentHostRegistry(app.getPath('userData'), discovery, async () => {
@@ -87,7 +97,7 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
   handle('tunnel-publish', async (window) => {
     const root = await currentRoot()
     const confirmation = await dialog.showMessageBox(window, { type: 'question', title: 'Publish private Dev Tunnel', message: 'Allow paired Task Continuum desktops to connect to this machine?',
-      detail: 'This creates or reuses an owner-only Microsoft Dev Tunnel and a loopback-only SSH endpoint. Publication reconnects after network loss and app restart until you Stop publication. Only explicitly authorized sessions are accessible; execution messages are never replayed. Keep this desktop and VS Code running. No OS SSH or firewall settings change. Dev Tunnels is a preview service.', buttons: ['Cancel', 'Publish'], defaultId: 0, cancelId: 0 })
+      detail: 'This creates or reuses an owner-only Microsoft Dev Tunnel and a loopback-only SSH endpoint. Publication reconnects after network loss and app restart until you Stop publication. Paired workspace devices can access linked sessions and read ordinary local files without per-file prompts. Application credentials are excluded; execution messages are never replayed. Keep this desktop and VS Code running. No OS SSH or firewall settings change. Dev Tunnels is a preview service.', buttons: ['Cancel', 'Publish'], defaultId: 0, cancelId: 0 })
     if (confirmation.response !== 1) return
     await unchanged(root)
     await tunnels.publish()
@@ -97,12 +107,16 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     const confirmation = await dialog.showMessageBox(window, { type: 'warning', title: 'Stop private publication', message: 'Disconnect remote desktops from this publication?', detail: 'Native Agent Host sessions are not stopped. Automatic workspace links exchange new invitations after publishing again.', buttons: ['Cancel', 'Stop publication'], defaultId: 0, cancelId: 0 })
     if (confirmation.response === 1) { await unchanged(root); await tunnels.stop() }
   })
-  return { agentHosts, gitSync, close: async () => {
+  let closing: Promise<void> | undefined
+  return { agentHosts, gitSync, filesReady, close: () => closing ??= (async () => {
+    try { await (await filesReady).close() } catch { console.error('Closing after file transfer MCP bridge failure.') }
+    await files.close()
+    await fileSource.close()
     try { await recovery } catch (error) { console.error('Closing after workspace recovery failure:', error instanceof Error ? error.message : 'Invalid saved state') }
     await gitSync.close()
     devices.close()
     await tunnels.close()
     await host.close()
     await agentHosts.close()
-  } }
+  })() }
 }
