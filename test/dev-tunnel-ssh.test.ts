@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { createServer } from 'node:http'
-import { createConnection } from 'node:net'
+import { createConnection, createServer as createTcpServer } from 'node:net'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import ssh2 from 'ssh2'
@@ -53,6 +53,44 @@ describe('application-managed SSH', () => {
     host.revoke(options.grantId)
     await expect(fetch(`http://127.0.0.1:${tunnel.port}`, { signal: AbortSignal.timeout(2000) })).rejects.toThrow()
   })
+
+  it('keeps an authorized idle forward alive beyond the 15-second AHP heartbeat interval', async () => {
+    const sockets = new Set<import('node:net').Socket>()
+    const service = createTcpServer((socket) => {
+      sockets.add(socket)
+      socket.once('close', () => sockets.delete(socket))
+      socket.pipe(socket)
+    })
+    await new Promise<void>((resolve) => service.listen(0, '127.0.0.1', resolve))
+    cleanup.push(() => new Promise<void>((resolve) => {
+      for (const socket of sockets) socket.destroy()
+      service.close(() => resolve())
+    }))
+    const address = service.address()
+    if (!address || typeof address === 'string') throw new Error('Missing echo port.')
+    const hostKey = newSshKeyPair()
+    const key = newSshKeyPair()
+    const host = await startSessionSshHost(hostKey)
+    cleanup.push(() => host.close())
+    const grantId = randomUUID()
+    const expiresAt = new Date(Date.now() + 60_000).toISOString()
+    host.allow(grantId, key.publicKey, address.port, expiresAt)
+    const tunnel = await openSessionSshBridge(createConnection(host.port, '127.0.0.1'), {
+      key, hostPublicKey: hostKey.publicKey, grantId, targetPort: address.port, signal: new AbortController().signal,
+    })
+    cleanup.push(tunnel.close)
+    const socket = createConnection(tunnel.port, '127.0.0.1')
+    cleanup.push(() => { socket.destroy() })
+    await new Promise<void>((resolve, reject) => { socket.once('connect', resolve); socket.once('error', reject) })
+    await new Promise<void>((resolve) => setTimeout(resolve, 16_000))
+    expect(socket.destroyed).toBe(false)
+    const reply = new Promise<string>((resolve, reject) => {
+      socket.once('data', (data: Buffer) => resolve(data.toString('utf8')))
+      socket.once('error', reject)
+    })
+    socket.write('after-idle')
+    await expect(reply).resolves.toBe('after-idle')
+  }, 35_000)
 
   it('pins the SSH host key and rejects another client or invitation', async () => {
     const { host, options } = await fixture()

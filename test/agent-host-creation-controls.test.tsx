@@ -44,7 +44,7 @@ function fixture() {
     }),
     models: vi.fn(async () => []), watch: vi.fn(async () => 'watch'),
     unwatch: vi.fn(async () => {}), terminal: vi.fn(async () => {}), releaseTerminal: vi.fn(async () => {}),
-    send: vi.fn(async () => {}), cancel: vi.fn(async () => {}),
+    send: vi.fn(async () => {}), resolveDelivery: vi.fn(async () => 'not-found' as const), cancel: vi.fn(async () => {}),
     onView: () => () => {},
   }
   window.agentHost = bridge

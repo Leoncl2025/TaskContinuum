@@ -57,6 +57,7 @@ function terminalFixture() {
     retainTerminal: vi.fn(),
     terminal: vi.fn(async () => {}),
     releaseTerminal: vi.fn(),
+    resolveDelivery: vi.fn(async (_id: string, _action: 'check' | 'abandon', authorize: () => Promise<void>) => { await authorize(); return 'not-found' as const }),
   }
   const manager = Object.assign(setup.manager, {
     authorize: vi.fn(async () => {}),
@@ -98,6 +99,35 @@ describe('local planning creation IPC', () => {
       expect(setup.connection.releaseTerminal).toHaveBeenCalledTimes(2)
       await expect(setup.invoke('terminal', id, resource, first)).rejects.toThrow('no longer active')
       expect(setup.connection.terminal).toHaveBeenCalledTimes(3)
+    })
+
+    describe('manual delivery review IPC', () => {
+      it('accepts only the exact target, UUID and explicit abandonment acknowledgement', async () => {
+        const setup = terminalFixture()
+        const id = randomUUID()
+        const review = (turnId: unknown, action: unknown, confirmed?: unknown) => setup.invoke('resolve-delivery', setup.target, turnId, action, confirmed)
+        await expect(review('not-a-uuid', 'check')).rejects.toThrow()
+        await expect(review(id, 'abandon')).rejects.toThrow()
+        await expect(review(id, 'abandon', false)).rejects.toThrow()
+        await expect(review(id, 'check', true)).rejects.toThrow()
+        expect(setup.connection.resolveDelivery).not.toHaveBeenCalled()
+        expect(await review(id, 'check')).toBe('not-found')
+        expect(setup.connection.resolveDelivery).toHaveBeenCalledWith(id, 'check', expect.any(Function))
+        expect(await review(id, 'abandon', true)).toBe('not-found')
+        expect(setup.connection.resolveDelivery).toHaveBeenCalledTimes(2)
+        expect(setup.manager.connection).toHaveBeenCalledWith('Q:\\workspace', setup.target)
+      })
+
+      it('refuses to report a delivery review result after the workspace changes', async () => {
+        const setup = terminalFixture()
+        const id = randomUUID()
+        setup.connection.resolveDelivery.mockImplementationOnce(async (_turn, _action, authorize) => {
+          setup.change('root')
+          await expect(authorize()).rejects.toThrow('changed')
+          return 'not-found'
+        })
+        await expect(setup.invoke('resolve-delivery', setup.target, id, 'check')).rejects.toThrow('changed')
+      })
     })
 
     it('revokes a pending terminal result and releases its lease when authorization changes', async () => {

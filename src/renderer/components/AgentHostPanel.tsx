@@ -137,6 +137,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const [view, setView] = useState<AgentHostView>()
   const [watch, setWatch] = useState<{ key: string; id: string }>()
   const [error, setError] = useState<string>()
+  const [deliveryReview, setDeliveryReview] = useState<{ id: string; status: 'checking' | 'not-found' | 'abandoning' | 'failed'; acknowledged: boolean; error?: string }>()
   const [draft, setDraft] = useState('')
   const [images, setImages] = useState<ChatImageAttachment[]>([])
   const [busy, setBusy] = useState(false)
@@ -266,6 +267,27 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     try { await bridge.cancel(target, activeTurn.id) } catch (failure) { setError(failure instanceof Error ? failure.message : 'The original turn could not be cancelled.') }
     finally { operating.current = false; setBusy(false) }
   }
+  async function reviewDelivery(action: 'check' | 'abandon'): Promise<void> {
+    const id = view?.pendingTurn?.id
+    if (!bridge || !id || view?.state !== 'connected' || operating.current
+      || action === 'abandon' && (deliveryReview?.id !== id || deliveryReview.status !== 'not-found' || !deliveryReview.acknowledged)) return
+    operating.current = true
+    setBusy(true)
+    setDeliveryReview({ id, status: action === 'check' ? 'checking' : 'abandoning', acknowledged: action === 'abandon' })
+    try {
+      const result = await bridge.resolveDelivery(target, id, action, action === 'abandon' ? true : undefined)
+      if (!mounted.current) return
+      if (result === 'not-found') setDeliveryReview({ id, status: 'not-found', acknowledged: false })
+      else {
+        if (result === 'abandoned' && attempted.current?.id === id) attempted.current = undefined
+        setDeliveryReview(undefined)
+        setError(undefined)
+      }
+    } catch (failure) {
+      if (mounted.current) setDeliveryReview({ id, status: 'failed', acknowledged: false,
+        error: failure instanceof Error ? failure.message : 'The delivery check failed. The original attempt remains blocked.' })
+    } finally { operating.current = false; setBusy(false) }
+  }
   async function reconnect(): Promise<void> {
     if (operating.current) return
     operating.current = true
@@ -296,7 +318,17 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     <form className="composer-area" onSubmit={(event) => { event.preventDefault(); void send() }}>
       <ChatImageStatus input={imageInput} />
       {(error || view?.error) && <p className="copilot-error vscode-chat-notice" role="alert">{error ?? view?.error}</p>}
-      {view?.pendingTurn?.state === 'uncertain' && <p className="vscode-chat-notice" role="status">Delivery outcome unknown. Check the original chat before another send.</p>}
+      {view?.pendingTurn?.state === 'uncertain' && <div className="vscode-chat-notice" role="group" aria-label="Resolve uncertain delivery">
+        <p role="status">Delivery outcome unknown. The previous message was not replayed. Check the original chat on {machineName} before another send.</p>
+        <button type="button" className="text-button" disabled={busy || view.state !== 'connected'} onClick={() => { void reviewDelivery('check') }}>Check original chat for this turn</button>
+        {view.state !== 'connected' && <p>Reconnect Agent Host before checking delivery.</p>}
+        {deliveryReview?.id === view.pendingTurn.id && deliveryReview.status === 'not-found' && <>
+          <p>This turn is not in the current Host snapshot. It may still arrive later. Only continue after checking the original chat yourself.</p>
+          <label><input type="checkbox" checked={deliveryReview.acknowledged} onChange={(event) => setDeliveryReview((current) => current && current.id === view.pendingTurn?.id ? { ...current, acknowledged: event.target.checked } : current)} /> I checked the original chat and accept the risk of a later duplicate.</label>
+          <button type="button" className="text-button" disabled={busy || !deliveryReview.acknowledged} onClick={() => { void reviewDelivery('abandon') }}>Abandon this attempt and unlock sending</button>
+        </>}
+        {deliveryReview?.id === view.pendingTurn.id && deliveryReview.error && <p className="copilot-error" role="alert">{deliveryReview.error}</p>}
+      </div>}
       {view?.chat?.draft?.text && <p className="vscode-chat-notice muted">The owner has an unsent draft.</p>}
       {currentCatalog?.error && <p className="copilot-error vscode-chat-notice" role="alert">{currentCatalog.error}</p>}
       {onSessions && !view && (error || currentCatalog?.error) && <button type="button" className="text-button" disabled={busy} onClick={onSessions}><Icon name="link" />Review session link</button>}

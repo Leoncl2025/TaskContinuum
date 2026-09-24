@@ -29,7 +29,7 @@ function fixture() {
     models: vi.fn(async () => [{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }]),
     watch: vi.fn(async () => { watchId = crypto.randomUUID(); for (const listener of listeners) listener({ id: watchId, view: structuredClone(view) }); return watchId }),
     unwatch: vi.fn(async () => {}), terminal: vi.fn(async () => {}), releaseTerminal: vi.fn(async () => {}),
-    send: vi.fn(async () => {}), cancel: vi.fn(async () => {}),
+    send: vi.fn(async () => {}), resolveDelivery: vi.fn(async () => 'not-found' as const), cancel: vi.fn(async () => {}),
     onView: (listener) => { listeners.add(listener); return () => listeners.delete(listener) },
   }
   window.agentHost = bridge
@@ -473,5 +473,66 @@ describe('Agent Host chat UI', () => {
     await screen.findByText('Terminal output was not restored after reconnect.')
     await user.click(screen.getByRole('button', { name: 'Retry terminal output' }))
     expect(setup.bridge.terminal).toHaveBeenLastCalledWith(expect.any(String), resource, expect.any(String), true)
+  })
+
+  it('keeps an uncertain draft blocked until an explicit original-chat review and acknowledgement', async () => {
+    const setup = fixture()
+    const turnId = crypto.randomUUID()
+    setup.view.pendingTurn = { id: turnId, state: 'uncertain' }
+    setup.view.canSend = false
+    vi.mocked(setup.bridge.resolveDelivery).mockImplementation(async (_target, _id, action) => action === 'abandon' ? 'abandoned' : 'not-found')
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    expect(await screen.findByRole('combobox', { name: 'Agent Host model' })).toBeDisabled()
+    await user.type(screen.getByRole('textbox', { name: 'Message Agent Host' }), 'Keep this new draft')
+    expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Abandon this attempt and unlock sending' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Check original chat for this turn' }))
+    await waitFor(() => expect(setup.bridge.resolveDelivery).toHaveBeenCalledExactlyOnceWith(setup.target, turnId, 'check', undefined))
+    expect(await screen.findByText(/This turn is not in the current Host snapshot/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Abandon this attempt and unlock sending' })).toBeDisabled()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('checkbox', { name: /I checked the original chat/ }))
+    await user.click(screen.getByRole('button', { name: 'Abandon this attempt and unlock sending' }))
+    await waitFor(() => expect(setup.bridge.resolveDelivery).toHaveBeenLastCalledWith(setup.target, turnId, 'abandon', true))
+    expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Keep this new draft')
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+    act(() => { setup.view.pendingTurn = undefined; setup.view.canSend = true; setup.emit() })
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Agent Host model' }), screen.getByRole('option', { name: 'GPT-6' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeEnabled())
+  })
+
+  it('does not offer abandonment after a failed review, or while the original Host is offline', async () => {
+    const setup = fixture()
+    setup.view.pendingTurn = { id: crypto.randomUUID(), state: 'uncertain' }
+    setup.view.canSend = false
+    setup.view.state = 'offline'
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    const check = screen.getByRole('button', { name: 'Check original chat for this turn' })
+    expect(check).toBeDisabled()
+    expect(setup.bridge.resolveDelivery).not.toHaveBeenCalled()
+    act(() => { setup.view.state = 'connected'; setup.emit() })
+    vi.mocked(setup.bridge.resolveDelivery).mockRejectedValueOnce(new Error('The original Host is unavailable.'))
+    await user.click(check)
+    await screen.findByRole('alert', { name: '' })
+    expect(screen.getByText('The original Host is unavailable.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Abandon this attempt and unlock sending' })).not.toBeInTheDocument()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+  })
+
+  it('automatically clears the warning after verifying that the original chat contains the turn', async () => {
+    const setup = fixture()
+    setup.view.pendingTurn = { id: crypto.randomUUID(), state: 'uncertain' }
+    setup.view.canSend = false
+    vi.mocked(setup.bridge.resolveDelivery).mockResolvedValueOnce('confirmed')
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await user.click(screen.getByRole('button', { name: 'Check original chat for this turn' }))
+    await waitFor(() => expect(setup.bridge.resolveDelivery).toHaveBeenCalledOnce())
+    expect(screen.queryByRole('checkbox', { name: /I checked the original chat/ })).not.toBeInTheDocument()
+    act(() => { setup.view.pendingTurn = undefined; setup.view.canSend = true; setup.emit() })
+    await waitFor(() => expect(screen.queryByRole('group', { name: 'Resolve uncertain delivery' })).not.toBeInTheDocument())
+    expect(setup.bridge.send).not.toHaveBeenCalled()
   })
 })

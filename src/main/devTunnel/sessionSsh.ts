@@ -10,6 +10,7 @@ import { sshPublicKeySchema } from './protocol'
 
 type Access = { id: string; key: Buffer; port: number; expires: number }
 export type SshKeyPair = { publicKey: string; privateKey: string }
+const FORWARDED_SOCKET_IDLE_MS = 60_000
 
 export function newSshKeyPair(): SshKeyPair {
   return encodeDeviceSshKey(generateKeyPairSync('ed25519').privateKey)
@@ -79,7 +80,8 @@ export async function startSessionSshHost(key: SshKeyPair, port = 0) {
       if (!allowed() || info.destIP !== '127.0.0.1' || info.destPort !== access!.port || sockets.size >= 64) { reject(); return }
       const socket = createConnection({ host: '127.0.0.1', port: access!.port })
       sockets.add(socket)
-      socket.setTimeout(15000, () => socket.destroy())
+      // AHP heartbeats run every 15 seconds; the forward must outlive scheduling jitter.
+      socket.setTimeout(FORWARDED_SOCKET_IDLE_MS, () => socket.destroy())
       socket.once('close', () => sockets.delete(socket))
       socket.once('error', () => { reject(); socket.destroy() })
       socket.once('connect', () => {

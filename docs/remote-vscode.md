@@ -272,6 +272,21 @@ persisted before dispatch; uncertain outcomes survive desktop restart and are ne
 resent automatically. Busy/queued/owner-draft states block sends. Offline history
 comes from a bounded private cache, not Git, and never grants control.
 
+An abnormal transport close can leave a send uncertain even when it never
+reached the owner. Reconnect first, then use **Check original chat for this turn**
+to compare the exact turn ID with the latest synchronized owner-chat snapshot. A found turn is
+confirmed without a resend. If absent, inspect the original owner chat yourself:
+it may still arrive later. Only after accepting that risk can you explicitly
+**Abandon this attempt and unlock sending**. This records the old attempt as
+abandoned without deleting its UUID/hash, preserves your current draft and
+does not send a message. A new send always gets a new UUID. Offline, unauthorized
+or changed-chat checks cannot abandon an uncertain delivery.
+
+The paired SSH forward allows 60 seconds of TCP inactivity, separate from the
+10-second login deadline, so the 15-second AHP heartbeat (plus scheduling jitter)
+does not race the forward's idle shutdown. Revocation, pairing expiry, connection
+limits and the client's heartbeat failure handling still close unavailable routes.
+
 The stable chat identity is `(owner.clientId, sessionId, chatId)`. The owner resolves
 that identity against current trusted local Hosts on each new connection, verifies
 the `copilotcli` provider, session snapshot and visible chat membership, and connects

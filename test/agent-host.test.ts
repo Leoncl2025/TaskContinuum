@@ -164,6 +164,89 @@ describe('AHP original chat connection', () => {
       expect(host.dispatches).toHaveLength(1)
     } finally { await first.close(); await second.close(); await host.close(); await rm(root, { recursive: true, force: true }) }
   })
+
+  it('reviews an uncertain turn without replay and allows an explicit durable abandon only after a fresh chat check', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-delivery-review-'))
+    const host = await startAgentHostFixture()
+    const target = { sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+    let offline = false
+    const transport = (signal: AbortSignal) => offline ? Promise.reject(new Error('The owner is unavailable.')) : connectLocalAgentHost(host.endpoint, signal)
+    const first = new AgentHostConnection(target, root, transport)
+    const second = new AgentHostConnection(target, root, transport)
+    const id = randomUUID()
+    try {
+      host.loseNextSend()
+      await expect(first.send(id, 'An uncertain turn', undefined, async () => {})).rejects.toThrow('confirmation')
+      await expect.poll(() => first.view.pendingTurn).toEqual({ id, state: 'uncertain' })
+      expect(host.dispatches).toHaveLength(1)
+      await expect(first.resolveDelivery(id, 'check', async () => { throw new Error('Access revoked.') })).rejects.toThrow('Access revoked.')
+      offline = true
+      await expect(first.resolveDelivery(id, 'check', async () => {})).rejects.toThrow('unavailable')
+      expect(first.view.pendingTurn).toEqual({ id, state: 'uncertain' })
+      offline = false
+      expect(await first.resolveDelivery(id, 'check', async () => {})).toBe('not-found')
+      expect(first.view.pendingTurn).toEqual({ id, state: 'uncertain' })
+      let release!: () => void
+      let entered!: () => void
+      const blocked = new Promise<void>((resolve) => { release = resolve })
+      const started = new Promise<void>((resolve) => { entered = resolve })
+      const reviewing = first.resolveDelivery(id, 'check', async () => { entered(); await blocked })
+      try {
+        await started
+        await expect(first.resolveDelivery(id, 'check', async () => {})).rejects.toThrow('already in progress')
+        await expect(first.send(randomUUID(), 'No send during review', undefined, async () => {})).rejects.toThrow('review')
+      } finally { release(); await reviewing }
+      expect(host.dispatches).toHaveLength(1)
+      let checks = 0
+      await expect(first.resolveDelivery(id, 'abandon', async () => { if (++checks === 2) throw new Error('Access changed.') })).rejects.toThrow('Access changed.')
+      expect(first.view.pendingTurn).toEqual({ id, state: 'uncertain' })
+      expect(await first.resolveDelivery(id, 'abandon', async () => {})).toBe('abandoned')
+      expect(first.view.pendingTurn).toBeUndefined()
+      expect(host.dispatches).toHaveLength(1)
+      await first.close()
+      await second.open()
+      expect(second.view.pendingTurn).toBeUndefined()
+      expect(await second.resolveDelivery(id, 'check', async () => {})).toBe('abandoned')
+      await expect(second.send(id, 'An uncertain turn', undefined, async () => {})).rejects.toThrow('not replayed')
+      expect(host.dispatches).toHaveLength(1)
+      await second.send(randomUUID(), 'A new explicit message', undefined, async () => {})
+      expect(host.dispatches).toHaveLength(2)
+    } finally { await first.close(); await second.close(); await host.close(); await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('confirms an uncertain turn when it appears in the original chat without abandoning or resending it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-delivery-confirm-'))
+    const host = await startAgentHostFixture()
+    const target = { sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+    const connection = new AgentHostConnection(target, root, (signal) => connectLocalAgentHost(host.endpoint, signal))
+    const id = randomUUID()
+    try {
+      host.loseNextSend()
+      await expect(connection.send(id, 'Delivered during a disconnect', undefined, async () => {})).rejects.toThrow('confirmation')
+      host.action({ type: 'chat/turnStarted', turnId: id, startedAt: new Date().toISOString(), message: { text: 'Delivered during a disconnect', origin: { kind: 'user' } } })
+      expect(await connection.resolveDelivery(id, 'check', async () => {})).toBe('confirmed')
+      expect(connection.view.pendingTurn).toBeUndefined()
+      expect(await connection.resolveDelivery(id, 'abandon', async () => {})).toBe('confirmed')
+      expect(host.dispatches).toHaveLength(1)
+    } finally { await connection.close(); await host.close(); await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('does not abandon an uncertain turn that appears after an initial not-found check', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'continuum-ahp-delivery-race-'))
+    const host = await startAgentHostFixture()
+    const target = { sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+    const connection = new AgentHostConnection(target, root, (signal) => connectLocalAgentHost(host.endpoint, signal))
+    const id = randomUUID()
+    try {
+      host.loseNextSend()
+      await expect(connection.send(id, 'Original', undefined, async () => {})).rejects.toThrow('confirmation')
+      expect(await connection.resolveDelivery(id, 'check', async () => {})).toBe('not-found')
+      host.action({ type: 'chat/turnStarted', turnId: id, startedAt: new Date().toISOString(), message: { text: 'Original', origin: { kind: 'user' } } })
+      expect(await connection.resolveDelivery(id, 'abandon', async () => {})).toBe('confirmed')
+      expect(connection.view.pendingTurn).toBeUndefined()
+      expect(host.dispatches).toHaveLength(1)
+    } finally { await connection.close(); await host.close(); await rm(root, { recursive: true, force: true }) }
+  })
 })
 
 describe('Agent Host endpoints', () => {

@@ -219,6 +219,20 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     await current(event, window, root, target)
     return connection.send(command.id, command.text, command.images, () => current(event, window, root, target), await readClientIdentity(app.getPath('userData')), selection)
   })
+  ipcMain.handle('agent-host:resolve-delivery', async (event, value: unknown, turnValue: unknown, actionValue: unknown, acknowledged: unknown) => {
+    const window = requireWindow(event)
+    const root = await currentRoot()
+    const target = agentHostTargetSchema.parse(value)
+    const turnId = z.uuid().parse(turnValue)
+    const action = z.enum(['check', 'abandon']).parse(actionValue)
+    if (action === 'abandon') z.literal(true).parse(acknowledged)
+    else z.undefined().parse(acknowledged)
+    const connection = await manager.connection(root, target)
+    await current(event, window, root, target)
+    const result = await connection.resolveDelivery(turnId, action, () => current(event, window, root, target))
+    await current(event, window, root, target)
+    return result
+  })
   ipcMain.handle('agent-host:cancel', async (event, value: unknown, id: unknown) => {
     const window = requireWindow(event)
     const root = await currentRoot()

@@ -46,6 +46,7 @@ export interface AgentHostBridge {
   terminal(watchId: string, resource: string, leaseId: string, retry?: boolean): Promise<void>
   releaseTerminal(watchId: string, resource: string, leaseId: string): Promise<void>
   send(target: AgentHostTarget, id: string, text: string, images?: ChatImageAttachment[], model?: ModelSelection): Promise<void>
+  resolveDelivery(target: AgentHostTarget, turnId: string, action: 'check' | 'abandon', acknowledged?: boolean): Promise<'confirmed' | 'not-found' | 'abandoned'>
   cancel(target: AgentHostTarget, turnId: string): Promise<void>
   onView(listener: (event: { id: string; view: AgentHostView }) => void): () => void
 }

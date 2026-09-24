@@ -16,7 +16,7 @@ import { agentHostKey, agentHostModelInfoSchema, agentHostModelSelectionSchema, 
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 
 export type AgentHostEvent = { type: 'action'; envelope: ActionEnvelope } | { type: 'snapshot'; snapshot: Snapshot } | { type: 'state' }
-const commandSchema = z.object({ id: z.uuid(), hash: z.string().regex(/^[a-f0-9]{64}$/), state: z.enum(['pending', 'uncertain', 'confirmed', 'failed']) }).strict()
+const commandSchema = z.object({ id: z.uuid(), hash: z.string().regex(/^[a-f0-9]{64}$/), state: z.enum(['pending', 'uncertain', 'confirmed', 'failed', 'abandoned']) }).strict()
 const ledgerSchema = z.object({ schemaVersion: z.literal(2), target: agentHostTargetSchema, commands: z.array(commandSchema).max(1000) }).strict()
 type Command = z.infer<typeof commandSchema>
 type ModelCatalog = Pick<SessionModelInfo, 'id' | 'name' | 'provider' | 'configSchema'>[]
@@ -42,6 +42,7 @@ export class AgentHostConnection {
   private loaded?: Promise<void>
   private writing: Promise<void> = Promise.resolve()
   private sending = false
+  private reviewing = false
   private retry?: ReturnType<typeof setTimeout>
   private heartbeat?: ReturnType<typeof setInterval>
   private failures = 0
@@ -470,8 +471,8 @@ export class AgentHostConnection {
 
   async send(id: string, text: string, images: ChatImageAttachment[] | undefined, authorize: () => Promise<void>, actor?: { clientId: string; machineName: string; username?: string }, model?: ModelSelection): Promise<void> {
     const command = { ...chatSubmissionSchema.parse({ id, text, ...(images?.length ? { images } : {}) }), ...(model === undefined ? {} : { model: agentHostModelSelectionSchema.parse(model) }) }
-    if (this.sending) {
-      const error = new Error('Another message is being submitted to this chat.')
+    if (this.sending || this.reviewing) {
+      const error = new Error('Another delivery or review is in progress for this chat.')
       this.diagnose('connection.send', { traceId: this.current?.traceId, status: 'error', step: 'validation', dispatched: false, error })
       throw error
     }
@@ -550,6 +551,47 @@ export class AgentHostConnection {
       const stop = () => { clearTimeout(timer); unlisten() }
       check()
     })
+  }
+
+  async resolveDelivery(id: string, action: 'check' | 'abandon', authorize: () => Promise<void>): Promise<'confirmed' | 'not-found' | 'abandoned'> {
+    z.uuid().parse(id)
+    if (action !== 'check' && action !== 'abandon') throw new Error('Invalid delivery review action.')
+    if (this.sending) throw new Error('Wait for the current delivery attempt to finish before reviewing it.')
+    if (this.reviewing) throw new Error('A delivery review is already in progress.')
+    this.reviewing = true
+    try {
+      await this.load()
+      const record = this.commands.find((command) => command.id === id)
+      if (!record) throw new Error('No delivery attempt matches this turn.')
+      if (record.state === 'confirmed' || record.state === 'abandoned') return record.state
+      if (record.state !== 'uncertain') throw new Error('Only an uncertain delivery can be reviewed.')
+      await authorize()
+      await this.open()
+      const active = this.current
+      if (!active || !this.connected) throw new Error('Reconnect to the original Agent Host before reviewing delivery.')
+      const response = await active.client.request('subscribe', { channel: this.target.chatId })
+      if (this.current !== active || !this.connected || !response.snapshot) throw new Error('The Agent Host connection changed while reviewing delivery.')
+      this.acceptSnapshot(response.snapshot)
+      await this.reconcile()
+      await authorize()
+      if (this.current !== active || !this.connected) throw new Error('The Agent Host connection changed while reviewing delivery.')
+      const latest = this.commands.find((command) => command.id === id)
+      if (latest?.state === 'confirmed') return 'confirmed'
+      if (latest !== record || latest.state !== 'uncertain') throw new Error('The delivery record changed while reviewing it.')
+      if (action === 'check') return 'not-found'
+      const chat = this.chat.value
+      if (chat?.activeTurn?.id === id || chat?.turns.some((turn) => turn.id === id)) {
+        record.state = 'confirmed'
+        try { await this.save() } catch (error) { if (record.state === 'confirmed') record.state = 'uncertain'; throw error }
+        this.emit({ type: 'state' })
+        return 'confirmed'
+      }
+      // Only an explicit user decision retires the old UUID; it is never replayed.
+      record.state = 'abandoned'
+      try { await this.save() } catch (error) { if (record.state === 'abandoned') record.state = 'uncertain'; throw error }
+      this.emit({ type: 'state' })
+      return 'abandoned'
+    } finally { this.reviewing = false }
   }
 
   async cancel(turnId: string, authorize: () => Promise<void>): Promise<void> {

@@ -89,6 +89,20 @@ describe('native-only preload boundary', () => {
     ])
   })
 
+  it('forwards explicit uncertain-delivery review without sending a new message', async () => {
+    const bridge = window.agentHost
+    if (!bridge) throw new Error('Agent Host preload API missing.')
+    const target = agentHostTargetFixture('review')
+    const turnId = crypto.randomUUID()
+    await bridge.resolveDelivery(target, turnId, 'check')
+    await bridge.resolveDelivery(target, turnId, 'abandon', true)
+    expect(ipc.invoke.mock.calls).toEqual([
+      ['agent-host:resolve-delivery', target, turnId, 'check', undefined],
+      ['agent-host:resolve-delivery', target, turnId, 'abandon', true],
+    ])
+    expect(ipc.invoke.mock.calls.some(([channel]) => channel === 'agent-host:send')).toBe(false)
+  })
+
   it('exposes root-scoped local creation without caller-selected paths, tasks, or remote workers', async () => {
     const bridge = window.agentHost
     if (!bridge) throw new Error('Agent Host preload API missing.')

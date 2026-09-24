@@ -12,7 +12,7 @@ afterEach(() => { delete window.agentHost })
 function bridge(sessions: AgentHostSession[] = []): AgentHostBridge {
   return {
     list: vi.fn(async () => ({ sessions, warnings: [] })),
-    watch: vi.fn(), unwatch: vi.fn(), terminal: vi.fn(), releaseTerminal: vi.fn(), send: vi.fn(), cancel: vi.fn(), models: vi.fn(async () => []), onView: vi.fn(() => () => {}),
+    watch: vi.fn(), unwatch: vi.fn(), terminal: vi.fn(), releaseTerminal: vi.fn(), send: vi.fn(), resolveDelivery: vi.fn(), cancel: vi.fn(), models: vi.fn(async () => []), onView: vi.fn(() => () => {}),
     creationWorkers: vi.fn(async () => []), creations: vi.fn(async () => []), create: vi.fn(), creationStatus: vi.fn(), bindCreation: vi.fn(),
     localCreationHosts: vi.fn(async () => []), localCreations: vi.fn(async () => []), createLocal: vi.fn(), localCreationStatus: vi.fn(),
   }
