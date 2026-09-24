@@ -20,6 +20,8 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
   const dispatches: unknown[] = []
   let loseNextSend = false
   let stallRoot = false
+  let modelQueries = 0
+  let failModels = false
   const terminals = new Map<string, TerminalState>()
   const failedTerminals = new Set<string>()
   const terminalSubscriptions = new Map<string, number>()
@@ -69,6 +71,13 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
       if (message.method === 'initialize') result = { protocolVersion: '0.9.0', serverSeq: sequence, snapshots: [], ...(initializeMeta ? { _meta: initializeMeta } : {}) }
       else if (message.method === 'listSessions') result = { items: [{ resource: sessionId, ...session, createdAt: chat.modifiedAt, modifiedAt: chat.modifiedAt }] }
       else if (message.method === 'subscribe') {
+        if (message.params.channel === 'ahp-root://') {
+          modelQueries++
+          if (failModels) {
+            socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32000, message: 'Fixture model catalog failure.' } }))
+            return
+          }
+        }
         if (stallRoot && message.params.channel === 'ahp-root://') return
         if (typeof message.params.channel === 'string' && message.params.channel.startsWith('ahp-terminal:/')) {
           const resource = message.params.channel
@@ -98,14 +107,19 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   const endpoint: AgentHostEndpoint = { schemaVersion: 2, type: 'standalone', pid: process.pid, instanceId: hostId, connectionToken: randomUUID(), protocolVersion: '0.9.0', endpoint: { type: 'tcp', host: '127.0.0.1', port: (server.address() as { port: number }).port } }
+  const holdSnapshot = (resource: string) => {
+    let release!: () => void
+    terminalDelays.set(resource, new Promise<void>((resolve) => { release = resolve }))
+    return () => { terminalDelays.delete(resource); release() }
+  }
   return { endpoint, hostId, sessionId, chatId, dispatches, action, snapshot, addTerminal, historyTerminals, terminalAction,
+    modelQueries: () => modelQueries,
+    failModels: (value: boolean) => { failModels = value },
+    setModels: (models: RootState['agents'][number]['models']) => { root.agents[0].models = structuredClone(models) },
     failTerminal: (resource: string) => { failedTerminals.add(resource) },
     restoreTerminal: (resource: string) => { failedTerminals.delete(resource) },
-    holdTerminal: (resource: string) => {
-      let release!: () => void
-      terminalDelays.set(resource, new Promise<void>((resolve) => { release = resolve }))
-      return () => { terminalDelays.delete(resource); release() }
-    },
+    holdTerminal: holdSnapshot,
+    holdModels: () => holdSnapshot('ahp-root://'),
     moveTerminalToOtherChat: (resource: string) => {
       const state = terminals.get(resource)
       if (!state) throw new Error('Unknown fixture terminal.')

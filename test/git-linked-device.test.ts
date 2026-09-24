@@ -87,7 +87,9 @@ it('streams the exact AHP chat through paired SSH with immutable bindings and re
     expect(diagnostics).toContainEqual(expect.objectContaining({ event: 'gateway.request', traceId: gateway?.traceId, method: 'subscribe', channel: 'root', status: 'ok', queueMs: expect.any(Number), authMs: expect.any(Number) }))
     expect(diagnostics).toContainEqual(expect.objectContaining({ event: 'device.transport', traceId: gateway?.traceId, step: 'websocket', status: 'ok' }))
     const remoteModel = { id: 'gpt-6', config: { thinkingLevel: 'max', contextSize: 872000 } }
+    const modelQueriesBeforeSend = fixture.modelQueries()
     await connection.send(id, 'Original over SSH', undefined, async () => {}, undefined, remoteModel)
+    expect(fixture.modelQueries()).toBe(modelQueriesBeforeSend)
     expect(fixture.dispatches).toEqual([expect.objectContaining({ type: 'chat/turnStarted', turnId: id, message: expect.objectContaining({ ...selection, model: remoteModel }) })])
     fixture.action({ type: 'chat/responsePart', turnId: id, part: { id: 'answer', kind: 'markdown', content: '' } })
     fixture.action({ type: 'chat/delta', turnId: id, partId: 'answer', content: 'Incremental remote answer' })

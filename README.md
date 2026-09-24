@@ -211,6 +211,10 @@ input picker has synchronized its draft. Native model changes do not overwrite
 your selection while this panel is open. Reconnect refreshes the list, and an
 unavailable model blocks sending rather than silently falling back. Each recorded
 turn shows its requested model ID, not a guarantee of the provider's actual model.
+Sending validates against the catalog already loaded for that connection rather
+than querying models again on both desktops for every message. Explicit model
+refresh still fetches the current catalog; reconnect discards the old cache.
+An explicit refresh failure blocks sending until model loading succeeds again.
 Both desktops need this update for remote model selection; an older owner gateway
 is rejected with an update message. Model selection does not change native tool
 approvals or create a new conversation.

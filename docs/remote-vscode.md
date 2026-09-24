@@ -163,6 +163,14 @@ catalog and sends the requested model explicitly. **Model options** come from it
 gateway. **Default** omits an override rather than copying an unsynchronized
 editor selection. A changed or unavailable model/option blocks sending until
 corrected, and an older gateway is rejected rather than silently dropping config.
+The loaded catalog is reused for send-time validation on both the client and owner
+connections, so an ordinary send does not add a model-directory RPC. The first
+lookup on a connection, explicit **Retry loading models**, and reconnect still
+load the directory; concurrent lookups share the in-flight request. A refresh
+failure invalidates the previous catalog instead of silently using it. Model or
+configuration changes are reflected on refresh; the native Host remains the final
+authority and may reject a selection that changed since loading. There is no
+automatic fallback model or execution replay.
 Options stay in the open panel only; recorded requested model/configuration and
 history remain private, never workspace Git settings. See
 [model selection details](../README.md#agent-host-sessions).

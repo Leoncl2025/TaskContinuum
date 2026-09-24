@@ -70,6 +70,34 @@ async function gatewaySetup(delayMs = 0) {
 }
 
 describe('Agent Host terminal demand', () => {
+  it('sends through the gateway without model queries on either side after catalog loading', async () => {
+    const setup = await gatewaySetup()
+    const remote = new AgentHostConnection(setup.target, setup.root, (signal) => setup.transport(signal))
+    const models = vi.spyOn(setup.connection, 'models')
+    try {
+      await remote.models()
+      expect(models).toHaveBeenCalledOnce()
+      expect(setup.host.modelQueries()).toBe(1)
+      setup.host.failModels(true)
+      for (let index = 0; index < 2; index++) {
+        const id = randomUUID()
+        await remote.send(id, 'Reuse the selected model', undefined, async () => {}, undefined, { id: 'gpt-6' })
+        setup.host.action({ type: 'chat/turnComplete', turnId: id, duration: 1 })
+        await expect.poll(() => remote.view.chat?.activeTurn).toBeUndefined()
+      }
+      expect(models).toHaveBeenCalledOnce()
+      expect(setup.host.modelQueries()).toBe(1)
+      expect(setup.host.dispatches).toHaveLength(2)
+      setup.host.failModels(false)
+      setup.host.setModels([{ id: 'owner-model', name: 'Owner model', provider: 'copilotcli' }])
+      await remote.models()
+      await expect(remote.send(randomUUID(), 'Do not fall back', undefined, async () => {}, undefined, { id: 'gpt-6' })).rejects.toThrow('no longer available')
+      expect(models).toHaveBeenCalledTimes(2)
+      expect(setup.host.modelQueries()).toBe(2)
+      expect(setup.host.dispatches).toHaveLength(2)
+    } finally { await remote.close(); await setup.close() }
+  })
+
   it('does not replay 16 failed history subscriptions on open or reconnect and retries only on demand', async () => {
     const setup = await gatewaySetup()
     const resources = setup.host.historyTerminals(16, true)

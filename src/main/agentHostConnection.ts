@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { AhpClient } from '@microsoft/agent-host-protocol/client'
 import type { AhpTransport, Subscription } from '@microsoft/agent-host-protocol/client'
 import { MessageKind, sessionReducer, terminalReducer } from '@microsoft/agent-host-protocol'
-import type { ActionEnvelope, ChatTurnStartedAction, ChatTurnCancelledAction, InitializeResult, MessageEmbeddedResourceAttachment, ModelSelection, SessionState, Snapshot, TerminalState } from '@microsoft/agent-host-protocol'
+import type { ActionEnvelope, ChatTurnStartedAction, ChatTurnCancelledAction, InitializeResult, MessageEmbeddedResourceAttachment, ModelSelection, SessionModelInfo, SessionState, Snapshot, TerminalState } from '@microsoft/agent-host-protocol'
 import type { AgentHostTarget, AgentHostView } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
@@ -19,9 +19,11 @@ export type AgentHostEvent = { type: 'action'; envelope: ActionEnvelope } | { ty
 const commandSchema = z.object({ id: z.uuid(), hash: z.string().regex(/^[a-f0-9]{64}$/), state: z.enum(['pending', 'uncertain', 'confirmed', 'failed']) }).strict()
 const ledgerSchema = z.object({ schemaVersion: z.literal(2), target: agentHostTargetSchema, commands: z.array(commandSchema).max(1000) }).strict()
 type Command = z.infer<typeof commandSchema>
+type ModelCatalog = Pick<SessionModelInfo, 'id' | 'name' | 'provider' | 'configSchema'>[]
+type ActiveConnection = { client: AhpClient; abort: AbortController; traceId: string }
 
 export class AgentHostConnection {
-  private current?: { client: AhpClient; abort: AbortController; traceId: string }
+  private current?: ActiveConnection
   private opening?: Promise<void>
   private closed = false
   private connected = false
@@ -45,6 +47,12 @@ export class AgentHostConnection {
   private failures = 0
   private readonly file: string
   private initialized?: InitializeResult
+  private modelCatalog?: {
+    active: ActiveConnection
+    models?: ModelCatalog
+    pending?: Promise<ModelCatalog>
+    failed?: boolean
+  }
 
   constructor(readonly target: AgentHostTarget, directory: string, private readonly transport: (signal: AbortSignal, traceId: string) => Promise<AhpTransport>) {
     agentHostTargetSchema.parse(target)
@@ -195,6 +203,7 @@ export class AgentHostConnection {
         if (this.closed) { abort.abort(); await client.shutdown(); throw new Error('Agent Host view is closed.') }
         advance('initialize')
         this.current = active
+        this.modelCatalog = undefined
         client.connect()
         this.initialized = await client.initialize({ clientId: randomUUID(), protocolVersions: ['0.9.0'] })
         if (this.initialized.protocolVersion !== '0.9.0') throw new Error('Unsupported Agent Host protocol.')
@@ -394,7 +403,7 @@ export class AgentHostConnection {
     if (changed) { await this.save(); this.emit({ type: 'state' }) }
   }
 
-  async models(parentTraceId?: string) {
+  async models(parentTraceId?: string): Promise<ModelCatalog> {
     const started = performance.now()
     let step: NonNullable<AgentHostDiagnosticDetails['step']> = 'load'
     let traceId = this.current?.traceId
@@ -405,22 +414,58 @@ export class AgentHostConnection {
       traceId = active.traceId
       if (this.initialized?._meta?.taskcontinuumCanSend !== undefined && this.initialized._meta.taskcontinuumModelSelection !== true) throw new Error('Update Task Continuum on the owner device to select remote models.')
       step = 'root'
-      const { result, subscription } = await active.client.subscribe('ahp-root://')
-      let models
-      try {
-        if (this.current !== active || result.snapshot?.resource !== 'ahp-root://') throw new Error('The model catalog is unavailable.')
-        const root = z.object({ agents: z.array(z.object({ provider: z.string(), models: z.array(agentHostModelInfoSchema).max(1000) })).max(100) }).parse(result.snapshot.state)
-        const provider = (this.snapshots.get(this.target.sessionId)?.state as SessionState | undefined)?.provider
-        const agent = root.agents.find((item) => item.provider === provider)
-        if (!agent) throw new Error('The original session provider has no model catalog.')
-        models = agent.models.filter((model) => model.provider === provider && model.policyState !== 'disabled').map(({ id, name, provider, configSchema }) => ({ id, name, provider, ...(configSchema ? { configSchema } : {}) }))
-      } finally { await subscription.close() }
+      let catalog = this.modelCatalog
+      if (catalog?.active !== active || !catalog.pending) {
+        catalog = { active }
+        this.modelCatalog = catalog
+        const selected = catalog
+        selected.pending = this.loadModels(active).then((models) => {
+          if (this.current !== active || this.modelCatalog !== selected) throw new Error('The connection changed while loading models.')
+          selected.models = models
+          return models
+        }).catch((error: unknown) => {
+          selected.failed = true
+          throw error
+        }).finally(() => { selected.pending = undefined })
+      }
+      const models = await catalog.pending!
       this.diagnose('connection.models', { traceId: active.traceId, parentTraceId, status: 'ok', step, elapsedMs: performance.now() - started, count: models.length })
-      return models
+      return structuredClone(models)
     } catch (error) {
       this.diagnose('connection.models', { traceId, parentTraceId, status: 'error', step, elapsedMs: performance.now() - started, error })
       throw error
     }
+  }
+
+  private async loadModels(active: NonNullable<typeof this.current>): Promise<ModelCatalog> {
+    const { result, subscription } = await active.client.subscribe('ahp-root://')
+    try {
+      if (this.current !== active || result.snapshot?.resource !== 'ahp-root://') throw new Error('The model catalog is unavailable.')
+      const root = z.object({ agents: z.array(z.object({ provider: z.string(), models: z.array(agentHostModelInfoSchema).max(1000) })).max(100) }).parse(result.snapshot.state)
+      const provider = (this.snapshots.get(this.target.sessionId)?.state as SessionState | undefined)?.provider
+      const agent = root.agents.find((item) => item.provider === provider)
+      if (!agent) throw new Error('The original session provider has no model catalog.')
+      return agent.models.filter((model) => model.provider === provider && model.policyState !== 'disabled').map(({ id, name, provider, configSchema }) => ({ id, name, provider, ...(configSchema ? { configSchema } : {}) }))
+    } finally { await subscription.close() }
+  }
+
+  private async modelsForSend(): Promise<ModelCatalog> {
+    const catalog = this.modelCatalog
+    if (catalog && catalog.active === this.current) {
+      if (catalog.pending) return catalog.pending
+      if (catalog.failed) throw new Error('The model catalog could not be refreshed. Retry loading models before sending.')
+      if (catalog.models) return catalog.models
+    }
+    return this.models()
+  }
+
+  private validateModel(model: ModelSelection, models: ModelCatalog): void {
+    const provider = (this.snapshots.get(this.target.sessionId)?.state as SessionState | undefined)?.provider
+    const selected = models.find((item) => item.id === model.id && item.provider === provider)
+    if (!selected) throw new Error('The selected model is no longer available. Refresh the model list and choose another model.')
+    if (Object.keys(model.config ?? {}).length && this.initialized?._meta?.taskcontinuumCanSend !== undefined && this.initialized._meta.taskcontinuumModelConfig !== true) throw new Error('Update Task Continuum on the owner device to configure remote models.')
+    const errors = modelConfigErrors(selected.configSchema, model.config ?? {})
+    if (errors.length) throw new Error(errors.join(' '))
   }
 
   async send(id: string, text: string, images: ChatImageAttachment[] | undefined, authorize: () => Promise<void>, actor?: { clientId: string; machineName: string; username?: string }, model?: ModelSelection): Promise<void> {
@@ -444,12 +489,7 @@ export class AgentHostConnection {
       await authorize()
       if (command.model) {
         step = 'models'
-        const modelId = command.model.id
-        const selected = (await this.models()).find((item) => item.id === modelId)
-        if (!selected) throw new Error('The selected model is no longer available. Refresh the model list and choose another model.')
-        if (Object.keys(command.model.config ?? {}).length && this.initialized?._meta?.taskcontinuumCanSend !== undefined && this.initialized._meta.taskcontinuumModelConfig !== true) throw new Error('Update Task Continuum on the owner device to configure remote models.')
-        const errors = modelConfigErrors(selected.configSchema, command.model.config ?? {})
-        if (errors.length) throw new Error(errors.join(' '))
+        this.validateModel(command.model, await this.modelsForSend())
       }
       const active = this.current!
       step = 'snapshot'
@@ -472,6 +512,11 @@ export class AgentHostConnection {
       if (this.current !== active || !this.connected) throw new Error('The connection changed before sending. Nothing was sent.')
       const latest = this.chat.value!
       if (latest.activeTurn || latest.draft?.text || latest.draft?.attachments?.length || latest.queuedMessages?.length || latest.interactivity === 'read-only' || latest.interactivity === 'hidden') throw new Error('The original chat became busy or has a new draft. Nothing was sent.')
+      if (command.model) {
+        const catalog = this.modelCatalog
+        if (catalog?.active !== active || !catalog.models || catalog.pending || catalog.failed) throw new Error('The model catalog changed before sending. Retry after loading models. Nothing was sent.')
+        this.validateModel(command.model, catalog.models)
+      }
       const selection = latest.draft ?? latest.turns.at(-1)?.message
       const selectedModel = command.model ?? selection?.model
       const attachments: MessageEmbeddedResourceAttachment[] | undefined = command.images?.map((image) => ({ type: 'embeddedResource' as MessageEmbeddedResourceAttachment['type'], label: image.name, displayKind: 'image', contentType: image.mimeType, data: image.data, _meta: { taskcontinuumImageId: image.id } }))
@@ -515,6 +560,7 @@ export class AgentHostConnection {
     if (this.current !== active) return
     this.diagnose('connection.offline', { traceId: active.traceId, status: 'closed', reason })
     this.current = undefined
+    this.modelCatalog = undefined
     this.connected = false
     clearInterval(this.heartbeat)
     active.abort.abort()
