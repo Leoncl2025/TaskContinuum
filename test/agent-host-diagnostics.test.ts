@@ -15,12 +15,42 @@ import { connectAgentHostWebSocket, connectLocalAgentHost } from '../src/main/ag
 import { startAgentHostFixture } from './agent-host-fixture'
 import {
   agentHostDiagnosticChannel, agentHostDiagnosticMethod, flushAgentHostDiagnostics,
-  logAgentHostDiagnostic, startAgentHostDiagnostics, stopAgentHostDiagnostics,
+  logAgentHostDiagnostic, startAgentHostDiagnostics, stopAgentHostDiagnostics, captureAgentHostDiagnostics,
 } from '../src/main/agentHostDiagnostics'
 
 afterEach(async () => { await stopAgentHostDiagnostics() })
 
 describe('Agent Host diagnostic logs', () => {
+  it('exports separate send-phase timings without messages, model IDs or raw errors', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-ahp-send-phase-'))
+    const host = await startAgentHostFixture()
+    const target = { sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Private-owner' } }
+    const connection = new AgentHostConnection(target, directory, (signal) => connectLocalAgentHost(host.endpoint, signal))
+    const id = randomUUID()
+    try {
+      await startAgentHostDiagnostics(directory)
+      await connection.models()
+      await connection.send(id, 'secret message contents', undefined, async () => {}, undefined, { id: 'gpt-6' })
+      const capture = await captureAgentHostDiagnostics(directory, {}, new AbortController().signal)
+      const text = capture.jsonl.toString('utf8')
+      expect(capture.truncated).toBe(false)
+      for (const secret of ['secret message contents', 'gpt-6', id, host.chatId, host.sessionId]) expect(text).not.toContain(secret)
+      const events = text.trim().split('\n').map((line) => JSON.parse(line) as { event: string; step: string; elapsedMs: number; status: string })
+      const phases = events.filter((event) => event.event === 'connection.send.phase')
+      expect(phases.map((event) => event.step)).toEqual(['load', 'authorization', 'models', 'snapshot', 'snapshot-apply', 'reconcile', 'validation', 'ledger', 'authorization', 'validation', 'dispatch', 'confirmation'])
+      for (const event of phases) {
+        expect(event.status).toBe('ok')
+        expect(event.elapsedMs).toBeGreaterThanOrEqual(0)
+      }
+      host.action({ type: 'chat/turnComplete', turnId: id, duration: 1 })
+      await expect.poll(() => connection.view.chat?.activeTurn).toBeUndefined()
+      await expect(connection.send(randomUUID(), 'other secret', undefined, async () => { throw new Error('secret permission detail') })).rejects.toThrow()
+      const failure = await captureAgentHostDiagnostics(directory, {}, new AbortController().signal)
+      expect(failure.jsonl.toString()).not.toContain('secret permission detail')
+      expect(failure.jsonl.toString()).toContain('"errorKind":"other"')
+    } finally { await connection.close(); await host.close(); await stopAgentHostDiagnostics(); await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('records only allowlisted metadata and sanitizes error text and untrusted identifiers', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-ahp-diagnostics-'))
     const target = { sessionId: `copilotcli:/${randomUUID()}`, chatId: 'ahp-chat://private-chat', owner: { clientId: randomUUID(), machineName: 'private-machine' } }

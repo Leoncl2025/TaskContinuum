@@ -113,6 +113,12 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
     return () => { terminalDelays.delete(resource); release() }
   }
   return { endpoint, hostId, sessionId, chatId, dispatches, action, snapshot, addTerminal, historyTerminals, terminalAction,
+    historyText: (count: number, text: string) => {
+      chat = { ...chat, turns: Array.from({ length: count }, (_, index) => ({
+        id: `history-${index}`, state: 'complete', message: { text: `Question ${index}`, origin: { kind: MessageKind.User } },
+        responseParts: [{ kind: 'markdown', id: `answer-${index}`, content: text }], usage: undefined,
+      } as ChatState['turns'][number])) }
+    },
     modelQueries: () => modelQueries,
     failModels: (value: boolean) => { failModels = value },
     setModels: (models: RootState['agents'][number]['models']) => { root.agents[0].models = structuredClone(models) },

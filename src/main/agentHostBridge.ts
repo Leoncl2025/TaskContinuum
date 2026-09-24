@@ -8,6 +8,8 @@ import { agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminal
 import { logAgentHostDiagnostic } from './agentHostDiagnostics'
 import type { AgentHostManager } from './agentHostManager'
 import type { AgentHostConnection } from './agentHostConnection'
+import { isAgentHostTurnBoundary } from './agentHostConnection'
+import type { AgentHostEvent } from './agentHostConnection'
 import { readClientIdentity } from './clientIdentity'
 import { agentHostCreateRequestSchema, creationLocationSchema, creationTaskIdSchema } from './agentHostCreationProtocol'
 import { localAgentHostCreateRequestSchema } from './localAgentHostCreationService'
@@ -112,18 +114,29 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     let timer: ReturnType<typeof setTimeout> | undefined
     let stopped = false
     let refreshing = false
+    let dirty = false
+    let urgent = false
     const leases = new Map<string, Set<string>>()
     const publish = async () => {
       timer = undefined
       if (stopped || refreshing) return
       refreshing = true
+      dirty = false
+      urgent = false
       try {
         await current(event, window, root, target)
         if (!stopped) window.webContents.send('agent-host:view', { id, view: connection.view })
       } catch { close() }
-      finally { refreshing = false }
+      finally { refreshing = false; if (dirty && !stopped) schedule() }
     }
-    const schedule = () => { if (!timer && !stopped) timer = setTimeout(() => { void publish() }, 25) }
+    const schedule = (event?: AgentHostEvent) => {
+      if (stopped) return
+      dirty = true
+      urgent ||= event !== undefined && isAgentHostTurnBoundary(event)
+      if (refreshing) return
+      if (urgent) { clearTimeout(timer); timer = undefined; void publish() }
+      else if (!timer) timer = setTimeout(() => { void publish() }, 25)
+    }
     const unlisten = connection.listen(schedule)
     const close = () => {
       if (stopped) return
@@ -136,7 +149,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     }
     watches.set(id, { window, root, target, connection, leases, close })
     schedule()
-    void connection.open().catch(schedule)
+    void connection.open().catch(() => schedule())
     return id
   })
   ipcMain.handle('agent-host:unwatch', (event, value: unknown) => {

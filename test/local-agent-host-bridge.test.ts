@@ -4,6 +4,8 @@ import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { registerAgentHostBridge } from '../src/main/agentHostBridge'
 import type { AgentHostManager } from '../src/main/agentHostManager'
+import type { AgentHostEvent } from '../src/main/agentHostConnection'
+import type { ActionEnvelope } from '@microsoft/agent-host-protocol'
 import type { LocalAgentHostCreateRequest, LocalAgentHostCreation } from '../src/shared/localAgentHostCreation'
 import type { AgentHostCreateRequest, AgentHostCreationLocation, AgentHostWorker } from '../src/shared/agentHostCreation'
 
@@ -38,7 +40,7 @@ function fixture() {
   } }
   registerAgentHostBridge(requireWindow, currentRoot, manager as unknown as AgentHostManager)
   const invoke = (channel: string, ...values: unknown[]) => ipc.handlers.get(`agent-host:${channel}`)!({} as IpcMainInvokeEvent, ...values)
-  return { request, result, localCreations, manager, currentRoot, invoke,
+  return { request, result, localCreations, manager, currentRoot, invoke, window,
     change: (what: 'root' | 'window' | 'webContents' | 'identity') => {
       if (what === 'root') root = 'Q:\\different-workspace'
       if (what === 'window') destroyed = true
@@ -53,7 +55,7 @@ function terminalFixture() {
   const connection = {
     view: { target, state: 'connected' },
     open: vi.fn(async () => {}),
-    listen: vi.fn(() => () => {}),
+    listen: vi.fn<(listener: (event: AgentHostEvent) => void) => () => void>(() => () => {}),
     retainTerminal: vi.fn(),
     terminal: vi.fn(async () => {}),
     releaseTerminal: vi.fn(),
@@ -65,6 +67,39 @@ function terminalFixture() {
   })
   return { ...setup, target, connection, manager }
 }
+
+describe('timely Agent Host view publication', () => {
+  it('publishes turn boundaries without the text debounce and preserves updates during a publication', async () => {
+    vi.useFakeTimers()
+    const setup = terminalFixture()
+    let id: unknown
+    try {
+      id = await setup.invoke('watch', setup.target)
+      await vi.advanceTimersByTimeAsync(25)
+      const publish = vi.mocked(setup.window.webContents.send)
+      publish.mockClear()
+      const notify = setup.connection.listen.mock.calls[0][0]
+      publish.mockImplementationOnce(() => {
+        setup.connection.view = { ...setup.connection.view, state: 'offline' }
+        notify({ type: 'state' })
+      })
+      notify({ type: 'action', envelope: { channel: setup.target.chatId, serverSeq: 1, action: { type: 'chat/turnStarted' } } as ActionEnvelope })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(publish).toHaveBeenCalledOnce()
+      await vi.advanceTimersByTimeAsync(25)
+      expect(publish).toHaveBeenCalledTimes(2)
+      expect(publish.mock.calls[1][1]).toMatchObject({ id, view: { state: 'offline' } })
+      publish.mockClear()
+      setup.manager.authorize.mockRejectedValueOnce(new Error('Revoked.'))
+      notify({ type: 'action', envelope: { channel: setup.target.chatId, serverSeq: 2, action: { type: 'chat/turnComplete' } } as ActionEnvelope })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(publish).not.toHaveBeenCalled()
+    } finally {
+      if (id) await setup.invoke('unwatch', id)
+      vi.useRealTimers()
+    }
+  })
+})
 
 describe('local planning creation IPC', () => {
   it('derives the current root in main and forwards only the exact local creation contract', async () => {

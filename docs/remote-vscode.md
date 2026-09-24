@@ -242,6 +242,19 @@ access and uncertain delivery. Older gateways retain the previous client snapsho
 check. Model selection, explicit send UUIDs, durable ledgers and the no-replay rule
 are unchanged. There is no increased RPC timeout.
 
+Inside Task Continuum, send/cancel checks and delivery reconciliation read a small
+state summary and a turn-ID index instead of cloning the full transcript. The
+chat store owns one history snapshot; renderer views, exported snapshots and
+model/agent selections remain isolated copies. Terminal discovery reuses the
+completed-turn index while processing active-turn updates.
+Turn-start, completion, cancellation and error events flush the existing gateway event queue
+without the ordinary text batching delay, preserving ordering and current-access
+checks. The desktop likewise publishes these updates promptly and retains updates
+that arrive during an in-flight publication. Ordinary text still batches.
+The final owner-to-native chat snapshot check remains: `view.turns` in AHP is only
+an advisory history shape, not an atomic busy/draft validation API, and must not
+be used to silently replace or discard the retained chat history.
+
 Opening a chat restores the session and chat without subscribing to completed
 tool terminals from its history. Running tool terminals still stream live.
 Expanding a completed tool requests its full terminal output on demand; closing
@@ -341,13 +354,24 @@ To inspect just the timing and failure fields on either computer:
 $dir = Join-Path $env:APPDATA 'Task Continuum\agent-host-diagnostics'
 $files = Get-ChildItem -LiteralPath $dir -Filter 'agent-host*.jsonl' -File
 Get-Content -LiteralPath $files.FullName | ConvertFrom-Json |
-  Where-Object { $_.event -in 'ipc.models', 'device.transport', 'connection.open', 'connection.models', 'connection.subscribe', 'connection.heartbeat', 'connection.offline', 'connection.retry', 'gateway.upgrade', 'gateway.models', 'gateway.request', 'gateway.socket' } |
+  Where-Object { $_.event -in 'ipc.models', 'device.transport', 'connection.open', 'connection.models', 'connection.subscribe', 'connection.send', 'connection.send.phase', 'connection.heartbeat', 'connection.offline', 'connection.retry', 'gateway.upgrade', 'gateway.models', 'gateway.request', 'gateway.socket' } |
   Sort-Object timeUtc |
   Select-Object timeUtc, event, status, traceId, parentTraceId, targetHash, step, method, channel, elapsedMs, queueMs, authMs, pending, reason, retryMs, errorKind, rpcCode, errorMethod, timeoutMs
 ```
 
 Use the overridden data directory instead of `$env:APPDATA` if
 `TASKCONTINUUM_DATA_DIR` is set.
+
+`connection.send` retains its overall send-to-turn-confirmation duration.
+`connection.send.phase` adds non-overlapping per-phase durations for load,
+authorization, cached model validation, snapshot fetch (`snapshot`, including
+transport/JSON decoding), owned-state acceptance (`snapshot-apply`), reconciliation,
+validation, durable pre-dispatch ledger write, dispatch and confirmation.
+Repeated authorization/validation phases are expected. These are TC timings:
+confirmation means the original Host echoed the turn, not that the SDK has
+started processing the prompt or the model has emitted its first token.
+The log exporter preserves these timings but still excludes text, model IDs,
+paths and raw exception messages.
 
 Reproduce the issue with **Retry loading models**, not a new message. Match
 the A-side `connection.models` event to the B-side `gateway.models` event by

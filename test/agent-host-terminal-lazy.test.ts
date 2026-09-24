@@ -70,6 +70,29 @@ async function gatewaySetup(delayMs = 0) {
 }
 
 describe('Agent Host terminal demand', () => {
+  it('flushes turn confirmations immediately with earlier queued actions in order', async () => {
+    const setup = await gatewaySetup()
+    const setTimer = globalThis.setTimeout
+    let timerSpy: ReturnType<typeof vi.spyOn> | undefined
+    try {
+      const client = await setup.client()
+      const { subscription } = await client.subscribe(setup.target.chatId)
+      timerSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, delay, ...args) => setTimer(callback, delay === 25 ? 60_000 : delay, ...args))
+      const id = randomUUID()
+      setup.host.action({ type: 'chat/turnStarted', turnId: id, startedAt: new Date().toISOString(), message: { text: 'Immediate echo', origin: { kind: 'user' } } })
+      const start = await subscription.next()
+      expect(start.value).toMatchObject({ type: 'action', params: { action: { type: 'chat/turnStarted', turnId: id } } })
+      setup.host.action({ type: 'chat/responsePart', turnId: id, part: { kind: 'markdown', id: 'answer', content: '' } })
+      setup.host.action({ type: 'chat/delta', turnId: id, partId: 'answer', content: 'Queued text' })
+      await expect.poll(() => setup.connection.view.chat?.activeTurn?.responseParts).toContainEqual({ kind: 'markdown', id: 'answer', content: 'Queued text' })
+      setup.host.action({ type: 'chat/turnComplete', turnId: id, duration: 1 })
+      const pending = [await subscription.next(), await subscription.next(), await subscription.next()]
+      expect(pending.map((event) => event.value?.type === 'action' ? event.value.params.action.type : undefined)).toEqual(['chat/responsePart', 'chat/delta', 'chat/turnComplete'])
+      const seq = pending.map((event) => event.value?.type === 'action' ? event.value.params.serverSeq : -1)
+      expect(seq).toEqual([...seq].sort((a, b) => a - b))
+    } finally { timerSpy?.mockRestore(); await setup.close() }
+  })
+
   it('keeps the owner draft guard when a capable client skips its pre-send snapshot round trip', async () => {
     const setup = await gatewaySetup()
     const remote = new AgentHostConnection(setup.target, setup.root, (signal) => setup.transport(signal))

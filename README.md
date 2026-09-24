@@ -215,6 +215,9 @@ Sending validates against the catalog already loaded for that connection rather
 than querying models again on both desktops for every message. Explicit model
 refresh still fetches the current catalog; reconnect discards the old cache.
 An explicit refresh failure blocks sending until model loading succeeds again.
+Send checks use lightweight state summaries instead of repeatedly copying the
+transcript. Turn confirmations are published without the ordinary text batching
+delay; owner draft checks and durable no-replay records remain in place.
 Both desktops need this update for remote model selection; an older owner gateway
 is rejected with an update message. Model selection does not change native tool
 approvals or create a new conversation.

@@ -10,6 +10,7 @@ import { agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminal
 import { AGENT_HOST_TRACE_HEADER, agentHostDiagnosticChannel, agentHostDiagnosticMethod, logAgentHostDiagnostic } from './agentHostDiagnostics'
 import type { AgentHostDiagnosticDetails } from './agentHostDiagnostics'
 import type { AgentHostConnection } from './agentHostConnection'
+import { isAgentHostTurnBoundary } from './agentHostConnection'
 import { AgentHostGatewayScheduler } from './agentHostGatewayScheduler'
 
 export interface AgentHostAccess { canSend: boolean; actor: { clientId: string; machineName: string; username?: string } }
@@ -95,6 +96,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
     let queuedEvents = 0
     let flushTimer: ReturnType<typeof setTimeout> | undefined
     let flushing = false
+    let urgent = false
     let pendingRequests = 0
     let closeReason: AgentHostDiagnosticDetails['reason']
     const authorize = async (send: boolean) => {
@@ -134,9 +136,11 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
       releaseTerminal(resource)
     }
     async function flush(): Promise<void> {
+      clearTimeout(flushTimer)
       flushTimer = undefined
       if (flushing || closed) return
       flushing = true
+      urgent = false
       try {
         await authorize(false)
         const batch = queue
@@ -149,10 +153,10 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
         logAgentHostDiagnostic('gateway.socket', { target, traceId, status: 'error', step: 'authorization', error })
         fail('access-changed')
       }
-      finally { flushing = false; if (queue.length && !closed) flushTimer = setTimeout(() => { void flush() }, 25) }
+      finally { flushing = false; if (queue.length && !closed) flushTimer = setTimeout(() => { void flush() }, urgent ? 0 : 25) }
     }
     const unlisten = connection.listen((event) => {
-      if (event.type === 'state') { if (connection.view.state !== 'connected') fail('owner-offline'); return }
+      if (event.type === 'state') { if (connection.state !== 'connected') fail('owner-offline'); return }
       if (event.type !== 'action' || event.envelope.channel === target.sessionId) return
       const resource = event.envelope.channel
       const pending = pendingSubscriptions.get(resource)
@@ -165,7 +169,9 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
       if (pending) pending.events.push(event.envelope)
       else {
         queue.push(event.envelope)
-        if (!flushTimer && !flushing) flushTimer = setTimeout(() => { void flush() }, 25)
+        urgent ||= isAgentHostTurnBoundary(event)
+        if (urgent && !flushing) void flush()
+        else if (!flushTimer && !flushing) flushTimer = setTimeout(() => { void flush() }, 25)
       }
     })
     let checking = false

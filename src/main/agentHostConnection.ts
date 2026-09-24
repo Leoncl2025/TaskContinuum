@@ -16,6 +16,9 @@ import { agentHostKey, agentHostModelInfoSchema, agentHostModelSelectionSchema, 
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 
 export type AgentHostEvent = { type: 'action'; envelope: ActionEnvelope } | { type: 'snapshot'; snapshot: Snapshot } | { type: 'state' }
+export function isAgentHostTurnBoundary(event: AgentHostEvent): boolean {
+  return event.type === 'action' && ['chat/turnStarted', 'chat/turnComplete', 'chat/turnCancelled', 'chat/error', 'chat/turnResume'].includes(event.envelope.action.type)
+}
 const commandSchema = z.object({ id: z.uuid(), hash: z.string().regex(/^[a-f0-9]{64}$/), state: z.enum(['pending', 'uncertain', 'confirmed', 'failed', 'abandoned']) }).strict()
 const ledgerSchema = z.object({ schemaVersion: z.literal(2), target: agentHostTargetSchema, commands: z.array(commandSchema).max(1000) }).strict()
 type Command = z.infer<typeof commandSchema>
@@ -65,23 +68,30 @@ export class AgentHostConnection {
     logAgentHostDiagnostic(event, { target: this.target, ...details })
   }
 
+  get state(): AgentHostView['state'] { return this.connected ? 'connected' : this.opening ? 'connecting' : 'offline' }
+  private get readOnly(): boolean { return this.initialized?._meta?.taskcontinuumCanSend === false || this.chat.sendState.readOnly }
+
   get view(): AgentHostView {
     const chat = this.chat.value
     const pending = this.commands.find((command) => command.state === 'pending' || command.state === 'uncertain')
-    const readOnly = this.initialized?._meta?.taskcontinuumCanSend === false || chat?.interactivity === 'read-only' || chat?.interactivity === 'hidden'
-    return { target: this.target, state: this.connected ? 'connected' : this.opening ? 'connecting' : 'offline', chat,
+    const readOnly = this.readOnly
+    return { target: this.target, state: this.state, chat,
       terminals: Object.fromEntries([...this.snapshots].filter(([resource]) => this.referencedTerminals.has(resource)).map(([resource, snapshot]) => [resource, structuredClone(snapshot.state) as TerminalState])),
-      terminalStatus: Object.fromEntries([...this.terminalStatus].filter(([resource]) => this.referencedTerminals.has(resource))),
+      terminalStatus: Object.fromEntries([...this.terminalStatus].filter(([resource]) => this.referencedTerminals.has(resource)).map(([resource, status]) => [resource, { ...status }])),
       canSend: this.connected && !readOnly && !pending && !this.sending && !chat?.activeTurn && !chat?.draft?.text && !chat?.draft?.attachments?.length && !chat?.queuedMessages?.length, readOnly,
       error: this.error, ...(pending ? { pendingTurn: { id: pending.id, state: pending.state as 'pending' | 'uncertain' } } : {}) }
   }
 
   get handshake(): InitializeResult {
     if (!this.initialized || !this.connected) throw new Error('Agent Host is offline.')
-    return { protocolVersion: this.initialized.protocolVersion, serverSeq: Math.max(0, ...[...this.snapshots.values()].map((snapshot) => snapshot.fromSeq)), snapshots: [], terminalCommandPrefix: this.initialized.terminalCommandPrefix }
+    return { protocolVersion: this.initialized.protocolVersion, serverSeq: Math.max(0, this.chat.lastSequence, ...[...this.snapshots.values()].map((snapshot) => snapshot.fromSeq)), snapshots: [], terminalCommandPrefix: this.initialized.terminalCommandPrefix }
   }
 
   snapshot(resource: string): Snapshot {
+    if (resource === this.target.chatId) {
+      if (!this.connected || !this.chat.loaded) throw new Error('This Agent Host channel is unavailable.')
+      return this.chat.toSnapshot()!
+    }
     const snapshot = this.snapshots.get(resource)
     if (!this.connected || !snapshot) throw new Error('This Agent Host channel is unavailable.')
     if (resource === this.target.sessionId) {
@@ -166,8 +176,8 @@ export class AgentHostConnection {
   }
 
   private save(): Promise<void> {
-    const ledger = structuredClone({ schemaVersion: 2, target: this.target, commands: this.commands })
-    const operation = this.writing.then(() => writeJsonAtomic(`${this.file}.commands.json`, ledgerSchema.parse(ledger)))
+    const ledger = ledgerSchema.parse({ schemaVersion: 2, target: this.target, commands: this.commands })
+    const operation = this.writing.then(() => writeJsonAtomic(`${this.file}.commands.json`, ledger))
     this.writing = operation.catch(() => undefined)
     return operation
   }
@@ -296,14 +306,14 @@ export class AgentHostConnection {
 
   private acceptSnapshot(snapshot: Snapshot): void {
     if (!Number.isSafeInteger(snapshot.fromSeq) || snapshot.fromSeq < 0 || !this.allowedChannel(snapshot.resource)) throw new Error('Invalid Agent Host snapshot identity.')
-    if ((this.snapshots.get(snapshot.resource)?.fromSeq ?? -1) > snapshot.fromSeq) return
+    if ((snapshot.resource === this.target.chatId ? this.chat.lastSequence : this.snapshots.get(snapshot.resource)?.fromSeq ?? -1) > snapshot.fromSeq) return
     if (snapshot.resource === this.target.sessionId && !(snapshot.state as SessionState).chats?.some((chat) => chat.resource === this.target.chatId && chat.interactivity !== 'hidden')) throw new Error('The chat is not a visible member of this original session.')
     if (agentHostTerminalIdSchema.safeParse(snapshot.resource).success) {
       const state = snapshot.state as TerminalState
       if (!Array.isArray(state.content) || state.claim?.kind !== 'session' || state.claim.session !== this.target.sessionId || state.claim.chat !== this.target.chatId) throw new Error('The terminal does not belong to the linked chat.')
     }
     if (snapshot.resource === this.target.chatId) this.chat.snapshot(snapshot)
-    this.snapshots.set(snapshot.resource, structuredClone(snapshot))
+    else this.snapshots.set(snapshot.resource, structuredClone(snapshot))
     if (snapshot.resource === this.target.chatId) this.refreshTerminals()
     this.emit({ type: 'snapshot', snapshot })
   }
@@ -325,21 +335,25 @@ export class AgentHostConnection {
         }
         if (event.type !== 'action') continue
         const envelope = event.params
-        const prior = this.snapshots.get(envelope.channel)
-        if (!prior || !this.allowedChannel(envelope.channel) || !Number.isSafeInteger(envelope.serverSeq)) throw new Error('Agent Host event identity changed.')
-        if (envelope.serverSeq <= prior.fromSeq) continue
-        let state: Snapshot['state']
-        if (envelope.channel === this.target.chatId) { this.chat.apply(envelope); state = this.chat.value! }
-        else if (envelope.channel === this.target.sessionId && envelope.action.type.startsWith('session/')) state = sessionReducer(prior.state as SessionState, envelope.action as Parameters<typeof sessionReducer>[1])
-        else if (agentHostTerminalIdSchema.safeParse(envelope.channel).success && envelope.action.type.startsWith('terminal/')) state = terminalReducer(prior.state as TerminalState, envelope.action as Parameters<typeof terminalReducer>[1])
-        else throw new Error('Unexpected Agent Host action.')
-        if (envelope.channel === this.target.sessionId && !(state as SessionState).chats.some((chat) => chat.resource === this.target.chatId && chat.interactivity !== 'hidden')) throw new Error('The selected chat is no longer available in this session.')
-        if (agentHostTerminalIdSchema.safeParse(envelope.channel).success) {
-          const terminal = state as TerminalState
-          if (terminal.claim.kind !== 'session' || terminal.claim.session !== this.target.sessionId || terminal.claim.chat !== this.target.chatId) throw new Error('The terminal changed ownership.')
+        if (!this.allowedChannel(envelope.channel) || !Number.isSafeInteger(envelope.serverSeq)) throw new Error('Agent Host event identity changed.')
+        if (envelope.channel === this.target.chatId) {
+          if (!this.chat.apply(envelope)) continue
+          this.refreshTerminals()
+        } else {
+          const prior = this.snapshots.get(envelope.channel)
+          if (!prior) throw new Error('Agent Host channel needs a snapshot.')
+          if (envelope.serverSeq <= prior.fromSeq) continue
+          let state: Snapshot['state']
+          if (envelope.channel === this.target.sessionId && envelope.action.type.startsWith('session/')) state = sessionReducer(prior.state as SessionState, envelope.action as Parameters<typeof sessionReducer>[1])
+          else if (agentHostTerminalIdSchema.safeParse(envelope.channel).success && envelope.action.type.startsWith('terminal/')) state = terminalReducer(prior.state as TerminalState, envelope.action as Parameters<typeof terminalReducer>[1])
+          else throw new Error('Unexpected Agent Host action.')
+          if (envelope.channel === this.target.sessionId && !(state as SessionState).chats.some((chat) => chat.resource === this.target.chatId && chat.interactivity !== 'hidden')) throw new Error('The selected chat is no longer available in this session.')
+          if (agentHostTerminalIdSchema.safeParse(envelope.channel).success) {
+            const terminal = state as TerminalState
+            if (terminal.claim.kind !== 'session' || terminal.claim.session !== this.target.sessionId || terminal.claim.chat !== this.target.chatId) throw new Error('The terminal changed ownership.')
+          }
+          this.snapshots.set(envelope.channel, { resource: envelope.channel, fromSeq: envelope.serverSeq, state })
         }
-        this.snapshots.set(envelope.channel, { resource: envelope.channel, fromSeq: envelope.serverSeq, state })
-        if (envelope.channel === this.target.chatId) this.refreshTerminals()
         this.emit({ type: 'action', envelope })
         void this.reconcile().catch(() => { this.error = 'Delivery confirmation could not be saved. Inspect the owner before retrying.'; this.emit({ type: 'state' }) })
         if (envelope.channel === this.target.chatId) this.discoverActiveTerminals()
@@ -357,17 +371,7 @@ export class AgentHostConnection {
   }
 
   private refreshTerminals(): void {
-    const chat = this.chat.value
-    const referenced = new Set<string>()
-    const active = new Set<string>()
-    const currentTurn = chat?.activeTurn
-    for (const turn of [...chat?.turns ?? [], ...currentTurn ? [currentTurn] : []]) for (const part of turn.responseParts) {
-      if (part.kind !== 'toolCall' || !('content' in part.toolCall)) continue
-      for (const content of part.toolCall.content ?? []) if (content.type === 'terminal' && agentHostTerminalIdSchema.safeParse(content.resource).success) {
-        referenced.add(content.resource)
-        if (turn === currentTurn && (part.toolCall.status === 'running' || part.toolCall.status === 'auth-required')) active.add(content.resource)
-      }
-    }
+    const { referenced, active } = this.chat.terminalResources
     this.referencedTerminals = referenced
     this.activeTerminals = active
     for (const resource of this.terminalSubscriptions.keys()) if (!referenced.has(resource) || !active.has(resource) && !this.terminalLeases.has(resource)) this.stopTerminal(resource)
@@ -398,9 +402,8 @@ export class AgentHostConnection {
   }
 
   private async reconcile(): Promise<void> {
-    const chat = this.chat.value
     let changed = false
-    for (const command of this.commands) if ((command.state === 'pending' || command.state === 'uncertain') && (chat?.activeTurn?.id === command.id || chat?.turns.some((turn) => turn.id === command.id))) { command.state = 'confirmed'; changed = true }
+    for (const command of this.commands) if ((command.state === 'pending' || command.state === 'uncertain') && this.chat.hasTurn(command.id)) { command.state = 'confirmed'; changed = true }
     if (changed) { await this.save(); this.emit({ type: 'state' }) }
   }
 
@@ -483,56 +486,68 @@ export class AgentHostConnection {
     this.diagnose('connection.send', { traceId, status: 'begin', step, dispatched: false })
     let record: Command | undefined
     let dispatched = false
+    let phaseStarted = started
+    const phase = (next: NonNullable<AgentHostDiagnosticDetails['step']>) => {
+      this.diagnose('connection.send.phase', { traceId, status: 'ok', step, elapsedMs: performance.now() - phaseStarted, dispatched })
+      step = next
+      phaseStarted = performance.now()
+    }
     try {
       await this.open()
       traceId = this.current?.traceId
-      step = 'authorization'
+      phase('authorization')
       await authorize()
       if (command.model) {
-        step = 'models'
+        phase('models')
         this.validateModel(command.model, await this.modelsForSend())
       }
       const active = this.current!
-      step = 'snapshot'
       if (this.initialized?._meta?.taskcontinuumCanSend === undefined || this.initialized._meta.taskcontinuumStreamedSendValidation !== true) {
+        phase('snapshot')
         const fresh = await active.client.request('subscribe', { channel: this.target.chatId })
         if (this.current !== active || !fresh.snapshot) throw new Error('The connection changed before sending. Nothing was sent.')
+        phase('snapshot-apply')
         this.acceptSnapshot(fresh.snapshot)
       }
-      if (this.current !== active || !this.connected || !this.chat.value) throw new Error('The connection changed before sending. Nothing was sent.')
+      phase('reconcile')
+      if (this.current !== active || !this.connected || !this.chat.loaded) throw new Error('The connection changed before sending. Nothing was sent.')
       await this.reconcile()
-      step = 'validation'
+      phase('validation')
       const hash = createHash('sha256').update(JSON.stringify(command)).digest('hex')
       const prior = this.commands.find((item) => item.id === id)
       if (prior) { if (prior.hash !== hash) throw new Error('This message ID belongs to different content.'); if (prior.state === 'confirmed') return; throw new Error('This message was already attempted. Inspect the original; it was not replayed.') }
-      const chat = this.chat.value!
-      if (this.initialized?._meta?.taskcontinuumCanSend === false || this.commands.some((item) => item.state === 'pending' || item.state === 'uncertain') || chat.activeTurn || chat.draft?.text || chat.draft?.attachments?.length || chat.queuedMessages?.length || chat.interactivity === 'read-only' || chat.interactivity === 'hidden') throw new Error('The original chat is busy, has a draft, is read-only, or has an uncertain delivery.')
+      const chat = this.chat.sendState
+      if (this.readOnly || this.commands.some((item) => item.state === 'pending' || item.state === 'uncertain') || chat.activeTurnId || chat.hasDraft || chat.hasQueuedMessages) throw new Error('The original chat is busy, has a draft, is read-only, or has an uncertain delivery.')
       if (this.commands.length >= 1000) throw new Error('Delivery record limit reached. No message was sent.')
-      step = 'ledger'
+      phase('ledger')
       record = { id, hash, state: 'pending' }
       this.commands.push(record)
       await this.save()
+      phase('authorization')
       await authorize()
+      phase('validation')
       if (this.current !== active || !this.connected) throw new Error('The connection changed before sending. Nothing was sent.')
-      const latest = this.chat.value!
-      if (latest.activeTurn || latest.draft?.text || latest.draft?.attachments?.length || latest.queuedMessages?.length || latest.interactivity === 'read-only' || latest.interactivity === 'hidden') throw new Error('The original chat became busy or has a new draft. Nothing was sent.')
+      const latest = this.chat.sendState
+      if (this.readOnly || latest.activeTurnId || latest.hasDraft || latest.hasQueuedMessages) throw new Error('The original chat became busy or has a new draft. Nothing was sent.')
       if (command.model) {
         const catalog = this.modelCatalog
         if (catalog?.active !== active || !catalog.models || catalog.pending || catalog.failed) throw new Error('The model catalog changed before sending. Retry after loading models. Nothing was sent.')
         this.validateModel(command.model, catalog.models)
       }
-      const selection = latest.draft ?? latest.turns.at(-1)?.message
+      const selection = this.chat.selection
       const selectedModel = command.model ?? selection?.model
       const attachments: MessageEmbeddedResourceAttachment[] | undefined = command.images?.map((image) => ({ type: 'embeddedResource' as MessageEmbeddedResourceAttachment['type'], label: image.name, displayKind: 'image', contentType: image.mimeType, data: image.data, _meta: { taskcontinuumImageId: image.id } }))
       const action: ChatTurnStartedAction = { type: 'chat/turnStarted' as ChatTurnStartedAction['type'], turnId: id, startedAt: new Date().toISOString(), message: { text: command.text, origin: { kind: MessageKind.User }, ...(attachments?.length ? { attachments } : {}), ...(selection?.agent ? { agent: selection.agent } : {}), ...(selectedModel ? { model: selectedModel } : {}), ...(actor ? { _meta: { taskcontinuumActor: actor } } : {}) } }
-      step = 'dispatch'
+      phase('dispatch')
       dispatched = true
       active.client.dispatch(this.target.chatId, action)
       this.emit({ type: 'state' })
-      step = 'confirmation'
+      phase('confirmation')
       await this.waitForTurn(id, active)
+      this.diagnose('connection.send.phase', { traceId, status: 'ok', step, elapsedMs: performance.now() - phaseStarted, dispatched })
       this.diagnose('connection.send', { traceId: active.traceId, status: 'ok', step, elapsedMs: performance.now() - started, dispatched })
     } catch (error) {
+      this.diagnose('connection.send.phase', { traceId, status: 'error', step, elapsedMs: performance.now() - phaseStarted, dispatched, error })
       this.diagnose('connection.send', { traceId, status: 'error', step, elapsedMs: performance.now() - started, dispatched, error })
       if (record && record.state !== 'confirmed') { record.state = dispatched ? 'uncertain' : 'failed'; await this.save() }
       throw error
@@ -543,8 +558,7 @@ export class AgentHostConnection {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { stop(); reject(new Error('Delivery was not confirmed. Inspect the original chat; no automatic replay.')) }, 15000)
       const check = () => {
-        const chat = this.chat.value
-        if (chat?.activeTurn?.id === id || chat?.turns.some((turn) => turn.id === id)) { stop(); resolve() }
+        if (this.chat.hasTurn(id)) { stop(); resolve() }
         else if (this.current !== active) { stop(); reject(new Error('Disconnected before confirmation. Inspect the original chat; no automatic replay.')) }
       }
       const unlisten = this.listen(check)
@@ -579,8 +593,7 @@ export class AgentHostConnection {
       if (latest?.state === 'confirmed') return 'confirmed'
       if (latest !== record || latest.state !== 'uncertain') throw new Error('The delivery record changed while reviewing it.')
       if (action === 'check') return 'not-found'
-      const chat = this.chat.value
-      if (chat?.activeTurn?.id === id || chat?.turns.some((turn) => turn.id === id)) {
+      if (this.chat.hasTurn(id)) {
         record.state = 'confirmed'
         try { await this.save() } catch (error) { if (record.state === 'confirmed') record.state = 'uncertain'; throw error }
         this.emit({ type: 'state' })
@@ -597,7 +610,7 @@ export class AgentHostConnection {
   async cancel(turnId: string, authorize: () => Promise<void>): Promise<void> {
     await authorize()
     const active = this.current
-    if (!active || !this.connected || this.view.readOnly || this.chat.value?.activeTurn?.id !== turnId) throw new Error('This exact turn is no longer running or control is not permitted.')
+    if (!active || !this.connected || this.readOnly || this.chat.sendState.activeTurnId !== turnId) throw new Error('This exact turn is no longer running or control is not permitted.')
     active.client.dispatch(this.target.chatId, { type: 'chat/turnCancelled' as ChatTurnCancelledAction['type'], turnId, duration: 0 })
   }
 
@@ -636,7 +649,7 @@ export class AgentHostConnection {
     if (this.current) this.offline(this.current, 'shutdown')
     await this.opening?.catch(() => undefined)
     await this.writing
-    const chat = this.snapshots.get(this.target.chatId)
+    const chat = this.chat.toSnapshot()
     if (chat && Buffer.byteLength(JSON.stringify(chat)) < 15 * 1024 * 1024) await writeJsonAtomic(`${this.file}.cache.json`, { schemaVersion: 2, target: this.target, chat })
     this.listeners.clear()
     this.diagnose('connection.close', { status: 'closed', reason: 'shutdown' })
