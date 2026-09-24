@@ -222,6 +222,9 @@ backend replacement, trust changes and provisional expiry invalidate reuse.
 When active synchronization prevents reuse, requests fall back to the original
 full verification rather than using stale cached permission or rejecting an
 otherwise valid connection solely because configuration is changing.
+If a read's completion queues another local transaction, authorization waits for
+that transaction and rechecks its version. It never removes another process's
+transaction lock or reuses permission while that external lock is held.
 This does not cache a connection-wide authorization decision: each request still
 checks current pairing, workspace/read/send scope and the owner's private receipt.
 Receipts are read again rather than cached. Unversioned policy providers continue

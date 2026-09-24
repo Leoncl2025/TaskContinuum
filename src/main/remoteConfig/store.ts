@@ -233,8 +233,12 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       const cached = this.authorizationCache
       if (cached?.inputs === before && now >= cached.from && now < cached.until) return { snapshot: cached.snapshot, generation }
       this.authorizationCache = undefined
-      const fresh = await this.read()
+      const reading = this.read()
       const afterGeneration = this.generation
+      const fresh = await reading
+      // A read can finish while its change notifications have already queued another transaction.
+      // Capture our generation before awaiting it, not the generation of that newer lock holder.
+      if (afterGeneration !== this.generation) continue
       let after: string
       try { after = await inputs() }
       catch (error) { if (afterGeneration !== this.generation) continue; throw error }
@@ -245,8 +249,10 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       if (!fresh.resolution.blocked) this.authorizationCache = { inputs: after, snapshot: structuredClone(snapshot), from: now, until: Math.min(Infinity, ...expiries) }
       return { snapshot, generation: afterGeneration }
     }
-    const fresh = await this.read()
-    return { snapshot: { document: fresh.document, revision: fresh.revision }, generation: this.generation }
+    const reading = this.read()
+    const generation = this.generation
+    const fresh = await reading
+    return { snapshot: { document: fresh.document, revision: fresh.revision }, generation }
   }
 
   /** Canonical plus locally durable records; provisional SSH records are not exportable authority. */

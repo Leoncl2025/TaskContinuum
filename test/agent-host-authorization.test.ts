@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { randomUUID } from 'node:crypto'
-import { link, mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { link, mkdir, mkdtemp, open, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -208,6 +208,47 @@ describe('verified Agent Host authorization fast path', () => {
     for (const snapshot of await reading) expect(snapshot.document.bindings['T-0001']).toBeUndefined()
   })
 
+  it('waits when a follow-up transaction already holds the lock as the cold read finishes', async () => {
+    const f = await fixture()
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    let update: Promise<unknown> | undefined
+    f.read.mockImplementationOnce(async () => {
+      const snapshot = await f.originalRead()
+      update = f.store.writeBinding('T-0001', null, snapshot.revision, async () => { entered(); await gate })
+      await started
+      return snapshot
+    })
+    const outcome = Promise.all([readRepositorySessionLinksForAuthorization(f.root), readRepositorySessionLinksForAuthorization(f.root)]).then(
+      (snapshot) => ({ snapshot, error: undefined }),
+      (error: unknown) => ({ snapshot: undefined, error }),
+    )
+    try {
+      await started
+      await new Promise<void>((resolve) => setTimeout(resolve, 60))
+      release()
+      await update
+      const result = await outcome
+      expect(result.error).toBeUndefined()
+      expect(result.snapshot).toHaveLength(2)
+      for (const snapshot of result.snapshot ?? []) expect(snapshot.document.bindings['T-0001']).toBeUndefined()
+    } finally { release(); await update; await outcome }
+  })
+
+  it('does not delete an external transaction lock or return cached permission while it is held', async () => {
+    const f = await fixture()
+    await readRepositorySessionLinksForAuthorization(f.root)
+    const path = join(f.stateDirectory, 'store.lock')
+    const lock = await open(path, 'wx', 0o600)
+    try {
+      await expect(readRepositorySessionLinksForAuthorization(f.root)).rejects.toMatchObject({ code: 'store-busy' })
+      expect((await stat(path)).isFile()).toBe(true)
+      f.deny()
+    } finally { await lock.close(); await rm(path) }
+    expect((await readRepositorySessionLinksForAuthorization(f.root)).document.bindings['T-0001']).toBeUndefined()
+  })
   it('rejects a detached backend after an in-flight read completes', async () => {
     const f = await fixture()
     let release!: () => void
