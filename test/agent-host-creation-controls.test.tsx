@@ -411,6 +411,25 @@ describe('explicit remote Agent Host creation', () => {
     expect(bridge.send).not.toHaveBeenCalled()
   })
 
+  it('reports creation failure without waiting for a slow worker catalogue and never retries create automatically', async () => {
+    const { bridge, worker, operation } = fixture()
+    const pending = operation('creating')
+    let release!: (value: AgentHostWorker[]) => void
+    vi.mocked(bridge.creationWorkers).mockImplementationOnce(() => new Promise((resolve) => { release = resolve }))
+    vi.mocked(bridge.creationStatus).mockResolvedValueOnce({ ...pending, state: 'failed',
+      error: 'Creation stopped during the final authorization check. No native create request was dispatched.' })
+    render(<AgentHostCreationControls taskId="T-0002" taskReady />)
+    try {
+      await screen.findByRole('heading', { name: 'Creation failed · T-0002' })
+      expect(screen.getByText(/Creation stopped during the final authorization check/)).toBeInTheDocument()
+      expect(bridge.creationStatus).toHaveBeenCalledExactlyOnceWith(pending.operationId)
+      expect(bridge.create).not.toHaveBeenCalled()
+      expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    } finally { await act(async () => { release([worker]) }) }
+    expect(bridge.create).not.toHaveBeenCalled()
+    expect(bridge.bindCreation).not.toHaveBeenCalled()
+  })
+
   it('shows unavailable APIs in an older preload while existing linking still works', async () => {
     const { session } = fixture()
     const list = vi.fn(async () => ({ sessions: [session], warnings: [] }))

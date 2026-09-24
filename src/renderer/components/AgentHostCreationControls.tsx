@@ -114,11 +114,13 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
   async function refresh(clearError = false, mode: Activity = 'foreground'): Promise<void> {
     await run(async (scope) => {
       const previouslyPending = new Set(savedOperations.current.filter(pending).map((operation) => operation.operationId))
-      const [catalogue, history] = await Promise.allSettled([location === 'local' ? bridge!.creationWorkers(taskId!, 'local') : bridge!.creationWorkers(taskId!), bridge!.creations(taskId!)])
-      if (!scope.active) return
-      if (catalogue.status === 'fulfilled') {
-        const localWorkers = catalogue.value.filter((item) => item.local === true)
-        const availableWorkers = location === 'local' ? (localWorkers.length === 1 ? localWorkers : []) : catalogue.value
+      const catalogue = (async () => {
+        let value: AgentHostWorker[]
+        try { value = await (location === 'local' ? bridge!.creationWorkers(taskId!, 'local') : bridge!.creationWorkers(taskId!)) }
+        catch (failure) { if (scope.active) { setCatalogueError(failureMessage(failure)); setCatalogueLoaded(false) }; return }
+        if (!scope.active) return
+        const localWorkers = value.filter((item) => item.local === true)
+        const availableWorkers = location === 'local' ? (localWorkers.length === 1 ? localWorkers : []) : value
         setWorkers(availableWorkers)
         if (location === 'local') {
           const localWorker = availableWorkers[0]
@@ -127,16 +129,21 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
         }
         setCatalogueLoaded(true)
         setCatalogueError(undefined)
-      } else { setCatalogueError(failureMessage(catalogue.reason)); setCatalogueLoaded(false) }
-      if (history.status === 'fulfilled') {
-        for (const operation of history.value) save(operation)
+      })()
+      const history = (async () => {
+        let operations: AgentHostCreation[]
+        try { operations = await bridge!.creations(taskId!) }
+        catch (failure) { if (scope.active) { setHistoryError(failureMessage(failure)); setHistoryLoaded(false) }; return }
+        if (!scope.active) return
+        for (const operation of operations) save(operation)
         setHistoryLoaded(true)
         setHistoryError(undefined)
-      } else { setHistoryError(failureMessage(history.reason)); setHistoryLoaded(false) }
-      for (const operation of savedOperations.current.filter((item) => pending(item) || previouslyPending.has(item.operationId))) {
-        if (!scope.active) return
-        await check(operation, scope)
-      }
+        for (const operation of savedOperations.current.filter((item) => pending(item) || previouslyPending.has(item.operationId))) {
+          if (!scope.active) return
+          await check(operation, scope)
+        }
+      })()
+      await Promise.all([catalogue, history])
     }, clearError, mode)
   }
 

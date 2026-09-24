@@ -32,7 +32,7 @@ const captureRecordSchema = z.object({
     'diagnostics.started', 'diagnostics.dropped', 'ipc.models', 'device.identity', 'device.transport',
     'connection.open', 'connection.subscribe', 'connection.models', 'connection.heartbeat',
     'connection.stream', 'connection.send', 'connection.send.phase', 'connection.offline', 'connection.retry', 'connection.close',
-    'gateway.upgrade', 'gateway.request', 'gateway.models', 'gateway.socket',
+    'gateway.upgrade', 'gateway.request', 'gateway.models', 'gateway.socket', 'creation.prepare', 'creation.execute',
   ]),
   targetHash: z.string().regex(/^[a-f0-9]{16}$/).optional(),
   ownerHash: z.string().regex(/^[a-f0-9]{16}$/).optional(),
@@ -40,7 +40,7 @@ const captureRecordSchema = z.object({
   status: z.enum(['begin', 'ok', 'error', 'closed', 'scheduled']).optional(),
   step: z.enum(['load', 'transport', 'initialize', 'identity', 'session', 'chat', 'terminal', 'root',
     'reconcile', 'authorization', 'workspace-recovery', 'tunnel', 'websocket', 'native', 'queue',
-    'response', 'heartbeat', 'validation', 'models', 'snapshot', 'snapshot-apply', 'ledger', 'dispatch', 'confirmation']).optional(),
+    'response', 'heartbeat', 'validation', 'models', 'snapshot', 'snapshot-apply', 'ledger', 'dispatch', 'confirmation', 'configuration', 'binding']).optional(),
   reason: z.enum(['heartbeat-failed', 'transport-closed', 'stream-ended', 'stream-error', 'access-changed',
     'owner-offline', 'backpressure', 'queue-limit', 'client-closed', 'invalid-frame', 'shutdown', 'auth-required']).optional(),
   method: z.enum(['initialize', 'reconnect', 'ping', 'subscribe', 'unsubscribe', 'dispatchAction', 'other']).optional(),
@@ -68,11 +68,12 @@ export type AgentHostDiagnosticEvent =
   | 'connection.open' | 'connection.subscribe' | 'connection.models' | 'connection.heartbeat'
   | 'connection.stream' | 'connection.send' | 'connection.send.phase' | 'connection.offline' | 'connection.retry' | 'connection.close'
   | 'gateway.upgrade' | 'gateway.request' | 'gateway.models' | 'gateway.socket'
+  | 'creation.prepare' | 'creation.execute'
 type Status = 'begin' | 'ok' | 'error' | 'closed' | 'scheduled'
 type Step = 'load' | 'transport' | 'initialize' | 'identity' | 'session' | 'chat' | 'terminal' | 'root'
   | 'reconcile' | 'authorization' | 'workspace-recovery' | 'tunnel' | 'websocket'
   | 'native' | 'queue' | 'response' | 'heartbeat' | 'validation' | 'models'
-  | 'snapshot' | 'snapshot-apply' | 'ledger' | 'dispatch' | 'confirmation'
+  | 'snapshot' | 'snapshot-apply' | 'ledger' | 'dispatch' | 'confirmation' | 'configuration' | 'binding'
 type Reason = 'heartbeat-failed' | 'transport-closed' | 'stream-ended' | 'stream-error'
   | 'access-changed' | 'owner-offline' | 'backpressure' | 'queue-limit' | 'client-closed'
   | 'invalid-frame' | 'shutdown' | 'auth-required'

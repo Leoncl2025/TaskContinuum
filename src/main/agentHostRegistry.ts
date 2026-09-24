@@ -15,6 +15,8 @@ import { connectLocalAgentHost, discoverAgentHosts } from './agentHostTransport'
 import { canonicalPolicyRoot } from './linkedSessionPolicy'
 import { sessionOwnerSchema } from './repositorySessionLinks'
 import { readJsonBounded } from './shared/storage'
+import { logAgentHostDiagnostic } from './agentHostDiagnostics'
+import type { AgentHostDiagnosticDetails } from './agentHostDiagnostics'
 
 export class AgentHostCreationError extends Error {}
 export type AgentHostCreationInspection = { state: 'creating'; error: string } | { state: 'failed'; error: string } | { state: 'ready'; nativeLifecycle: 'creating' | 'ready'; session: AgentHostSession }
@@ -128,7 +130,8 @@ export class AgentHostRegistry {
   private async creationClient(hostId: string, signal: AbortSignal, advertised?: AgentHostEndpoint) {
     agentHostIdSchema.parse(hostId)
     const abort = new AbortController()
-    const cancellation = AbortSignal.any([signal, abort.signal, AbortSignal.timeout(10000)])
+    // The WebSocket handshake and individual RPCs have deadlines, not the prepared connection's lifetime.
+    const cancellation = AbortSignal.any([signal, abort.signal])
     const endpoint = advertised ?? (await discoverAgentHosts(this.discovery)).find((item) => item.instanceId === hostId)
     if (!endpoint) throw new AgentHostCreationError('The exact selected Agent Host is not running. No replacement Host was selected.')
     let client: AhpClient | undefined
@@ -151,17 +154,29 @@ export class AgentHostRegistry {
     await client.unsubscribe('ahp-root://')
   }
 
-  async prepareCreation(hostId: string, sessionId: string, root: string, signal: AbortSignal): Promise<PreparedAgentHostCreation> {
+  async prepareCreation(hostId: string, sessionId: string, root: string, signal: AbortSignal, traceId: string = randomUUID()): Promise<PreparedAgentHostCreation> {
     agentHostSessionIdSchema.parse(sessionId)
     if (!sessionId.startsWith('copilotcli:/')) throw new AgentHostCreationError('Creation requires a native copilotcli session identity.')
     const canonical = await canonicalPolicyRoot(root)
     const owner = await this.creationOwner()
-    const connection = await this.creationClient(hostId, signal)
+    let connection: Awaited<ReturnType<AgentHostRegistry['creationClient']>> | undefined
+    let step: NonNullable<AgentHostDiagnosticDetails['step']> = 'transport'
+    let started = performance.now()
+    const advance = (next: NonNullable<AgentHostDiagnosticDetails['step']>) => {
+      logAgentHostDiagnostic('creation.prepare', { traceId, status: 'ok', step, elapsedMs: performance.now() - started })
+      step = next
+      started = performance.now()
+    }
     try {
-      await this.requireCreationProvider(connection.client)
+      connection = await this.creationClient(hostId, signal)
+      const preparedConnection = connection
+      advance('root')
+      await this.requireCreationProvider(preparedConnection.client)
+      advance('configuration')
       const workingDirectory = pathToFileURL(canonical).href
-      const resolved = await connection.client.request('resolveSessionConfig', { channel: 'ahp-root://', provider: 'copilotcli', workingDirectory, config: { isolation: 'folder' } })
+      const resolved = await preparedConnection.client.request('resolveSessionConfig', { channel: 'ahp-root://', provider: 'copilotcli', workingDirectory, config: { isolation: 'folder' } })
       const config = creationConfig(resolved)
+      advance('validation')
       const command: CreateSessionParams = { channel: sessionId, provider: 'copilotcli', workingDirectories: [workingDirectory], config }
       let dispatched = false
       return {
@@ -169,14 +184,24 @@ export class AgentHostRegistry {
         create: async (authorize) => {
           if (dispatched) throw new AgentHostCreationError('Native creation cannot be replayed.')
           await authorize()
-          connection.signal.throwIfAborted()
+          preparedConnection.signal.throwIfAborted()
+          if (preparedConnection.client.connectionState.status === 'closed') throw new AgentHostCreationError('The prepared Host connection closed before dispatch. No native create request was dispatched.')
           dispatched = true
-          if (await connection.client.request('createSession', command) !== null) throw new AgentHostCreationError('The native creation acknowledgement was not recognized. Query the original operation; do not create a replacement.')
+          if (await preparedConnection.client.request('createSession', command) !== null) throw new AgentHostCreationError('The native creation acknowledgement was not recognized. Query the original operation; do not create a replacement.')
         },
-        inspect: (chatId, nativeAcknowledged) => this.inspectCreatedSession(connection.client, sessionId, canonical, owner, chatId, nativeAcknowledged),
-        close: connection.close,
+        inspect: (chatId, nativeAcknowledged) => this.inspectCreatedSession(preparedConnection.client, sessionId, canonical, owner, chatId, nativeAcknowledged),
+        close: preparedConnection.close,
       }
-    } catch (error) { await connection.close(); throw error }
+    } catch (error) {
+      logAgentHostDiagnostic('creation.prepare', { traceId, status: 'error', step, elapsedMs: performance.now() - started, error, dispatched: false })
+      await connection?.close()
+      if (error instanceof AgentHostCreationError) throw error
+      const stages: Partial<Record<NonNullable<AgentHostDiagnosticDetails['step']>, string>> = {
+        configuration: 'resolving the native session configuration', root: 'checking the native provider',
+      }
+      const stage = stages[step] ?? 'connecting to the selected Host'
+      throw new AgentHostCreationError(`Creation preparation failed while ${stage}. No native create request was dispatched.`, { cause: error })
+    }
   }
 
   async inspectCreation(hostId: string, sessionId: string, root: string, signal: AbortSignal, chatId?: string, nativeAcknowledged = false): Promise<AgentHostCreationInspection> {

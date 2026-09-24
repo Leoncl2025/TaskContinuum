@@ -121,6 +121,23 @@ matching task binding under its own revision check. Other bindings are not
 overwritten. Binding publication uses the same Automatic workspace links path
 as other configuration edits; it does not stage unrelated task or code changes.
 
+Native preparation keeps its connection open while final task, owner, revision
+and send-permission checks run. The 10-second WebSocket handshake deadline is
+not a lifetime for that prepared connection: individual native RPCs still have
+their 5-second deadline, and shutdown/cancellation still prevents dispatch.
+Read-only pre-create binding checks reuse the verified, invalidatable binding
+snapshot instead of replaying the entire configuration transaction. Final binding
+writes retain revision and ownership checks.
+
+Saved creation status is refreshed independently of worker/Host catalogue loading,
+so slow discovery does not hide an operation's failure. Diagnostic events
+`creation.prepare` and `creation.execute` identify the phase and elapsed time;
+their `traceId` is the operation ID shown on the creation card. Logs contain no
+workspace paths, credentials or raw native error text. A pre-dispatch failure
+does not trigger an automatic retry; refresh the catalogue and explicitly start
+a new operation only after the saved operation reports failure. An uncertain
+operation must be checked using its existing ID.
+
 If a connection drops, reopen the creation controls and check the saved operation.
 Recovery queries the same operation; it never retries native creation or user
 messages automatically. **Created but not bound** keeps the exact created session

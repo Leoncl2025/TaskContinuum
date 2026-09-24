@@ -17,6 +17,7 @@ import { deviceRequest } from '../src/main/vscodeDeviceHttp'
 import { createAgentHostCreationCallerFixture, createPairedAgentHostCreationFixture, creationFixtureKey, deferred, writeCreationTaskWorkspace } from './agent-host-creation-fixture'
 import { agentHostTargetFixture, createImmutableBindingsFixture } from './immutable-bindings-fixture'
 import { taskSessionLinks } from '../src/shared/sessionBindings'
+import { captureAgentHostDiagnostics, startAgentHostDiagnostics, stopAgentHostDiagnostics } from '../src/main/agentHostDiagnostics'
 
 type Fixture = Awaited<ReturnType<typeof createPairedAgentHostCreationFixture>> & { bindings: Awaited<ReturnType<typeof createImmutableBindingsFixture>> }
 const fixtures: Fixture[] = []
@@ -94,6 +95,42 @@ describe('worker-authoritative native Agent Host creation', () => {
     await expect(readFile(join(worker.workspace, '.taskcontinuum', 'session-bindings.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     expect((await worker.workers()).workspaces).toMatchObject([{ taskState: 'bound', expectedRevision: links.revision }])
     expect((await records(worker))[0]).toMatchObject({ pairId: worker.pair.id, nativeSessionId: session.sessionId, result: { state: 'ready' } })
+  })
+
+  it('uses verified binding snapshots for repeated pre-create checks and records stage diagnostics', async () => {
+    const worker = await fixture()
+    worker.bindings.store.options.trust.authorizationVersion = () => 'fixed-fixture-trust'
+    await worker.bindings.store.acquireAuthorization()
+    const read = vi.spyOn(worker.bindings.store, 'read')
+    const original = worker.registry.prepareCreation.bind(worker.registry)
+    let preCreateReads = -1
+    vi.spyOn(worker.registry, 'prepareCreation').mockImplementation(async (...args) => {
+      const prepared = await original(...args)
+      return {
+        get dispatched() { return prepared.dispatched },
+        create: async (authorize) => {
+          await prepared.create(async () => { await authorize(); preCreateReads = read.mock.calls.length })
+        },
+        inspect: prepared.inspect, close: prepared.close,
+      }
+    })
+    const logs = join(worker.root, 'diagnostics')
+    await startAgentHostDiagnostics(logs)
+    try {
+      await worker.begin()
+      await ready(worker)
+      expect(preCreateReads).toBe(0)
+      expect(worker.native.creations).toHaveLength(1)
+      expect((await worker.begin()).state).toBe('ready')
+      expect(worker.native.creations).toHaveLength(1)
+      const result = await captureAgentHostDiagnostics(logs, {}, new AbortController().signal)
+      const text = result.jsonl.toString('utf8')
+      const events = text.trim().split('\n').map((line) => JSON.parse(line))
+      expect(result.truncated).toBe(false)
+      expect(events).toContainEqual(expect.objectContaining({ event: 'creation.prepare', traceId: worker.request.operationId, step: 'configuration', status: 'ok' }))
+      expect(events).toContainEqual(expect.objectContaining({ event: 'creation.execute', traceId: worker.request.operationId, step: 'dispatch', status: 'ok', dispatched: true }))
+      for (const secret of [worker.workspace, worker.pair.token, worker.native.endpoint.connectionToken]) expect(text).not.toContain(secret)
+    } finally { await stopAgentHostDiagnostics() }
   })
 
   it.each(['missing version', 'Host-pinned session', 'legacy record', 'mixed formats', 'unknown version'] as const)('rejects %s without migrating records or replaying creation', async (format) => {
@@ -390,7 +427,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     if (acknowledgement === 'lost') worker.native.loseAcknowledgement()
     else worker.native.setAcknowledgement({})
     await worker.begin()
-    await expect.poll(async () => (await records(worker))[0].result.state, { timeout: 3000, interval: 25 }).toBe('uncertain')
+    await expect.poll(async () => (await records(worker))[0].result, { timeout: 3000, interval: 25 }).toMatchObject({ state: 'uncertain' })
     expect((await records(worker))[0].nativeAcknowledged).toBe(false)
     const original = worker.native.creations[0].channel
     expect(worker.native.sessions.get(original)!.session.lifecycle).toBe('creating')

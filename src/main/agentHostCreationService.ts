@@ -9,10 +9,12 @@ import { agentHostKey, agentHostSessionIdSchema, agentHostTargetSchema } from '.
 import { AgentHostCreationError } from './agentHostRegistry'
 import type { AgentHostCreationInspection, AgentHostRegistry, PreparedAgentHostCreation } from './agentHostRegistry'
 import { canonicalPolicyRoot, LocalSessionLinkReceiptsError, locallyLinkedAgentHostSessions, recordLocalLink, validateLocalSessionLinkReceipts } from './linkedSessionPolicy'
-import { bindRepositoryAgentHostCreation, readRepositorySessionLinks, sessionOwnerSchema } from './repositorySessionLinks'
+import { acquireRepositorySessionAuthorization, bindRepositoryAgentHostCreation, readRepositorySessionLinks, sessionOwnerSchema } from './repositorySessionLinks'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 import { readTaskWorkspace } from './workspaceReader'
 import { taskSessionLinks } from '../shared/sessionBindings'
+import { logAgentHostDiagnostic } from './agentHostDiagnostics'
+import type { AgentHostDiagnosticDetails } from './agentHostDiagnostics'
 
 type CreateCommand = z.infer<typeof agentHostCreateCommandSchema>
 type Lookup = z.infer<typeof agentHostCreationLookupSchema>
@@ -63,7 +65,7 @@ export async function describeAgentHostCreationWorkspace(root: string, taskId: s
   const workspace: AgentHostCreationWorkspace = { id, name: basename(root).slice(0, 300) || 'Authorized workspace', canSend, taskState: 'unavailable', expectedRevision: null }
   try {
     if (!reachable) throw new Error('Unavailable workspace.')
-    const [tasks, links] = await Promise.all([readTaskWorkspace(root), readRepositorySessionLinks(root)])
+    const [tasks, { snapshot: links }] = await Promise.all([readTaskWorkspace(root), acquireRepositorySessionAuthorization(root)])
     workspace.expectedRevision = links.revision
     workspace.taskState = !tasks.tasks.some((task) => task.id === taskId) ? 'missing' : links.document.bindings[taskId] ? 'bound' : 'available'
   } catch { workspace.error = 'The authorized task workspace or its session bindings could not be read.' }
@@ -156,7 +158,7 @@ export class AgentHostCreationService {
     try { workspace = await readTaskWorkspace(root) }
     catch { throw new AgentHostCreationRequestError(409, 'The authorized task workspace is unavailable. No native session was created.') }
     if (!workspace.tasks.some((task) => task.id === request.taskId)) throw new AgentHostCreationRequestError(409, 'The task does not exist on this worker. No native session was created.')
-    const links = await readRepositorySessionLinks(root)
+    const { snapshot: links } = await acquireRepositorySessionAuthorization(root)
     if (links.revision !== request.expectedRevision) throw new AgentHostCreationRequestError(409, 'The worker task binding revision changed. Refresh before starting a new operation.')
     await this.checkReceipts()
   }
@@ -215,29 +217,52 @@ export class AgentHostCreationService {
   private async execute(initial: Operation): Promise<void> {
     let operation = initial
     let prepared: PreparedAgentHostCreation | undefined
+    const traceId = operation.request.operationId
+    let step: NonNullable<AgentHostDiagnosticDetails['step']> = 'authorization'
+    let phaseStarted = performance.now()
+    logAgentHostDiagnostic('creation.execute', { traceId, status: 'begin', step, dispatched: false })
+    const advance = (next: NonNullable<AgentHostDiagnosticDetails['step']>) => {
+      logAgentHostDiagnostic('creation.execute', { traceId, status: 'ok', step, elapsedMs: performance.now() - phaseStarted, dispatched: prepared?.dispatched ?? false })
+      step = next
+      phaseStarted = performance.now()
+    }
     try {
       await this.authorizedOperation(operation)
       if (JSON.stringify(await this.registry.creationOwner()) !== JSON.stringify(operation.owner)) throw new AgentHostCreationError('The worker execution identity changed. No replacement owner was selected.')
-      prepared = await this.registry.prepareCreation(operation.request.hostId, operation.nativeSessionId, operation.root, this.abort.signal)
+      advance('native')
+      prepared = await this.registry.prepareCreation(operation.request.hostId, operation.nativeSessionId, operation.root, this.abort.signal, traceId)
+      advance('validation')
       await this.checkTask(operation.root, operation.request)
       if (JSON.stringify(await this.registry.creationOwner()) !== JSON.stringify(operation.owner)) throw new AgentHostCreationError('The worker execution identity changed during native preparation.')
       await this.authorizedOperation(operation)
+      advance('ledger')
       operation = await this.replace(operation, { phase: 'dispatched' })
+      advance('authorization')
       await prepared.create(async () => {
         await this.checkTask(operation.root, operation.request)
         if (JSON.stringify(await this.registry.creationOwner()) !== JSON.stringify(operation.owner)) throw new AgentHostCreationError('The worker execution identity changed before creation.')
         await this.authorizedOperation(operation)
+        advance('dispatch')
       })
+      advance('confirmation')
       operation = await this.replace(operation, { nativeAcknowledged: true })
+      advance('snapshot')
       await this.authorizedOperation(operation)
       const inspected = await prepared.inspect(undefined, operation.nativeAcknowledged)
       await this.authorizedOperation(operation)
+      advance('binding')
       await this.acceptInspection(operation, inspected)
+      advance('response')
     } catch (error) {
+      logAgentHostDiagnostic('creation.execute', { traceId, status: 'error', step, elapsedMs: performance.now() - phaseStarted, dispatched: prepared?.dispatched ?? false, error })
       if (error instanceof ChangedOperationError) return
       const message = error instanceof AgentHostCreationError ? error.message : prepared?.dispatched
         ? 'The native creation acknowledgement or exact session could not be verified. Query this same operation; creation will not be replayed.'
-        : 'The Host could not prepare native creation. No native create request was dispatched.'
+        : step === 'authorization' ? 'Creation stopped during the final authorization check. No native create request was dispatched.'
+          : step === 'ledger' ? 'Creation stopped while saving its dispatch reservation. No native create request was dispatched.'
+            : step === 'validation' ? 'Creation stopped while checking the task and binding revision. No native create request was dispatched.'
+              : step === 'dispatch' ? 'The prepared Host connection was cancelled before dispatch. No native create request was dispatched.'
+              : 'The Host could not prepare native creation. No native create request was dispatched.'
       await this.replace(operation, { phase: prepared?.dispatched ? operation.phase : 'complete', result: { ...operation.result, state: prepared?.dispatched ? 'uncertain' : 'failed', error: message } })
     } finally { await prepared?.close() }
   }
