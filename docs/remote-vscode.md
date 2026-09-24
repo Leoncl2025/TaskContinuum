@@ -221,22 +221,26 @@ revalidate active sockets immediately; each outgoing batch and control also chec
 the current policy and local owner receipt. Disconnect/Stop in **Remote devices**
 stays authoritative.
 
-Authorization no longer rereads and verifies the entire immutable binding history
-for every request. A store-local fast path reuses an already verified binding
-snapshot only while record-file identities/timestamps, durable state, enrolled
-trust version and provisional-overlay revision are unchanged. Concurrent checks
-share a single lookup. Changed inputs trigger full verification; local writes,
-backend replacement, trust changes and provisional expiry invalidate reuse.
-When active synchronization prevents reuse, requests fall back to the original
-full verification rather than using stale cached permission or rejecting an
-otherwise valid connection solely because configuration is changing.
-If a read's completion queues another local transaction, authorization waits for
-that transaction and rechecks its version. It never removes another process's
-transaction lock or reuses permission while that external lock is held.
-This does not cache a connection-wide authorization decision: each request still
-checks current pairing, workspace/read/send scope and the owner's private receipt.
-Receipts are read again rather than cached. Unversioned policy providers continue
-using the full verification path.
+Connection admission verifies the binding history, enrolled trust and private
+owner receipts. Established sessions then use a workspace/owner-scoped in-memory
+authorization lease: ordinary requests and outgoing event batches check the live
+pairing, expiry, exact chat and read/send scope without rereading those files or
+waiting behind read-only synchronization transactions.
+
+Binding writes and receipt edits invalidate leases in-process; trust-version
+changes, backend removal and monotonic provisional expiry are checked in memory.
+Filesystem notifications invalidate leases when externally modified records,
+durable policy inputs or receipts change. Monitoring failure disables cached
+access. Changed inputs require full verification again, never an automatic grant.
+Unversioned policy providers retain the full verification path. Transaction locks
+are never deleted to recover access.
+
+With capable gateways, a remote send uses its continuously subscribed chat state
+instead of making another cross-device chat-snapshot request first. The owner still
+refreshes native chat state before dispatch and rejects busy chats, drafts, revoked
+access and uncertain delivery. Older gateways retain the previous client snapshot
+check. Model selection, explicit send UUIDs, durable ledgers and the no-replay rule
+are unchanged. There is no increased RPC timeout.
 
 Opening a chat restores the session and chat without subscribing to completed
 tool terminals from its history. Running tool terminals still stream live.

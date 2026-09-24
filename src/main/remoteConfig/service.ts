@@ -270,6 +270,12 @@ export class WorkspaceSyncService {
     }
   }
 
+  sessionAccessReady(root: string): boolean {
+    const canonical = process.platform === 'win32' ? root.toLowerCase() : root
+    const runtime = this.runtimes.get(canonical)
+    return !!runtime && this.networkAllowed(runtime)
+  }
+
   private async ensure(root: string, enable: boolean): Promise<Runtime | undefined> {
     if (this.closed) throw new Error('Workspace synchronization is closed.')
     root = await canonicalPolicyRoot(root)
@@ -489,6 +495,7 @@ export class WorkspaceSyncService {
       runtime.disposeBackend = await registerRepositorySessionLinksBackend(root, {
         read: () => config.read(),
         readForAuthorization: () => config.readForAuthorization(),
+        acquireAuthorization: () => config.acquireAuthorization(),
         writeBinding: async (taskId, target, revision, beforeWrite) => {
           await this.checkUpstream(runtime)
           return config.writeBinding(taskId, target, revision, async () => {

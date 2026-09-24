@@ -70,6 +70,19 @@ async function gatewaySetup(delayMs = 0) {
 }
 
 describe('Agent Host terminal demand', () => {
+  it('keeps the owner draft guard when a capable client skips its pre-send snapshot round trip', async () => {
+    const setup = await gatewaySetup()
+    const remote = new AgentHostConnection(setup.target, setup.root, (signal) => setup.transport(signal))
+    try {
+      await remote.models()
+      setup.host.draft('Do not overwrite this unsent owner draft')
+      expect(remote.view.chat?.draft?.text).toBeUndefined()
+      await expect(remote.send(randomUUID(), 'Attempt stale send', undefined, async () => {}, undefined, { id: 'gpt-6' })).rejects.toThrow()
+      expect(setup.host.dispatches).toHaveLength(0)
+      expect(setup.host.snapshot(setup.target.chatId).state).toMatchObject({ draft: { text: 'Do not overwrite this unsent owner draft' } })
+    } finally { await remote.close(); await setup.close() }
+  })
+
   it('sends through the gateway without model queries on either side after catalog loading', async () => {
     const setup = await gatewaySetup()
     const remote = new AgentHostConnection(setup.target, setup.root, (signal) => setup.transport(signal))

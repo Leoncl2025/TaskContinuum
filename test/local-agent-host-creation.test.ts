@@ -315,7 +315,7 @@ describe('private workspace-local native planning sessions', () => {
       const saved = JSON.stringify([edit])
       await writeFile(setup.file, saved)
       await expect(setup.service.authorizes(setup.root, target)).rejects.toThrow('unreadable')
-      await expect(setup.manager.authorize(setup.root, target)).rejects.toThrow('Enable Automatic workspace links')
+      await expect(setup.manager.authorize(setup.root, target)).rejects.toThrow('Private local creation records are unreadable')
       await expect(setup.service.status(setup.root, setup.request.operationId, setup.authorize)).rejects.toThrow('unreadable')
       expect(await readFile(setup.file, 'utf8')).toBe(saved)
     }

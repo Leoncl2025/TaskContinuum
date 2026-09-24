@@ -19,6 +19,7 @@ import type { AgentHostCreationWorkspace } from '../shared/agentHostCreation'
 import type { FileTransferSource } from './fileTransferSource'
 import { chunkRequestSchema, exportRequestSchema, FileTransferError, transferFailure, transferLookupSchema } from '../shared/fileTransfer'
 import { FileTransferBudget } from './fileTransferBudget'
+import type { AgentHostAuthorizationLease } from './agentHostAuthorization'
 
 const workspacePolicySchema = z.object({ root: z.string().min(1), canSend: z.boolean() }).strict()
 const pairingSchema = z.object({ id: z.uuid(), participant: remoteClientSchema, publicKey: sshPublicKeySchema,
@@ -39,7 +40,11 @@ export class VSCodeDeviceHost {
   private loading?: Promise<void>
   private closed = false
   private abort = new AbortController()
-  private agentHosts?: { registry: AgentHostRegistry; linked(root: string): Promise<AgentHostTarget[]> }
+  private agentHosts?: {
+    registry: AgentHostRegistry
+    linked(root: string): Promise<AgentHostTarget[]>
+    access?(root: string): Promise<AgentHostAuthorizationLease>
+  }
   private agentHostGateway?: ReturnType<typeof attachAgentHostGateway>
   private agentHostCreations?: AgentHostCreationService
   private fileSource?: FileTransferSource
@@ -54,9 +59,9 @@ export class VSCodeDeviceHost {
   }
 
   setAgentHostAccess(registry: AgentHostRegistry, linked: (root: string) => Promise<AgentHostTarget[]>,
-    authorizeLocal?: (ownerId: string, workspaceId: string) => Promise<string>): void {
+    authorizeLocal?: (ownerId: string, workspaceId: string) => Promise<string>, access?: (root: string) => Promise<AgentHostAuthorizationLease>): void {
     if (this.server) throw new Error('Agent Host access must be configured before device publication.')
-    this.agentHosts = { registry, linked }
+    this.agentHosts = { registry, linked, access }
     this.agentHostCreations = new AgentHostCreationService(this.directory, registry, (pairId, workspaceId) => this.authorizedCreationWorkspace(pairId, workspaceId), authorizeLocal)
   }
 
@@ -109,15 +114,21 @@ export class VSCodeDeviceHost {
     const pair = this.state!.pairs.find((item) => Buffer.byteLength(token) === Buffer.byteLength(item.token) && timingSafeEqual(Buffer.from(token), Buffer.from(item.token)))
     if (!pair || !this.permitted(pair.id) || !this.agentHosts) throw new Error('Device access is unavailable.')
     const policy = JSON.stringify(pair.workspaces)
+    let scopeError: unknown
     for (const workspace of pair.workspaces) {
       if (send && !workspace.canSend) continue
-      const linked = await this.agentHosts.linked(workspace.root).catch(() => [])
+      let linked: AgentHostTarget[]
+      try {
+        linked = this.agentHosts.access
+          ? (await this.agentHosts.access(workspace.root)).localTargets
+          : await this.agentHosts.linked(workspace.root)
+      } catch (error) { scopeError = error; continue }
       if (!linked.some((item) => agentHostKey(item) === agentHostKey(target))) continue
       const current = this.state!.pairs.find((item) => item.id === pair.id)
       if (!current || !this.permitted(pair.id) || JSON.stringify(current.workspaces) !== policy) throw new Error('Device policy changed.')
       return { canSend: workspace.canSend, actor: pair.participant }
     }
-    throw new Error('The exact Agent Host chat has not been locally confirmed for this workspace.')
+    throw new Error('The exact Agent Host chat has not been locally confirmed for an available workspace.', { cause: scopeError })
   }
 
   private async agentHostCatalog(pair: Pairing) {

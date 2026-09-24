@@ -8,10 +8,11 @@ import {
   type RemoteConfigStoreStatus, type RemotePayloads, type RemoteRecord, type RemoteRecordFile, type RemoteRecordKind,
   type RemoteSettingChanges, type RemoteSettingsSnapshot, type SettingPayload, type SettingScope,
 } from '../../shared/remoteConfig'
-import type { RepositorySessionLinksBackend } from '../repositorySessionLinks'
+import type { RepositorySessionLinksBackend, SessionLinksAuthorization } from '../repositorySessionLinks'
 import { sessionLinkKey, sessionLinkSchema, sessionLinksDocumentSchema, sessionLinkTaskIdSchema } from '../sessionLinkSchema'
 import { BindingOverlay } from './overlay'
 import { authorizationInputs } from './authorizationInputs'
+import { AuthorizationWatch } from '../shared/authorizationWatch'
 import {
   appendRecord, canonicalJson, createRecord, devicePublicationSchema, entityKey, operationIdSchema, parseRecord,
   readCheckedFile, readRecords, recordClosure, recordPath, RemoteConfigError, resolvedSettings, resolveRecords, serializeRecord, unionRecords, verifyRecord, writeLocalState,
@@ -62,6 +63,10 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
   private authorizationCache?: { inputs: string; snapshot: SessionLinksSnapshot; from: number; until: number }
   private authorizing?: Promise<{ snapshot: SessionLinksSnapshot; generation: number }>
   private generation = 0
+  private readonly accessWatch = new AuthorizationWatch()
+  private watching?: Promise<void>
+  private sessionAuthorization?: SessionLinksAuthorization
+  private acquiringAuthorization?: Promise<SessionLinksAuthorization>
 
   constructor(readonly options: RemoteConfigStoreOptions) {
     z.uuid().parse(options.workspaceId)
@@ -134,7 +139,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
         await lock.close()
         await rm(lockFile, { force: true })
       }
-    })
+    }).catch((error: unknown) => { this.accessWatch.invalidate(); throw error })
     this.pending = operation.then(() => undefined, () => undefined)
     const result = await operation
     if (result.changed.length) await this.notify(result.changed, result.snapshot ?? await this.read())
@@ -209,6 +214,45 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     }
     // Active synchronization may keep invalidating reuse. Preserve the original verified read in that case.
     return this.read()
+  }
+
+  async acquireAuthorization(): Promise<SessionLinksAuthorization> {
+    if (this.sessionAuthorization?.current()) return this.sessionAuthorization
+    this.acquiringAuthorization ??= this.createSessionAuthorization().finally(() => { this.acquiringAuthorization = undefined })
+    return this.acquiringAuthorization
+  }
+
+  private async createSessionAuthorization(): Promise<SessionLinksAuthorization> {
+    if (!this.options.trust.authorizationVersion) return { snapshot: await this.read(), current: () => false }
+    this.watching ??= (async () => {
+      for (const root of [this.options.recordsRoot, this.options.outboxRoot]) {
+        await this.directory(root)
+        this.accessWatch.observe(root, true)
+      }
+      await this.directory(this.options.stateDirectory)
+      this.accessWatch.observe(this.options.stateDirectory, false, (name) => ['store.json', 'pending-operations.json', 'binding-overlays.json'].includes(name))
+      this.accessWatch.observe(this.options.workspaceRoot, false)
+    })()
+    await this.watching
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const unchanged = this.accessWatch.checkpoint()
+      const version = this.options.trust.authorizationVersion()
+      const snapshot = await this.readForAuthorization()
+      const overlay = this.options.overlay?.currentAuthorizationRevision()
+      const cached = this.authorizationCache
+      if (!unchanged() || !cached || cached.snapshot.revision !== snapshot.revision || version !== this.options.trust.authorizationVersion()) continue
+      const lease = {
+        snapshot,
+        current: () => {
+          const now = this.options.trust.now?.() ?? Date.now()
+          return !this.closed && unchanged() && version === this.options.trust.authorizationVersion?.()
+            && now >= cached.from && now < cached.until && overlay === this.options.overlay?.currentAuthorizationRevision()
+        },
+      }
+      this.sessionAuthorization = lease
+      return lease
+    }
+    return { snapshot: await this.readForAuthorization(), current: () => false }
   }
 
   private async authorizationSnapshot(): Promise<{ snapshot: SessionLinksSnapshot; generation: number }> {
@@ -320,6 +364,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     return current
   }
   private async commitBatch(state: StoreState, operations: RemoteRecord[]): Promise<void> {
+    if (operations.length) this.accessWatch.invalidate()
     for (const record of operations) {
       if (record.actor.deviceId !== this.options.actor.deviceId) throw new RemoteConfigError('wrong-actor', 'A local write must retain the local enrolled author.')
       await verifyRecord(record, this.options.trust)
@@ -484,6 +529,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
   }
 
   async close(): Promise<void> {
+    this.accessWatch.close()
     this.authorizationCache = undefined
     this.generation++
     await this.pending

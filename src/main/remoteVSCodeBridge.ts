@@ -54,7 +54,12 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     return { clientId, machineName }
   }, localTaskWorker)
   host.setAgentHostAccess(registry, async (root) => { await gitSync.requireReadyRoot(root); return locallyLinkedAgentHostSessions(app.getPath('userData'), root, await clientIdentity()) },
-    (ownerId, workspaceId) => localTaskWorker.authorize(ownerId, workspaceId))
+    (ownerId, workspaceId) => localTaskWorker.authorize(ownerId, workspaceId), async (root) => {
+      if (!gitSync.sessionAccessReady(root)) throw new Error('The workspace is not ready for Agent Host access.')
+      const access = await agentHosts.access.acquire(root)
+      if (!gitSync.sessionAccessReady(root)) throw new Error('Workspace access changed while connecting.')
+      return access
+    })
   const gitSync = new WorkspaceSyncService({
     directory: app.getPath('userData'), keys, tunnels, host, devices,
     identity: clientIdentity, onChange: onConfigurationChanged,

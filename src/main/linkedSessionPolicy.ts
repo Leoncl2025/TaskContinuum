@@ -14,6 +14,15 @@ export class LocalSessionLinkReceiptsError extends Error {
   constructor() { super(agentHostCreationErrorMessages['link-receipts-unavailable']) }
 }
 let writing: Promise<unknown> = Promise.resolve()
+const receiptListeners = new Set<() => void>()
+export function onLocalSessionLinkChange(listener: () => void): () => void {
+  receiptListeners.add(listener)
+  return () => { receiptListeners.delete(listener) }
+}
+export async function readLocalSessionLinkReceipts(directory: string) {
+  await writing
+  return receipts(directory)
+}
 export async function canonicalPolicyRoot(root: string): Promise<string> {
   const path = await realpath(root)
   return process.platform === 'win32' ? path.toLowerCase() : path
@@ -41,6 +50,7 @@ export async function recordLocalLink(
     ? link.length <= 1 ? link[0] : (() => { throw new Error('Confirm one exact Agent Host session at a time.') })()
     : link
   const operation = writing.then(async () => {
+    for (const listener of receiptListeners) listener()
     const parsedDetach = detachTarget ? agentHostTargetSchema.parse(detachTarget) : undefined
     const next = (await receipts(directory)).filter((receipt) => {
       if (receipt.root !== canonical || receipt.taskId !== taskId) return true
@@ -56,6 +66,7 @@ export async function recordLocalLink(
     })
     if (selected?.provider === 'agent-host' && selected.owner.clientId === storedOwner.clientId) next.push({ root: canonical, taskId, owner: storedOwner, identity: { sessionId: selected.sessionId, chatId: selected.chatId } })
     await writeJsonAtomic(join(directory, 'local-session-link-receipts.json'), receiptsSchema.parse({ schemaVersion: 2, receipts: next }))
+    for (const listener of receiptListeners) listener()
   })
   writing = operation.catch(() => undefined)
   await operation

@@ -119,7 +119,7 @@ test('links and streams original AHP chats with current receipts and explicit li
       retiredBridges: ['copilot', 'vscodeChat', 'sharedSessions'].filter((name) => Reflect.has(window, name)),
     }))
     expect(security.info.security).toEqual({ contextIsolated: true, sandboxed: true })
-    expect(security.keys).toEqual(['bindCreation', 'cancel', 'create', 'createLocal', 'creationStatus', 'creationWorkers', 'creations', 'list', 'localCreationHosts', 'localCreationStatus', 'localCreations', 'models', 'onView', 'send', 'unwatch', 'watch'])
+    expect(security.keys).toEqual(['bindCreation', 'cancel', 'create', 'createLocal', 'creationStatus', 'creationWorkers', 'creations', 'list', 'localCreationHosts', 'localCreationStatus', 'localCreations', 'models', 'onView', 'releaseTerminal', 'send', 'terminal', 'unwatch', 'watch'])
     expect(security.require).toBe('undefined')
     expect(security.retiredBridges).toEqual([])
     expect(await page!.evaluate(async (value) => { try { await window.agentHost!.watch({ ...value, chatId: 'ahp-chat:/not-linked' }); return false } catch { return true } }, target)).toBe(true)

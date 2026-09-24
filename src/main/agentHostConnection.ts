@@ -493,9 +493,12 @@ export class AgentHostConnection {
       }
       const active = this.current!
       step = 'snapshot'
-      const fresh = await active.client.request('subscribe', { channel: this.target.chatId })
-      if (this.current !== active || !fresh.snapshot) throw new Error('The connection changed before sending. Nothing was sent.')
-      this.acceptSnapshot(fresh.snapshot)
+      if (this.initialized?._meta?.taskcontinuumCanSend === undefined || this.initialized._meta.taskcontinuumStreamedSendValidation !== true) {
+        const fresh = await active.client.request('subscribe', { channel: this.target.chatId })
+        if (this.current !== active || !fresh.snapshot) throw new Error('The connection changed before sending. Nothing was sent.')
+        this.acceptSnapshot(fresh.snapshot)
+      }
+      if (this.current !== active || !this.connected || !this.chat.value) throw new Error('The connection changed before sending. Nothing was sent.')
       await this.reconcile()
       step = 'validation'
       const hash = createHash('sha256').update(JSON.stringify(command)).digest('hex')
