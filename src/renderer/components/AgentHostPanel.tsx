@@ -15,6 +15,8 @@ import { Icon, IconButton } from './Primitives'
 import { AgentHostModelOptions } from './AgentHostModelConfig'
 import { modelConfigErrors } from '../../shared/agentHostModelConfig'
 import type { ModelConfig } from '../../shared/agentHostModelConfig'
+import { sessionTitle } from '../chat/useSessionTitles'
+import type { SessionTitleUpdate } from '../chat/useSessionTitles'
 
 function terminalText(state: TerminalState | undefined): string {
   return state ? stripAnsi(state.content.map((part) => part.type === 'command' ? part.output : part.value).join('')) : ''
@@ -119,6 +121,8 @@ type AgentHostPanelProps = {
   target: AgentHostTarget
   connectionRevision?: number
   active?: boolean
+  cachedTitle?: string
+  onTitles?(sessions: readonly SessionTitleUpdate[]): void
   onClose(): void
   onDevices?(): void
   onSessions?(): void
@@ -127,7 +131,7 @@ type AgentHostPanelProps = {
   prepareFirstMessage?(text: string): Promise<string>
 } & ({ task: TaskRecord; workspace?: never; onDetach(): void } | { task?: never; workspace: Pick<WorkspaceSnapshot, 'id' | 'name'>; onDetach?: never })
 
-export function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, onDetach, onClose, onDevices, onSessions, onBusy, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
+export function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, cachedTitle, onTitles, onDetach, onClose, onDevices, onSessions, onBusy, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
   const bridge = window.agentHost
   const { sessionId, chatId } = target
   const { clientId, machineName } = target.owner
@@ -205,6 +209,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
         const recovered = event.view.state === 'connected' && !connected
         connected = event.view.state === 'connected'
         setView(event.view)
+        if (connected && event.view.chat?.resource === chatId) onTitles?.([{ ...selected, title: event.view.chat.title, updatedAt: event.view.chat.modifiedAt }])
         if (recovered) {
           connectionGeneration++
           if (!loadedModels || connectionGeneration > 1) loadModels()
@@ -214,7 +219,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     loadModels()
     void bridge.watch(selected).then((id) => { if (active) { watchId = id; setWatch({ key: catalogKey, id }); setError(undefined) } else void bridge.unwatch(id).catch(() => undefined) }).catch((failure: unknown) => { if (active) setError(failure instanceof Error ? failure.message : 'Agent Host access is unavailable.') })
     return () => { active = false; unlisten(); if (watchId) void bridge.unwatch(watchId).catch(() => undefined) }
-  }, [bridge, sessionId, chatId, clientId, machineName, catalogKey, key])
+  }, [bridge, sessionId, chatId, clientId, machineName, catalogKey, key, onTitles])
   const activeTurn = view?.chat?.activeTurn
   const responding = Boolean(activeTurn)
   const pending = Boolean(view?.pendingTurn)
@@ -305,7 +310,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const modelStatus = !bridge ? 'Desktop update required.' : !currentCatalog ? 'Loading models from the owner Host...' : currentCatalog.error ? undefined : !modelId ? 'Choose a model below to enable sending.' : !modelReady ? 'The selected model is unavailable. Choose another model or retry loading models.' : undefined
   return <aside className="chat-panel ahp-panel" aria-label={workspace ? 'Agent Host task creation chat' : 'Agent Host task chat'}>
     <header className="panel-header"><span>AGENT HOST</span><div className="header-actions">{onDevices && <IconButton icon="remote" label="Manage devices" onClick={onDevices} />}<IconButton icon="refresh" label="Reconnect Agent Host" disabled={busy} onClick={() => { void reconnect() }} />{onDetach && <IconButton icon="debug-disconnect" label="Detach conversation" disabled={busy || pending} onClick={onDetach} />}{!workspace && <IconButton icon="close" label="Hide chat panel" onClick={onClose} />}</div></header>
-    <div className="chat-context"><Icon name="copilot" /><div><strong>{view?.chat?.title || 'Original Host chat'}</strong><span title={sessionId}>{sessionId}</span></div><span className="context-badge">{contextLabel}</span></div>
+    <div className="chat-context"><Icon name="copilot" /><div><strong>{sessionTitle(target, view?.target && agentHostKey(view.target) === key ? view.chat?.title : undefined) || cachedTitle || 'Original Host chat'}</strong><span title={sessionId}>{sessionId}</span></div><span className="context-badge">{contextLabel}</span></div>
     <div className="session-toolbar"><span role="status">{stateLabel}</span><span className="muted">AHP 0.9.0</span></div>
     <div className="vscode-execution-identity"><Icon name="server" /><span>Copilot @ {machineName}</span></div>
     <div className="chat-log" ref={log} role="log" aria-label={`Agent Host conversation for ${contextLabel}`} aria-live="polite" onScroll={() => { if (log.current) following.current = log.current.scrollHeight - log.current.scrollTop - log.current.clientHeight < 60 }}>

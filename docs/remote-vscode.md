@@ -55,6 +55,22 @@ To link an existing session:
   VS Code journal saves. Stop targets the exact active turn, with read/send access.
   Provider sign-in, tool confirmations and agent questions still use the owner UI.
 
+### Last-known chat titles
+
+The Current tree and chat header retain titles learned from discovery and live
+chat updates in this desktop's local display cache, scoped to the workspace and
+exact owner/session/chat identity. Reopening the sidebar or restarting the desktop
+can show the last known title while discovery is unavailable or incomplete. Empty
+titles, raw IDs and generic placeholders do not replace a known title; newer
+real titles update the cache. Older timestamped snapshots cannot undo a rename.
+The cache keeps up to 256 titles per workspace and is never published to Git.
+Storage failures are reported, with in-memory titles retained for the open workspace.
+
+Titles are display metadata only. A cached title does not add a discovery entry,
+restore a removed task binding, reconnect a chat, or grant read/send access.
+Unavailable chats still show **Not in discovery list**; exact IDs remain visible.
+Chats that have never supplied a meaningful title still use the existing fallback.
+
 ### Create on This Computer
 
 In **Agent Host sessions > Create**, select a task and change **Execution location**

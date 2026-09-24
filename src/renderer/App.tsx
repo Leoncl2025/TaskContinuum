@@ -24,6 +24,7 @@ import { AgentHostPanel } from './components/AgentHostPanel'
 import { AgentHostSessionsSidebar } from './components/AgentHostSessionsSidebar'
 import type { AgentHostSession } from '../shared/agentHost'
 import { agentHostKey } from '../shared/agentHost'
+import { useSessionTitles } from './chat/useSessionTitles'
 import appIcon from '../../build/icon.png'
 
 type DialogName = 'quick-open' | 'settings' | 'remote-devices' | null
@@ -44,6 +45,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   onPublishRepository(workspace: WorkspaceSnapshot): void
 }) {
   const workspace = workspaces.state.current
+  const sessionTitles = useSessionTitles(workspace?.id)
   const [taskAgentOpen, setTaskAgentOpen] = useState(false)
   const links = useSessionLinks(!taskAgentOpen && workspace?.tasks.length ? workspace : null)
   const bindings = links.bindings
@@ -310,7 +312,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
         <button type="button" className="activity" aria-label="Preferences" title="Preferences and integration status" onClick={() => setDialog('settings')}><Icon name="settings-gear" /></button>
       </nav>
 
-      {sidebarVisible && (sidebarView === 'sessions' ? <AgentHostSessionsSidebar key={task?.id ?? 'no-task'} taskId={task?.id} taskTitle={task?.title} taskReady={Boolean(task && links.ready)} bindings={bindings} activeKey={activeBinding ? sessionBindingKey(activeBinding) : undefined} localOwnerId={links.localOwner?.clientId} busy={links.busy} onSelect={task ? (binding) => selectSession(task.id, binding) : undefined} onDetach={task ? (binding) => detachSession(task.id, binding) : undefined} onLink={linkAgentHost} onCreated={agentHostCreated} onDevices={() => setDialog('remote-devices')} onTasks={openSidebar} onClose={toggleSidebar} /> : <TaskSidebar key={createdTaskId ?? 'initial'} tasks={tasks} selectedId={selectedId} query={query} onQuery={setQuery} onSelect={selectTask} onCreate={onCreateRepository} onCreateTask={openTaskCreation} creationDisabled={!workspaces.available || workspaceLocked || workspaces.busy} onClose={toggleSidebar} workspace={workspace ?? undefined} workspaceControls={workspaceControls} />)}
+      {sidebarVisible && (sidebarView === 'sessions' ? <AgentHostSessionsSidebar key={task?.id ?? 'no-task'} taskId={task?.id} taskTitle={task?.title} taskReady={Boolean(task && links.ready)} bindings={bindings} activeKey={activeBinding ? sessionBindingKey(activeBinding) : undefined} localOwnerId={links.localOwner?.clientId} cachedTitles={sessionTitles.titles} titleCacheError={sessionTitles.error} onTitles={sessionTitles.remember} busy={links.busy} onSelect={task ? (binding) => selectSession(task.id, binding) : undefined} onDetach={task ? (binding) => detachSession(task.id, binding) : undefined} onLink={linkAgentHost} onCreated={agentHostCreated} onDevices={() => setDialog('remote-devices')} onTasks={openSidebar} onClose={toggleSidebar} /> : <TaskSidebar key={createdTaskId ?? 'initial'} tasks={tasks} selectedId={selectedId} query={query} onQuery={setQuery} onSelect={selectTask} onCreate={onCreateRepository} onCreateTask={openTaskCreation} creationDisabled={!workspaces.available || workspaceLocked || workspaces.busy} onClose={toggleSidebar} workspace={workspace ?? undefined} workspaceControls={workspaceControls} />)}
       {!compact && sidebarVisible && <PanelSash panel="sidebar" {...sizes.sidebar} onResize={(width) => changePanelWidth('sidebar', width)} onReset={() => changePanelWidth('sidebar', defaultLayout.sidebarWidth)} />}
 
       <Activity mode={compact && sidebarVisible ? 'hidden' : 'visible'}><main className="main-panel" aria-label="Task workspace">
@@ -333,7 +335,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
         </div>
         <div id="active-task" className="active-task" data-chat-visible={chatVisible}>
           <Activity mode={chatVisible ? 'visible' : 'hidden'}>
-            {chatPanels.map((panel) => <Activity key={panel.key} mode={!taskAgentOpen && panel.key === activePanelKey ? 'visible' : 'hidden'}><AgentHostPanel task={panel.task} target={panel.binding.agentHost} active={!taskAgentOpen && panel.key === activePanelKey} connectionRevision={agentHostRevision} onDetach={openAgentHostSessions} onClose={toggleChat} onDevices={window.remoteVSCode ? () => setDialog('remote-devices') : undefined} onSessions={openAgentHostSessions} onBusy={setAgentHostBusy} /></Activity>)}
+            {chatPanels.map((panel) => <Activity key={panel.key} mode={!taskAgentOpen && panel.key === activePanelKey ? 'visible' : 'hidden'}><AgentHostPanel task={panel.task} target={panel.binding.agentHost} cachedTitle={sessionTitles.titles[agentHostKey(panel.binding.agentHost)]} onTitles={sessionTitles.remember} active={!taskAgentOpen && panel.key === activePanelKey} connectionRevision={agentHostRevision} onDetach={openAgentHostSessions} onClose={toggleChat} onDevices={window.remoteVSCode ? () => setDialog('remote-devices') : undefined} onSessions={openAgentHostSessions} onBusy={setAgentHostBusy} /></Activity>)}
             {taskAgentOpen && workspace && <LocalTaskAgent workspace={workspace} workspaces={workspaces} onCreated={taskCreated} onReviewDraft={() => setTaskCreationMode('draft')} onTaskChat={task ? showTaskChat : undefined} onClose={toggleChat} onBusy={setTaskAgentBusy} />}
             {!taskAgentOpen && !agentHostBinding && <aside className="chat-panel empty-chat" aria-label="Task chat">
               <header className="panel-header"><span>AGENT HOST</span><IconButton icon="close" label="Hide chat panel" onClick={toggleChat} /></header>
