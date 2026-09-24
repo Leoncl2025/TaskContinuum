@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { lstat, mkdir, open, realpath, rm } from 'node:fs/promises'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { z } from 'zod'
-import { sessionLinkEntries, taskSessionLinks, type SessionLink, type SessionLinksDocument } from '../../shared/sessionBindings'
+import { sessionLinkEntries, taskSessionLinks, type SessionLink, type SessionLinksDocument, type SessionLinksSnapshot } from '../../shared/sessionBindings'
 import {
   remoteConfigLimits, type BindingNotificationAcknowledgement, type RemoteActor, type RemoteConfigSnapshot,
   type RemoteConfigStoreStatus, type RemotePayloads, type RemoteRecord, type RemoteRecordFile, type RemoteRecordKind,
@@ -11,6 +11,7 @@ import {
 import type { RepositorySessionLinksBackend } from '../repositorySessionLinks'
 import { sessionLinkKey, sessionLinkSchema, sessionLinksDocumentSchema, sessionLinkTaskIdSchema } from '../sessionLinkSchema'
 import { BindingOverlay } from './overlay'
+import { authorizationInputs } from './authorizationInputs'
 import {
   appendRecord, canonicalJson, createRecord, devicePublicationSchema, entityKey, operationIdSchema, parseRecord,
   readCheckedFile, readRecords, recordClosure, recordPath, RemoteConfigError, resolvedSettings, resolveRecords, serializeRecord, unionRecords, verifyRecord, writeLocalState,
@@ -58,6 +59,9 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
   private pending: Promise<unknown> = Promise.resolve()
   private readonly listeners = new Set<LocalChangeListener>()
   private closed = false
+  private authorizationCache?: { inputs: string; snapshot: SessionLinksSnapshot; from: number; until: number }
+  private authorizing?: Promise<{ snapshot: SessionLinksSnapshot; generation: number }>
+  private generation = 0
 
   constructor(readonly options: RemoteConfigStoreOptions) {
     z.uuid().parse(options.workspaceId)
@@ -103,6 +107,8 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     if (failures.length && !this.options.onError) throw new RemoteConfigError('delivery-failed', `The configuration was durably saved, but ${failures.length} local change notification(s) failed. Retry delivery, not the edit.`)
   }
   private async transaction<T>(action: (state: StoreState, recovered: RemoteRecord[]) => Promise<TransactionResult<T>>): Promise<T> {
+    this.generation++
+    this.authorizationCache = undefined
     const operation = this.pending.then(async () => {
       if (this.closed) throw new RemoteConfigError('closed', 'The remote configuration store is closed.')
       await this.directory(this.options.stateDirectory)
@@ -192,6 +198,55 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       const snapshot = await this.snapshot(state)
       return { value: snapshot, changed: recovered, snapshot }
     })
+  }
+
+  async readForAuthorization(): Promise<SessionLinksSnapshot> {
+    if (!this.options.trust.authorizationVersion) return this.read()
+    for (let attempt = 0; attempt < 3; attempt++) {
+      this.authorizing ??= this.authorizationSnapshot().finally(() => { this.authorizing = undefined })
+      const result = await this.authorizing
+      if (!this.closed && result.generation === this.generation) return structuredClone(result.snapshot)
+    }
+    // Active synchronization may keep invalidating reuse. Preserve the original verified read in that case.
+    return this.read()
+  }
+
+  private async authorizationSnapshot(): Promise<{ snapshot: SessionLinksSnapshot; generation: number }> {
+    const inputs = async () => {
+      const version = this.options.trust.authorizationVersion!()
+      const files = await authorizationInputs(this.options.recordsRoot, this.options.outboxRoot, this.options.stateDirectory)
+      const overlay = await this.options.overlay?.authorizationRevision()
+      if (version !== this.options.trust.authorizationVersion!()) throw new RemoteConfigError('authorization-changed', 'The enrolled trust changed during authorization.')
+      return JSON.stringify([files, version, this.options.trust.workspaceId, this.options.trust.maximumInvitationLifetimeMs, overlay])
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const pending = this.pending
+      await pending
+      if (pending !== this.pending) continue
+      if (this.closed) throw new RemoteConfigError('closed', 'The remote configuration store is closed.')
+      const generation = this.generation
+      let before: string
+      try { before = await inputs() }
+      catch (error) { if (generation !== this.generation) continue; throw error }
+      if (generation !== this.generation) continue
+      const now = this.options.trust.now?.() ?? Date.now()
+      const cached = this.authorizationCache
+      if (cached?.inputs === before && now >= cached.from && now < cached.until) return { snapshot: cached.snapshot, generation }
+      this.authorizationCache = undefined
+      const fresh = await this.read()
+      const afterGeneration = this.generation
+      let after: string
+      try { after = await inputs() }
+      catch (error) { if (afterGeneration !== this.generation) continue; throw error }
+      if (before !== after || afterGeneration !== this.generation || this.closed) continue
+      const snapshot = { document: fresh.document, revision: fresh.revision }
+      const expiries = fresh.resolution.records.flatMap((record) => record.kind === 'invitation' && record.payload.action === 'grant'
+        && Date.parse(record.payload.expiresAt) > now ? [Date.parse(record.payload.expiresAt)] : [])
+      if (!fresh.resolution.blocked) this.authorizationCache = { inputs: after, snapshot: structuredClone(snapshot), from: now, until: Math.min(Infinity, ...expiries) }
+      return { snapshot, generation: afterGeneration }
+    }
+    const fresh = await this.read()
+    return { snapshot: { document: fresh.document, revision: fresh.revision }, generation: this.generation }
   }
 
   /** Canonical plus locally durable records; provisional SSH records are not exportable authority. */
@@ -423,6 +478,8 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
   }
 
   async close(): Promise<void> {
+    this.authorizationCache = undefined
+    this.generation++
     await this.pending
     this.closed = true
     this.listeners.clear()

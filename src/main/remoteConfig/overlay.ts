@@ -144,6 +144,13 @@ export class BindingOverlay {
     })
   }
 
+  authorizationRevision(): Promise<string> {
+    return this.queue(async () => {
+      if (this.expire()) { this.options.onChange?.(); this.requestSync(); this.schedule() }
+      return this.state().revision
+    })
+  }
+
   async accept(input: unknown, senderId: string, canonical: readonly RemoteRecord[], trust = this.options.trust): Promise<BindingNotificationAcknowledgement> {
     return this.queue(async () => {
       let operationId = ''

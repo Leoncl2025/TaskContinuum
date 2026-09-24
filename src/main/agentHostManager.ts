@@ -9,7 +9,7 @@ import type { AgentHostRegistry } from './agentHostRegistry'
 import type { VSCodeDeviceClient } from './vscodeDeviceClient'
 import { agentHostKey, agentHostTargetSchema } from './agentHostProtocol'
 import { canonicalPolicyRoot, locallyLinkedAgentHostSessions } from './linkedSessionPolicy'
-import { readRepositorySessionLinks } from './repositorySessionLinks'
+import { readRepositorySessionLinksForAuthorization } from './repositorySessionLinks'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 import { AgentHostCreationClient } from './agentHostCreationClient'
 import { LocalAgentHostCreationService } from './localAgentHostCreationService'
@@ -66,7 +66,7 @@ export class AgentHostManager {
     const target = agentHostTargetSchema.parse(value)
     const owner = await this.owner()
     if (target.owner.clientId === owner.clientId && await this.localCreations.authorizes(root, target).catch(() => false)) return
-    const { document } = await readRepositorySessionLinks(root)
+    const { document } = await readRepositorySessionLinksForAuthorization(root)
     if (!sessionLinkEntries(document.bindings).some(([, link]) => link.provider === 'agent-host' && agentHostKey(link) === agentHostKey(target))) throw new Error('The task no longer links this exact Agent Host chat.')
     if (target.owner.clientId === owner.clientId && !(await locallyLinkedAgentHostSessions(this.directory, root, owner)).some((link) => agentHostKey(link) === agentHostKey(target))) throw new Error('A Git-only edit cannot grant local Agent Host access. Confirm the link on its owner.')
   }

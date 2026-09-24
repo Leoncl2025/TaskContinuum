@@ -8,6 +8,7 @@ export { sessionOwnerSchema, sessionLinkSchema, sessionLinkKey } from './session
 
 export interface RepositorySessionLinksBackend {
   read(): Promise<SessionLinksSnapshot>
+  readForAuthorization?(): Promise<SessionLinksSnapshot>
   update(expectedRevision: string | null, transform: (before: SessionLinksDocument) => SessionLinksDocument | Promise<SessionLinksDocument>, beforeWrite?: () => Promise<void>): Promise<SessionLinksSnapshot>
   writeBinding?(taskId: string, targets: SessionLink | SessionLink[] | null, expectedRevision: string | null, beforeWrite?: () => Promise<void>): Promise<SessionLinksSnapshot>
 }
@@ -46,6 +47,14 @@ function requireBackend(root: string): RepositorySessionLinksBackend {
 
 export async function readRepositorySessionLinks(root: string): Promise<SessionLinksSnapshot> {
   return bindingSnapshot(await requireBackend(await canonicalRoot(root)).read())
+}
+
+export async function readRepositorySessionLinksForAuthorization(root: string): Promise<SessionLinksSnapshot> {
+  const canonical = await canonicalRoot(root)
+  const backend = requireBackend(canonical)
+  const snapshot = await (backend.readForAuthorization ? backend.readForAuthorization() : backend.read())
+  if (backends.get(canonical) !== backend) throw new Error('The immutable binding backend changed during authorization.')
+  return bindingSnapshot(snapshot)
 }
 
 export function removeRepositorySessionLink(root: string, taskId: string, expectedRevision: string | null, detachTarget?: AgentHostTarget): Promise<SessionLinksSnapshot> {

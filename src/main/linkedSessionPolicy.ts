@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import { realpath } from 'node:fs/promises'
 import { z } from 'zod'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
-import { readRepositorySessionLinks, sessionOwnerSchema } from './repositorySessionLinks'
+import { readRepositorySessionLinksForAuthorization, sessionOwnerSchema } from './repositorySessionLinks'
 import { sessionLinkEntries, taskSessionLinks, type SessionLinksDocument, type SessionOwner, type SessionLink } from '../shared/sessionBindings'
 import { agentHostIdentitySchema, agentHostTargetSchema } from './agentHostProtocol'
 import type { AgentHostTarget } from '../shared/agentHost'
@@ -70,7 +70,7 @@ export async function unregisteredLocalLinks(directory: string, root: string, bi
 
 export async function locallyLinkedAgentHostSessions(directory: string, root: string, owner: SessionOwner): Promise<AgentHostTarget[]> {
   const canonical = await canonicalPolicyRoot(root)
-  const { document } = await readRepositorySessionLinks(canonical)
+  const { document } = await readRepositorySessionLinksForAuthorization(canonical)
   return (await receipts(directory)).flatMap((receipt) => {
     const link = taskSessionLinks(document.bindings, receipt.taskId).find((candidate) =>
       candidate.provider === 'agent-host' && candidate.owner.clientId === owner.clientId

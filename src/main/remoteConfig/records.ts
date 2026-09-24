@@ -190,6 +190,8 @@ export interface RecordTrust {
   allowDeviceReactivation?(record: RemoteRecord<'device'>): Awaitable<boolean>
   maximumInvitationLifetimeMs?: number
   now?: () => number
+  /** Changes whenever any dynamic trust callback result can change; absent means no authorization caching. */
+  authorizationVersion?(): string
 }
 
 export function bindingTargets(payload: RemoteRecord<'binding'>['payload']): SessionLink[] {

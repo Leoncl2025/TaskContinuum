@@ -213,6 +213,20 @@ revalidate active sockets immediately; each outgoing batch and control also chec
 the current policy and local owner receipt. Disconnect/Stop in **Remote devices**
 stays authoritative.
 
+Authorization no longer rereads and verifies the entire immutable binding history
+for every request. A store-local fast path reuses an already verified binding
+snapshot only while record-file identities/timestamps, durable state, enrolled
+trust version and provisional-overlay revision are unchanged. Concurrent checks
+share a single lookup. Changed inputs trigger full verification; local writes,
+backend replacement, trust changes and provisional expiry invalidate reuse.
+When active synchronization prevents reuse, requests fall back to the original
+full verification rather than using stale cached permission or rejecting an
+otherwise valid connection solely because configuration is changing.
+This does not cache a connection-wide authorization decision: each request still
+checks current pairing, workspace/read/send scope and the owner's private receipt.
+Receipts are read again rather than cached. Unversioned policy providers continue
+using the full verification path.
+
 Opening a chat restores the session and chat without subscribing to completed
 tool terminals from its history. Running tool terminals still stream live.
 Expanding a completed tool requests its full terminal output on demand; closing

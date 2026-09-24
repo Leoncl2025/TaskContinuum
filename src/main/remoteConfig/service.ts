@@ -331,6 +331,7 @@ export class WorkspaceSyncService {
     }
     const trust: RecordTrust = {
       workspaceId: enrollment.workspaceId,
+      authorizationVersion: () => JSON.stringify(runtime.enrollment),
       maximumInvitationLifetimeMs: 24 * 60 * 60 * 1000,
       trustedKey: (actor) => {
         const pin = runtime.enrollment.pins[actor.deviceId]
@@ -487,6 +488,7 @@ export class WorkspaceSyncService {
       this.blockedBackends.delete(root)
       runtime.disposeBackend = await registerRepositorySessionLinksBackend(root, {
         read: () => config.read(),
+        readForAuthorization: () => config.readForAuthorization(),
         writeBinding: async (taskId, target, revision, beforeWrite) => {
           await this.checkUpstream(runtime)
           return config.writeBinding(taskId, target, revision, async () => {
