@@ -68,6 +68,11 @@ export async function startAgentHostCreationFixture() {
       subscriber.send(JSON.stringify({ jsonrpc: '2.0', method: 'action', params: envelope }))
     }
   }
+  function subscriberCount(sessionId: string): number {
+    const chatId = sessions.get(sessionId)?.chat.resource
+    return [...subscriptions].filter(([socket, channels]) => socket.readyState === socket.OPEN
+      && (channels.has(sessionId) || chatId !== undefined && channels.has(chatId))).length
+  }
   sockets.on('connection', (socket) => {
     subscriptions.set(socket, new Set())
     socket.on('close', () => subscriptions.delete(socket))
@@ -125,7 +130,16 @@ export async function startAgentHostCreationFixture() {
   const endpoint: AgentHostEndpoint = { schemaVersion: 2, type: 'standalone', pid: process.pid, instanceId: hostId, connectionToken: randomUUID(), protocolVersion: '0.9.0',
     endpoint: { type: 'tcp', host: '127.0.0.1', port: (server.address() as { port: number }).port } }
   return {
-    endpoint, hostId, calls, creations, sessions, action,
+    endpoint, hostId, calls, creations, sessions, action, subscriberCount,
+    collectUnusedSessions: () => {
+      const collected: string[] = []
+      for (const [id, entry] of sessions) if (!entry.chat.turns.length && !entry.chat.activeTurn && !subscriberCount(id)) {
+        sessions.delete(id)
+        deletedSessions.add(id)
+        collected.push(id)
+      }
+      return collected
+    },
     deleteSession: (sessionId: string) => { if (sessions.delete(sessionId)) deletedSessions.add(sessionId) },
     setModels: (value: typeof models) => { models = value },
     setProvider: (value: string) => { provider = value },

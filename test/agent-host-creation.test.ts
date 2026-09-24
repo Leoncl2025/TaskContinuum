@@ -4,7 +4,8 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { createConnection } from 'node:net'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { AhpClient } from '@microsoft/agent-host-protocol/client'
+import { AhpClient, RpcError } from '@microsoft/agent-host-protocol/client'
+import { AhpErrorCodes } from '@microsoft/agent-host-protocol'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { agentHostCreationResultSchema } from '../src/main/agentHostCreationProtocol'
 import { agentHostTargetSchema } from '../src/main/agentHostProtocol'
@@ -439,6 +440,107 @@ describe('worker-authoritative native Agent Host creation', () => {
     expect((await readRepositorySessionLinks(worker.workspace)).document.bindings).toEqual({})
     expect(worker.native.creations.map((request) => request.channel)).toEqual([original])
     expect(worker.native.calls.filter((call) => call.method === 'dispatchAction')).toEqual([])
+  })
+
+  it('hands an empty created session to the shared owner connection before closing the creation probe', async () => {
+    const worker = await fixture()
+    worker.native.setLifecycle('creating')
+    await worker.begin()
+    const session = await ready(worker)
+    await expect.poll(() => worker.native.subscriberCount(session.sessionId)).toBe(1)
+    for (let index = 0; index < 3; index++) {
+      expect(worker.native.collectUnusedSessions()).toEqual([])
+      expect(await worker.status()).toMatchObject({ state: 'ready', session })
+    }
+    const connection = await worker.registry.connection({ sessionId: session.sessionId, chatId: session.chatId, owner: session.owner })
+    expect(connection.state).toBe('connected')
+    const before = worker.native.calls.length
+    await connection.open()
+    expect(worker.native.calls).toHaveLength(before)
+    expect(worker.native.calls.filter((call) => call.method === 'dispatchAction')).toEqual([])
+    expect(worker.native.creations).toHaveLength(1)
+    await worker.restart(async () => {
+      await expect.poll(() => worker.native.subscriberCount(session.sessionId)).toBe(0)
+      expect(worker.native.collectUnusedSessions()).toEqual([session.sessionId])
+    })
+    expect(await worker.status()).toMatchObject({ state: 'failed', session, error: expect.stringContaining('explicitly deleted') })
+    expect((await worker.begin()).state).toBe('failed')
+    expect(worker.native.creations).toHaveLength(1)
+  })
+
+  it('retires a worker-confirmed deleted session on the caller and allows only a new explicit operation', async () => {
+    const worker = await fixture()
+    worker.native.setLifecycle('creating')
+    const caller = await callerFixture(worker)
+    try {
+      const [selected] = await caller.client.workers(caller.workspace, worker.request.taskId)
+      const request = { ...worker.request, workerId: selected.id }
+      await caller.client.create(caller.workspace, request, async () => {})
+      const session = await ready(worker)
+      expect((await records(worker))[0].everReady).toBe(true)
+      worker.native.deleteSession(session.sessionId)
+      const failed = await caller.client.status(caller.workspace, request.operationId, async () => {})
+      expect(failed).toMatchObject({ state: 'failed', session, error: expect.stringContaining('explicitly deleted') })
+      expect((await worker.begin()).state).toBe('failed')
+      expect(await caller.client.create(caller.workspace, request, async () => {})).toEqual(failed)
+      expect(worker.native.creations).toHaveLength(1)
+      expect(taskSessionLinks((await readRepositorySessionLinks(worker.workspace)).document.bindings, request.taskId)[0].sessionId).toBe(session.sessionId)
+      const [refreshed] = await caller.client.workers(caller.workspace, request.taskId)
+      const next = { ...request, operationId: randomUUID(), expectedRevision: refreshed.workspaces[0].expectedRevision }
+      await caller.client.create(caller.workspace, next, async () => {})
+      await expect.poll(async () => (await caller.client.status(caller.workspace, next.operationId, async () => {})).state, { timeout: 8000 }).toBe('ready')
+      expect(worker.native.creations).toHaveLength(2)
+      expect(worker.native.creations[1].channel).not.toBe(session.sessionId)
+      expect(await caller.client.status(caller.workspace, request.operationId, async () => {})).toEqual(failed)
+      expect(worker.native.calls.filter((call) => call.method === 'dispatchAction')).toEqual([])
+    } finally { await caller.close() }
+  })
+
+  it.each(['missing', 'different-session', 'different-error-code'] as const)('does not turn %s into a confirmed deletion', async (reason) => {
+    const worker = await fixture()
+    worker.native.setLifecycle('creating')
+    await worker.begin()
+    const session = await ready(worker)
+    if (reason === 'missing') worker.native.sessions.delete(session.sessionId)
+    else vi.spyOn(worker.registry, 'inspectCreation').mockRejectedValue(new RpcError(
+      reason === 'different-error-code' ? -32603 : AhpErrorCodes.SessionNotFound,
+      `Session was explicitly deleted: ${reason === 'different-session' ? `copilotcli:/${randomUUID()}` : session.sessionId}`,
+    ))
+    expect(await worker.status()).toMatchObject({ state: 'uncertain', session })
+    expect((await worker.begin()).state).toBe('uncertain')
+    expect(worker.native.creations).toHaveLength(1)
+    expect(worker.native.calls.filter((call) => call.method === 'dispatchAction')).toEqual([])
+  })
+
+  it('rechecks authorization before recording a terminal deletion outcome', async () => {
+    const worker = await fixture()
+    worker.native.setLifecycle('creating')
+    await worker.begin()
+    const session = await ready(worker)
+    vi.spyOn(worker.registry, 'inspectCreation').mockImplementationOnce(async () => {
+      await worker.host.setWorkspace(worker.pair.id, await canonicalPolicyRoot(worker.workspace), false)
+      throw new RpcError(AhpErrorCodes.SessionNotFound, `Session was explicitly deleted: ${session.sessionId}`)
+    })
+    await expect(worker.status()).rejects.toMatchObject({ status: 403 })
+    expect((await records(worker))[0].result.state).toBe('ready')
+    expect(worker.native.creations).toHaveLength(1)
+  })
+
+  it('checks a created-unbound session for confirmed deletion without retrying its binding', async () => {
+    const worker = await fixture()
+    worker.native.setLifecycle('creating')
+    await worker.begin()
+    const session = await ready(worker)
+    const before = await readRepositorySessionLinks(worker.workspace)
+    await removeRepositorySessionLink(worker.workspace, worker.request.taskId, before.revision)
+    expect((await worker.status()).state).toBe('created-unbound')
+    const detached = await readRepositorySessionLinks(worker.workspace)
+    expect((await worker.status()).state).toBe('created-unbound')
+    expect(await readRepositorySessionLinks(worker.workspace)).toEqual(detached)
+    worker.native.deleteSession(session.sessionId)
+    expect(await worker.status()).toMatchObject({ state: 'failed', session, error: expect.stringContaining('explicitly deleted') })
+    expect(await readRepositorySessionLinks(worker.workspace)).toEqual(detached)
+    expect(worker.native.creations).toHaveLength(1)
   })
 
   it.each([false, true])('recovers only valid durable provisional-session records (missing acknowledgement=%s)', async (missingAcknowledgement) => {

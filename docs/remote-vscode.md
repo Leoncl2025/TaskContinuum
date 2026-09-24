@@ -114,6 +114,14 @@ An acknowledged empty native chat can retain lifecycle `creating` until its
 first explicit send. A confirmed creation/binding is not a claim that the model
 runtime has initialized, and Task Continuum never sends a warm-up prompt.
 
+Before releasing its temporary creation connection, the owner opens the verified
+session/chat on its existing shared Agent Host connection. This keeps the native
+empty draft subscribed while assignment and caller UI connection are pending, and
+reuses the same connection for later viewing/sending (including its heartbeat and
+64-connection registry limit). No prompt is needed to keep the draft alive. Closing
+the owner desktop releases those subscriptions; a still-empty native draft may then
+be garbage-collected by the Host.
+
 The worker saves a durable operation before invoking native creation. After
 confirming the native session and chat identities, it saves that task's immutable
 binding operation and private owner receipt. The caller then saves only the
@@ -145,6 +153,14 @@ IDs. Missing choices and revoked/read-only access keep creation disabled; anothe
 Host is never substituted automatically. Then click **Create and assign** to submit
 a new operation with the current binding revision and a new ID. The old record is
 retained, and neither refreshing nor restoring choices dispatches native creation.
+
+An exact native `SessionNotFound` response stating that the recorded session was
+explicitly deleted is terminal, including when native empty-draft cleanup caused
+the deletion. After rechecking access and owner identity, status records failure
+and permits a new explicit operation; it never replays the deleted session's ID
+or removes existing task bindings. Generic `-32001`, an offline Host, or an error
+naming another session remain uncertain. Unresolved operations are displayed before
+old failures so the operation blocking creation and its status action are visible.
 
 If a connection drops, reopen the creation controls and check the saved operation.
 Recovery queries the same operation; it never retries native creation or user

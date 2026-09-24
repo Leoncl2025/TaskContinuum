@@ -266,7 +266,7 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
     {unresolved && <p className="muted" role="status">Resolve the saved creation below before starting another. Status checks never create a second chat.</p>}
     {error && <p className="copilot-error" role="alert">{error}</p>}
     <div className="ah-creation-operations" aria-live="polite">
-      {operations.map((operation) => {
+      {[...operations].sort((left, right) => Number(pending(right)) - Number(pending(left))).map((operation) => {
         const source = workers.find((item) => item.id === operation.workerId)
         const owner = operation.session?.owner ?? source?.owner
         return <section className="ah-creation-operation" key={operation.operationId} aria-label={`Creation ${operation.operationId}`}>

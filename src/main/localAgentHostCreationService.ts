@@ -1,13 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, open, rm } from 'node:fs/promises'
 import { join } from 'node:path'
-import { AhpErrorCodes } from '@microsoft/agent-host-protocol'
-import { RpcError } from '@microsoft/agent-host-protocol/client'
 import { z } from 'zod'
 import type { AgentHostTarget } from '../shared/agentHost'
 import type { LocalAgentHostCreateRequest, LocalAgentHostCreation } from '../shared/localAgentHostCreation'
 import { agentHostIdSchema, agentHostKey, agentHostSessionSchema, agentHostTargetSchema } from './agentHostProtocol'
-import { AgentHostCreationError } from './agentHostRegistry'
+import { AgentHostCreationError, isExplicitlyDeletedAgentHostSession } from './agentHostRegistry'
 import type { AgentHostCreationInspection, AgentHostRegistry, PreparedAgentHostCreation } from './agentHostRegistry'
 import { canonicalPolicyRoot } from './linkedSessionPolicy'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
@@ -215,8 +213,7 @@ export class LocalAgentHostCreationService {
       } catch (error) {
         if (error instanceof ChangedRecordError) record = await this.lookup(root, id, authorize)
         else {
-          const deleted = error instanceof RpcError && error.code === AhpErrorCodes.SessionNotFound
-            && error.message === `RPC error ${AhpErrorCodes.SessionNotFound}: Session was explicitly deleted: ${record.nativeSessionId}`
+          const deleted = isExplicitlyDeletedAgentHostSession(error, record.nativeSessionId)
           if (deleted) { await this.verifyOwner(record); await this.current(authorize) }
           record = await this.replace(record, { result: { ...record.result, state: deleted ? 'failed' : 'uncertain',
             error: deleted ? 'The original local session was explicitly deleted. Create a new local agent session to continue.'

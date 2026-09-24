@@ -245,6 +245,17 @@ describe('private workspace-local native planning sessions', () => {
     expect(setup.native.calls.filter((call) => call.method === 'dispatchAction')).toEqual([])
   })
 
+  it('keeps an empty local created chat subscribed until the owner connection closes without sending a prompt', async () => {
+    const setup = await fixture()
+    setup.native.setLifecycle('creating')
+    const target = await ready(setup)
+    await expect.poll(() => setup.native.subscriberCount(target.sessionId)).toBe(1)
+    expect(setup.native.collectUnusedSessions()).toEqual([])
+    expect(await setup.service.status(setup.root, setup.request.operationId, setup.authorize)).toMatchObject({ state: 'ready', session: target })
+    expect(setup.native.creations).toHaveLength(1)
+    expect(setup.native.calls.filter((call) => call.method === 'dispatchAction')).toEqual([])
+  })
+
   it.each(['missing', 'offline', 'different-session', 'different-error-code'] as const)('does not treat a %s result as confirmed deletion', async (reason) => {
     const setup = await fixture()
     const target = await ready(setup)

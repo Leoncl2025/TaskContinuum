@@ -541,6 +541,7 @@ describe('explicit remote Agent Host creation', () => {
     render(<AgentHostCreationControls taskId="T-0002" taskReady />)
     await choose(user)
     const row = screen.getByRole('region', { name: `Creation ${unresolved.operationId}` })
+    expect(screen.getAllByRole('region', { name: /^Creation / })[0]).toBe(row)
     expect(within(row).queryByRole('button', { name: 'Use these choices again' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Use these choices again' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()

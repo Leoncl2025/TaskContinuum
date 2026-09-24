@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { lstat, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { AhpClient } from '@microsoft/agent-host-protocol/client'
+import { AhpClient, RpcError } from '@microsoft/agent-host-protocol/client'
+import { AhpErrorCodes } from '@microsoft/agent-host-protocol'
 import type { CreateSessionParams, SessionState } from '@microsoft/agent-host-protocol'
 import { z } from 'zod'
 import type { AgentHostSession, AgentHostTarget } from '../shared/agentHost'
@@ -19,6 +20,10 @@ import { logAgentHostDiagnostic } from './agentHostDiagnostics'
 import type { AgentHostDiagnosticDetails } from './agentHostDiagnostics'
 
 export class AgentHostCreationError extends Error {}
+export function isExplicitlyDeletedAgentHostSession(error: unknown, sessionId: string): boolean {
+  return error instanceof RpcError && error.code === AhpErrorCodes.SessionNotFound
+    && error.message === `RPC error ${AhpErrorCodes.SessionNotFound}: Session was explicitly deleted: ${sessionId}`
+}
 export type AgentHostCreationInspection = { state: 'creating'; error: string } | { state: 'failed'; error: string } | { state: 'ready'; nativeLifecycle: 'creating' | 'ready'; session: AgentHostSession }
 export interface PreparedAgentHostCreation {
   readonly dispatched: boolean
@@ -235,7 +240,10 @@ export class AgentHostRegistry {
       throw new AgentHostCreationError('The created chat snapshot does not match the verified session chat.')
     }
     if (chat.data.workingDirectories) await this.verifyCreationDirectory(chat.data.workingDirectories, root)
-    return { state: 'ready', nativeLifecycle: state.lifecycle, session: agentHostSessionSchema.parse({ sessionId, chatId, owner, title: 'New Copilot chat', provider: 'copilotcli', updatedAt: chat.data.modifiedAt, canSend: true }) }
+    const session = agentHostSessionSchema.parse({ sessionId, chatId, owner, title: 'New Copilot chat', provider: 'copilotcli', updatedAt: chat.data.modifiedAt, canSend: true })
+    // Native empty drafts are GC'd after their last subscriber leaves. Hand off before closing this probe.
+    await (await this.connection({ sessionId, chatId, owner })).open()
+    return { state: 'ready', nativeLifecycle: state.lifecycle, session }
   }
 
   private async verifyCreationDirectory(directories: string[] | undefined, root: string): Promise<void> {

@@ -6,7 +6,7 @@ import { agentHostCreationErrorMessages } from '../shared/agentHostCreation'
 import type { AgentHostCreationErrorCode, AgentHostCreationLocation, AgentHostCreationResult, AgentHostCreationWorkspace } from '../shared/agentHostCreation'
 import { agentHostCreateCommandSchema, agentHostCreationBindSchema, agentHostCreationLookupSchema, agentHostCreationResultSchema, creationRevisionSchema } from './agentHostCreationProtocol'
 import { agentHostKey, agentHostSessionIdSchema, agentHostTargetSchema } from './agentHostProtocol'
-import { AgentHostCreationError } from './agentHostRegistry'
+import { AgentHostCreationError, isExplicitlyDeletedAgentHostSession } from './agentHostRegistry'
 import type { AgentHostCreationInspection, AgentHostRegistry, PreparedAgentHostCreation } from './agentHostRegistry'
 import { canonicalPolicyRoot, LocalSessionLinkReceiptsError, locallyLinkedAgentHostSessions, recordLocalLink, validateLocalSessionLinkReceipts } from './linkedSessionPolicy'
 import { acquireRepositorySessionAuthorization, bindRepositoryAgentHostCreation, readRepositorySessionLinks, sessionOwnerSchema } from './repositorySessionLinks'
@@ -294,7 +294,7 @@ export class AgentHostCreationService {
         if (!await this.bindingReady(operation)) operation = await this.replace(operation, { phase: 'complete', result: { ...operation.result, state: 'created-unbound', error: 'The original task binding or local receipt was removed. Status will not rebind it. Explicitly retry binding this same session if intended.' } })
         else if (operation.nativeLifecycle === 'creating') operation = await this.reconcile(operation)
         else this.failures.delete(operation.request.operationId)
-      } else if (operation.result.state !== 'failed' && operation.result.state !== 'created-unbound') {
+      } else if (operation.result.state !== 'failed') {
         operation = await this.reconcile(operation)
       }
     }
@@ -306,9 +306,16 @@ export class AgentHostCreationService {
     try {
       const inspected = await this.registry.inspectCreation(operation.request.hostId, operation.nativeSessionId, operation.root, this.abort.signal, operation.result.session?.chatId, operation.nativeAcknowledged)
       await this.authorizedOperation(operation)
+      if (operation.result.state === 'created-unbound' && inspected.state !== 'failed') return operation
       return await this.acceptInspection(operation, inspected)
     } catch (error) {
       if (error instanceof ChangedOperationError) return this.lookup(operation.pairId, { operationId: operation.request.operationId, workspaceId: operation.request.workspaceId }, operationLocation(operation))
+      if (isExplicitlyDeletedAgentHostSession(error, operation.nativeSessionId)) {
+        await this.authorizedOperation(operation)
+        if (JSON.stringify(await this.registry.creationOwner()) !== JSON.stringify(operation.owner)) throw new AgentHostCreationRequestError(403, 'The original worker execution identity is unavailable.')
+        return this.replace(operation, { phase: 'complete', nativeLifecycle: 'failed', result: { ...operation.result, state: 'failed',
+          error: 'The native Host confirmed that the original session was explicitly deleted (including possible empty-session cleanup). This operation will not be replayed. Start a new operation explicitly to create another chat.' } })
+      }
       return this.replace(operation, { nativeLifecycle: undefined, result: { ...operation.result, state: operation.result.session && !operation.everReady ? 'created-unbound' : 'uncertain',
         error: error instanceof AgentHostCreationError ? error.message : 'The recorded native session is not currently verifiable. A missing session is not permission to replay creation.' } })
     }
