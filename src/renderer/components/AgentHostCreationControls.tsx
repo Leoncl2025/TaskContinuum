@@ -64,6 +64,9 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
   const host = worker?.hosts.find((item) => item.hostId === hostId)
   const unresolved = operations.some(pending)
   const canCreate = Boolean(taskId && taskReady && supported && !disabled && !busy && catalogueLoaded && historyLoaded && !catalogueError && !historyError && !unresolved && (!local || (worker?.local === true && worker.workspaces.length === 1)) && worker?.state === 'connected' && workspace?.canSend && (workspace.taskState === 'available' || workspace.taskState === 'bound') && host?.available)
+  const missingChoice = !local && !worker ? 'Choose a remote worker to enable creation.'
+    : !local && worker && !workspace ? 'Choose a shared worker workspace to enable creation.'
+      : worker && workspace && !host ? 'Choose the exact Agent Host to enable creation.' : undefined
 
   function save(operation: AgentHostCreation): void {
     if (operation.taskId !== taskId) throw new Error('The creation response belongs to a different task.')
@@ -111,25 +114,28 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
     }
   }
 
+  async function loadCatalogue(scope: Lifetime): Promise<AgentHostWorker[] | undefined> {
+    let value: AgentHostWorker[]
+    try { value = await (local ? bridge!.creationWorkers(taskId!, 'local') : bridge!.creationWorkers(taskId!)) }
+    catch (failure) { if (scope.active) { setCatalogueError(failureMessage(failure)); setCatalogueLoaded(false) }; return }
+    if (!scope.active) return
+    const localWorkers = value.filter((item) => item.local === true)
+    const availableWorkers = local ? (localWorkers.length === 1 ? localWorkers : []) : value
+    setWorkers(availableWorkers)
+    if (local) {
+      const localWorker = availableWorkers[0]
+      setWorkerId(localWorker?.id ?? '')
+      setWorkspaceId(localWorker?.workspaces.length === 1 ? localWorker.workspaces[0].id : '')
+    }
+    setCatalogueLoaded(true)
+    setCatalogueError(undefined)
+    return availableWorkers
+  }
+
   async function refresh(clearError = false, mode: Activity = 'foreground'): Promise<void> {
     await run(async (scope) => {
       const previouslyPending = new Set(savedOperations.current.filter(pending).map((operation) => operation.operationId))
-      const catalogue = (async () => {
-        let value: AgentHostWorker[]
-        try { value = await (location === 'local' ? bridge!.creationWorkers(taskId!, 'local') : bridge!.creationWorkers(taskId!)) }
-        catch (failure) { if (scope.active) { setCatalogueError(failureMessage(failure)); setCatalogueLoaded(false) }; return }
-        if (!scope.active) return
-        const localWorkers = value.filter((item) => item.local === true)
-        const availableWorkers = location === 'local' ? (localWorkers.length === 1 ? localWorkers : []) : value
-        setWorkers(availableWorkers)
-        if (location === 'local') {
-          const localWorker = availableWorkers[0]
-          setWorkerId(localWorker?.id ?? '')
-          setWorkspaceId(localWorker?.workspaces.length === 1 ? localWorker.workspaces[0].id : '')
-        }
-        setCatalogueLoaded(true)
-        setCatalogueError(undefined)
-      })()
+      const catalogue = loadCatalogue(scope)
       const history = (async () => {
         let operations: AgentHostCreation[]
         try { operations = await bridge!.creations(taskId!) }
@@ -205,6 +211,24 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
     })
   }
 
+  async function reuseChoices(operation: AgentHostCreation): Promise<void> {
+    if (disabled || !historyLoaded || historyError || savedOperations.current.some(pending) || operation.state !== 'failed') return
+    await run(async (scope) => {
+      setWorkerId('')
+      setWorkspaceId('')
+      setHostId('')
+      const available = await loadCatalogue(scope)
+      if (!scope.active || !available) return
+      const source = available.find((item) => item.id === operation.workerId)
+      if (!source) throw new Error('The original worker is not available in this execution location. Check the location and connection, or choose another worker explicitly. No replacement was selected.')
+      setWorkerId(source.id)
+      if (!source.workspaces.some((item) => item.id === operation.workspaceId)) throw new Error('The original workspace is no longer shared by this worker. Restore access or choose another workspace explicitly. No replacement was selected.')
+      setWorkspaceId(operation.workspaceId)
+      if (!source.hosts.some((item) => item.hostId === operation.hostId)) throw new Error('The original Agent Host is no longer listed. Start it or choose another Host explicitly. No replacement was selected.')
+      setHostId(operation.hostId)
+    })
+  }
+
   return <section className="ah-creation" aria-label={heading} aria-busy={busy}>
     <h3><Icon name="server-environment" />{heading}</h3>
     <label className="form-field">Execution location<select aria-label="Execution location" value={location} disabled={!supported || busy || disabled || !taskId} onChange={(event) => { if (event.target.value === 'local' || event.target.value === 'remote') changeLocation(event.target.value) }}><option value="remote">Remote worker</option><option value="local">This computer</option></select></label>
@@ -237,6 +261,7 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
       {host && !host.available && <p role="status">The selected Agent Host is unavailable.</p>}
       {host?.error && <p className="copilot-error" role="alert">{host.error}</p>}
     </div>}
+    {catalogueLoaded && historyLoaded && !catalogueError && !historyError && !busy && !unresolved && workers.length > 0 && missingChoice && <p className="muted" role="status">{missingChoice}</p>}
     <button type="button" className="primary-button" disabled={!canCreate} onClick={() => { void create() }}>Create and assign{taskId ? ` to ${taskId}` : ''}</button>
     {unresolved && <p className="muted" role="status">Resolve the saved creation below before starting another. Status checks never create a second chat.</p>}
     {error && <p className="copilot-error" role="alert">{error}</p>}
@@ -248,10 +273,12 @@ function CreationControls({ taskId, taskReady, disabled = false, onCreated }: Cr
           <h4>{stateLabels[operation.state]} · {operation.taskId}</h4>
           <dl><div><dt>Machine</dt><dd>{owner?.machineName ?? 'Machine unavailable'}{owner && <> · <code>{owner.clientId}</code></>}</dd></div><div><dt>Worker</dt><dd>{operation.workerId}</dd></div><div><dt>Workspace</dt><dd>{operation.workspaceId}</dd></div><div><dt>Host</dt><dd>{operation.hostId}</dd></div><div><dt>Operation</dt><dd>{operation.operationId}</dd></div>{operation.session && <><div><dt>Session</dt><dd>{operation.session.sessionId}</dd></div><div><dt>Chat</dt><dd>{operation.session.chatId}</dd></div></>}</dl>
           {operation.state === 'uncertain' && <p>The worker may have created the chat. Check this same operation after reconnecting; do not create again.</p>}
+          {operation.state === 'failed' && <p>This is a saved failed attempt, not a new creation request. Reuse its choices or select a target above, then click Create and assign to start a new operation. Reusing choices never creates a chat.</p>}
           {operation.state === 'created-unbound' && <p>The chat exists. Retry only its assignment; no new chat or prompt will be created.</p>}
           {operation.nativeLifecycle === 'creating' && operation.session && <p>The Host acknowledged this chat. Its native agent initializes on the first explicit send; no warm-up prompt was sent.</p>}
           {operation.error && <p className="copilot-error" role="alert">{operation.error}</p>}
           <div className="ah-creation-actions">
+            {operation.state === 'failed' && <button type="button" className="secondary-button" disabled={busy || disabled || !historyLoaded || Boolean(historyError) || unresolved} onClick={() => { void reuseChoices(operation) }}>Use these choices again</button>}
             {pending(operation) && <button type="button" className="secondary-button" disabled={busy} onClick={() => { void run((scope) => check(operation, scope)) }}>Check status</button>}
             {operation.state === 'created-unbound' && <button type="button" className="primary-button" disabled={busy || !taskReady} onClick={() => { void retryBinding(operation) }}>Retry binding</button>}
             {operation.state === 'ready' && onCreated && <button type="button" className="primary-button" disabled={busy} onClick={() => { void run((scope) => openCreated(operation, scope)) }}>Open created chat</button>}

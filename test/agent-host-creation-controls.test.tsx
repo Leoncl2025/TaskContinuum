@@ -430,6 +430,159 @@ describe('explicit remote Agent Host creation', () => {
     expect(bridge.bindCreation).not.toHaveBeenCalled()
   })
 
+  it('restores a saved failed target after remount, then creates only explicitly with a new ID and fresh revision', async () => {
+    const { bridge, worker, operation, saved } = fixture()
+    const failed = operation('failed')
+    failed.error = 'The Host could not prepare native creation. No native create request was dispatched.'
+    const user = userEvent.setup()
+    const mounted = render(<AgentHostCreationControls taskId="T-0002" taskReady />)
+    await choose(user)
+    mounted.unmount()
+    render(<AgentHostCreationControls taskId="T-0002" taskReady />)
+    const reuse = await screen.findByRole('button', { name: 'Use these choices again' })
+    await waitFor(() => expect(reuse).toBeEnabled())
+    const create = screen.getByRole('button', { name: 'Create and assign to T-0002' })
+    expect(create).toBeDisabled()
+    expect(screen.getByRole('combobox', { name: 'Remote worker' })).toHaveValue('')
+    expect(screen.getByText('Choose a remote worker to enable creation.')).toBeInTheDocument()
+    worker.workspaces[0].expectedRevision = 'c'.repeat(64)
+    const calls = vi.mocked(bridge.creationWorkers).mock.calls.length
+    await user.click(reuse)
+    expect(bridge.creationWorkers).toHaveBeenCalledTimes(calls + 1)
+    expect(screen.getByRole('combobox', { name: 'Remote worker' })).toHaveValue(failed.workerId)
+    expect(screen.getByRole('combobox', { name: 'Shared worker workspace' })).toHaveValue(failed.workspaceId)
+    expect(screen.getByRole('combobox', { name: 'Exact Agent Host' })).toHaveValue(failed.hostId)
+    expect(create).toBeEnabled()
+    expect(bridge.create).not.toHaveBeenCalled()
+    expect(bridge.creationStatus).not.toHaveBeenCalled()
+    expect(bridge.bindCreation).not.toHaveBeenCalled()
+    await user.click(create)
+    expect(bridge.create).toHaveBeenCalledExactlyOnceWith({
+      operationId: expect.any(String), taskId: failed.taskId, workerId: failed.workerId,
+      workspaceId: failed.workspaceId, hostId: failed.hostId, expectedRevision: 'c'.repeat(64),
+    })
+    expect(vi.mocked(bridge.create).mock.calls[0][0].operationId).not.toBe(failed.operationId)
+    expect(saved.get(failed.operationId)).toEqual(failed)
+    expect(bridge.send).not.toHaveBeenCalled()
+  })
+
+  it('explains each missing choice instead of leaving a disabled Create button unexplained', async () => {
+    const { worker } = fixture()
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskReady />)
+    await screen.findByText('Choose a remote worker to enable creation.')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Remote worker' }), worker.id)
+    expect(screen.getByText('Choose a shared worker workspace to enable creation.')).toBeInTheDocument()
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Shared worker workspace' }), worker.workspaces[0].id)
+    expect(screen.getByText('Choose the exact Agent Host to enable creation.')).toBeInTheDocument()
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Exact Agent Host' }), worker.hosts[0].hostId)
+    expect(screen.queryByText(/to enable creation\./)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeEnabled()
+  })
+
+  it.each(['worker', 'workspace', 'Host'] as const)('does not substitute a replacement when the original %s is missing', async (missing) => {
+    const { bridge, worker, operation } = fixture()
+    operation('failed')
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskReady />)
+    await choose(user)
+    const next = structuredClone(worker)
+    if (missing === 'worker') next.id = 'replacement-worker'
+    if (missing === 'workspace') next.workspaces[0].id = 'replacement-workspace'
+    if (missing === 'Host') next.hosts[0].hostId = 'replacement-host'
+    vi.mocked(bridge.creationWorkers).mockResolvedValue([next])
+    await user.click(screen.getByRole('button', { name: 'Use these choices again' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('No replacement was selected.')
+    expect(screen.getByRole('combobox', { name: 'Exact Agent Host' })).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    expect(bridge.create).not.toHaveBeenCalled()
+  })
+
+  it.each(['offline', 'read-only', 'missing task', 'unavailable Host'] as const)('refreshes eligibility before restoring choices and keeps %s creation blocked', async (reason) => {
+    const { bridge, worker, operation } = fixture()
+    operation('failed')
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskReady />)
+    await choose(user)
+    const next = structuredClone(worker)
+    if (reason === 'offline') next.state = 'offline'
+    if (reason === 'read-only') next.workspaces[0].canSend = false
+    if (reason === 'missing task') next.workspaces[0].taskState = 'missing'
+    if (reason === 'unavailable Host') next.hosts[0].available = false
+    vi.mocked(bridge.creationWorkers).mockResolvedValue([next])
+    await user.click(screen.getByRole('button', { name: 'Use these choices again' }))
+    expect(screen.getByRole('combobox', { name: 'Exact Agent Host' })).toHaveValue(worker.hosts[0].hostId)
+    expect(screen.getAllByRole('status').length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    expect(bridge.create).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a recovery catalogue failure and permits an explicit retry without creating', async () => {
+    const { bridge, operation } = fixture()
+    operation('failed')
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskReady />)
+    await choose(user)
+    vi.mocked(bridge.creationWorkers).mockRejectedValueOnce(new Error('Worker connection lost.'))
+    await user.click(screen.getByRole('button', { name: 'Use these choices again' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Workers could not be loaded: Worker connection lost.')
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Use these choices again' }))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeEnabled()
+    expect(bridge.create).not.toHaveBeenCalled()
+  })
+
+  it.each(['creating', 'uncertain', 'created-unbound'] as const)('never offers recovery as a way around an unresolved %s operation', async (state) => {
+    const { bridge, operation } = fixture()
+    operation('failed')
+    const unresolved = operation(state)
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskReady />)
+    await choose(user)
+    const row = screen.getByRole('region', { name: `Creation ${unresolved.operationId}` })
+    expect(within(row).queryByRole('button', { name: 'Use these choices again' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Use these choices again' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    expect(bridge.create).not.toHaveBeenCalled()
+  })
+
+  it('recovers failed local choices using only local discovery and does not create until explicitly requested', async () => {
+    const { bridge, localWorker, saved } = localFixture()
+    const failed: AgentHostCreation = { operationId: crypto.randomUUID(), taskId: 'T-0002', workerId: localWorker.id, workspaceId: localWorker.workspaces[0].id, hostId: localWorker.hosts[0].hostId, state: 'failed' }
+    saved.set(failed.operationId, failed)
+    const user = userEvent.setup()
+    render(<AgentHostCreationControls taskId="T-0002" taskReady />)
+    await selectLocation(user, 'local')
+    await user.click(screen.getByRole('button', { name: 'Use these choices again' }))
+    expect(bridge.creationWorkers).toHaveBeenLastCalledWith('T-0002', 'local')
+    expect(screen.getByRole('combobox', { name: 'Exact Agent Host' })).toHaveValue(failed.hostId)
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeEnabled()
+    expect(bridge.create).not.toHaveBeenCalled()
+  })
+
+  it('ignores a late recovery after task changes and coalesces rapid recovery clicks', async () => {
+    const { bridge, worker, operation } = fixture()
+    operation('failed')
+    const user = userEvent.setup()
+    const view = render(<AgentHostCreationControls taskId="T-0002" taskReady />)
+    await choose(user)
+    let release!: (value: AgentHostWorker[]) => void
+    vi.mocked(bridge.creationWorkers).mockImplementationOnce(() => new Promise((resolve) => { release = resolve }))
+    const before = vi.mocked(bridge.creationWorkers).mock.calls.length
+    const reuse = screen.getByRole('button', { name: 'Use these choices again' })
+    act(() => { fireEvent.click(reuse); fireEvent.click(reuse) })
+    expect(bridge.creationWorkers).toHaveBeenCalledTimes(before + 1)
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeDisabled()
+    view.rerender(<AgentHostCreationControls taskId="T-0003" taskReady />)
+    await waitFor(() => expect(bridge.creationWorkers).toHaveBeenLastCalledWith('T-0003'))
+    await act(async () => { release([worker]) })
+    expect(screen.getByRole('combobox', { name: 'Remote worker' })).toHaveValue('')
+    expect(screen.getByRole('combobox', { name: 'Exact Agent Host' })).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Create and assign to T-0003' })).toBeDisabled()
+    expect(bridge.create).not.toHaveBeenCalled()
+  })
+
   it('shows unavailable APIs in an older preload while existing linking still works', async () => {
     const { session } = fixture()
     const list = vi.fn(async () => ({ sessions: [session], warnings: [] }))

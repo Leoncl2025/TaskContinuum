@@ -138,6 +138,14 @@ does not trigger an automatic retry; refresh the catalogue and explicitly start
 a new operation only after the saved operation reports failure. An uncertain
 operation must be checked using its existing ID.
 
+When reopening the Create tab, empty pickers mean no new target has been selected;
+the saved failure card is not a new failure. **Use these choices again** on a failed
+card refreshes the catalogue and restores only its exact worker, workspace and Host
+IDs. Missing choices and revoked/read-only access keep creation disabled; another
+Host is never substituted automatically. Then click **Create and assign** to submit
+a new operation with the current binding revision and a new ID. The old record is
+retained, and neither refreshing nor restoring choices dispatches native creation.
+
 If a connection drops, reopen the creation controls and check the saved operation.
 Recovery queries the same operation; it never retries native creation or user
 messages automatically. **Created but not bound** keeps the exact created session

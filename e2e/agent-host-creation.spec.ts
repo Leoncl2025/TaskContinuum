@@ -146,6 +146,7 @@ test('creates explicitly through sandboxed IPC and recovers the same operation a
   ]
   const taskFile = join(taskDirectory, 'task.json')
   const taskText = JSON.stringify({ schemaVersion: '1.0', id: 'T-0001', title: 'Remote creation lifecycle', type: 'feature', status: 'backlog', priority: 'P2', relations: { level: 'task', parent: null } })
+  const failed: AgentHostCreation = { operationId: randomUUID(), taskId: 'T-0001', workerId: 'send-worker', workspaceId: 'send-workspace', hostId: 'selected-exact-host', state: 'failed', error: 'No native create request was dispatched.' }
   let app: ElectronApplication | undefined
   let page: Page
   const errors: string[] = []
@@ -153,7 +154,7 @@ test('creates explicitly through sandboxed IPC and recovers the same operation a
   await Promise.all([taskDirectory, profile, discovery, join(workspace, '.agentdesk'), join(home, 'AppData', 'Roaming'), join(home, 'AppData', 'Local')].map((directory) => mkdir(directory, { recursive: true })))
   await writeFile(join(workspace, '.agentdesk', 'config.json'), JSON.stringify({ schemaVersion: '1.0', workspace: 'Mock remote creation workspace' }))
   await writeFile(taskFile, taskText)
-  await writeFile(files.ledger, JSON.stringify({ workers, operations: [], calls: [] } satisfies MockLedger))
+  await writeFile(files.ledger, JSON.stringify({ workers, operations: [failed], calls: [] } satisfies MockLedger))
   await writeFile(files.bindingSnapshot, JSON.stringify({
     document: { schemaVersion: '2.1', bindings: {} }, revision: null,
     localOwner: { clientId: '00000000-0000-4000-8000-000000000021', machineName: 'Creation UI fixture' },
@@ -224,15 +225,30 @@ test('creates explicitly through sandboxed IPC and recovers the same operation a
     const consentBeforeCreate = await calls('native-dialog')
     expect(consentBeforeCreate).toHaveLength(1)
     expect(consentBeforeCreate[0].args).toEqual(['Allow Agent Host access for this task workspace?', ['Cancel', 'Allow']])
+    await picker.getByRole('button', { name: 'Hide session sidebar', exact: true }).click()
+    picker = await openPicker()
+    await expect(picker.getByRole('heading', { name: 'Creation failed · T-0001', exact: true })).toBeVisible()
+    await expect(picker.getByText('Choose a remote worker to enable creation.', { exact: true })).toBeVisible()
+    await expect(create()).toBeDisabled()
+    const consentBeforeRecovery = (await calls('native-dialog')).length
+    await picker.getByRole('button', { name: 'Use these choices again', exact: true }).click()
+    await expect(picker.getByRole('combobox', { name: 'Remote worker', exact: true })).toHaveValue(failed.workerId)
+    await expect(picker.getByRole('combobox', { name: 'Shared worker workspace', exact: true })).toHaveValue(failed.workspaceId)
+    await expect(picker.getByRole('combobox', { name: 'Exact Agent Host', exact: true })).toHaveValue(failed.hostId)
+    await expect(create()).toBeEnabled()
+    expect(await calls('native-dialog')).toHaveLength(consentBeforeRecovery)
+    expect(await calls('agent-host:create')).toEqual([])
+    expect(await calls('agent-host:bind-creation')).toEqual([])
     await expect(picker.getByRole('checkbox')).toHaveCount(0)
     await mkdir(resolve('artifacts'), { recursive: true })
     await page!.screenshot({ path: resolve('artifacts', 'agent-host-creation-controls-desktop.png') })
     await create().click()
     await expect(picker.getByRole('heading', { name: 'Outcome uncertain · T-0001', exact: true })).toBeVisible()
     await expect(create()).toBeDisabled()
-    expect(await calls('native-dialog')).toHaveLength(consentBeforeCreate.length)
-    const operation = (await ledger()).operations[0]
+    expect(await calls('native-dialog')).toHaveLength(consentBeforeRecovery)
+    const operation = (await ledger()).operations.find((item) => item.operationId !== failed.operationId)!
     expect(operation.operationId).toMatch(/^[0-9a-f-]{36}$/)
+    expect((await ledger()).operations.find((item) => item.operationId === failed.operationId)).toEqual(failed)
     expect(await calls('agent-host:create')).toEqual([{ channel: 'agent-host:create', args: [{ operationId: operation.operationId, taskId: 'T-0001', workerId: 'send-worker', workspaceId: 'send-workspace', hostId: 'selected-exact-host', expectedRevision: revision }] }])
     const row = () => picker.getByRole('region', { name: `Creation ${operation.operationId}`, exact: true })
     await expect(row()).toContainText(workerOwner.machineName)
