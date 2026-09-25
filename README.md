@@ -41,6 +41,8 @@ key files are not deleted or imported into the new runtime.
   creation, model/configuration selection, reasoning/tool status and terminal output.
 - Remote devices over managed Dev Tunnel + restricted SSH, with browser sign-in,
   protected device keys, scoped pairing, revocation and private offline caches.
+- Workspace-synchronized machine aliases, with the original hostname and device
+  identity retained for connections and session ownership.
 - Native provider sign-in, tool approvals and agent questions remain on the owner.
 - Immutable signed workspace records for public device identities, invitations,
   bindings and typed settings; session history and private credentials stay off Git.
@@ -531,10 +533,11 @@ upstream pauses Git sync with a visible error, not workspace opening or local
 configuration editing. Repository URL changes still require trust review.
 
 The workspace descriptor is `.taskcontinuum/workspace.json`. The only public
-record types are **device**, **invitation**, **binding** and **setting**:
+record types are **device**, **alias**, **invitation**, **binding** and **setting**:
 
 ```text
 .taskcontinuum/records/v1/devices/<deviceId>/<operationId>.json
+.taskcontinuum/records/v1/aliases/<deviceId>/<operationId>.json
 .taskcontinuum/records/v1/invitations/<issuerId>/<recipientId>/<operationId>.json
 .taskcontinuum/records/v1/bindings/<taskId>/<operationId>.json
 .taskcontinuum/records/v1/settings/<scope>/<key>/<operationId>.json
@@ -545,6 +548,15 @@ not edits to a shared registry. Typed settings describe device/workspace
 configuration, not session model options. History, requested model/configuration,
 image bytes, private invitations, private keys, endpoint tokens and authorization
 receipts remain outside Git. Public metadata alone cannot grant session access.
+
+Use the alias controls in **Remote devices > Automatic workspace links** to name
+this machine or an enrolled remote machine. Aliases are shared with the workspace,
+support up to 80 characters of single-line text, and can be cleared to restore
+the hostname. They change display names and session search, not SSH identities,
+owner IDs or saved session bindings. Aliases are public Git metadata; do not put
+secrets in them. Update all enrolled desktops to an alias-capable build before
+publishing aliases; older builds reject unknown record types.
+See [machine aliases](docs/workspace-git-sync.md#machine-aliases).
 
 Synchronization runs at a fixed **15-second** cadence. A local configuration edit
 durably saves its operation and immediately schedules Git publication. Binding

@@ -51,6 +51,7 @@ const remoteVSCode: RemoteVSCodeBridge = {
     disable: () => ipcRenderer.invoke('remote-vscode:git-disable'),
     syncNow: () => ipcRenderer.invoke('remote-vscode:git-sync'),
     revokeDevice: (deviceId) => ipcRenderer.invoke('remote-vscode:git-revoke', deviceId),
+    setMachineAlias: (deviceId, alias, expectedRevision) => ipcRenderer.invoke('remote-vscode:git-machine-alias', { deviceId, alias, expectedRevision }),
     setSetting: (key, value, expectedRevision) => ipcRenderer.invoke('remote-vscode:git-setting', { key, value, expectedRevision }),
     openSettings: () => ipcRenderer.invoke('remote-vscode:git-open-settings'),
     onBindingsChanged: (listener) => {
