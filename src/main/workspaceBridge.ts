@@ -46,9 +46,5 @@ export function registerWorkspaceBridge(requireWindow: (event: IpcMainInvokeEven
   handle('close', () => store.closeWorkspace())
   handle('session-links', async (_window, id) => { await authorize(await store.getState()); return store.getSessionLinks(id) })
   handle('update-session-link', async (_window, request) => { await authorize(await store.getState()); return store.updateSessionLink(request) })
-  return { currentRoot: async () => {
-    const state = await store.getState()
-    if (!state.current) throw new Error('Open a real task workspace before using shared sessions.')
-    return state.current.root
-  } }
+  return { currentRoot: () => store.getCurrentRoot() }
 }

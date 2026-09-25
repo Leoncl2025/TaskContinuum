@@ -31,6 +31,7 @@ describe('selected and recent workspaces', () => {
     const { store, profile } = await fixture()
     expect(await store.getState()).toEqual({ current: null, recent: [] })
     expect(await new WorkspaceStore(profile).getState()).toEqual({ current: null, recent: [] })
+    await expect(store.getCurrentRoot()).rejects.toThrow('Open a real task workspace')
   })
 
   it('switches known roots, retains recents, and restores the last workspace after restart', async () => {
@@ -41,6 +42,7 @@ describe('selected and recent workspaces', () => {
     expect(switched.current?.name).toBe('TaskContinuum-ad')
     expect(switched.recent.map((entry) => entry.name)).toEqual(['TaskContinuum-ad', 'Another-workspace'])
     expect((await new WorkspaceStore(profile).getState()).current?.root).toBe(first)
+    expect(await new WorkspaceStore(profile).getCurrentRoot()).toBe(first)
     expect(JSON.parse(await readFile(join(profile, 'workspaces.json'), 'utf8')).currentId).toBe(initial.current!.id)
   })
 
@@ -50,6 +52,7 @@ describe('selected and recent workspaces', () => {
     await expect(store.openFolder(join(second, 'tasks'))).rejects.toThrow('AgentDesk workspace')
     await expect(store.openRecent(second)).rejects.toThrow('recent list')
     expect((await store.getState()).current?.id).toBe(initial.current?.id)
+    expect(await store.getCurrentRoot()).toBe(first)
   })
 
   it('closes the selected workspace without forgetting recently opened folders', async () => {
@@ -59,6 +62,7 @@ describe('selected and recent workspaces', () => {
     const restored = await new WorkspaceStore(profile).getState()
     expect(restored.current).toBeNull()
     expect(restored.recent).toHaveLength(1)
+    await expect(store.getCurrentRoot()).rejects.toThrow('Open a real task workspace')
   })
 
   it('reports missing startup folders without crashing or silently displaying stale tasks', async () => {
@@ -69,11 +73,13 @@ describe('selected and recent workspaces', () => {
     expect(restored.current).toBeNull()
     expect(restored.warning).toContain('previous workspace could not be opened')
     expect(restored.recent).toHaveLength(1)
+    await expect(new WorkspaceStore(profile).getCurrentRoot()).rejects.toThrow('Open a real task workspace')
   })
 
   it('persists a folder selected by the launch environment for ordinary restarts', async () => {
     const { first, profile } = await fixture()
     expect((await new WorkspaceStore(profile, first).getState()).current?.name).toBe('TaskContinuum-ad')
+    expect(await new WorkspaceStore(profile, first).getCurrentRoot()).toBe(first)
     expect((await new WorkspaceStore(profile).getState()).current?.root).toBe(first)
   })
 
@@ -184,6 +190,71 @@ describe('selected and recent workspaces', () => {
     expect((await switching).current?.root).toBe(second)
     await expect(store.verifyRepositoryPublication(request)).rejects.toThrow('active workspace changed')
     expect(verify).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['folder', 'recent', 'create', 'close', 'invalid-folder', 'invalid-recent'] as const)('rejects identity checks while %s selection is queued, then uses the settled root', async (action) => {
+    const { first, second, profile } = await fixture()
+    const setup = await repositoryFixture()
+    let release!: () => void, entered!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    vi.spyOn(setup.service, 'verifyPublication').mockImplementationOnce(async () => {
+      entered()
+      await gate
+      return { url: 'https://github.com/fixture_emu/tasks' }
+    })
+    vi.spyOn(setup.service, 'create').mockResolvedValue(second)
+    const store = new WorkspaceStore(profile, undefined, undefined, setup.service)
+    const recent = await store.openFolder(second)
+    const initial = await store.openFolder(first)
+    const verifying = store.verifyRepositoryPublication({ workspaceId: initial.current!.id, remoteUrl: 'https://github.com/fixture_emu/tasks.git' })
+    let selecting: Promise<unknown> | undefined
+    try {
+      await started
+      expect(await store.getCurrentRoot()).toBe(first)
+      selecting = action === 'folder' ? store.openFolder(second)
+        : action === 'recent' ? store.openRecent(recent.current!.id)
+          : action === 'create' ? store.createRepository({ parentPath: setup.root, name: 'created-tasks' })
+            : action === 'close' ? store.closeWorkspace()
+              : action === 'invalid-folder' ? store.openFolder(join(first, 'missing'))
+                : store.openRecent('invalid-id')
+      await expect(store.getCurrentRoot()).rejects.toThrow('workspace selection is changing')
+      const result = Promise.allSettled([selecting])
+      release()
+      await verifying
+      expect((await result)[0].status).toBe(action.startsWith('invalid') ? 'rejected' : 'fulfilled')
+      if (action === 'close') await expect(store.getCurrentRoot()).rejects.toThrow('Open a real task workspace')
+      else expect(await store.getCurrentRoot()).toBe(action.startsWith('invalid') ? first : second)
+    } finally {
+      release()
+      await Promise.allSettled([verifying, selecting])
+    }
+  })
+
+  it('keeps identity checks blocked until all overlapping selections settle, even if an earlier selection fails', async () => {
+    const { first, second, profile } = await fixture()
+    const setup = await repositoryFixture()
+    let release!: () => void, entered!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    vi.spyOn(setup.service, 'create').mockImplementationOnce(async () => {
+      entered()
+      await gate
+      return second
+    })
+    const store = new WorkspaceStore(profile, undefined, undefined, setup.service)
+    await store.openFolder(first)
+    const invalid = store.openRecent('invalid-id')
+    const creating = store.createRepository({ parentPath: setup.root, name: 'created-tasks' })
+    try {
+      await expect(invalid).rejects.toThrow('recent list')
+      await started
+      await expect(store.getCurrentRoot()).rejects.toThrow('workspace selection is changing')
+    } finally {
+      release()
+      await creating
+    }
+    expect(await store.getCurrentRoot()).toBe(second)
   })
 
   it('creates and reloads a canonical task without changing Git history or another workspace', async () => {

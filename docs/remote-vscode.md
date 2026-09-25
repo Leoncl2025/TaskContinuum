@@ -184,6 +184,13 @@ naming another session remain uncertain. Unresolved operations are displayed bef
 old failures so the operation blocking creation and its status action are visible.
 
 If a connection drops, reopen the creation controls and check the saved operation.
+Creation/binding authorization checks the selected workspace identity without
+waiting for the workspace UI operation queue. This avoids a circular wait when
+the caller is writing a binding while the UI reads session links. Folder selection,
+repository creation, opening a recent workspace and closing the workspace reject
+these checks while queued or running; the original operation reports the error
+instead of hanging or switching its target. Window, owner, task and binding
+permission checks remain in place. Full workspace reads and edits remain serialized.
 Recovery queries the same operation; it never retries native creation or user
 messages automatically. **Created but not bound** keeps the exact created session
 available for an explicit binding retry after resolving a conflict. That action

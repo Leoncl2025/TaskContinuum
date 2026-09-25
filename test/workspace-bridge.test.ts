@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => {
     constructor: vi.fn(),
     store: {
       getState: vi.fn(async () => state),
+      getCurrentRoot: vi.fn(async () => state.current!.root),
       openFolder: vi.fn(async () => state),
       openRecent: vi.fn(async () => state),
       refresh: vi.fn(async () => state),
@@ -71,6 +72,15 @@ function setup() {
 }
 
 describe('workspace repository IPC boundary', () => {
+  it('checks the selected root without waiting for the full workspace operation queue', async () => {
+    const { bridge } = setup()
+    expect(await bridge.currentRoot()).toBe(mocks.state.current!.root)
+    expect(mocks.store.getCurrentRoot).toHaveBeenCalledOnce()
+    expect(mocks.store.getState).not.toHaveBeenCalled()
+    mocks.store.getCurrentRoot.mockRejectedValueOnce(new Error('The workspace selection is changing.'))
+    await expect(bridge.currentRoot()).rejects.toThrow('selection is changing')
+  })
+
   it('uses the trusted native parent picker without creating or selecting a directory', async () => {
     const { invoke, window, requireWindow, authorize } = setup()
     expect(await invoke('choose-parent-folder')).toBe('Q:\\chosen-parent')

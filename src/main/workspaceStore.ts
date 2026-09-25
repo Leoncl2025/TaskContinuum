@@ -45,6 +45,7 @@ export class WorkspaceStore {
   private state: WorkspaceState = { current: null, recent: [] }
   private loading?: Promise<void>
   private pending: Promise<unknown> = Promise.resolve()
+  private pendingSelections = 0
 
   constructor(private readonly stateDirectory: string, startupFolder?: string, private readonly verifyAgentHost?: (root: string, target: AgentHostTarget) => Promise<AgentHostTarget>, private readonly repositories = new WorkspaceRepositoryService()) {
     this.stateFile = join(stateDirectory, 'workspaces.json')
@@ -85,10 +86,21 @@ export class WorkspaceStore {
     } finally { await rm(temporary, { force: true }) }
   }
 
-  private update<Result>(action: () => Promise<Result>): Promise<Result> {
+  private update<Result>(action: () => Promise<Result>, changesSelection = false): Promise<Result> {
+    if (changesSelection) this.pendingSelections++
     const work = this.pending.then(async () => { await this.load(); return action() })
+      .finally(() => { if (changesSelection) this.pendingSelections-- })
     this.pending = work.catch(() => undefined)
     return work
+  }
+
+  async getCurrentRoot(): Promise<string> {
+    await this.load()
+    // Binding guards may hold the configuration queue while a workspace link
+    // read waits on it. Identity checks must not wait on that workspace queue.
+    if (this.pendingSelections) throw new Error('The workspace selection is changing. Wait for it to finish and retry the original operation.')
+    if (!this.state.current) throw new Error('Open a real task workspace before using shared sessions.')
+    return this.state.current.root
   }
 
   async getState(): Promise<WorkspaceState> {
@@ -105,7 +117,7 @@ export class WorkspaceStore {
     return structuredClone(next)
   }
 
-  openFolder(root: string): Promise<WorkspaceState> { return this.update(() => this.open(root)) }
+  openFolder(root: string): Promise<WorkspaceState> { return this.update(() => this.open(root), true) }
 
   createRepository(value: unknown): Promise<WorkspaceState> {
     return this.update(async () => {
@@ -114,7 +126,7 @@ export class WorkspaceStore {
       try { return await this.open(root) } catch (error) {
         throw new Error(`The repository was created at ${root}, but could not be selected or saved. Use Open existing to recover it. ${error instanceof Error ? error.message : 'Workspace history could not be saved.'}`)
       }
-    })
+    }, true)
   }
 
   getRepositoryStatus(value: unknown): Promise<WorkspaceRepositoryStatus> {
@@ -193,7 +205,7 @@ export class WorkspaceStore {
       const selected = this.state.recent.find((item) => typeof id === 'string' && item.id === id)
       if (!selected) throw new Error('That workspace is not in the recent list. Use Open workspace folder.')
       return this.open(selected.root)
-    })
+    }, true)
   }
 
   refresh(): Promise<WorkspaceState> {
@@ -206,7 +218,7 @@ export class WorkspaceStore {
       await this.save(next)
       this.state = next
       return structuredClone(next)
-    })
+    }, true)
   }
 
   private selectedWorkspace(workspaceId: unknown): WorkspaceSnapshot {
