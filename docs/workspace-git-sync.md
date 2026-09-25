@@ -157,6 +157,39 @@ an error.
 
 ## Settings and recovery
 
+### Configuration transaction locks
+
+The private `workspace-sync/<workspace-hash>/store/store.lock` records its
+workspace ID, machine hostname, process ID and a unique ownership nonce before a
+configuration transaction starts. On restart, Task Continuum automatically
+reclaims a well-formed lock only when it belongs to this workspace on this machine
+and the operating system confirms that its process no longer exists. It then
+recovers the existing pending-operation journal before reading or changing
+configuration; bindings, receipts and session history are not reset or replayed.
+A successful stale-lock recovery appears in diagnostics as
+`configuration.transaction`, step `workspace-recovery`, status `ok`.
+
+A live PID (including a reused PID), an inaccessible process, a different machine
+or workspace, or an unrecognized/empty legacy lock is never reclaimed based on
+age. The error distinguishes a live owner from an owner that cannot be verified.
+Recovery itself is serialized by `store-recovery.lock`, and release verifies the
+file identity and ownership nonce before removing a lock. Symbolic links and
+hard-linked lock files are rejected.
+
+If ownership cannot be verified, or an interrupted recovery leaves
+`store-recovery.lock`, stop **all Task Continuum instances using that data
+directory**, verify their processes have exited, and rename only the indicated
+lock to a timestamped backup before restarting. Never remove a lock while an
+instance is running. Keep `store.json`, `pending-operations.json`, the outbox,
+receipts and task files intact. A blank task view after `store-busy` means workspace
+loading failed, not that its tasks were deleted.
+
+This is crash recovery, not a timeout for a live transaction. A deadlock in a
+still-running process requires a separate fix; waiting longer must not grant
+another process permission to write concurrently.
+
+### Local settings
+
 **Edit local configuration** opens a generated JSON projection in app data. Edit
 only its values, not its base revision or causal frontier. UI and file changes
 use the same typed write path. Per-setting heads let file edits survive unrelated

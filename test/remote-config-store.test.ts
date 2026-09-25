@@ -1,6 +1,8 @@
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { link, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { hostname } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SessionLink } from '../src/shared/sessionBindings'
 import type { BindingChangedNotification, DevicePayload, RemoteRecord, RemoteSettingChanges } from '../src/shared/remoteConfig'
@@ -356,7 +358,7 @@ describe('effective repository binding backend and durable immutable store', () 
     expect((await f.store.read()).document.bindings['T-0002']).toEqual([binding('two')])
   })
 
-  it('recovers an interrupted durable batch with the original signed operations instead of exposing partial success', async () => {
+  it('recovers an interrupted durable batch and exited-owner lock after restart without exposing partial success', async () => {
     const f = await fixture()
     await f.store.initialize()
     const first = await operation({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [binding()] } })
@@ -375,10 +377,16 @@ describe('effective repository binding backend and durable immutable store', () 
     expect(f.changed).not.toHaveBeenCalled()
     await expect(f.store.read()).rejects.toThrow('filesystem links')
     await rm(obstruction, { recursive: true })
-    const recovered = await f.store.read()
+    const exitedPid = Number(execFileSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { windowsHide: true, encoding: 'utf8' }))
+    await writeFile(join(f.stateDirectory, 'store.lock'), JSON.stringify({ schemaVersion: 1, workspaceId, pid: exitedPid, host: hostname(), nonce: randomUUID() }))
+    await f.store.close()
+    const restarted = new RemoteConfigStore(f.options)
+    stores.push(restarted)
+    const recovered = await restarted.read()
     expect(recovered.document.bindings).toEqual({ 'T-0001': [binding()], 'T-0002': [binding('two')] })
     expect(recovered.records.map((record) => record.operationId).sort()).toEqual(journal.operations.map((record) => record.operationId).sort())
     expect(await readdir(f.stateDirectory)).not.toContain('pending-operations.json')
+    expect(await readdir(f.stateDirectory)).not.toContain('store.lock')
     expect(f.changed).toHaveBeenCalledTimes(1)
   })
 

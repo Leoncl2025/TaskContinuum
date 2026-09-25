@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { lstat, mkdir, open, realpath, rm } from 'node:fs/promises'
+import { lstat, mkdir, realpath, rm } from 'node:fs/promises'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { z } from 'zod'
 import { sessionLinkEntries, taskSessionLinks, type SessionLink, type SessionLinksDocument, type SessionLinksSnapshot } from '../../shared/sessionBindings'
@@ -12,6 +12,7 @@ import type { RepositorySessionLinksBackend, SessionLinksAuthorization } from '.
 import { sessionLinkKey, sessionLinkSchema, sessionLinksDocumentSchema, sessionLinkTaskIdSchema } from '../sessionLinkSchema'
 import { BindingOverlay } from './overlay'
 import { authorizationInputs } from './authorizationInputs'
+import { acquireStoreLock } from './storeLock'
 import type { AuthorizationTransactionLock } from './authorizationInputs'
 import { AuthorizationWatch } from '../shared/authorizationWatch'
 import { logAgentHostDiagnostic, measureAgentHostDiagnostic } from '../agentHostDiagnostics'
@@ -143,16 +144,10 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
           if (child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child)) throw new RemoteConfigError('unsafe-path', 'Local state and the durable outbox must be outside both the accepted-record cache and the user checkout.')
         }
       }
-      const lockFile = join(this.options.stateDirectory, 'store.lock')
-      let lock
-      try { lock = await this.measure('configuration.transaction', 'lock', () => open(lockFile, 'wx', 0o600)) }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new RemoteConfigError('store-busy', 'Another process is using this configuration store. Retry after it finishes; remove a stale store.lock only after all app instances stop.')
-        throw error
-      }
+      const lock = await this.measure('configuration.transaction', 'lock', () => acquireStoreLock(this.options.stateDirectory, this.options.workspaceId))
       try {
-        const held = await lock.stat({ bigint: true })
-        this.transactionLock = { dev: held.dev, ino: held.ino }
+        if (lock.recovered) logAgentHostDiagnostic('configuration.transaction', { scope: this.options.workspaceRoot, step: 'workspace-recovery', status: 'ok' })
+        this.transactionLock = lock.identity
         const recovered = await this.measure('configuration.transaction', 'journal', () => this.recoverJournal())
         const state = await this.measure('configuration.transaction', 'state', () => this.state())
         if (!mutates) this.readOnlyLock = this.transactionLock
@@ -160,8 +155,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       } finally {
         this.readOnlyLock = undefined
         this.transactionLock = undefined
-        await lock.close()
-        await rm(lockFile, { force: true })
+        await lock.release()
       }
     }).catch((error: unknown) => { this.verifiedSnapshot = undefined; this.accessWatch.invalidate(); throw error })
       .finally(() => { if (mutates) this.pendingMutations-- })
