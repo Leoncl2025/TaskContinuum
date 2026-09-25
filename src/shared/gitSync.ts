@@ -16,6 +16,8 @@ export interface WorkspaceGitSyncStatus {
   provisionalTasks: string[]
   conflicts: string[]
   peers: GitSyncPeer[]
+  localDevice?: { deviceId: string; machineName: string }
+  machineAliases?: Record<string, string>
   settingsFile?: string
   revision: string | null
   settings?: RemoteSettings
@@ -27,6 +29,7 @@ export interface WorkspaceGitSyncBridge {
   disable(): Promise<void>
   syncNow(): Promise<void>
   revokeDevice(deviceId: string): Promise<void>
+  setMachineAlias(deviceId: string, alias: string | null, expectedRevision: string | null): Promise<void>
   setSetting(key: 'autoLink' | 'tunnelEnabled' | 'connectTimeoutMs', value: boolean | number | null, expectedRevision: string | null): Promise<void>
   openSettings(): Promise<void>
   onBindingsChanged(listener: () => void): () => void

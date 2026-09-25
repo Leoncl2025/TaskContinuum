@@ -6,8 +6,10 @@ import type { AgentHostCreation, AgentHostWorker } from '../src/shared/agentHost
 import { agentHostCreationErrorMessages } from '../src/shared/agentHostCreation'
 import { AgentHostCreationControls } from '../src/renderer/components/AgentHostCreationControls'
 import { AgentHostSessionsSidebar } from '../src/renderer/components/AgentHostSessionsSidebar'
+import { MachineAliasesProvider } from '../src/renderer/MachineAliasesProvider'
+import { gitSyncUiFixture } from './remote-config-ui-fixture'
 
-afterEach(() => { delete window.agentHost; vi.useRealTimers() })
+afterEach(() => { delete window.agentHost; delete window.remoteVSCode; vi.useRealTimers() })
 
 function fixture() {
   const owner = { clientId: 'authenticated-owner', machineName: 'Paired workstation' }
@@ -151,6 +153,38 @@ describe('explicit task-local Agent Host creation', () => {
     await act(async () => { finish(original) })
     expect(screen.queryByRole('region', { name: `Creation ${original.operationId}` })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Create and assign to T-0002' })).toBeEnabled()
+  })
+
+  it('keeps local creation bound to the current workspace and chosen Host when its machine alias changes', async () => {
+    const { bridge, session, localWorker } = localFixture()
+    const git = gitSyncUiFixture()
+    window.remoteVSCode = git.remote
+    git.setStatus({ ...git.getStatus(), machineAliases: { [localWorker.owner.clientId]: 'Local desk' } })
+    const onCreated = vi.fn(async () => {})
+    const user = userEvent.setup()
+    render(<MachineAliasesProvider workspaceId="workspace"><AgentHostCreationControls taskId="T-0002" taskReady onCreated={onCreated} /></MachineAliasesProvider>)
+
+    await selectLocation(user, 'local')
+    expect(await screen.findByText('Local desk (This workstation)')).toHaveAttribute('title', localWorker.owner.machineName)
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Exact Agent Host' }), 'local-native-host')
+    git.setStatus({ ...git.getStatus(), machineAliases: { [localWorker.owner.clientId]: 'Local build machine' } })
+    await act(async () => git.notify())
+    expect(screen.getByText('Local build machine (This workstation)')).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Execution location' })).toHaveValue('local')
+    expect(screen.getByRole('combobox', { name: 'Exact Agent Host' })).toHaveValue('local-native-host')
+    expect(screen.queryByRole('combobox', { name: 'Remote worker' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'Shared worker workspace' })).not.toBeInTheDocument()
+    expect(bridge.creationWorkers).toHaveBeenCalledTimes(2)
+    expect(bridge.creations).toHaveBeenCalledTimes(2)
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    await waitFor(() => expect(onCreated).toHaveBeenCalledExactlyOnceWith('T-0002', session))
+    expect(bridge.create).toHaveBeenCalledExactlyOnceWith({
+      operationId: expect.any(String), taskId: 'T-0002', workerId: localWorker.id,
+      workspaceId: 'canonical-current-workspace', hostId: 'local-native-host', expectedRevision: 'b'.repeat(64),
+    })
+    expect(session.owner).toEqual(localWorker.owner)
+    expect(bridge.createLocal).not.toHaveBeenCalled()
+    expect(bridge.send).not.toHaveBeenCalled()
   })
 
   it('creates locally while unrelated existing-session discovery is still pending', async () => {
@@ -368,6 +402,90 @@ describe('explicit task-local Agent Host creation', () => {
 })
 
 describe('explicit remote Agent Host creation', () => {
+  it('refreshes worker labels without changing the selected creation target or saved session identity', async () => {
+    const { bridge, worker, session } = fixture()
+    const git = gitSyncUiFixture()
+    window.remoteVSCode = git.remote
+    git.setStatus({ ...git.getStatus(), machineAliases: { [worker.owner.clientId]: 'Office' } })
+    const onCreated = vi.fn(async () => {})
+    const user = userEvent.setup()
+    render(<MachineAliasesProvider workspaceId="workspace"><AgentHostCreationControls taskId="T-0002" taskReady onCreated={onCreated} /></MachineAliasesProvider>)
+    await screen.findByRole('option', { name: /Office \(Paired workstation\)/ })
+    await choose(user)
+    expect(screen.getByText('Office (Paired workstation)', { exact: true })).toBeInTheDocument()
+    git.setStatus({ ...git.getStatus(), machineAliases: { [worker.owner.clientId]: 'Studio' } })
+    await act(async () => git.notify())
+    expect(screen.getByRole('option', { name: /Studio \(Paired workstation\)/ })).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Remote worker' })).toHaveValue(worker.id)
+    expect(screen.getByRole('combobox', { name: 'Shared worker workspace' })).toHaveValue(worker.workspaces[0].id)
+    expect(screen.getByRole('combobox', { name: 'Exact Agent Host' })).toHaveValue(worker.hosts[0].hostId)
+    expect(bridge.creationWorkers).toHaveBeenCalledOnce()
+    expect(bridge.creations).toHaveBeenCalledOnce()
+    await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
+    await waitFor(() => expect(onCreated).toHaveBeenCalledExactlyOnceWith('T-0002', session))
+    expect(bridge.create).toHaveBeenCalledExactlyOnceWith({
+      operationId: expect.any(String), taskId: 'T-0002', workerId: worker.id,
+      workspaceId: worker.workspaces[0].id, hostId: worker.hosts[0].hostId, expectedRevision: 'a'.repeat(64),
+    })
+    const operation = screen.getByRole('region', { name: /^Creation / })
+    expect(within(operation).getByText(/Studio \(Paired workstation\)/)).toBeInTheDocument()
+    expect(session.owner).toEqual({ clientId: 'authenticated-owner', machineName: 'Paired workstation' })
+    expect(bridge.send).not.toHaveBeenCalled()
+    expect(bridge.watch).not.toHaveBeenCalled()
+  })
+
+  it('shows workspace aliases on recovered operations even when the worker catalog is unavailable', async () => {
+    const { bridge, worker, operation } = fixture()
+    const saved = operation('ready')
+    vi.mocked(bridge.creationWorkers).mockResolvedValue([])
+    const git = gitSyncUiFixture()
+    window.remoteVSCode = git.remote
+    git.setStatus({ ...git.getStatus(), machineAliases: { [worker.owner.clientId]: 'Saved workstation' } })
+    render(<MachineAliasesProvider workspaceId="workspace"><AgentHostCreationControls taskId="T-0002" taskReady /></MachineAliasesProvider>)
+    const detail = await screen.findByRole('region', { name: `Creation ${saved.operationId}` })
+    expect(within(detail).getByText(/Saved workstation \(Paired workstation\)/)).toBeInTheDocument()
+    git.setStatus({ ...git.getStatus(), machineAliases: {} })
+    await act(async () => git.notify())
+    expect(within(detail).getByText(/Paired workstation/)).toBeInTheDocument()
+    expect(within(detail).queryByText(/Saved workstation/)).not.toBeInTheDocument()
+    expect(bridge.create).not.toHaveBeenCalled()
+    expect(bridge.creationStatus).not.toHaveBeenCalled()
+  })
+
+  it('searches sessions by aliases and actual hostnames while linking the unchanged owner identity', async () => {
+    const { bridge, session } = fixture()
+    const other: AgentHostSession = { ...session, sessionId: 'ahp-session:/other', chatId: 'ahp-chat:/other/main', title: 'Different owner', owner: { clientId: 'different-owner', machineName: session.owner.machineName } }
+    vi.mocked(bridge.list).mockResolvedValue({ sessions: [session, other], warnings: [] })
+    const git = gitSyncUiFixture()
+    window.remoteVSCode = git.remote
+    git.setStatus({ ...git.getStatus(), machineAliases: { [session.owner.clientId]: 'Build lab' } })
+    const onLink = vi.fn(async () => {})
+    render(<MachineAliasesProvider workspaceId="workspace"><AgentHostSessionsSidebar taskId="T-0002" taskReady initialView="link" onLink={onLink} onDevices={vi.fn()} onClose={vi.fn()} /></MachineAliasesProvider>)
+    await screen.findByRole('region', { name: `Host session ${session.title}` })
+    const query = screen.getByRole('textbox', { name: 'Find Agent Host session' })
+    fireEvent.change(query, { target: { value: 'BUILD LAB' } })
+    expect(screen.getByRole('region', { name: `Host session ${session.title}` })).toHaveTextContent('Build lab (Paired workstation)')
+    expect(screen.queryByRole('region', { name: `Host session ${other.title}` })).not.toBeInTheDocument()
+    fireEvent.change(query, { target: { value: 'PAIRED WORKSTATION' } })
+    expect(screen.getByRole('region', { name: `Host session ${other.title}` })).toBeInTheDocument()
+    fireEvent.change(query, { target: { value: other.sessionId } })
+    expect(screen.getByRole('region', { name: `Host session ${other.title}` })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: `Host session ${session.title}` })).not.toBeInTheDocument()
+    fireEvent.change(query, { target: { value: 'PAIRED WORKSTATION' } })
+    git.setStatus({ ...git.getStatus(), machineAliases: { [session.owner.clientId]: 'Renamed lab' } })
+    await act(async () => git.notify())
+    expect(query).toHaveValue('PAIRED WORKSTATION')
+    fireEvent.change(query, { target: { value: 'Renamed lab' } })
+    const result = screen.getByRole('region', { name: `Host session ${session.title}` })
+    expect(result).toHaveTextContent('Renamed lab (Paired workstation)')
+    fireEvent.click(within(result).getByRole('button', { name: `Link ${session.title} to T-0002` }))
+    await waitFor(() => expect(onLink).toHaveBeenCalledExactlyOnceWith(session))
+    expect(session.owner).toEqual({ clientId: 'authenticated-owner', machineName: 'Paired workstation' })
+    expect(bridge.list).toHaveBeenCalledOnce()
+    expect(bridge.create).not.toHaveBeenCalled()
+    expect(bridge.send).not.toHaveBeenCalled()
+  })
+
   it('distinguishes acknowledged lazy native initialization from a saved task assignment', async () => {
     const { bridge, operation } = fixture()
     operation('ready').nativeLifecycle = 'creating'

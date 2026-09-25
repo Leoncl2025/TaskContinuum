@@ -1,13 +1,16 @@
-import { render, screen, within } from '@testing-library/react'
+import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentHostSessionsSidebar } from '../src/renderer/components/AgentHostSessionsSidebar'
 import type { AgentHostBridge, AgentHostSession } from '../src/shared/agentHost'
+import { agentHostKey } from '../src/shared/agentHost'
 import { sessionBindingKey } from '../src/renderer/chat/sessionBindings'
 import type { SessionBindings } from '../src/renderer/chat/sessionBindings'
 import { agentHostTargetFixture } from './immutable-bindings-fixture'
+import { MachineAliasesProvider } from '../src/renderer/MachineAliasesProvider'
+import { gitSyncUiFixture } from './remote-config-ui-fixture'
 
-afterEach(() => { delete window.agentHost })
+afterEach(() => { delete window.agentHost; delete window.remoteVSCode })
 
 function bridge(sessions: AgentHostSession[] = []): AgentHostBridge {
   return {
@@ -24,6 +27,69 @@ function binding(name: string, title = 'Agent Host') {
 }
 
 describe('AgentHostSessionsSidebar', () => {
+  it('keeps cached titles and alias search together without changing link targets', async () => {
+    const target = agentHostTargetFixture('cached-alias')
+    const session: AgentHostSession = { ...target, title: 'Discovery title', provider: 'copilotcli', updatedAt: '', canSend: true }
+    window.agentHost = bridge([session])
+    const git = gitSyncUiFixture()
+    window.remoteVSCode = git.remote
+    git.setStatus({ ...git.getStatus(), machineAliases: { [target.owner.clientId]: 'Build desk' } })
+    const onLink = vi.fn(async () => {})
+    const user = userEvent.setup()
+    render(<MachineAliasesProvider workspaceId="workspace"><AgentHostSessionsSidebar taskId="T-0002" taskReady initialView="link"
+      cachedTitles={{ [agentHostKey(target)]: 'Remembered work' }} onLink={onLink} onDevices={vi.fn()} onClose={vi.fn()} /></MachineAliasesProvider>)
+
+    const row = await screen.findByRole('region', { name: 'Host session Remembered work' })
+    expect(within(row).getByText(`Build desk (${target.owner.machineName}) / Read and send`)).toBeInTheDocument()
+    const search = screen.getByRole('textbox', { name: 'Find Agent Host session' })
+    for (const query of ['Remembered work', 'Build desk', target.owner.machineName]) {
+      await user.clear(search)
+      await user.type(search, query)
+      expect(screen.getByRole('region', { name: 'Host session Remembered work' })).toBeInTheDocument()
+    }
+    await user.click(screen.getByRole('button', { name: 'Link Remembered work to T-0002' }))
+    expect(onLink).toHaveBeenCalledExactlyOnceWith(session)
+  })
+
+  it('updates aliases for bound sessions without changing selection, ownership, or detach targets', async () => {
+    const first = binding('alias-first', 'First conversation')
+    const otherTarget = { ...agentHostTargetFixture('alias-second'), owner: { clientId: 'other-owner', machineName: first.owner.machineName } }
+    const second = { id: otherTarget.sessionId, title: 'Second conversation', owner: otherTarget.owner, agentHost: otherTarget, ownerIsRemote: true }
+    const catalogue = bridge()
+    window.agentHost = catalogue
+    const git = gitSyncUiFixture()
+    window.remoteVSCode = git.remote
+    git.setStatus({ ...git.getStatus(), machineAliases: { [first.owner.clientId]: 'Office', [second.owner.clientId]: 'Laptop' } })
+    const onSelect = vi.fn()
+    const onDetach = vi.fn(async () => {})
+    const user = userEvent.setup()
+    render(<MachineAliasesProvider workspaceId="workspace"><AgentHostSessionsSidebar taskId="T-0002" taskTitle="Multiple conversations" taskReady
+      bindings={{ 'T-0002': [first, second] }} activeKey={sessionBindingKey(first)} onSelect={onSelect} onDetach={onDetach}
+      onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} /></MachineAliasesProvider>)
+
+    expect(await screen.findByText(`Local / Office (${first.owner.machineName})`)).toHaveAttribute('title', first.owner.machineName)
+    expect(screen.getByText(`Remote / Laptop (${second.owner.machineName})`)).toBeInTheDocument()
+    expect(screen.getByRole('treeitem', { name: first.title })).toHaveAttribute('aria-selected', 'true')
+    git.setStatus({ ...git.getStatus(), machineAliases: { [first.owner.clientId]: 'Build desk', [second.owner.clientId]: 'Laptop' } })
+    await act(async () => git.notify())
+    expect(screen.getByText(`Local / Build desk (${first.owner.machineName})`)).toBeInTheDocument()
+    expect(screen.getByRole('treeitem', { name: first.title })).toHaveAttribute('aria-selected', 'true')
+    expect(onSelect).not.toHaveBeenCalled()
+    expect(onDetach).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: `Open ${second.title}` }))
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith(second)
+    await user.click(screen.getByRole('button', { name: `Unlink ${first.title}` }))
+    await user.click(screen.getByRole('button', { name: 'Detach session' }))
+    expect(onDetach).toHaveBeenCalledExactlyOnceWith(first)
+    git.setStatus({ ...git.getStatus(), machineAliases: {} })
+    await act(async () => git.notify())
+    expect(screen.getByText(`Local / ${first.owner.machineName}`)).toBeInTheDocument()
+    expect(screen.getByText(`Remote / ${second.owner.machineName}`)).toBeInTheDocument()
+    expect(catalogue.list).toHaveBeenCalledOnce()
+    expect(catalogue.create).not.toHaveBeenCalled()
+    expect(catalogue.send).not.toHaveBeenCalled()
+  })
+
   it('supports tree collapse, expansion, keyboard navigation, and session activation', async () => {
     const first = binding('keyboard-first', 'Keyboard first')
     const second = binding('keyboard-second', 'Keyboard second')

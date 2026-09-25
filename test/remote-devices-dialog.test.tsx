@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RemoteDevicesDialog } from '../src/renderer/components/RemoteDevicesDialog'
+import { RemoteDeviceConnections } from '../src/renderer/components/RemoteDeviceControls'
+import { MachineAliasesProvider } from '../src/renderer/MachineAliasesProvider'
 import type { RemoteVSCodeBridge } from '../src/shared/remoteVSCode'
 import type { DevTunnelStatus } from '../src/shared/devTunnel'
 import { gitSyncUiFixture } from './remote-config-ui-fixture'
@@ -36,6 +38,53 @@ function fixture() {
 afterEach(() => { delete window.remoteVSCode; delete window.agentHost })
 
 describe('native Agent Host remote device controls', () => {
+  it('propagates alias saves by authenticated owner UUID while device actions retain pairing IDs', async () => {
+    const setup = fixture()
+    const ownerClientId = crypto.randomUUID()
+    const device: Device = { id: 'pairing-connection-id', ownerClientId, machineName: 'Machine-B', enabled: true, state: 'connected', expiresAt: '2099-01-01T00:00:00Z' }
+    const ownerless: Device = { ...device, id: ownerClientId, ownerClientId: undefined, machineName: 'Ownerless-host' }
+    vi.mocked(setup.devices.list).mockResolvedValue([device, ownerless])
+    setup.setStatus({
+      ...setup.getStatus(), peers: [{ deviceId: ownerClientId, machineName: device.machineName, state: 'offline' }],
+      machineAliases: { [ownerClientId]: 'Office', [device.id]: 'Wrong pairing alias', [device.machineName]: 'Wrong hostname alias' },
+    })
+    render(<MachineAliasesProvider workspaceId="workspace"><RemoteDevicesDialog onClose={vi.fn()} /></MachineAliasesProvider>)
+    await screen.findByRole('button', { name: 'Disconnect device Office (Machine-B)' })
+    expect(screen.getByRole('button', { name: 'Disconnect device Ownerless-host' })).toBeInTheDocument()
+    expect(screen.queryByText(/Wrong pairing alias|Wrong hostname alias/)).not.toBeInTheDocument()
+    expect(setup.api.status).toHaveBeenCalledOnce()
+    fireEvent.click(screen.getByRole('button', { name: 'Rename Machine-B' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Machine alias for Machine-B' }), { target: { value: 'Studio' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save alias' }))
+    await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Machine alias for Machine-B' })).not.toBeInTheDocument())
+    const disconnect = await screen.findByRole('button', { name: 'Disconnect device Studio (Machine-B)' })
+    expect(setup.api.setMachineAlias).toHaveBeenCalledExactlyOnceWith(ownerClientId, 'Studio', null)
+    expect(setup.devices.connect).not.toHaveBeenCalled()
+    expect(setup.devices.disconnect).not.toHaveBeenCalled()
+    fireEvent.click(disconnect)
+    await waitFor(() => expect(setup.devices.disconnect).toHaveBeenCalledExactlyOnceWith(device.id))
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect device Studio (Machine-B)' }))
+    await waitFor(() => expect(setup.devices.connect).toHaveBeenCalledExactlyOnceWith(device.id))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Forget device Studio (Machine-B)' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Forget device Studio (Machine-B)' }))
+    await waitFor(() => expect(setup.devices.forget).toHaveBeenCalledExactlyOnceWith(device.id))
+    expect(device.ownerClientId).toBe(ownerClientId)
+    expect(device.machineName).toBe('Machine-B')
+    fireEvent.click(screen.getByRole('button', { name: 'Rename Machine-B' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Clear alias' }))
+    await screen.findByRole('button', { name: 'Disconnect device Machine-B' })
+    expect(setup.api.revokeDevice).not.toHaveBeenCalled()
+  })
+
+  it('uses original device names when rendered outside the workspace alias provider', async () => {
+    const setup = fixture()
+    setup.setStatus({ ...setup.getStatus(), machineAliases: { 'device-b': 'Not available outside this workspace' } })
+    render(<RemoteDeviceConnections />)
+    await screen.findByRole('button', { name: 'Disconnect device Machine-B' })
+    expect(setup.api.status).not.toHaveBeenCalled()
+    expect(screen.queryByText('Not available outside this workspace')).not.toBeInTheDocument()
+  })
+
   it('shows trusted automatic links without manual pairing, permission controls or automatic session actions', async () => {
     const { devices, api, devTunnels } = fixture()
     const send = vi.fn()

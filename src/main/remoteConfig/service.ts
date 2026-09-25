@@ -189,6 +189,7 @@ export class WorkspaceSyncService {
     runtime.status.provisionalTasks = snapshot.provisional
     runtime.status.conflicts = [...new Set(snapshot.resolution.diagnostics.map((issue) => issue.entityKey ?? issue.code))]
     runtime.status.settings = this.settings(snapshot, runtime.local.clientId)
+    runtime.status.machineAliases = snapshot.resolution.machineAliases
     const peers = new Map(runtime.peers.status().map((peer) => [peer.deviceId, peer]))
     for (const [id, pin] of Object.entries(runtime.enrollment.pins)) {
       if (id === runtime.local.clientId) continue
@@ -597,7 +598,8 @@ export class WorkspaceSyncService {
     })
     const runtime: Runtime = {
       root, directory, metadata, enrollment, local, localClientKey: client, store: config, scheduler, control, peers, settings, replica,
-      disposeBackend: () => {}, status: { enabled: enrollment.enabled, workspaceId: enrollment.workspaceId, intervalMs: 15000, state: 'starting', pending: 0, provisionalTasks: [], conflicts: [], peers: [], revision: null, settingsFile: settings.file },
+      disposeBackend: () => {}, status: { enabled: enrollment.enabled, workspaceId: enrollment.workspaceId, intervalMs: 15000, state: 'starting', pending: 0, provisionalTasks: [], conflicts: [], peers: [], revision: null, settingsFile: settings.file,
+        localDevice: { deviceId: local.clientId, machineName: local.machineName }, machineAliases: {} },
       ownRevision: '', grants: new Map(), grantedPairs: new Map(Object.entries(metadata.managedPairs)), importedGrants: new Map(), network: new Set(), peerAgain: false, peerConnections: new Map(), recoveredOwners: new Set(), closed: false, generation: 0, grantWork: new Set(), connectionAbort: new AbortController(),
     }
     try {
@@ -672,6 +674,14 @@ export class WorkspaceSyncService {
     await this.refresh(runtime)
     await runtime.settings.refresh()
     this.reconcilePeers(runtime)
+  }
+  async setMachineAlias(root: string, deviceId: string, alias: string | null, expectedRevision: string | null): Promise<void> {
+    const runtime = await this.ensure(root, false)
+    if (!runtime?.enrollment.enabled) throw new Error('Enable automatic workspace links before naming machines.')
+    if (!runtime.enrollment.pins[deviceId]) throw new Error('This machine is not enrolled in the active workspace.')
+    await this.checkUpstream(runtime)
+    await runtime.store.setMachineAlias(deviceId, alias, expectedRevision)
+    await this.refresh(runtime)
   }
   async disable(root: string): Promise<void> {
     const runtime = await this.ensure(root, false)

@@ -81,6 +81,38 @@ Existing pairs can continue independently of another offline device. Repeated
 polling and restarts reuse stable identities, saved ports and existing grants;
 requests and private tokens are not stored in the public records.
 
+## Machine aliases
+
+In **Remote devices > Automatic workspace links**, use the alias editor beside
+this machine or an enrolled peer. Saving names a machine; clearing the alias or
+saving a blank value restores its original hostname. Edits require automatic
+workspace links to be enabled. Existing aliases remain available from cached
+configuration while synchronization is paused or offline.
+
+Aliases are workspace-scoped, shared by enrolled desktops, and keyed by the
+stable device ID, not by hostname, pairing ID or SSH route. Any enrolled editor
+can name a known machine in that workspace. Unicode and spaces are supported;
+leading/trailing spaces are trimmed, and names are limited to 80 characters with
+no control characters or line breaks. Names do not have to be unique.
+
+Device lists, the session sidebar's Current and Link views (including search),
+local and remote creation details, chat machine labels and the workbench status
+use the alias when available. The original hostname remains discoverable. Renaming
+never changes the machine identity, private pairing, session owner, binding,
+selected creation target or active conversation.
+
+Alias edits use separate signed `alias` records and the same durable outbox and
+Git synchronization as other public configuration. Restart does not lose a saved
+alias. They are public workspace metadata; do not use secrets as aliases. All
+enrolled desktops must use an alias-capable build before publishing these records;
+older builds reject unknown record types instead of silently ignoring them.
+
+Concurrent incompatible aliases show a configuration conflict and fall back to
+the hostname; they do not disable otherwise valid connections or session bindings.
+Save the intended name or clear it at the current revision to resolve every
+observed alias head. A stale edit is rejected rather than overwriting a newer name.
+Never edit or delete signed record files to rename a machine.
+
 ## Provisional bindings
 
 When A binds a task to a B-owned session, A sends the exact signed binding
@@ -105,6 +137,7 @@ Public Git data:
 ```text
 .taskcontinuum/workspace.json
 .taskcontinuum/records/v1/devices/<deviceId>/<operationId>.json
+.taskcontinuum/records/v1/aliases/<deviceId>/<operationId>.json
 .taskcontinuum/records/v1/invitations/<issuerId>/<recipientId>/<operationId>.json
 .taskcontinuum/records/v1/bindings/<taskId>/<operationId>.json
 .taskcontinuum/records/v1/settings/<scope>/<key>/<operationId>.json

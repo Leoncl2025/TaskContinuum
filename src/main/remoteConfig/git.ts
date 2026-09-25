@@ -51,7 +51,7 @@ const PUSH_ATTEMPTS = 3
 const OID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/
 const UUID = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}'
 const OPERATION = '[a-f0-9]{64}\\.json'
-const RECORD_PATH = new RegExp(`^\\.taskcontinuum/records/v1/(?:devices/${UUID}|invitations/${UUID}/${UUID}|bindings/T-[0-9]{4,}|settings/(?:workspace|${UUID})/(?:autoLink|tunnelEnabled|connectTimeoutMs))/${OPERATION}$`)
+const RECORD_PATH = new RegExp(`^\\.taskcontinuum/records/v1/(?:(?:devices|aliases)/${UUID}|invitations/${UUID}/${UUID}|bindings/T-[0-9]{4,}|settings/(?:workspace|${UUID})/(?:autoLink|tunnelEnabled|connectTimeoutMs))/${OPERATION}$`)
 const queues = new Map<string, Promise<unknown>>()
 
 interface GitResult {
