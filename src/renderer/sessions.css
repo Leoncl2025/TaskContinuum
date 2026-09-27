@@ -33,7 +33,7 @@
 .session-filter { display: flex; align-items: center; gap: 8px; padding: 12px 13px; font-size: 11px; color: var(--muted); }
 .session-filter select { width: 100%; min-width: 0; background: var(--input); border: 1px solid var(--border); padding: 5px; border-radius: 3px; }
 .ahp-panel { container: agent-chat / inline-size; }
-.ahp-chat-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title actions" "meta meta"; align-items: center; gap: 4px 12px; flex-shrink: 0; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.ahp-chat-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title actions" "meta meta"; align-items: center; gap: 0 10px; flex-shrink: 0; padding: 3px 10px 4px; border-bottom: 1px solid var(--border); }
 .ahp-chat-title { grid-area: title; display: flex; align-items: center; min-width: 0; gap: 8px; }
 .ahp-chat-title > .codicon { color: var(--accent); font-size: 16px; }
 .ahp-chat-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; line-height: 20px; }
@@ -46,7 +46,7 @@
 .ahp-chat-machine { display: inline-flex; align-items: center; min-width: 0; gap: 6px; }
 .ahp-chat-machine > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ahp-chat-actions { grid-area: actions; display: flex; align-items: center; gap: 2px; }
-.ahp-chat-actions .icon-button { flex-shrink: 0; }
+.ahp-chat-actions .icon-button { flex-shrink: 0; width: 24px; height: 24px; }
 .ahp-chat-details dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 12px 16px; margin: 0; font-size: 12px; line-height: 1.6; }
 .ahp-chat-details dt { color: var(--muted); }
 .ahp-chat-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }

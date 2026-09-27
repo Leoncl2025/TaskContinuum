@@ -20,16 +20,22 @@ test.beforeAll(async () => {
 test.afterAll(async () => { await server?.close() })
 
 for (const scenario of [
-  { name: 'wide-light', width: 1440, height: 900, theme: 'light', long: false },
-  { name: 'narrow-light', width: 360, height: 740, theme: 'light', long: true },
-  { name: 'short-narrow', width: 320, height: 600, theme: 'light', long: true },
-  { name: 'compact-dark', width: 768, height: 640, theme: 'dark', long: true },
+  { name: 'wide-light', width: 1440, height: 900, theme: 'light', long: false, zoom: 1 },
+  { name: 'narrow-light', width: 360, height: 740, theme: 'light', long: true, zoom: 1 },
+  { name: 'short-narrow', width: 320, height: 600, theme: 'light', long: true, zoom: 1 },
+  { name: 'compact-dark', width: 768, height: 640, theme: 'dark', long: true, zoom: 1 },
+  { name: 'zoomed-light', width: 1586, height: 1100, theme: 'light', long: true, zoom: 2 },
 ]) {
   test(`maximizes conversation space in ${scenario.name}`, async ({ page }, testInfo) => {
     const errors: string[] = []
     page.on('pageerror', (error) => errors.push(error.message))
     await page.setViewportSize({ width: scenario.width, height: scenario.height })
     await page.goto(`${url}?theme=${scenario.theme}${scenario.long ? '&long' : ''}`)
+    await page.evaluate((zoom) => {
+      document.body.style.zoom = String(zoom)
+      // CSS zoom leaves viewport units unchanged, unlike Electron's page zoom.
+      document.querySelector<HTMLElement>('.workbench')!.style.height = `${innerHeight / zoom}px`
+    }, scenario.zoom)
     const panel = page.getByRole('complementary', { name: 'Agent Host task chat' })
     await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
     await panel.getByRole('combobox', { name: 'Agent Host model' }).selectOption('gpt-6')
@@ -43,11 +49,16 @@ for (const scenario of [
     })
     console.log(JSON.stringify({ scenario: scenario.name, ...geometry }))
     await page.screenshot({ path: testInfo.outputPath(`${scenario.name}.png`) })
-    expect(geometry.headerHeight).toBeLessThanOrEqual(scenario.width >= 640 ? 44 : 64)
-    expect(geometry.chatHeight).toBeGreaterThanOrEqual(scenario.height * 0.65)
+    expect(geometry.headerHeight).toBe((scenario.width / scenario.zoom >= 640 ? 32 : 48) * scenario.zoom)
+    expect(geometry.chatHeight).toBeGreaterThanOrEqual(scenario.height / scenario.zoom * 0.65)
     expect(geometry.horizontalOverflow).toBe(false)
+    await expect(panel.getByRole('textbox', { name: 'Message Agent Host' })).toBeInViewport()
+    await expect(panel.getByRole('button', { name: 'Send to Agent Host' })).toBeInViewport()
     for (const name of ['Chat details', 'Manage devices', 'Reconnect Agent Host', 'Detach conversation', 'Hide chat panel']) {
       await expect(panel.getByRole('button', { name, exact: true })).toBeInViewport()
+      const size = await panel.getByRole('button', { name, exact: true }).boundingBox()
+      expect(size?.width).toBeGreaterThanOrEqual(24 * scenario.zoom)
+      expect(size?.height).toBeGreaterThanOrEqual(24 * scenario.zoom)
     }
 
     const trigger = panel.getByRole('button', { name: 'Chat details', exact: true })
@@ -72,7 +83,7 @@ for (const scenario of [
     await expect(panel.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
     if (scenario.name === 'wide-light') {
       await page.locator('.workbench').evaluate((element) => { element.style.width = '360px' })
-      expect(await panel.getByLabel('Chat header').evaluate((element) => element.getBoundingClientRect().height)).toBeLessThanOrEqual(64)
+      expect(await panel.getByLabel('Chat header').evaluate((element) => element.getBoundingClientRect().height)).toBe(48)
       for (const name of ['Chat details', 'Manage devices', 'Reconnect Agent Host', 'Detach conversation', 'Hide chat panel']) {
         await expect(panel.getByRole('button', { name, exact: true })).toBeInViewport()
       }

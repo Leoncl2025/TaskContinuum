@@ -203,8 +203,9 @@ An unknown delivery blocks further sends until its original turn is observed.
 Read-only participants cannot send or cancel.
 
 The compact chat header keeps the conversation title, connection state and machine
-name in one row on wide panels, or two rows on narrow panels. Long names truncate
-without pushing the conversation down. Use **Chat details** for the full title,
+name in a 32 CSS-pixel row on wide panels, or two rows totaling 48 CSS pixels on
+narrow panels. Text stays at its normal size, and toolbar buttons retain 24-pixel
+targets. Long names truncate without pushing the conversation down. Use **Chat details** for the full title,
 task or workspace, hostname, owner/session/chat IDs and protocol version. Details
 open without resizing the message area and close with Escape. Reconnect, device
 management, detach and close remain available in the header.
