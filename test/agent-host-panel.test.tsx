@@ -49,6 +49,86 @@ function historicalOutput(view: AgentHostView, resource: string, duplicate = fal
 }
 
 describe('Agent Host chat UI', () => {
+  it('keeps a compact header and exposes full identities without reconnecting or losing the draft', async () => {
+    const setup = fixture()
+    const onDevices = vi.fn()
+    const onDetach = vi.fn()
+    const onClose = vi.fn()
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDevices={onDevices} onDetach={onDetach} onClose={onClose} />)
+    const header = screen.getByLabelText('Chat header')
+    expect(await within(header).findByText('Same original Host chat')).toHaveAttribute('title', 'Same original Host chat')
+    expect(within(header).getByRole('status')).toHaveTextContent('Connected')
+    expect(within(header).getByText('Copilot @ Owner-B')).toBeInTheDocument()
+    expect(screen.queryByText(setup.target.sessionId, { exact: true })).not.toBeInTheDocument()
+    await user.type(screen.getByRole('textbox', { name: 'Message Agent Host' }), 'Keep this draft')
+    const trigger = within(header).getByRole('button', { name: 'Chat details' })
+    await user.click(trigger)
+    expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    const details = screen.getByRole('dialog', { name: 'Chat details' })
+    for (const value of [setup.target.sessionId, setup.target.chatId, setup.target.owner.clientId, demoTasks[1].id, 'AHP 0.9.0']) {
+      expect(within(details).getByText(value, { exact: true })).toBeInTheDocument()
+    }
+    fireEvent(details, new Event('cancel', { cancelable: true }))
+    expect(screen.queryByRole('dialog', { name: 'Chat details' })).not.toBeInTheDocument()
+    expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    expect(trigger).toHaveFocus()
+    expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Keep this draft')
+    expect(setup.bridge.watch).toHaveBeenCalledOnce()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+    await user.click(within(header).getByRole('button', { name: 'Manage devices' }))
+    await user.click(within(header).getByRole('button', { name: 'Detach conversation' }))
+    await user.click(within(header).getByRole('button', { name: 'Hide chat panel' }))
+    expect(onDevices).toHaveBeenCalledOnce()
+    expect(onDetach).toHaveBeenCalledOnce()
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('keeps offline and read-only states visible without opening details', async () => {
+    const setup = fixture()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    const header = screen.getByLabelText('Chat header')
+    await within(header).findByText('Connected')
+    setup.view.state = 'offline'
+    setup.view.readOnly = true
+    setup.view.canSend = false
+    act(() => setup.emit())
+    expect(within(header).getByRole('status')).toHaveTextContent('Offline history')
+    expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
+    setup.view.state = 'connected'
+    act(() => setup.emit())
+    expect(within(header).getByRole('status')).toHaveTextContent('Read only')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('closes details when a panel becomes inactive or changes conversation', async () => {
+    const setup = fixture()
+    const user = userEvent.setup()
+    const props = { task: demoTasks[1], target: setup.target, onDetach: vi.fn(), onClose: vi.fn() }
+    const panel = render(<AgentHostPanel {...props} />)
+    await user.click(screen.getByRole('button', { name: 'Chat details' }))
+    expect(screen.getByRole('dialog', { name: 'Chat details' })).toBeInTheDocument()
+    panel.rerender(<AgentHostPanel {...props} active={false} />)
+    expect(screen.queryByRole('dialog', { name: 'Chat details' })).not.toBeInTheDocument()
+    panel.rerender(<AgentHostPanel {...props} target={{ ...setup.target, chatId: 'ahp-chat:/other' }} />)
+    expect(screen.queryByRole('dialog', { name: 'Chat details' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Chat details' })).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('exposes workspace context without task-only header actions', async () => {
+    const setup = fixture()
+    const user = userEvent.setup()
+    render(<AgentHostPanel workspace={{ id: 'workspace', name: 'Planning workspace' }} target={setup.target} onClose={vi.fn()} />)
+    await user.click(screen.getByRole('button', { name: 'Chat details' }))
+    const details = screen.getByRole('dialog', { name: 'Chat details' })
+    expect(within(details).getByText('Workspace', { exact: true })).toBeInTheDocument()
+    expect(within(details).getByText('Planning workspace')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Detach conversation' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Hide chat panel' })).not.toBeInTheDocument()
+    await user.click(within(details).getByRole('button', { name: 'Close Chat details' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
   it('settles an in-flight send while a different session is visible without replaying it', async () => {
     const { target, bridge } = fixture()
     let complete!: () => void

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { _electron as electron, expect, test } from '@playwright/test'
-import type { ElectronApplication } from '@playwright/test'
+import type { ElectronApplication, Locator, Page } from '@playwright/test'
 import type { AgentHostCreateRequest, AgentHostCreation, AgentHostWorker } from '../src/shared/agentHostCreation'
 import type { SessionLinksSnapshot } from '../src/shared/sessionBindings'
 
@@ -11,6 +11,13 @@ interface LocalCreationLedger {
   snapshot: SessionLinksSnapshot
   operations: AgentHostCreation[]
   calls: { channel: string; args: unknown[] }[]
+}
+
+async function expectChatIdentity(page: Page, panel: Locator, sessionId: string): Promise<void> {
+  await panel.getByRole('button', { name: 'Chat details', exact: true }).click()
+  const details = page.getByRole('dialog', { name: 'Chat details', exact: true })
+  await expect(details.getByText(sessionId, { exact: true })).toBeVisible()
+  await details.getByRole('button', { name: 'Close Chat details', exact: true }).click()
 }
 
 async function installLocalCreationMock(app: ElectronApplication, ledgerFile: string, workspaceId: string): Promise<void> {
@@ -175,7 +182,7 @@ test('creates a task-local chat through the real preload without remote creation
     expect(firstOperation.operationId).toMatch(/^[0-9a-f-]{36}$/)
     expect(firstOperation.session).toBeDefined()
     const firstTarget = { sessionId: firstOperation.session!.sessionId, chatId: firstOperation.session!.chatId, owner }
-    await expect(panel.getByText(firstTarget.sessionId, { exact: true })).toBeVisible()
+    await expectChatIdentity(page, panel, firstTarget.sessionId)
     await expect(panel.getByText(`Copilot @ ${owner.machineName}`, { exact: true })).toBeVisible()
     await expect(panel.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('')
 
@@ -193,7 +200,7 @@ test('creates a task-local chat through the real preload without remote creation
     expect(secondOperation.operationId).toMatch(/^[0-9a-f-]{36}$/)
     expect(secondOperation.operationId).not.toBe(firstOperation.operationId)
     const secondTarget = { sessionId: secondOperation.session!.sessionId, chatId: secondOperation.session!.chatId, owner }
-    await expect(panel.getByText(secondTarget.sessionId, { exact: true })).toBeVisible()
+    await expectChatIdentity(page, panel, secondTarget.sessionId)
     expect(await calls('agent-host:create')).toEqual([
       { channel: 'agent-host:create', args: [{ operationId: firstOperation.operationId, taskId: 'T-0001', workerId: owner.clientId, workspaceId: worker.workspaces[0].id, hostId: 'exact-local-host', expectedRevision: revision }] },
       { channel: 'agent-host:create', args: [{ operationId: secondOperation.operationId, taskId: 'T-0001', workerId: owner.clientId, workspaceId: worker.workspaces[0].id, hostId: 'exact-local-host', expectedRevision: revision }] },
@@ -206,13 +213,13 @@ test('creates a task-local chat through the real preload without remote creation
     await expect(panel.getByRole('alert').first()).toBeVisible()
     await expect(panel.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
     await page.reload()
-    await expect(panel.getByText(firstTarget.sessionId, { exact: true })).toBeVisible()
+    await expectChatIdentity(page, panel, firstTarget.sessionId)
     expect(await calls('agent-host:create')).toHaveLength(2)
     await page.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
     await expect(page.getByRole('tree', { name: 'Sessions for T-0001' }).getByRole('treeitem')).toHaveCount(3)
     await expect(page.getByRole('dialog', { name: 'Agent Host sessions' })).toHaveCount(0)
     await page.getByRole('button', { name: 'Open Created local task chat 2' }).click()
-    await expect(panel.getByText(secondTarget.sessionId, { exact: true })).toBeVisible()
+    await expectChatIdentity(page, panel, secondTarget.sessionId)
     await app.close()
     app = await electron.launch({ args: [resolve('.')], cwd: resolve('.'), env: environment })
     page = await app.firstWindow()
@@ -223,11 +230,11 @@ test('creates a task-local chat through the real preload without remote creation
     await installLocalCreationMock(app, ledgerFile, restartedWorkspaceId)
     await page.reload()
     const restoredPanel = page.getByRole('complementary', { name: 'Agent Host task chat', exact: true })
-    await expect(restoredPanel.getByText(firstTarget.sessionId, { exact: true })).toBeVisible()
+    await expectChatIdentity(page, restoredPanel, firstTarget.sessionId)
     await page.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
     await expect(page.getByRole('dialog', { name: 'Agent Host sessions' })).toHaveCount(0)
     await page.getByRole('button', { name: 'Open Created local task chat 2' }).click()
-    await expect(restoredPanel.getByText(secondTarget.sessionId, { exact: true })).toBeVisible()
+    await expectChatIdentity(page, restoredPanel, secondTarget.sessionId)
     expect((await ledger()).snapshot).toEqual(snapshot)
     const allowedChannels = new Set(['agent-host:list', 'agent-host:creation-workers', 'agent-host:creations', 'agent-host:create', 'agent-host:creation-status', 'workspace:session-links'])
     expect((await ledger()).calls.filter((item) => !allowedChannels.has(item.channel))).toEqual([])

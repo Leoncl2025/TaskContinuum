@@ -100,7 +100,7 @@ Run commands from this repository's root. Dependencies are pinned in
 | `npm run build` | Type-check and build production main/preload/renderer output and the standalone task CLI. |
 | `npm start` | Open the already-built Electron application. |
 | `npm run check` | Run lint, unit tests, and production build. |
-| `npm run test:e2e` | Build and run real Electron tests; native AHP opt-ins are described below. |
+| `npm run test:e2e` | Build and run Electron and browser layout tests; native AHP opt-ins are described below. |
 | `npm run icon:generate` | Render the approved SVG into a PNG and multi-resolution ICO using the installed Electron runtime. |
 | `npm run dist:win` | Build Windows x64 NSIS installer and ZIP in `dist`; never upload automatically. |
 | `npm run test:packaged` | Verify the packaged desktop, icon, standalone task CLI, and restart recovery after packaging. |
@@ -118,6 +118,12 @@ preview if its port is already occupied.
 Desktop tests use the installed Electron executable, not a downloaded Playwright
 browser. Their isolated profiles, screenshots, and reports are ignored by Git.
 Screenshots cover dark, light, contextual chat, and compact layouts.
+
+The isolated compact-chat layout tests use Playwright Chromium with a fixture
+bridge, not a live Agent Host. Install it once with `npx playwright install chromium`,
+then run `npx playwright test compact-chat-header.spec.ts` to check header height,
+conversation space, long names, panel resizing and keyboard-accessible details.
+This browser installation is also required before running the full E2E suite.
 
 ### Windows release workflow
 
@@ -195,6 +201,13 @@ updates/reconnection. Native tool approvals, questions and provider authenticati
 remain on B. Recovery obtains authoritative snapshots; it never replays a send.
 An unknown delivery blocks further sends until its original turn is observed.
 Read-only participants cannot send or cancel.
+
+The compact chat header keeps the conversation title, connection state and machine
+name in one row on wide panels, or two rows on narrow panels. Long names truncate
+without pushing the conversation down. Use **Chat details** for the full title,
+task or workspace, hostname, owner/session/chat IDs and protocol version. Details
+open without resizing the message area and close with Escape. Reconnect, device
+management, detach and close remain available in the header.
 
 Choose a model in the compact toolbar at the bottom of the Agent Host message input once. Task Continuum
 remembers your last explicit model and options in this device's local profile,
