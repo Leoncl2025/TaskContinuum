@@ -107,6 +107,9 @@ for (const scenario of [
     const tabs = page.getByRole('tablist', { name: 'Open tasks' })
     const first = tabs.getByRole('tab', { name: 'Fix Connection issues', exact: true })
     await expect(first).toBeVisible()
+    const titlebar = page.locator('.titlebar')
+    const header = titlebar.getByLabel('Chat header', { exact: true })
+    await expect(header.getByText('Connected', { exact: true })).toBeVisible()
     await page.evaluate((zoom) => {
       document.body.style.zoom = String(zoom)
       document.querySelector<HTMLElement>('.workbench')!.style.height = `${innerHeight / zoom}px`
@@ -117,6 +120,8 @@ for (const scenario of [
       search: document.querySelector('.command-center')!.getBoundingClientRect().height,
       searchWidth: document.querySelector('.command-center')!.getBoundingClientRect().width,
       tabs: document.querySelector('.editor-tabs')!.getBoundingClientRect().height,
+      chatHeader: document.querySelector('.titlebar .ahp-chat-header')!.getBoundingClientRect().height,
+      extraChatRow: document.querySelector('.ahp-panel .chat-log')!.getBoundingClientRect().top - document.querySelector('.editor-tabs')!.getBoundingClientRect().bottom,
       overflow: document.documentElement.scrollWidth > innerWidth,
     }))
     console.log(JSON.stringify({ scenario: `workbench-${scenario.name}`, ...geometry }))
@@ -125,25 +130,42 @@ for (const scenario of [
     expect(geometry.search).toBe(24 * scenario.zoom)
     expect(geometry.searchWidth).toBeLessThanOrEqual(420 * scenario.zoom)
     expect(geometry.tabs).toBe(28 * scenario.zoom)
+    expect(geometry.chatHeader).toBeLessThanOrEqual(32 * scenario.zoom)
+    expect(geometry.extraChatRow).toBe(0)
     expect(geometry.overflow).toBe(false)
+    await expect(header).toHaveCount(1)
+    await expect(page.locator('.ahp-panel .ahp-chat-header')).toHaveCount(0)
     await expect(search).toBeInViewport()
+    await expect(header.getByRole('button', { name: 'Chat details' })).toBeInViewport()
     for (const name of ['Minimize window', 'Maximize or restore window', 'Close window']) {
       await expect(page.getByRole('button', { name, exact: true })).toBeInViewport()
     }
 
     const composer = page.getByRole('textbox', { name: 'Message Agent Host' })
     await composer.fill('Preserve this draft while switching tasks')
+    await header.getByRole('button', { name: 'Chat details' }).click()
+    const details = page.getByRole('dialog', { name: 'Chat details', exact: true })
+    await expect(details.getByText('BUILD-WORKSTATION', { exact: true })).toBeVisible()
+    for (const name of ['Manage devices', 'Reconnect Agent Host', 'Detach conversation', 'Hide chat panel']) {
+      await expect(details.getByRole('button', { name, exact: true })).toBeVisible()
+    }
+    await details.getByRole('button', { name: 'Reconnect Agent Host', exact: true }).click()
+    await expect(details).toHaveCount(0)
+    await expect(header.getByText('Connected', { exact: true })).toBeVisible()
+    await expect(composer).toHaveValue('Preserve this draft while switching tasks')
     await search.click()
     const quickOpen = page.getByRole('dialog', { name: 'Quick open' })
     await quickOpen.getByRole('textbox', { name: 'Find a task' }).fill('Sept-2026')
     await quickOpen.getByRole('button', { name: /Sept-2026 planning/ }).click()
     const second = tabs.getByRole('tab', { name: 'Sept-2026 planning and release coordination', exact: true })
     await expect(second).toHaveAttribute('aria-selected', 'true')
+    await expect(header).toHaveCount(0)
     await expect(second).toHaveAttribute('title', 'Sept-2026 planning and release coordination')
     expect(await second.locator('span').last().evaluate((element) => element.getBoundingClientRect().width)).toBeLessThanOrEqual(160 * scenario.zoom)
     await second.focus()
     await page.keyboard.press('ArrowLeft')
     await expect(first).toHaveAttribute('aria-selected', 'true')
+    await expect(header).toHaveCount(1)
     await expect(composer).toHaveValue('Preserve this draft while switching tasks')
     await page.screenshot({ path: testInfo.outputPath(`workbench-${scenario.name}-tabs.png`) })
     await page.keyboard.press('ControlOrMeta+p')
@@ -164,5 +186,13 @@ for (const scenario of [
     await expect(first).toHaveAttribute('aria-selected', 'true')
     await expect(composer).toHaveValue('Preserve this draft while switching tasks')
     expect(errors).toEqual([])
+    await page.getByRole('button', { name: 'Toggle chat panel', exact: true }).click()
+    await expect(header).toHaveCount(0)
+    await page.getByRole('button', { name: 'Toggle chat panel', exact: true }).click()
+    await expect(header.getByText('Connected', { exact: true })).toBeVisible()
+    await expect(composer).toHaveValue('Preserve this draft while switching tasks')
+    await page.evaluate(() => window.compactChatFixture.setState('offline', true))
+    await expect(header.getByText('Offline history', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
   })
 }

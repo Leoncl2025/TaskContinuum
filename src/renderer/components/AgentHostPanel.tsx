@@ -1,4 +1,5 @@
 import { useEffect, useEffectEvent, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import stripAnsi from 'strip-ansi'
 import type { ResponsePart, TerminalState, Turn, ActiveTurn } from '@microsoft/agent-host-protocol'
 import { agentHostKey } from '../../shared/agentHost'
@@ -122,6 +123,7 @@ type AgentHostPanelProps = {
   target: AgentHostTarget
   connectionRevision?: number
   active?: boolean
+  headerTarget?: HTMLElement | null
   cachedTitle?: string
   onTitles?(sessions: readonly SessionTitleUpdate[]): void
   onClose(): void
@@ -132,7 +134,7 @@ type AgentHostPanelProps = {
   prepareFirstMessage?(text: string): Promise<string>
 } & ({ task: TaskRecord; workspace?: never; onDetach(): void } | { task?: never; workspace: Pick<WorkspaceSnapshot, 'id' | 'name'>; onDetach?: never })
 
-export function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, cachedTitle, onTitles, onDetach, onClose, onDevices, onSessions, onBusy, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
+export function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, headerTarget, cachedTitle, onTitles, onDetach, onClose, onDevices, onSessions, onBusy, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
   const bridge = window.agentHost
   const { sessionId, chatId } = target
   const { clientId, machineName } = target.owner
@@ -314,21 +316,26 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const modelStatus = !bridge ? 'Desktop update required.' : !currentCatalog ? 'Loading models from the owner Host...' : currentCatalog.error ? undefined : !modelId ? 'Choose a model below to enable sending.' : !modelReady ? 'The selected model is unavailable. Choose another model or retry loading models.' : undefined
   const displayTitle = sessionTitle(target, view?.target && agentHostKey(view.target) === key ? view.chat?.title : undefined) || cachedTitle || 'Original Host chat'
   const detailsOpen = active && detailsKey === key
+  const chatActions = <>
+    {onDevices && <IconButton icon="remote" label="Manage devices" onClick={() => { setDetailsKey(undefined); onDevices() }} />}
+    <IconButton icon="refresh" label="Reconnect Agent Host" disabled={busy} onClick={() => { setDetailsKey(undefined); void reconnect() }} />
+    {onDetach && <IconButton icon="debug-disconnect" label="Detach conversation" disabled={busy || pending} onClick={() => { setDetailsKey(undefined); onDetach() }} />}
+    {!workspace && <IconButton icon="close" label="Hide chat panel" onClick={() => { setDetailsKey(undefined); onClose() }} />}
+  </>
+  const HeaderTag = headerTarget ? 'div' : 'header'
+  const header = <HeaderTag className="ahp-chat-header" aria-label="Chat header" role={headerTarget ? 'group' : undefined}>
+    <div className="ahp-chat-title"><Icon name="copilot" /><strong title={displayTitle}>{displayTitle}</strong></div>
+    <div className="ahp-chat-meta">
+      <span className="ahp-chat-status" role="status" data-state={stateLabel} title={stateLabel}><span aria-hidden="true" /><span className="ahp-chat-state-label">{stateLabel}</span></span>
+      <span className="ahp-chat-machine" title={ownerLabel}><Icon name="server" /><span>Copilot @ {ownerLabel}</span></span>
+    </div>
+    <div className="ahp-chat-actions">
+      <IconButton icon={headerTarget ? 'ellipsis' : 'info'} label="Chat details" title={headerTarget ? 'Chat details and actions' : 'Chat details'} aria-haspopup="dialog" aria-expanded={detailsOpen} onClick={() => setDetailsKey(key)} />
+      <div className="ahp-chat-secondary-actions">{chatActions}</div>
+    </div>
+  </HeaderTag>
   return <aside className="chat-panel ahp-panel" aria-label={workspace ? 'Agent Host task creation chat' : 'Agent Host task chat'}>
-    <header className="ahp-chat-header" aria-label="Chat header">
-      <div className="ahp-chat-title"><Icon name="copilot" /><strong title={displayTitle}>{displayTitle}</strong></div>
-      <div className="ahp-chat-meta">
-        <span className="ahp-chat-status" role="status" data-state={stateLabel}><span aria-hidden="true" />{stateLabel}</span>
-        <span className="ahp-chat-machine" title={ownerLabel}><Icon name="server" /><span>Copilot @ {ownerLabel}</span></span>
-      </div>
-      <div className="ahp-chat-actions">
-        <IconButton icon="info" label="Chat details" aria-haspopup="dialog" aria-expanded={detailsOpen} onClick={() => setDetailsKey(key)} />
-        {onDevices && <IconButton icon="remote" label="Manage devices" onClick={onDevices} />}
-        <IconButton icon="refresh" label="Reconnect Agent Host" disabled={busy} onClick={() => { void reconnect() }} />
-        {onDetach && <IconButton icon="debug-disconnect" label="Detach conversation" disabled={busy || pending} onClick={onDetach} />}
-        {!workspace && <IconButton icon="close" label="Hide chat panel" onClick={onClose} />}
-      </div>
-    </header>
+    {headerTarget ? active && createPortal(header, headerTarget) : header}
     {detailsOpen && <Dialog title="Chat details" className="ahp-chat-details" onClose={() => setDetailsKey(undefined)}>
       <dl>
         <dt>Conversation</dt><dd>{displayTitle}</dd>
@@ -340,6 +347,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
         <dt>Chat ID</dt><dd><code>{chatId}</code></dd>
         <dt>Protocol</dt><dd>AHP 0.9.0</dd>
       </dl>
+      {headerTarget && <div className="dialog-actions" role="group" aria-label="Chat actions">{chatActions}</div>}
     </Dialog>}
     <div className="chat-log" ref={log} role="log" aria-label={`Agent Host conversation for ${contextLabel}`} aria-live="polite" onScroll={() => { if (log.current) following.current = log.current.scrollHeight - log.current.scrollTop - log.current.clientHeight < 60 }}>
       {!turns.length && <p className="muted">{view?.state === 'connected' ? 'No messages.' : 'Waiting for original history...'}</p>}

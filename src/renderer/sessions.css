@@ -39,19 +39,31 @@
 .ahp-chat-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; line-height: 20px; }
 .ahp-chat-meta { grid-area: meta; display: flex; align-items: center; min-width: 0; gap: 12px; color: var(--muted); font-size: 11px; line-height: 16px; }
 .ahp-chat-status { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; white-space: nowrap; }
-.ahp-chat-status > span { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }
-.ahp-chat-status[data-state="Connected"] > span { background: var(--green); }
-.ahp-chat-status:is([data-state="Connecting..."], [data-state="Agent responding"], [data-state="Delivery pending"]) > span { background: var(--accent); }
-.ahp-chat-status:is([data-state="Connection failed"], [data-state="Desktop update required"]) > span { background: #e67c73; }
+.ahp-chat-status > span:first-child { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }
+.ahp-chat-status[data-state="Connected"] > span:first-child { background: var(--green); }
+.ahp-chat-status:is([data-state="Connecting..."], [data-state="Agent responding"], [data-state="Delivery pending"]) > span:first-child { background: var(--accent); }
+.ahp-chat-status:is([data-state="Connection failed"], [data-state="Desktop update required"]) > span:first-child { background: #e67c73; }
 .ahp-chat-machine { display: inline-flex; align-items: center; min-width: 0; gap: 6px; }
 .ahp-chat-machine > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ahp-chat-actions { grid-area: actions; display: flex; align-items: center; gap: 2px; }
+.ahp-chat-actions, .ahp-chat-secondary-actions { display: flex; align-items: center; gap: 2px; }
+.ahp-chat-actions { grid-area: actions; }
 .ahp-chat-actions .icon-button { flex-shrink: 0; width: 24px; height: 24px; }
 .ahp-chat-details dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 12px 16px; margin: 0; font-size: 12px; line-height: 1.6; }
 .ahp-chat-details dt { color: var(--muted); }
 .ahp-chat-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 @container agent-chat (min-width: 640px) {
   .ahp-chat-header { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; grid-template-areas: "title meta actions"; }
+}
+.titlebar .ahp-chat-header { display: flex; gap: 10px; height: 31px; min-width: 0; padding: 0; border: 0; }
+.titlebar .ahp-chat-title { flex: 1; }
+.titlebar .ahp-chat-meta { flex: 0 1 auto; max-width: 45%; }
+.titlebar .ahp-chat-actions { flex-shrink: 0; }
+@media (max-width: 1000px) {
+  .titlebar .ahp-chat-secondary-actions, .titlebar .ahp-chat-machine { display: none; }
+  .titlebar .ahp-chat-header { gap: 6px; }
+  .titlebar .ahp-chat-meta { max-width: 42%; overflow: hidden; }
+  .titlebar .ahp-chat-status { min-width: 0; flex-shrink: 1; }
+  .titlebar .ahp-chat-state-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 }
 .ahp-panel .composer { position: relative; overflow: visible; }
 .ahp-panel .composer-toolbar { justify-content: flex-start; flex-wrap: wrap; gap: 4px; padding: 4px 8px 8px; }

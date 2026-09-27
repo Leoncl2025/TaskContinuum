@@ -14,7 +14,8 @@ interface LocalCreationLedger {
 }
 
 async function expectChatIdentity(page: Page, panel: Locator, sessionId: string): Promise<void> {
-  await panel.getByRole('button', { name: 'Chat details', exact: true }).click()
+  await expect(panel).toBeVisible()
+  await page.getByLabel('Chat header').getByRole('button', { name: 'Chat details', exact: true }).click()
   const details = page.getByRole('dialog', { name: 'Chat details', exact: true })
   await expect(details.getByText(sessionId, { exact: true })).toBeVisible()
   await details.getByRole('button', { name: 'Close Chat details', exact: true }).click()
@@ -183,7 +184,7 @@ test('creates a task-local chat through the real preload without remote creation
     expect(firstOperation.session).toBeDefined()
     const firstTarget = { sessionId: firstOperation.session!.sessionId, chatId: firstOperation.session!.chatId, owner }
     await expectChatIdentity(page, panel, firstTarget.sessionId)
-    await expect(panel.getByText(`Copilot @ ${owner.machineName}`, { exact: true })).toBeVisible()
+    await expect(page.getByLabel('Chat header').getByText(`Copilot @ ${owner.machineName}`, { exact: true })).toBeVisible()
     await expect(panel.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('')
 
     await picker.getByRole('tab', { name: 'Create', exact: true }).click()

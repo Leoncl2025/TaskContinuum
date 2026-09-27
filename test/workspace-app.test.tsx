@@ -107,6 +107,40 @@ async function selectCreationTarget(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('workspace switching in the desktop workbench', () => {
+  it('shows only the selected task conversation in the titlebar and retains drafts across task switches', async () => {
+    const { first, repository, target, agentHost, bridge } = creationFixture()
+    const other = { ...target, sessionId: 'ahp-session:/other', chatId: 'ahp-chat:/other/main',
+      owner: { clientId: crypto.randomUUID(), machineName: 'Other owner' } }
+    first.tasks.push({ ...first.tasks[0], id: 'T-0003', title: 'Another bound task' })
+    repository[first.id] = { document: { schemaVersion: '2.1', bindings: {
+      'T-0002': [{ provider: 'agent-host', ...target }],
+      'T-0003': [{ provider: 'agent-host', ...other }],
+    } }, revision: 'a'.repeat(64) }
+    const user = userEvent.setup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(await screen.findByRole('button', { name: 'Open workspace folder' }))
+    await screen.findByText('Copilot @ Creation-worker')
+    const titlebar = screen.getByRole('banner', { name: 'Workbench toolbar' })
+    await within(titlebar).findByText('Connected', { exact: true })
+    expect(within(titlebar).getAllByLabelText('Chat header')).toHaveLength(1)
+    expect(within(screen.getByRole('complementary', { name: 'Agent Host task chat' })).queryByLabelText('Chat header')).not.toBeInTheDocument()
+    await user.type(screen.getByRole('textbox', { name: 'Message Agent Host' }), 'Draft for the first task')
+    await user.keyboard('{Control>}p{/Control}')
+    const picker = screen.getByRole('dialog', { name: 'Quick open' })
+    await user.click(within(picker).getByRole('button', { name: /Another bound task/ }))
+    await within(titlebar).findByText('Copilot @ Other owner')
+    expect(within(titlebar).getAllByLabelText('Chat header')).toHaveLength(1)
+    expect(within(titlebar).queryByText('Copilot @ Creation-worker')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: 'Actual UI task' }))
+    await within(titlebar).findByText('Copilot @ Creation-worker')
+    expect(within(titlebar).getAllByLabelText('Chat header')).toHaveLength(1)
+    expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Draft for the first task')
+    expect(agentHost.create).not.toHaveBeenCalled()
+    expect(agentHost.send).not.toHaveBeenCalled()
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+  })
+
   it('shares updated aliases with the statusbar and chat without rebinding, restarting watches, or losing drafts', async () => {
     const { first, repository, target, bridge, agentHost } = creationFixture()
     repository[first.id] = { document: { schemaVersion: '2.1', bindings: { 'T-0002': [{ provider: 'agent-host', ...target }] } }, revision: 'a'.repeat(64) }
@@ -372,7 +406,7 @@ describe('workspace switching in the desktop workbench', () => {
     await waitFor(() => expect(agentHost.watch).toHaveBeenCalledTimes(2))
     expect(agentHost.watch).toHaveBeenLastCalledWith(target)
     expect(agentHost.models).toHaveBeenCalledTimes(2)
-    expect(within(panel).getByText('Connected', { exact: true })).toBeInTheDocument()
+    expect(within(screen.getByLabelText('Chat header')).getByText('Connected', { exact: true })).toBeInTheDocument()
     expect(within(panel).queryAllByRole('alert')).toEqual([])
     expect(within(panel).getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Keep this unsent draft')
     expect(taskSessionLinks(repository[first.id].document.bindings, 'T-0002')).toEqual([{ provider: 'agent-host', ...target }])

@@ -203,16 +203,22 @@ remain on B. Recovery obtains authoritative snapshots; it never replays a send.
 An unknown delivery blocks further sends until its original turn is observed.
 Read-only participants cannot send or cancel.
 
-The compact chat header keeps the conversation title, connection state and machine
-name in a 32 CSS-pixel row on wide panels, or two rows totaling 48 CSS pixels on
-narrow panels. Text stays at its normal size, and toolbar buttons retain 24-pixel
-targets. Long names truncate without pushing the conversation down. Use **Chat details** for the full title,
+The active task conversation shares the 32 CSS-pixel window bar with search,
+so the wide workbench has only that top row and the 28-pixel task tabs above the
+messages. Switching tasks updates this header without recreating the conversation.
+On narrow windows, search becomes an icon and the **Chat details** menu provides
+the machine identity and secondary actions; the title and connection state stay
+in the top row. Standalone and task-creation panels retain their own compact
+32-pixel header (48 pixels when narrow).
+Text stays at its normal size, and toolbar buttons retain 24-pixel targets.
+Long names truncate without pushing the conversation down. Use **Chat details** for the full title,
 task or workspace, hostname, owner/session/chat IDs and protocol version. Details
 open without resizing the message area and close with Escape. Reconnect, device
-management, detach and close remain available in the header.
+management, detach and close remain available in the header or its details menu.
 
 The top window bar is 32 CSS pixels tall with a 24-pixel search entry, capped at
-420 pixels wide. Open-task tabs use a separate 28-pixel row with tighter spacing,
+420 pixels wide when no conversation is active, or 220 pixels beside an active
+conversation. Open-task tabs use a separate 28-pixel row with tighter spacing,
 full-name tooltips and horizontal scrolling when needed. Search, Ctrl+P, arrow-key
 task switching and closing tabs keep their existing behavior.
 

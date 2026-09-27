@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { Activity } from 'react'
+import { Activity, useState } from 'react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ChatState } from '@microsoft/agent-host-protocol'
@@ -49,6 +49,42 @@ function historicalOutput(view: AgentHostView, resource: string, duplicate = fal
 }
 
 describe('Agent Host chat UI', () => {
+  it('moves only the active header into its titlebar slot without restarting the conversation', async () => {
+    const setup = fixture()
+    const onDevices = vi.fn()
+    const user = userEvent.setup()
+    function DockedPanel({ active }: { active: boolean }) {
+      const [slot, setSlot] = useState<HTMLDivElement | null>(null)
+      return <>
+        <div ref={setSlot} aria-label="Titlebar slot" />
+        <AgentHostPanel task={demoTasks[1]} target={setup.target} headerTarget={slot} active={active}
+          onDevices={onDevices} onDetach={vi.fn()} onClose={vi.fn()} />
+      </>
+    }
+    const mounted = render(<DockedPanel active />)
+    const slot = screen.getByLabelText('Titlebar slot')
+    await within(slot).findByText('Connected')
+    const panel = screen.getByRole('complementary', { name: 'Agent Host task chat' })
+    expect(within(panel).queryByLabelText('Chat header')).not.toBeInTheDocument()
+    await user.type(within(panel).getByRole('textbox'), 'Keep my draft')
+    await user.click(within(slot).getByRole('button', { name: 'Chat details' }))
+    const details = screen.getByRole('dialog', { name: 'Chat details' })
+    expect(within(details).getByText(setup.target.sessionId)).toBeInTheDocument()
+    await user.click(within(details).getByRole('button', { name: 'Manage devices' }))
+    expect(onDevices).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    mounted.rerender(<DockedPanel active={false} />)
+    expect(within(slot).queryByLabelText('Chat header')).not.toBeInTheDocument()
+    mounted.rerender(<DockedPanel active />)
+    expect(within(slot).getAllByLabelText('Chat header')).toHaveLength(1)
+    expect(within(panel).getByRole('textbox')).toHaveValue('Keep my draft')
+    expect(setup.bridge.watch).toHaveBeenCalledOnce()
+    expect(setup.bridge.models).toHaveBeenCalledOnce()
+    expect(setup.bridge.unwatch).not.toHaveBeenCalled()
+    expect(setup.bridge.create).not.toHaveBeenCalled()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+  })
+
   it('keeps a compact header and exposes full identities without reconnecting or losing the draft', async () => {
     const setup = fixture()
     const onDevices = vi.fn()
