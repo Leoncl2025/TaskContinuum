@@ -3,6 +3,9 @@ import { MessageKind } from '@microsoft/agent-host-protocol'
 import type { ResponsePartKind, Turn } from '@microsoft/agent-host-protocol'
 import type { AgentHostBridge, AgentHostView } from '../../src/shared/agentHost'
 import type { WorkspaceGitSyncStatus } from '../../src/shared/gitSync'
+import type { WorkspaceSnapshot } from '../../src/shared/workspace'
+import App from '../../src/renderer/App'
+import { defaultLayout, saveLayout } from '../../src/renderer/layout'
 import { AgentHostPanel } from '../../src/renderer/components/AgentHostPanel'
 import { MachineAliasesContext } from '../../src/renderer/machineAliases'
 import { fixtureTasks } from '../../test/task-fixture'
@@ -64,7 +67,43 @@ window.compactChatFixture = {
     emit()
   },
 }
-createRoot(document.getElementById('root')!).render(
+const root = createRoot(document.getElementById('root')!)
+if (parameters.has('workbench')) {
+  const workspace: WorkspaceSnapshot = {
+    id: 'fixture', name: 'Layout fixture', title: 'Layout fixture', root: 'C:\\layout-fixture',
+    loadedAt: '', warnings: [],
+    tasks: [
+      { ...fixtureTasks[1], id: 'T-0002', title: 'Fix Connection issues', parentId: undefined },
+      { ...fixtureTasks[1], id: 'T-0003', title: 'Sept-2026 planning and release coordination', parentId: undefined },
+    ],
+  }
+  const state = { current: workspace, recent: [workspace] }
+  window.workspace = {
+    getState: async () => state, openFolder: async () => state, openRecent: async () => state, refresh: async () => state,
+    closeWorkspace: unsupported, chooseParentFolder: unsupported, createRepository: unsupported,
+    getTaskCreationContext: unsupported, createTask: unsupported, getTaskAgentInstructions: unsupported,
+    getRepositoryStatus: unsupported, openRepositoryCreation: unsupported,
+    getRepositoryPushPlan: unsupported, verifyRepositoryPublication: unsupported,
+    getSessionLinks: async () => ({
+      document: { schemaVersion: '2.1', bindings: { 'T-0002': [{ provider: 'agent-host', ...target }] } },
+      revision: 'a'.repeat(64), localOwner: target.owner,
+    }),
+    updateSessionLink: unsupported,
+  }
+  window.remoteVSCode = {
+    gitSync: {
+      status: async () => status, enable: unsupported, disable: unsupported, syncNow: unsupported,
+      revokeDevice: unsupported, setMachineAlias: unsupported, setSetting: unsupported, openSettings: unsupported,
+      onBindingsChanged: () => () => {},
+    },
+  }
+  window.desktop = {
+    getInfo: async () => ({ name: 'Task Continuum', version: 'layout-fixture', platform: 'win32', security: { contextIsolated: true, sandboxed: true } }),
+    minimize: unsupported, toggleMaximize: unsupported, close: unsupported, copyText: unsupported,
+  }
+  saveLayout({ ...defaultLayout, sidebar: false, details: false, theme: parameters.get('theme') === 'dark' ? 'dark' : 'light' })
+  root.render(<App />)
+} else root.render(
   <div className="workbench" data-theme={parameters.get('theme') ?? 'light'}>
     <MachineAliasesContext.Provider value={{ status, refresh: async () => status }}>
       <AgentHostPanel task={fixtureTasks[1]} target={target} onClose={() => {}} onDetach={() => {}} onDevices={() => {}} />

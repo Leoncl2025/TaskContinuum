@@ -325,7 +325,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
           {openTasks.map((id, index) => {
             const item = tasks.find((value) => value.id === id)!
             return <div key={id} className={`editor-tab ${id === selectedId ? 'selected' : ''}`}>
-              <button type="button" role="tab" aria-selected={id === selectedId} aria-controls="active-task" tabIndex={id === selectedId ? 0 : -1} onClick={() => selectTask(id)} onKeyDown={(event) => {
+              <button type="button" role="tab" title={item.title} aria-selected={id === selectedId} aria-controls="active-task" tabIndex={id === selectedId ? 0 : -1} onClick={() => selectTask(id)} onKeyDown={(event) => {
                 if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
                   event.preventDefault()
                   const next = (index + (event.key === 'ArrowRight' ? 1 : openTasks.length - 1)) % openTasks.length

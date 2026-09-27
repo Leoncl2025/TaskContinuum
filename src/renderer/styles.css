@@ -34,15 +34,15 @@ kbd { font-family: inherit; font-size: 10px; color: var(--muted); border: 1px so
 .avatar { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; flex-shrink: 0; border-radius: 50%; background: #3d4960; color: #d9e6fc; font-size: 11px; }
 .avatar.small { width: 19px; height: 19px; font-size: 9px; }
 
-.titlebar { height: 38px; flex-shrink: 0; display: flex; align-items: center; gap: 16px; border-bottom: 1px solid var(--border); background: var(--title); padding-left: 14px; -webkit-app-region: drag; user-select: none; }
+.titlebar { height: 32px; flex-shrink: 0; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); background: var(--title); padding-left: 10px; -webkit-app-region: drag; user-select: none; }
 .titlebar button { -webkit-app-region: no-drag; }
-.app-brand { width: 260px; display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.app-brand { width: 220px; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .brand-mark { color: var(--accent); display: inline-flex; }
 .brand-mark img { display: block; }
-.command-center { flex: 1; max-width: 500px; min-width: 130px; height: 25px; display: flex; align-items: center; justify-content: center; gap: 9px; background: var(--raised); border: 1px solid #7774; border-radius: 5px; color: var(--muted); font-size: 12px; }
+.command-center { flex: 1; max-width: 420px; min-width: 130px; height: 24px; display: flex; align-items: center; justify-content: center; gap: 6px; background: var(--raised); border: 1px solid #7774; border-radius: 4px; color: var(--muted); font-size: 12px; }
 .command-center:hover { border-color: #7778; }
 .command-center span:not(.codicon) { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.command-center kbd { margin-left: 18px; }
+.command-center kbd { margin-left: 8px; }
 .titlebar-actions { display: flex; gap: 4px; margin-left: auto; padding-right: 8px; }
 .titlebar-actions button[aria-pressed='true'] { color: var(--text); }
 .window-controls { height: 100%; display: flex; gap: 0; }
@@ -134,13 +134,14 @@ kbd { font-family: inherit; font-size: 10px; color: var(--muted); border: 1px so
 .empty-sidebar p { font-size: 11px; line-height: 1.6; }
 
 .main-panel { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
-.editor-tabs { display: flex; height: 36px; min-height: 36px; background: var(--panel); border-bottom: 1px solid var(--border); overflow: auto; }
-.editor-tab { display: flex; align-items: center; flex-shrink: 0; border-right: 1px solid var(--border); border-top: 1px solid transparent; padding: 0 7px 0 3px; color: var(--muted); }
+.editor-tabs { display: flex; height: 28px; min-height: 28px; background: var(--panel); border-bottom: 1px solid var(--border); overflow: auto; }
+.editor-tabs::-webkit-scrollbar { height: 2px; }
+.editor-tab { display: flex; align-items: center; flex-shrink: 0; border-right: 1px solid var(--border); border-top: 1px solid transparent; padding: 0 4px 0 2px; color: var(--muted); }
 .editor-tab.selected { background: var(--bg); border-top-color: var(--accent); color: var(--text); }
-.editor-tab > button[role='tab'] { display: flex; align-items: center; gap: 8px; padding: 8px 8px; font-size: 12px; }
-.editor-tab > button[role='tab'] span:last-child { max-width: 185px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.editor-tab > button[role='tab'] { display: flex; align-items: center; gap: 6px; height: 100%; padding: 0 6px; font-size: 12px; line-height: 18px; }
+.editor-tab > button[role='tab'] span:last-child { max-width: 160px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .editor-tab > button[role='tab'] .codicon { font-size: 14px; color: var(--accent); }
-.editor-tab .icon-button { width: 20px; height: 22px; }
+.editor-tab .icon-button { width: 24px; height: 24px; }
 .editor-tab .icon-button .codicon { font-size: 13px; }
 .active-task { display: flex; flex: 1; min-width: 0; min-height: 0; }
 .task-details-panel { display: flex; flex: 0 0 var(--details-width, 380px); flex-direction: column; width: var(--details-width, 380px); min-width: 0; min-height: 0; border-left: 1px solid var(--border); container: task-details / inline-size; }
@@ -319,7 +320,7 @@ kbd { font-family: inherit; font-size: 10px; color: var(--muted); border: 1px so
 @media (max-width: 660px) {
   .app-brand > span:last-child { display: none; }
   .titlebar { gap: 7px; }
-  .command-center { font-size: 10px; }
+  .command-center { min-width: 0; font-size: 10px; }
   .command-center > .codicon { display: none; }
   .task-document { padding: 22px; }
   .detail-tabs { margin: 0 20px; gap: 18px; }

@@ -46,6 +46,7 @@ for (const scenario of [
         chatHeight: log.clientHeight,
         horizontalOverflow: document.documentElement.scrollWidth > innerWidth,
       }
+
     })
     console.log(JSON.stringify({ scenario: scenario.name, ...geometry }))
     await page.screenshot({ path: testInfo.outputPath(`${scenario.name}.png`) })
@@ -88,6 +89,80 @@ for (const scenario of [
         await expect(panel.getByRole('button', { name, exact: true })).toBeInViewport()
       }
     }
+    expect(errors).toEqual([])
+  })
+}
+
+for (const scenario of [
+  { name: 'wide', width: 1440, height: 900, zoom: 1, theme: 'light' },
+  { name: 'narrow', width: 360, height: 740, zoom: 1, theme: 'light' },
+  { name: 'dark', width: 768, height: 700, zoom: 1, theme: 'dark' },
+  { name: 'zoomed', width: 1586, height: 1100, zoom: 2, theme: 'light' },
+]) {
+  test(`keeps workbench chrome compact and usable in ${scenario.name}`, async ({ page }, testInfo) => {
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    await page.setViewportSize({ width: scenario.width, height: scenario.height })
+    await page.goto(`${url}?workbench&theme=${scenario.theme}`)
+    const tabs = page.getByRole('tablist', { name: 'Open tasks' })
+    const first = tabs.getByRole('tab', { name: 'Fix Connection issues', exact: true })
+    await expect(first).toBeVisible()
+    await page.evaluate((zoom) => {
+      document.body.style.zoom = String(zoom)
+      document.querySelector<HTMLElement>('.workbench')!.style.height = `${innerHeight / zoom}px`
+    }, scenario.zoom)
+    const search = page.locator('.command-center')
+    const geometry = await page.evaluate(() => ({
+      titlebar: document.querySelector('.titlebar')!.getBoundingClientRect().height,
+      search: document.querySelector('.command-center')!.getBoundingClientRect().height,
+      searchWidth: document.querySelector('.command-center')!.getBoundingClientRect().width,
+      tabs: document.querySelector('.editor-tabs')!.getBoundingClientRect().height,
+      overflow: document.documentElement.scrollWidth > innerWidth,
+    }))
+    console.log(JSON.stringify({ scenario: `workbench-${scenario.name}`, ...geometry }))
+    await page.screenshot({ path: testInfo.outputPath(`workbench-${scenario.name}.png`) })
+    expect(geometry.titlebar).toBe(32 * scenario.zoom)
+    expect(geometry.search).toBe(24 * scenario.zoom)
+    expect(geometry.searchWidth).toBeLessThanOrEqual(420 * scenario.zoom)
+    expect(geometry.tabs).toBe(28 * scenario.zoom)
+    expect(geometry.overflow).toBe(false)
+    await expect(search).toBeInViewport()
+    for (const name of ['Minimize window', 'Maximize or restore window', 'Close window']) {
+      await expect(page.getByRole('button', { name, exact: true })).toBeInViewport()
+    }
+
+    const composer = page.getByRole('textbox', { name: 'Message Agent Host' })
+    await composer.fill('Preserve this draft while switching tasks')
+    await search.click()
+    const quickOpen = page.getByRole('dialog', { name: 'Quick open' })
+    await quickOpen.getByRole('textbox', { name: 'Find a task' }).fill('Sept-2026')
+    await quickOpen.getByRole('button', { name: /Sept-2026 planning/ }).click()
+    const second = tabs.getByRole('tab', { name: 'Sept-2026 planning and release coordination', exact: true })
+    await expect(second).toHaveAttribute('aria-selected', 'true')
+    await expect(second).toHaveAttribute('title', 'Sept-2026 planning and release coordination')
+    expect(await second.locator('span').last().evaluate((element) => element.getBoundingClientRect().width)).toBeLessThanOrEqual(160 * scenario.zoom)
+    await second.focus()
+    await page.keyboard.press('ArrowLeft')
+    await expect(first).toHaveAttribute('aria-selected', 'true')
+    await expect(composer).toHaveValue('Preserve this draft while switching tasks')
+    await page.screenshot({ path: testInfo.outputPath(`workbench-${scenario.name}-tabs.png`) })
+    await page.keyboard.press('ControlOrMeta+p')
+    await expect(quickOpen).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(quickOpen).toHaveCount(0)
+    const close = tabs.getByRole('button', { name: 'Close Sept-2026 planning and release coordination', exact: true })
+    await close.scrollIntoViewIfNeeded()
+    const size = await close.boundingBox()
+    expect(size?.width).toBeGreaterThanOrEqual(24 * scenario.zoom)
+    expect(size?.height).toBeGreaterThanOrEqual(24 * scenario.zoom)
+    const tabRow = await tabs.boundingBox()
+    expect(tabRow?.height).toBe(28 * scenario.zoom)
+    expect(size!.y).toBeGreaterThanOrEqual(tabRow!.y)
+    expect(size!.y + size!.height).toBeLessThanOrEqual(tabRow!.y + tabRow!.height)
+    await close.click()
+    await expect(second).toHaveCount(0)
+    await expect(first).toHaveAttribute('aria-selected', 'true')
+    await expect(composer).toHaveValue('Preserve this draft while switching tasks')
     expect(errors).toEqual([])
   })
 }

@@ -121,8 +121,9 @@ Screenshots cover dark, light, contextual chat, and compact layouts.
 
 The isolated compact-chat layout tests use Playwright Chromium with a fixture
 bridge, not a live Agent Host. Install it once with `npx playwright install chromium`,
-then run `npx playwright test compact-chat-header.spec.ts` to check header height,
-conversation space, long names, panel resizing and keyboard-accessible details.
+then run `npx playwright test compact-chat-header.spec.ts` to check header/search/tab
+heights, conversation space, long names, panel resizing, task switching and
+keyboard-accessible details.
 This browser installation is also required before running the full E2E suite.
 
 ### Windows release workflow
@@ -209,6 +210,11 @@ targets. Long names truncate without pushing the conversation down. Use **Chat d
 task or workspace, hostname, owner/session/chat IDs and protocol version. Details
 open without resizing the message area and close with Escape. Reconnect, device
 management, detach and close remain available in the header.
+
+The top window bar is 32 CSS pixels tall with a 24-pixel search entry, capped at
+420 pixels wide. Open-task tabs use a separate 28-pixel row with tighter spacing,
+full-name tooltips and horizontal scrolling when needed. Search, Ctrl+P, arrow-key
+task switching and closing tabs keep their existing behavior.
 
 Choose a model in the compact toolbar at the bottom of the Agent Host message input once. Task Continuum
 remembers your last explicit model and options in this device's local profile,
