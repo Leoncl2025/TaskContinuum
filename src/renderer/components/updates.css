@@ -1,0 +1,11 @@
+.update-settings { display: grid; gap: 10px; }
+.update-settings h3, .update-settings p { margin: 0; }
+.update-version { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+.update-auto-check { display: flex; align-items: center; gap: 8px; }
+.update-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.update-progress { display: flex; align-items: center; gap: 10px; }
+.update-progress progress { flex: 1; min-width: 0; }
+.update-release-notes summary { cursor: pointer; }
+.update-release-notes pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; max-height: 240px; overflow-y: auto; }
+.update-status { display: inline-flex; min-width: 0; }
+.update-status button { display: inline-flex; align-items: center; gap: 5px; }

@@ -12,6 +12,7 @@ import type { FileTransferSource } from './fileTransferSource'
 import type { VSCodeDeviceClient } from './vscodeDeviceClient'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 import { FileTransferBudget } from './fileTransferBudget'
+import type { DesktopOperations } from './desktopOperations'
 
 const savedSchema = z.object({
   schemaVersion: z.literal(1), root: z.string(), request: fetchRequestSchema,
@@ -35,11 +36,15 @@ export class FileTransferService {
   private readonly cleanupTimer: ReturnType<typeof setInterval>
 
   constructor(directory: string, private readonly source: Pick<FileTransferSource, 'prepare' | 'chunk' | 'release'>,
-    private readonly devices: Pick<VSCodeDeviceClient, 'fileDevices' | 'fileRequest' | 'fileDeviceKey'>, private readonly budget = new FileTransferBudget()) {
+    private readonly devices: Pick<VSCodeDeviceClient, 'fileDevices' | 'fileRequest' | 'fileDeviceKey'>, private readonly budget = new FileTransferBudget(),
+    private readonly operations?: DesktopOperations) {
     this.directory = join(directory, 'file-transfer-inbox')
     this.cleanupTimer = setInterval(() => { void this.serialized(() => this.expire()).catch(() => console.error('File transfer inbox expiry failed.')) }, 60_000)
     this.cleanupTimer.unref()
   }
+
+  get hasActiveWork(): boolean { return this.active.size > 0 || this.busy.size > 0 }
+  private runOperation<T>(action: () => Promise<T>): Promise<T> { return this.operations?.runAsync(action) ?? action() }
 
   forWorkspace(root: string): FileTransferApi {
     const canonical = async () => {
@@ -47,15 +52,15 @@ export class FileTransferService {
       return process.platform === 'win32' ? value.toLowerCase() : value
     }
     return {
-      devices: async () => [
+      devices: () => this.runOperation(async () => [
         { deviceId: 'local', machineName: hostname(), state: 'connected', enabled: true, fileTransfer: 'available' },
         ...await this.devices.fileDevices(await canonical()),
-      ],
-      fetch: async (request) => this.fetch(await canonical(), fetchRequestSchema.parse(request)),
-      status: async (id) => this.status(await canonical(), z.uuid().parse(id)),
-      resume: async (id) => this.resume(await canonical(), z.uuid().parse(id)),
-      cancel: async (id) => this.cancel(await canonical(), z.uuid().parse(id)),
-      read: async (request) => this.read(await canonical(), readFileRequestSchema.parse(request)),
+      ]),
+      fetch: (request) => this.runOperation(async () => this.fetch(await canonical(), fetchRequestSchema.parse(request))),
+      status: (id) => this.runOperation(async () => this.status(await canonical(), z.uuid().parse(id))),
+      resume: (id) => this.runOperation(async () => this.resume(await canonical(), z.uuid().parse(id))),
+      cancel: (id) => this.runOperation(async () => this.cancel(await canonical(), z.uuid().parse(id))),
+      read: (request) => this.runOperation(async () => this.read(await canonical(), readFileRequestSchema.parse(request))),
     }
   }
 

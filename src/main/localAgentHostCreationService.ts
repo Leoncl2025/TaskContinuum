@@ -56,6 +56,8 @@ export class LocalAgentHostCreationService {
 
   constructor(private readonly directory: string, private readonly registry: AgentHostRegistry) {}
 
+  get hasActiveWork(): boolean { return this.running.size > 0 }
+
   private async current(authorize: Guard): Promise<void> {
     if (this.closed) throw new Error('The local creation service is closed.')
     await authorize()

@@ -4,6 +4,7 @@ import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import type { WorkspaceState } from '../shared/workspace'
 import { WorkspaceStore } from './workspaceStore'
 import type { AgentHostTarget } from '../shared/agentHost'
+import { handleDesktopOperation } from './desktopOperations'
 
 export function registerWorkspaceBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, verifyAgentHost?: (root: string, target: AgentHostTarget) => Promise<AgentHostTarget>, onOpen?: (root: string) => Promise<void>) {
   const store = new WorkspaceStore(app.getPath('userData'), process.env.TASKCONTINUUM_WORKSPACE, verifyAgentHost)
@@ -15,7 +16,7 @@ export function registerWorkspaceBridge(requireWindow: (event: IpcMainInvokeEven
     return state
   }
   function handle<Result>(channel: string, action: (window: BrowserWindow, value: unknown) => Promise<Result>): void {
-    ipcMain.handle(`workspace:${channel}`, (event, value: unknown) => action(requireWindow(event), value))
+    handleDesktopOperation(ipcMain, `workspace:${channel}`, (event, value: unknown) => action(requireWindow(event), value))
   }
   handle('state', async () => authorize(await store.getState()))
   handle('open-folder', async (window) => {

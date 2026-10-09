@@ -18,7 +18,7 @@ beforeEach(async () => {
   await import('../src/preload/index')
 })
 afterEach(() => {
-  for (const name of ['desktop', 'workspace', 'agentHost', 'remoteVSCode', 'copilot', 'vscodeChat', 'sharedSessions']) Reflect.deleteProperty(window, name)
+  for (const name of ['desktop', 'workspace', 'agentHost', 'remoteVSCode', 'updates', 'copilot', 'vscodeChat', 'sharedSessions']) Reflect.deleteProperty(window, name)
 })
 
 describe('native-only preload boundary', () => {
@@ -40,7 +40,7 @@ describe('native-only preload boundary', () => {
   })
 
   it('exposes only native sessions, workspace metadata and retained desktop/device APIs', () => {
-    expect(ipc.expose.mock.calls.map(([name]) => name).sort()).toEqual(['agentHost', 'desktop', 'remoteVSCode', 'workspace'])
+    expect(ipc.expose.mock.calls.map(([name]) => name).sort()).toEqual(['agentHost', 'desktop', 'remoteVSCode', 'updates', 'workspace'])
     for (const name of ['copilot', 'vscodeChat', 'sharedSessions']) expect(Reflect.has(window, name)).toBe(false)
     expect(window.workspace).not.toHaveProperty('migrateSessionLinks')
     expect(window.workspace).not.toHaveProperty('useDemo')
@@ -50,6 +50,27 @@ describe('native-only preload boundary', () => {
     expect(Object.keys(window.remoteVSCode?.devices ?? {}).sort()).toEqual(['connect', 'disconnect', 'forget', 'list'])
     for (const name of ['share', 'unshare', 'recipients', 'pair', 'workspace', 'adoptLinks', 'import', 'revoke']) expect(window.remoteVSCode?.devices).not.toHaveProperty(name)
     expect(ipc.invoke).not.toHaveBeenCalled()
+  })
+
+  it('exposes parameterless update actions and removes update event listeners', async () => {
+    const updates = window.updates
+    if (!updates) throw new Error('Update preload API missing.')
+    await updates.getState()
+    await updates.check()
+    await updates.setAutoCheck(false)
+    await updates.openRelease()
+    await updates.download()
+    await updates.install()
+    const id = crypto.randomUUID()
+    await updates.respondToInstall(id, ['Unsent draft'])
+    expect(ipc.invoke.mock.calls).toEqual([
+      ['updates:getState'], ['updates:check'], ['updates:setAutoCheck', false],
+      ['updates:openRelease'], ['updates:download'], ['updates:install'],
+      ['updates:respondToInstall', id, ['Unsent draft']],
+    ])
+    const disposers = [updates.onState(vi.fn()), updates.onPrepareInstall(vi.fn()), updates.onInstallAborted(vi.fn())]
+    for (const dispose of disposers) dispose()
+    expect(ipc.removeListener.mock.calls).toEqual(ipc.on.mock.calls)
   })
 
   it('forwards only explicit creation, browser, terminal planning and read-only verification operations', async () => {

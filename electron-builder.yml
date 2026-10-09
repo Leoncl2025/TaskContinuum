@@ -1,5 +1,11 @@
 appId: com.leoncl2025.taskcontinuum
 asar: true
+afterPack: build/after-pack.mjs
+publish:
+  provider: github
+  owner: Leoncl2025
+  repo: TaskContinuum
+  releaseType: release
 directories:
   output: dist
 files:
@@ -27,6 +33,7 @@ win:
       arch:
         - x64
 nsis:
+  include: build/installer.nsh
   artifactName: TaskContinuum-${version}-win-${arch}-setup.${ext}
   installerIcon: build/icon.ico
   uninstallerIcon: build/icon.ico

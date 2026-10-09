@@ -62,9 +62,11 @@ describe('AHP original chat connection', () => {
       }
       const id = randomUUID()
       await connection.send(id, 'Explicit model', undefined, async () => {}, undefined, model)
+      expect(connection.hasActiveWork).toBe(true)
       expect(host.dispatches).toEqual([expect.objectContaining({ message: expect.objectContaining({ model, agent: { uri: 'file:///fixture/plan.agent.md' } }) })])
       host.action({ type: 'chat/turnComplete', turnId: id, duration: 1 })
       await expect.poll(() => connection.view.chat?.activeTurn).toBeUndefined()
+      expect(connection.hasActiveWork).toBe(false)
       await connection.send(id, 'Explicit model', undefined, async () => {}, undefined, model)
       await expect(connection.send(id, 'Explicit model', undefined, async () => {}, undefined, { id: 'owner-model' })).rejects.toThrow('different content')
       await expect(connection.send(id, 'Explicit model', undefined, async () => {}, undefined, { id: 'gpt-6', config: { thinkingLevel: 'low' } })).rejects.toThrow('different content')

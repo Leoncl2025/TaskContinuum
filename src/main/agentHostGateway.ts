@@ -16,6 +16,7 @@ import { AgentHostGatewayScheduler } from './agentHostGatewayScheduler'
 export interface AgentHostAccess { canSend: boolean; actor: { clientId: string; machineName: string; username?: string } }
 export interface AgentHostGatewayOptions {
   port(): number | undefined
+  runOperation?(action: () => Promise<void>): Promise<void>
   authorize(token: string, target: AgentHostTarget, send: boolean): Promise<AgentHostAccess>
   connection(target: AgentHostTarget): Promise<AgentHostConnection>
 }
@@ -28,6 +29,7 @@ const dispatchSchema = z.object({ channel: z.string().max(512), clientSeq: z.num
 class TerminalUnavailableError extends Error {}
 
 export function attachAgentHostGateway(server: Server, options: AgentHostGatewayOptions) {
+  const runOperation = options.runOperation ?? ((action: () => Promise<void>) => action())
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024, perMessageDeflate: false })
   const checks = new Set<() => void>()
   const scheduler = new AgentHostGatewayScheduler()
@@ -47,7 +49,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
       stepStarted = performance.now()
     }
     logAgentHostDiagnostic('gateway.upgrade', { traceId, status: 'begin', step })
-    void (async () => {
+    void runOperation(async () => {
       if (request.headers.origin || request.headers.host !== `127.0.0.1:${options.port()}` || (request.url?.length ?? 0) > 4096 || sockets.clients.size + pendingUpgrades >= 32) throw new Error('Denied.')
       pendingUpgrades++
       try {
@@ -73,7 +75,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
       } finally {
         pendingUpgrades--
       }
-    })().catch((error: unknown) => {
+    }).catch((error: unknown) => {
       logAgentHostDiagnostic('gateway.upgrade', { target, traceId, status: 'error', step, elapsedMs: performance.now() - started, error })
       if (!socket.destroyed) socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
     })
@@ -266,7 +268,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
           logAgentHostDiagnostic('gateway.socket', { target, traceId, status: 'error', step: 'response', error })
           fail('transport-closed')
         },
-        run: async (queueMs) => {
+        run: (queueMs) => runOperation(async () => {
           let step: NonNullable<AgentHostDiagnosticDetails['step']> = 'authorization'
           let authMs = 0
           let authorized = false
@@ -423,11 +425,11 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
                 : { code: -32602, message: 'Command, channel, or session access is not authorized.' } })
               else fail('invalid-frame')
             } else if (!closed) fail('access-changed')
-          } finally {
-            finishUnsubscribe()
-            pendingRequests--
           }
-        },
+        }).finally(() => {
+          finishUnsubscribe()
+          pendingRequests--
+        }),
       })
       if (!queued) { pendingRequests--; finishUnsubscribe(); if (initializer) rejectInitialization?.(new Error('Agent Host gateway is busy.')); fail('queue-limit') }
     })

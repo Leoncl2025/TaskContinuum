@@ -71,6 +71,11 @@ export class AgentHostConnection {
   get state(): AgentHostView['state'] { return this.connected ? 'connected' : this.opening ? 'connecting' : 'offline' }
   private get readOnly(): boolean { return this.initialized?._meta?.taskcontinuumCanSend === false || this.chat.sendState.readOnly }
 
+  get hasActiveWork(): boolean {
+    return this.sending || this.reviewing || Boolean(this.opening || this.chat.sendState.activeTurnId || this.chat.sendState.hasQueuedMessages)
+      || this.commands.some((command) => command.state === 'pending' || command.state === 'uncertain')
+  }
+
   get view(): AgentHostView {
     const chat = this.chat.value
     const pending = this.commands.find((command) => command.state === 'pending' || command.state === 'uncertain')

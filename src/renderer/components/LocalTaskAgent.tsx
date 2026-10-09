@@ -121,7 +121,7 @@ export function LocalTaskAgent({ workspace, workspaces, onCreated, onReviewDraft
   }
 
   const session = creation?.state === 'ready' ? creation.session : undefined
-  return <section className="chat-panel task-creation-chat" aria-label="Task creation">
+  return <section className="chat-panel task-creation-chat" data-update-blocker={locked || creation?.state === 'uncertain' ? 'Finish or resolve the current local session creation before updating.' : undefined} aria-label="Task creation">
     <header className="panel-header"><span>CREATE TASKS</span><div className="header-actions">
       {onTaskChat && <IconButton icon="comment-discussion" label="Show task conversation" disabled={locked} onClick={onTaskChat} />}
       <IconButton icon="close" label="Hide chat panel" onClick={onClose} />

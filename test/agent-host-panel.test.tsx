@@ -11,6 +11,7 @@ import { fixtureTasks as demoTasks } from './task-fixture'
 import { modelConfigFixture } from './agent-host-model-fixture'
 import { MachineAliasesProvider } from '../src/renderer/MachineAliasesProvider'
 import { gitSyncUiFixture } from './remote-config-ui-fixture'
+import { updateBlockers } from '../src/renderer/installSafety'
 
 afterEach(() => { delete window.agentHost; delete window.desktop; delete window.remoteVSCode })
 
@@ -243,6 +244,23 @@ describe('Agent Host chat UI', () => {
     expect(setup.target.owner.machineName).toBe('Owner-B')
     expect(setup.bridge.create).not.toHaveBeenCalled()
     expect(setup.bridge.createLocal).not.toHaveBeenCalled()
+  })
+
+  it('blocks update installation for unsent text even when its Activity pane is hidden', async () => {
+    const setup = fixture()
+    const user = userEvent.setup()
+    const panel = <AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />
+    const rendered = render(<Activity mode="visible">{panel}</Activity>)
+    await screen.findByText('Same original Host chat')
+    expect(updateBlockers(document)).toEqual([])
+    await user.type(screen.getByRole('textbox', { name: 'Message Agent Host' }), 'Keep this draft across an update attempt')
+    expect(updateBlockers(document).join(' ')).toContain('unsent chat text and images')
+    rendered.rerender(<Activity mode="hidden">{panel}</Activity>)
+    expect(updateBlockers(document).join(' ')).toContain('unsent chat text and images')
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+    rendered.rerender(<Activity mode="visible">{panel}</Activity>)
+    await user.clear(screen.getByRole('textbox', { name: 'Message Agent Host' }))
+    await waitFor(() => expect(updateBlockers(document)).toEqual([]))
   })
 
   it('remembers the explicit model and options when reopening another task chat on the same owner', async () => {
@@ -522,6 +540,7 @@ describe('Agent Host chat UI', () => {
     setup.view.canSend = false
     act(() => setup.emit())
     expect(await screen.findByText('Live')).toHaveProperty('tagName', 'STRONG')
+    expect(updateBlockers(document).join(' ')).toContain('Wait for Agent Host activity')
     expect(screen.getByRole('textbox')).toHaveValue('Keep my next question')
     await user.click(screen.getByRole('button', { name: 'Stop Agent Host response' }))
     expect(setup.bridge.cancel).toHaveBeenCalledExactlyOnceWith(setup.target, 'running-turn')
@@ -547,6 +566,7 @@ describe('Agent Host chat UI', () => {
     const file = new File([Uint8Array.from(atob(data), (character) => character.charCodeAt(0))], 'Screenshot.png', { type: 'image/png' })
     fireEvent.paste(screen.getByRole('textbox'), { clipboardData: { items: [{ kind: 'file', type: file.type, getAsFile: () => file }], getData: () => '' } })
     await screen.findByRole('img', { name: file.name })
+    expect(updateBlockers(document).join(' ')).toContain('unsent chat text and images')
     await user.click(screen.getByRole('button', { name: 'Send to Agent Host' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('Delivery outcome unknown.')
     expect(screen.getByRole('img', { name: file.name })).toBeInTheDocument()
@@ -556,6 +576,7 @@ describe('Agent Host chat UI', () => {
     setup.view.canSend = false
     setup.view.pendingTurn = { id: command[1], state: 'uncertain' }
     act(() => setup.emit())
+    expect(updateBlockers(document).join(' ')).toContain('unknown message delivery')
     expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
     await user.click(screen.getByRole('button', { name: 'Reconnect Agent Host' }))
     await waitFor(() => expect(setup.bridge.watch).toHaveBeenCalledTimes(2))

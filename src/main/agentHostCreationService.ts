@@ -108,6 +108,8 @@ export class AgentHostCreationService {
     }
   }
 
+  get hasActiveWork(): boolean { return this.running.size > 0 }
+
   private transaction<Result>(action: (operations: Operation[]) => Promise<{ value: Result; changed?: boolean }> | { value: Result; changed?: boolean }): Promise<Result> {
     const operation = this.writing.then(async () => {
       const directory = join(this.directory, 'agent-host-creation')

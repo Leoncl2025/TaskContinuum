@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { FileTransferService } from '../src/main/fileTransferService'
 import { FileTransferBudget } from '../src/main/fileTransferBudget'
+import { DesktopOperations } from '../src/main/desktopOperations'
 import type { VSCodeDeviceClient } from '../src/main/vscodeDeviceClient'
 import { exportRequestSchema, FILE_TRANSFER_LIMITS, FileTransferError } from '../src/shared/fileTransfer'
 import type { ExportManifest, ExportRequest } from '../src/shared/fileTransfer'
@@ -36,14 +37,37 @@ async function fixture(data = Buffer.from('some log data')) {
     fileDeviceKey: vi.fn<VSCodeDeviceClient['fileDeviceKey']>(async (_root, peer) => peer),
   }
   const budget = new FileTransferBudget()
-  const service = new FileTransferService(directory, source, devices, budget)
+  const operations = new DesktopOperations()
+  const service = new FileTransferService(directory, source, devices, budget, operations)
   cleanups.push(async () => { await service.close(); await rm(root, { recursive: true, force: true }) })
   const api = service.forWorkspace(workspace)
   const request = { requestId: randomUUID(), deviceId: 'local' as const, selection: { kind: 'files' as const, paths: ['C:\\fake.log'] } }
-  return { root, directory, workspace, service, api, request, source, devices, saved, budget }
+  return { root, directory, workspace, service, api, request, source, devices, saved, budget, operations }
 }
 
 describe('file transfer inbox', () => {
+  it('reports active transfers for update safety and rejects new MCP work while restart is locked', async () => {
+    const setup = await fixture()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const chunk = setup.source.chunk.getMockImplementation()!
+    setup.source.chunk.mockImplementationOnce(async (...args) => { await gate; return chunk(...args) })
+    expect(setup.service.hasActiveWork).toBe(false)
+    const start = await setup.api.fetch(setup.request)
+    try {
+      expect(setup.service.hasActiveWork).toBe(true)
+      expect(setup.budget.hasActiveWork).toBe(true)
+      release()
+      await expect.poll(async () => (await setup.api.status(start.transferId)).state).toBe('delivered')
+      await expect.poll(() => setup.service.hasActiveWork).toBe(false)
+      expect(setup.budget.hasActiveWork).toBe(false)
+      setup.operations.lock()
+      await expect(setup.api.fetch({ ...setup.request, requestId: randomUUID() })).rejects.toThrow('preparing')
+      await expect(setup.api.resume(start.transferId)).rejects.toThrow('preparing')
+      expect(setup.source.prepare).toHaveBeenCalledOnce()
+    } finally { release(); setup.operations.unlock() }
+  })
+
   it('delivers and hashes a multichunk file, deduplicates request IDs and pages UTF-8 without splitting a character', async () => {
     const text = 'abcd\u4f60\u597d'.repeat(70_000)
     const setup = await fixture(Buffer.from(text))

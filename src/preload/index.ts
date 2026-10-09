@@ -3,6 +3,7 @@ import type { DesktopBridge, DesktopInfo } from '../shared/desktop'
 import type { WorkspaceBridge } from '../shared/workspace'
 import type { RemoteVSCodeBridge } from '../shared/remoteVSCode'
 import type { AgentHostBridge, AgentHostView } from '../shared/agentHost'
+import type { UpdateBridge, UpdateState } from '../shared/updates'
 
 const bridge: DesktopBridge = {
   getInfo: async () => {
@@ -22,6 +23,32 @@ const bridge: DesktopBridge = {
   copyText: (text) => ipcRenderer.invoke('desktop:copy-text', text),
 }
 contextBridge.exposeInMainWorld('desktop', bridge)
+
+const updates: UpdateBridge = {
+  getState: () => ipcRenderer.invoke('updates:getState'),
+  check: () => ipcRenderer.invoke('updates:check'),
+  setAutoCheck: (enabled) => ipcRenderer.invoke('updates:setAutoCheck', enabled),
+  openRelease: () => ipcRenderer.invoke('updates:openRelease'),
+  download: () => ipcRenderer.invoke('updates:download'),
+  install: () => ipcRenderer.invoke('updates:install'),
+  onState: (listener) => {
+    const receive = (_event: Electron.IpcRendererEvent, state: UpdateState) => listener(state)
+    ipcRenderer.on('updates:state', receive)
+    return () => ipcRenderer.removeListener('updates:state', receive)
+  },
+  onPrepareInstall: (listener) => {
+    const receive = (_event: Electron.IpcRendererEvent, requestId: string) => listener(requestId)
+    ipcRenderer.on('updates:prepare-install', receive)
+    return () => ipcRenderer.removeListener('updates:prepare-install', receive)
+  },
+  respondToInstall: (requestId, blockers) => ipcRenderer.invoke('updates:respondToInstall', requestId, blockers),
+  onInstallAborted: (listener) => {
+    const receive = () => listener()
+    ipcRenderer.on('updates:install-aborted', receive)
+    return () => ipcRenderer.removeListener('updates:install-aborted', receive)
+  },
+}
+contextBridge.exposeInMainWorld('updates', updates)
 
 const agentHost: AgentHostBridge = {
   list: () => ipcRenderer.invoke('agent-host:list'),

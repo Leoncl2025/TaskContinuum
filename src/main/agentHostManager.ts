@@ -29,6 +29,11 @@ export class AgentHostManager {
     this.access = access ?? new AgentHostAuthorization(directory, owner)
   }
 
+  get hasActiveWork(): boolean {
+    return this.local.hasActiveWork || this.localCreations.hasActiveWork || this.creations.hasActiveWork
+      || [...this.remote.values()].some((connection) => connection.hasActiveWork)
+  }
+
   private async consents(): Promise<string[]> {
     try { return z.array(z.string().max(4096)).max(100).parse(await readJsonBounded(join(this.directory, 'agent-host-consents.json'), 512 * 1024)) } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Agent Host access preferences are unreadable.')

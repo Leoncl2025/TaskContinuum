@@ -20,9 +20,16 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
 
 Get the Windows x64 installer or ZIP from
 [GitHub Releases](https://github.com/Leoncl2025/TaskContinuum/releases).
-Extract the entire ZIP before launching. Current releases are unsigned; verify
-the published SHA-256 checksums. Electron is bundled, so launching requires
-neither Node.js nor npm. Repository operations require Git.
+Extract the entire ZIP before launching. Verify the published SHA-256 checksums.
+Electron is bundled, so launching requires neither Node.js nor npm.
+Repository operations require Git.
+
+Signed NSIS installations check GitHub for stable updates and download them in
+the background. Choose **Restart to update** when ready; chatting and unsent drafts
+are never interrupted automatically. Configure this in **Preferences > Application
+updates**. ZIP, development and unsigned builds remain manual-only. Existing
+0.1.1 installations need one manual installer upgrade.
+See [update and release instructions](docs/updates.md).
 
 ## Get started
 

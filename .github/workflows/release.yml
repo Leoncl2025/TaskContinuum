@@ -1,0 +1,150 @@
+name: Signed Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable vMAJOR.MINOR.PATCH tag on the default branch history
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: taskcontinuum-production-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    timeout-minutes: 10
+    if: github.repository == 'Leoncl2025/TaskContinuum' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: windows-latest
+    outputs:
+      commit: ${{ steps.ref.outputs.commit }}
+      version: ${{ steps.ref.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - id: ref
+        name: Validate trusted tag, commit and all version fields
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: node scripts/release.mjs ref "$env:RELEASE_TAG"
+
+  build:
+    timeout-minutes: 45
+    needs: validate
+    runs-on: windows-latest
+    environment: release-signing
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
+      - name: Build signed artifacts without publishing
+        run: node scripts/release-build.mjs
+        env:
+          TASKCONTINUUM_SIGNED_RELEASE: '1'
+          TASKCONTINUUM_UPDATE_PUBLISHER: ${{ vars.TASKCONTINUUM_UPDATE_PUBLISHER }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+      - name: Verify Authenticode and packaged update policy
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          TASKCONTINUUM_UPDATE_PUBLISHER: ${{ vars.TASKCONTINUUM_UPDATE_PUBLISHER }}
+        run: ./scripts/release-verify-signatures.ps1 -Version "$env:RELEASE_VERSION" -Publisher "$env:TASKCONTINUUM_UPDATE_PUBLISHER"
+      - run: npm run test:packaged
+      - name: Test extracted ZIP with isolated profiles
+        shell: pwsh
+        run: |
+          $env:TASKCONTINUUM_PACKAGED_EXECUTABLE = (Resolve-Path 'dist\release-zip-check\TaskContinuum.exe').Path
+          npm run test:packaged
+      - name: Validate update metadata and produce exact checksum manifest
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: node scripts/release.mjs manifest "$env:RELEASE_TAG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-windows-release
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            dist/*-setup.exe
+            dist/*.zip
+            dist/*-setup.exe.blockmap
+            dist/latest.yml
+            dist/SHA256SUMS.txt
+
+  draft:
+    timeout-minutes: 20
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-windows-release
+          path: dist
+      - name: Create draft, upload and verify downloaded bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: node scripts/release.mjs draft "$RELEASE_TAG" dist "$RELEASE_COMMIT"
+
+  publish:
+    timeout-minutes: 20
+    needs: [validate, draft]
+    runs-on: ubuntu-latest
+    environment: production-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-windows-release
+          path: dist
+      - name: Reverify tag, exact assets and checksums, then publish stable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: node scripts/release.mjs publish "$RELEASE_TAG" dist "$RELEASE_COMMIT"

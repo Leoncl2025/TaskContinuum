@@ -11,6 +11,7 @@ import { deviceIdentitySchema } from '../src/main/vscodeDeviceProtocol'
 import { agentHostCatalogSchema } from '../src/main/agentHostProtocol'
 import type { AgentHostRegistry } from '../src/main/agentHostRegistry'
 import type { AgentHostTarget } from '../src/shared/agentHost'
+import { DesktopOperations } from '../src/main/desktopOperations'
 
 const protector = { available: () => true, encrypt: (value: string) => Buffer.from(value), decrypt: (value: Buffer) => value.toString() }
 const cleanup: (() => Promise<void>)[] = []
@@ -24,8 +25,9 @@ describe('device-scoped native Agent Host gateway', () => {
     const target: AgentHostTarget = { sessionId: 'copilotcli:/original', chatId: 'ahp-chat:/original', owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
     const describeSession = vi.fn(async () => ({ ...target, title: 'Original native chat', provider: 'copilotcli', updatedAt: new Date().toISOString(), canSend: true }))
     const registry = { describe: describeSession } as unknown as AgentHostRegistry
+    const operations = new DesktopOperations()
     const createHost = () => {
-      const host = new VSCodeDeviceHost(join(root, 'profile'), protector)
+      const host = new VSCodeDeviceHost(join(root, 'profile'), protector, operations)
       host.setAgentHostAccess(registry, async () => [target])
       return host
     }
@@ -38,6 +40,11 @@ describe('device-scoped native Agent Host gateway', () => {
     const port = await host.start()
     const call = (path: string, body: unknown = {}) => deviceRequest(port, port, pair.token, path, body, AbortSignal.timeout(5000))
 
+    expect(deviceIdentitySchema.parse(await call('/device/identity'))).toEqual({ ownerId, deviceId: pair.id })
+    operations.lock()
+    await expect(call('/device/identity')).rejects.toMatchObject({ status: 503 })
+    await expect(call('/device/agent-host/create')).rejects.toMatchObject({ status: 503 })
+    operations.unlock()
     expect(deviceIdentitySchema.parse(await call('/device/identity'))).toEqual({ ownerId, deviceId: pair.id })
     expect(describeSession).not.toHaveBeenCalled()
     expect(agentHostCatalogSchema.parse(await call('/device/agent-host/sessions')).sessions).toEqual([])

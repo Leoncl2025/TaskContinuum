@@ -84,6 +84,8 @@ export class AgentHostRegistry {
 
   constructor(private readonly directory: string, private readonly discovery: string[], private readonly owner: () => Promise<SessionOwner>) {}
 
+  get hasActiveWork(): boolean { return [...this.connections.values()].some((connection) => connection.hasActiveWork) }
+
   async creationOwner(): Promise<SessionOwner> { return sessionOwnerSchema.parse(await this.owner()) }
 
   async creationHosts(signal: AbortSignal): Promise<AgentHostCreationHost[]> {

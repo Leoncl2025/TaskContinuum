@@ -20,6 +20,7 @@ import type { FileTransferSource } from './fileTransferSource'
 import { chunkRequestSchema, exportRequestSchema, FileTransferError, transferFailure, transferLookupSchema } from '../shared/fileTransfer'
 import { FileTransferBudget } from './fileTransferBudget'
 import type { AgentHostAuthorizationLease } from './agentHostAuthorization'
+import type { DesktopOperations } from './desktopOperations'
 
 const workspacePolicySchema = z.object({ root: z.string().min(1), canSend: z.boolean() }).strict()
 const pairingSchema = z.object({ id: z.uuid(), participant: remoteClientSchema, publicKey: sshPublicKeySchema,
@@ -50,7 +51,11 @@ export class VSCodeDeviceHost {
   private fileSource?: FileTransferSource
   private fileBudget = new FileTransferBudget()
 
-  constructor(private readonly directory: string, private readonly protector: DeviceProtector) {}
+  constructor(private readonly directory: string, private readonly protector: DeviceProtector, private readonly operations?: DesktopOperations) {}
+
+  get hasActiveWork(): boolean { return this.agentHostCreations?.hasActiveWork ?? false }
+
+  private runOperation(action: () => Promise<void>): Promise<void> { return this.operations?.runAsync(action) ?? action() }
 
   setFileTransferSource(source: FileTransferSource, budget = new FileTransferBudget()): void {
     if (this.server) throw new Error('File transfers must be configured before device publication.')
@@ -272,7 +277,7 @@ export class VSCodeDeviceHost {
     this.starting ??= (async () => {
       await this.load()
       const server = createServer((request, response) => {
-        void (async () => {
+        void this.runOperation(async () => {
           if (request.method !== 'POST' || request.headers.origin || request.headers.host !== `127.0.0.1:${this.state!.port}`) { response.writeHead(403).end(); return }
           const bearer = request.headers.authorization?.replace(/^Bearer /, '') ?? ''
           let pair = this.state!.pairs.find((item) => Buffer.byteLength(bearer) === Buffer.byteLength(item.token) && timingSafeEqual(Buffer.from(bearer), Buffer.from(item.token)))
@@ -307,7 +312,7 @@ export class VSCodeDeviceHost {
           if (!this.permitted(pair.id)) { response.writeHead(403).end(); return }
           response.setHeader('Content-Type', 'application/json')
           response.end(JSON.stringify(result))
-        })().catch((error: unknown) => {
+        }).catch((error: unknown) => {
           if (request.url?.startsWith('/device/files/') && !response.headersSent) {
             const failure = transferFailure(error)
             const status = failure.code === 'ACCESS_DENIED' ? 403 : failure.code === 'UNSUPPORTED' ? 404 : failure.code === 'BUSY' ? 429 : 400
@@ -331,7 +336,7 @@ export class VSCodeDeviceHost {
       server.headersTimeout = 10000
       server.maxConnections = 64
       this.server = server
-      if (this.agentHosts) this.agentHostGateway = attachAgentHostGateway(server, { port: () => this.state?.port,
+      if (this.agentHosts) this.agentHostGateway = attachAgentHostGateway(server, { port: () => this.state?.port, runOperation: (action) => this.runOperation(action),
         authorize: (token, target, send) => this.authorizedAgentHost(token, target, send), connection: (target) => this.agentHosts!.registry.connection(target) })
       await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(this.state!.port ?? 0, '127.0.0.1', resolve) })
       const address = server.address()

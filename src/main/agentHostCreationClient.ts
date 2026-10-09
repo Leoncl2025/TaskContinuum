@@ -43,6 +43,8 @@ export class AgentHostCreationClient {
 
   constructor(private readonly directory: string, private readonly devices: AgentHostCreationDevices) {}
 
+  get hasActiveWork(): boolean { return this.pending.size > 0 }
+
   private async scope(root: string) {
     const canonical = await canonicalPolicyRoot(root)
     return { root: canonical, directory: join(this.directory, 'agent-host-creations', 'client', createHash('sha256').update(canonical).digest('hex')) }

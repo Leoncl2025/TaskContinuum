@@ -314,6 +314,9 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const turns = [...view?.chat?.turns ?? [], ...activeTurn ? [activeTurn] : []]
   const stateLabel = !bridge ? 'Desktop update required' : !view && (error || currentCatalog?.error) ? 'Connection failed' : !view || view.state === 'connecting' ? 'Connecting...' : view.state === 'offline' ? 'Offline history' : pending ? 'Delivery pending' : activeTurn ? 'Agent responding' : view.readOnly ? 'Read only' : 'Connected'
   const modelStatus = !bridge ? 'Desktop update required.' : !currentCatalog ? 'Loading models from the owner Host...' : currentCatalog.error ? undefined : !modelId ? 'Choose a model below to enable sending.' : !modelReady ? 'The selected model is unavailable. Choose another model or retry loading models.' : undefined
+  const updateBlocker = busy || pending || responding || imageInput.reading
+    ? 'Wait for Agent Host activity, image reading and unknown message delivery to finish before updating.'
+    : draft.length || images.length ? 'Send or clear unsent chat text and images before updating. Drafts are not discarded by an update.' : undefined
   const displayTitle = sessionTitle(target, view?.target && agentHostKey(view.target) === key ? view.chat?.title : undefined) || cachedTitle || 'Original Host chat'
   const detailsOpen = active && detailsKey === key
   const chatActions = <>
@@ -334,7 +337,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       <div className="ahp-chat-secondary-actions">{chatActions}</div>
     </div>
   </HeaderTag>
-  return <aside className="chat-panel ahp-panel" aria-label={workspace ? 'Agent Host task creation chat' : 'Agent Host task chat'}>
+  return <aside className="chat-panel ahp-panel" data-update-blocker={updateBlocker} aria-label={workspace ? 'Agent Host task creation chat' : 'Agent Host task chat'}>
     {headerTarget ? active && createPortal(header, headerTarget) : header}
     {detailsOpen && <Dialog title="Chat details" className="ahp-chat-details" onClose={() => setDetailsKey(undefined)}>
       <dl>
