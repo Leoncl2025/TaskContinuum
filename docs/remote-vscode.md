@@ -280,8 +280,8 @@ and [Host/client tool ownership](https://code.visualstudio.com/docs/agents/conce
 Paste a screenshot or choose **Attach images** in the native chat composer.
 Up to four PNG/JPEG/GIF/WebP images can accompany a message, including image-only
 messages, with limits of 5 MiB per image and 10 MiB total. The paired route sends
-image bytes, not client filesystem paths. Previews/removal and failed-send draft
-retention follow the [image attachment guidance](../README.md#image-attachments).
+image bytes, not client filesystem paths. Preview or remove attachments before
+sending; failed submissions retain the current draft.
 Images and history remain off Git; native model/tool capabilities and approvals
 still apply. An interrupted image submission is not replayed automatically.
 
