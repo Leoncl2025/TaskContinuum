@@ -71,6 +71,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   const [createdTaskId, setCreatedTaskId] = useState<string | null>(null)
   const [compactPanel, setCompactPanel] = useState<'tasks' | 'chat' | 'details'>(() => workspace?.tasks.length ? 'chat' : 'details')
   const [desktop, setDesktop] = useState<DesktopInfo>()
+  const [fullScreen, setFullScreen] = useState(false)
   const [desktopError, setDesktopError] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const compact = useSyncExternalStore(subscribeCompact, isCompact, () => false)
@@ -120,8 +121,12 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   useEffect(() => { saveLayout(layout) }, [layout])
   useEffect(() => {
     let mounted = true
-    void window.desktop?.getInfo().then((info) => { if (mounted) setDesktop(info) }).catch(() => { if (mounted) setDesktopError(true) })
-    return () => { mounted = false }
+    let changed = false
+    const bridge = window.desktop
+    const unlisten = bridge?.onFullScreenChanged((value) => { changed = true; if (mounted) setFullScreen(value) })
+    void bridge?.getInfo().then((info) => { if (mounted) setDesktop(info) }).catch(() => { if (mounted) setDesktopError(true) })
+    void bridge?.getFullScreen().then((value) => { if (mounted && !changed) setFullScreen(value) }).catch(() => { if (mounted) setDesktopError(true) })
+    return () => { mounted = false; unlisten?.() }
   }, [])
 
   const toggleSidebar = useCallback(() => {
@@ -211,7 +216,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
     else setLayout((value) => ({ ...value, sidebar: true }))
   }
 
-  function windowAction(action: 'minimize' | 'toggleMaximize' | 'close'): void {
+  function windowAction(action: 'minimize' | 'toggleMaximize' | 'toggleFullScreen' | 'close'): void {
     void window.desktop?.[action]().catch(() => setDesktopError(true))
   }
 
@@ -297,7 +302,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
       <div className="titlebar-chat" ref={setChatHeaderTarget} hidden={!unifiedChatHeader} />
       <button type="button" className="command-center" aria-label="Search tasks and jump back in" title="Search tasks (Ctrl+P)" onClick={() => { setQuickQuery(''); setDialog('quick-open') }}><Icon name="search" /><span>Search tasks and jump back in</span><kbd>Ctrl P</kbd></button>
       <div className="titlebar-actions">{workspaces.available && <IconButton icon="folder-opened" label="Switch workspace folder" disabled={workspaceLocked || workspaces.busy} onClick={openWorkspace} />}{!compact && <><IconButton icon="layout-sidebar-left" label="Toggle task sidebar" title="Toggle task sidebar (Ctrl+B)" aria-pressed={sidebarVisible} onClick={toggleSidebar} /><IconButton icon="comment-discussion" label="Toggle chat panel" title="Toggle chat panel (Ctrl+Alt+B)" aria-pressed={chatVisible} onClick={toggleChat} /><IconButton icon="layout-sidebar-right" label="Toggle task details" title="Toggle task details (Ctrl+Alt+D)" aria-pressed={detailsVisible} onClick={toggleDetails} /></>}</div>
-      {window.desktop && <div className="window-controls"><IconButton icon="chrome-minimize" label="Minimize window" onClick={() => windowAction('minimize')} /><IconButton icon="chrome-maximize" label="Maximize or restore window" onClick={() => windowAction('toggleMaximize')} /><IconButton icon="chrome-close" label="Close window" onClick={() => windowAction('close')} /></div>}
+      {window.desktop && <div className="window-controls"><IconButton icon={fullScreen ? 'screen-normal' : 'screen-full'} label={fullScreen ? 'Exit full screen' : 'Enter full screen'} title={`${fullScreen ? 'Exit' : 'Enter'} full screen (F11 / Shift+Alt+Enter)`} aria-pressed={fullScreen} onClick={() => windowAction('toggleFullScreen')} /><IconButton icon="chrome-minimize" label="Minimize window" onClick={() => windowAction('minimize')} /><IconButton icon="chrome-maximize" label="Maximize or restore window" disabled={fullScreen} onClick={() => windowAction('toggleMaximize')} /><IconButton icon="chrome-close" label="Close window" onClick={() => windowAction('close')} /></div>}
     </header>
 
     {compact && <nav className="compact-navigation" aria-label="Workspace panes">

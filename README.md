@@ -11,6 +11,10 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
 - Task creation through the UI, a local agent, or CLI.
 - Streaming Markdown, model options, image attachments, and terminal output.
 - Compact layouts, resizable panels, dark/light themes, and cached chat titles.
+- Native full screen: press **F11** or **Shift+Alt+Enter**, or use the titlebar's
+  full-screen button, to fill the monitor and hide the Windows taskbar. Repeat to
+  exit; window size and maximized state are restored. This does not change the
+  system's taskbar settings. Escape keeps its normal dialog/chat behavior.
 
 ## Download
 

@@ -100,6 +100,7 @@ if (parameters.has('workbench')) {
   window.desktop = {
     getInfo: async () => ({ name: 'Task Continuum', version: 'layout-fixture', platform: 'win32', security: { contextIsolated: true, sandboxed: true } }),
     minimize: unsupported, toggleMaximize: unsupported, close: unsupported, copyText: unsupported,
+    getFullScreen: async () => false, toggleFullScreen: unsupported, onFullScreenChanged: () => () => {},
   }
   saveLayout({ ...defaultLayout, sidebar: false, details: false, theme: parameters.get('theme') === 'dark' ? 'dark' : 'light' })
   root.render(<App />)

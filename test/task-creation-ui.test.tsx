@@ -17,6 +17,7 @@ async function setup(mode: 'form' | 'agent' = 'form', configure?: (agent: AgentH
   window.desktop = {
     getInfo: vi.fn(async () => ({ name: 'Task Continuum', version: 'test', platform: 'win32', security: { sandboxed: true, contextIsolated: true } })),
     copyText, minimize: vi.fn(async () => {}), toggleMaximize: vi.fn(async () => {}), close: vi.fn(async () => {}),
+    getFullScreen: vi.fn(async () => false), toggleFullScreen: vi.fn(async () => {}), onFullScreenChanged: vi.fn(() => () => {}),
   }
   const target = { sessionId: 'copilotcli:/local-task-creation', chatId: 'ahp-chat:/local-task-creation', owner: { clientId: crypto.randomUUID(), machineName: 'This PC' } }
   const session = { ...target, title: 'Task planning', provider: 'copilotcli', updatedAt: new Date().toISOString(), canSend: true }

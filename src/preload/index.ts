@@ -11,6 +11,13 @@ const bridge: DesktopBridge = {
   },
   minimize: () => ipcRenderer.invoke('desktop:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('desktop:toggle-maximize'),
+  getFullScreen: () => ipcRenderer.invoke('desktop:full-screen'),
+  toggleFullScreen: () => ipcRenderer.invoke('desktop:toggle-full-screen'),
+  onFullScreenChanged: (listener) => {
+    const receive = (_event: Electron.IpcRendererEvent, fullScreen: boolean) => listener(fullScreen)
+    ipcRenderer.on('desktop:full-screen-changed', receive)
+    return () => ipcRenderer.removeListener('desktop:full-screen-changed', receive)
+  },
   close: () => ipcRenderer.invoke('desktop:close'),
   copyText: (text) => ipcRenderer.invoke('desktop:copy-text', text),
 }

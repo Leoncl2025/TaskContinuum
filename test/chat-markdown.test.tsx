@@ -47,7 +47,7 @@ describe('native chat Markdown presentation', () => {
     expect(await screen.findByText('Code could not be copied.')).toBeInTheDocument()
     expect(screen.getByLabelText('Code block')).toHaveTextContent('const updated = 43;')
     const copyText = vi.fn(async () => {})
-    window.desktop = { copyText, getInfo: vi.fn(), close: vi.fn(), minimize: vi.fn(), toggleMaximize: vi.fn() }
+    window.desktop = { copyText, getInfo: vi.fn(), close: vi.fn(), minimize: vi.fn(), toggleMaximize: vi.fn(), getFullScreen: vi.fn(async () => false), toggleFullScreen: vi.fn(), onFullScreenChanged: vi.fn(() => () => {}) }
     await user.click(screen.getByRole('button', { name: 'Copy code' }))
     expect(copyText).toHaveBeenCalledExactlyOnceWith('const updated = 43;\n')
     expect(write).toHaveBeenCalledTimes(2)
