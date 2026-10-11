@@ -78,6 +78,8 @@ describe('paired native Agent Host SSH transport', () => {
     const setup = await fixture()
     const requests = vi.spyOn(deviceHttp, 'deviceRequest')
     expect(setup.transport).not.toHaveBeenCalled()
+    expect(setup.device).toMatchObject({ ownerClientId: setup.target.owner.clientId, machineName: setup.target.owner.machineName })
+    expect(setup.device.id).not.toBe(setup.device.ownerClientId)
     expect(await setup.client.publicIdentities(setup.workspace)).toEqual([{ deviceId: setup.target.owner.clientId, machineName: setup.target.owner.machineName, hostPublicKey: setup.invitation.devTunnel.hostPublicKey }])
     expect(await setup.client.list(setup.otherWorkspace)).toEqual([])
     await expect(setup.client.connect(setup.otherWorkspace, setup.device.id)).rejects.toThrow('task workspace')

@@ -7,6 +7,7 @@ import { APP_URL, PRODUCTION_CSP, isTrustedRendererUrl, rendererSecurityPreferen
 import { registerWorkspaceBridge } from './workspaceBridge'
 import { registerRemoteVSCodeBridge } from './remoteVSCodeBridge'
 import { registerWindowZoom, WindowZoomPreferences } from './windowZoom'
+import { registerWindowFullscreen, toggleWindowFullscreen } from './windowFullscreen'
 import { registerAgentHostBridge } from './agentHostBridge'
 import { startAgentHostDiagnostics, stopAgentHostDiagnostics } from './agentHostDiagnostics'
 
@@ -60,6 +61,8 @@ function registerDesktopBridge(): void {
     if (window.isMaximized()) window.unmaximize()
     else window.maximize()
   })
+  ipcMain.handle('desktop:full-screen', (event) => requireTrustedWindow(event).isFullScreen())
+  ipcMain.handle('desktop:toggle-full-screen', (event) => toggleWindowFullscreen(requireTrustedWindow(event)))
   ipcMain.handle('desktop:close', (event) => requireTrustedWindow(event).close())
   ipcMain.handle('desktop:copy-text', (event, value: unknown) => {
     requireTrustedWindow(event)
@@ -90,6 +93,7 @@ async function createWindow(): Promise<void> {
   })
   mainWindow = window
   registerWindowZoom(window, zoom, devUrl)
+  registerWindowFullscreen(window, devUrl)
   let initialNavigation = true
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', (event) => event.preventDefault())

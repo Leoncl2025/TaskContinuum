@@ -311,7 +311,7 @@ test('creates explicitly through sandboxed IPC and recovers the same operation a
     await expect(page!.getByRole('dialog', { name: 'Agent Host sessions' })).toHaveCount(0)
     const panel = page!.getByRole('complementary', { name: 'Agent Host task chat', exact: true })
     await expect(panel).toBeVisible()
-    await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
+    await expect(page!.getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible()
     const target: AgentHostTarget = { sessionId: createdSession.sessionId, chatId: createdSession.chatId, owner: createdSession.owner }
     const snapshot = JSON.parse(await readFile(files.bindingSnapshot, 'utf8')) as SessionLinksSnapshot
     expect(snapshot.document).toEqual({ schemaVersion: '2.1', bindings: { 'T-0001': [{ provider: 'agent-host', ...target }] } })
@@ -329,7 +329,7 @@ test('creates explicitly through sandboxed IPC and recovers the same operation a
     expect(externalRequests).toEqual([])
     await page!.screenshot({ path: resolve('artifacts', 'agent-host-creation-recovered-desktop.png') })
     await page!.reload()
-    await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
+    await expect(page!.getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible()
     expect(await calls('agent-host:create')).toHaveLength(1)
     expect(await calls('agent-host:bind-creation')).toHaveLength(1)
     expect(errors).toEqual([])
@@ -355,7 +355,7 @@ test('creates explicitly through sandboxed IPC and recovers the same operation a
     expect((await ledger()).operations.find((item) => item.operationId === operation.operationId)).toMatchObject({ state: 'abandoned', session: createdSession })
     expect(JSON.parse(await readFile(files.bindingSnapshot, 'utf8'))).toEqual(snapshot)
     await page!.reload()
-    await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
+    await expect(page!.getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible()
     picker = await openPicker()
     await expect(row()).toHaveCount(0)
     await selectTarget(picker, 'send-worker', 'send-workspace', 'selected-exact-host')

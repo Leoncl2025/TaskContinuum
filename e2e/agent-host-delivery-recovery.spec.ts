@@ -40,7 +40,7 @@ test('requires an explicit original-chat review before unlocking an uncertain na
     await sessions.getByRole('tab', { name: 'Link', exact: true }).click()
     await sessions.getByRole('button', { name: 'Link Original Host chat to T-0001' }).click()
     const panel = page.getByRole('complementary', { name: 'Agent Host task chat' })
-    await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
+    await expect(page.getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible()
     await panel.getByRole('combobox', { name: 'Agent Host model' }).selectOption('gpt-6')
     await panel.getByRole('textbox', { name: 'Message Agent Host' }).fill('A message without a native echo')
     fixture.loseNextSend()

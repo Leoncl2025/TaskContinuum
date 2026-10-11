@@ -32,6 +32,39 @@
 .copilot-connection div span { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .session-filter { display: flex; align-items: center; gap: 8px; padding: 12px 13px; font-size: 11px; color: var(--muted); }
 .session-filter select { width: 100%; min-width: 0; background: var(--input); border: 1px solid var(--border); padding: 5px; border-radius: 3px; }
+.ahp-panel { container: agent-chat / inline-size; }
+.ahp-chat-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title actions" "meta meta"; align-items: center; gap: 0 10px; flex-shrink: 0; padding: 3px 10px 4px; border-bottom: 1px solid var(--border); }
+.ahp-chat-title { grid-area: title; display: flex; align-items: center; min-width: 0; gap: 8px; }
+.ahp-chat-title > .codicon { color: var(--accent); font-size: 16px; }
+.ahp-chat-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; line-height: 20px; }
+.ahp-chat-meta { grid-area: meta; display: flex; align-items: center; min-width: 0; gap: 12px; color: var(--muted); font-size: 11px; line-height: 16px; }
+.ahp-chat-status { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; white-space: nowrap; }
+.ahp-chat-status > span:first-child { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }
+.ahp-chat-status[data-state="Connected"] > span:first-child { background: var(--green); }
+.ahp-chat-status:is([data-state="Connecting..."], [data-state="Agent responding"], [data-state="Delivery pending"]) > span:first-child { background: var(--accent); }
+.ahp-chat-status:is([data-state="Connection failed"], [data-state="Desktop update required"]) > span:first-child { background: #e67c73; }
+.ahp-chat-machine { display: inline-flex; align-items: center; min-width: 0; gap: 6px; }
+.ahp-chat-machine > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ahp-chat-actions, .ahp-chat-secondary-actions { display: flex; align-items: center; gap: 2px; }
+.ahp-chat-actions { grid-area: actions; }
+.ahp-chat-actions .icon-button { flex-shrink: 0; width: 24px; height: 24px; }
+.ahp-chat-details dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 12px 16px; margin: 0; font-size: 12px; line-height: 1.6; }
+.ahp-chat-details dt { color: var(--muted); }
+.ahp-chat-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+@container agent-chat (min-width: 640px) {
+  .ahp-chat-header { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; grid-template-areas: "title meta actions"; }
+}
+.titlebar .ahp-chat-header { display: flex; gap: 10px; height: 31px; min-width: 0; padding: 0; border: 0; }
+.titlebar .ahp-chat-title { flex: 1; }
+.titlebar .ahp-chat-meta { flex: 0 1 auto; max-width: 45%; }
+.titlebar .ahp-chat-actions { flex-shrink: 0; }
+@media (max-width: 1000px) {
+  .titlebar .ahp-chat-secondary-actions, .titlebar .ahp-chat-machine { display: none; }
+  .titlebar .ahp-chat-header { gap: 6px; }
+  .titlebar .ahp-chat-meta { max-width: 42%; overflow: hidden; }
+  .titlebar .ahp-chat-status { min-width: 0; flex-shrink: 1; }
+  .titlebar .ahp-chat-state-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+}
 .ahp-panel .composer { position: relative; overflow: visible; }
 .ahp-panel .composer-toolbar { justify-content: flex-start; flex-wrap: wrap; gap: 4px; padding: 4px 8px 8px; }
 .ahp-panel .composer-toolbar > :last-child { margin-left: auto; }
@@ -169,6 +202,10 @@
 .workspace-links-status-dot { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--subtle); }
 .workspace-links-status.is-enabled .workspace-links-status-dot { background: var(--accent); }
 .workspace-links-meta { margin: 10px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.machine-alias-editor { margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 4px; }
+.machine-alias-editor .form-field { margin: 0; }
+.machine-alias-editor input { width: 100%; min-width: 0; }
+.machine-alias-editor .muted { font-size: 11px; line-height: 1.5; }
 .remote-connections > h3 { margin: 0 0 10px; font-size: 13px; line-height: 20px; font-weight: 600; }
 .remote-device-empty { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 12px; line-height: 20px; color: var(--muted); }
 .remote-vscode-import { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; margin-block: 18px; }

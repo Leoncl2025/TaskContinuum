@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { Activity } from 'react'
+import { Activity, useState } from 'react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ChatState, McpAuthRequiredReason, ResponsePart, ResponsePartKind, ToolCallCancellationReason, ToolCallCompletedState, ToolCallConfirmationReason, ToolCallContributorKind, ToolCallResponsePart, ToolCallStatus, ToolResultContentType, TurnState } from '@microsoft/agent-host-protocol'
@@ -9,8 +9,10 @@ import { AgentHostPanel } from '../src/renderer/components/AgentHostPanel'
 import { readModelPreference, saveModelPreference } from '../src/renderer/chat/modelPreferences'
 import { fixtureTasks as demoTasks } from './task-fixture'
 import { modelConfigFixture } from './agent-host-model-fixture'
+import { MachineAliasesProvider } from '../src/renderer/MachineAliasesProvider'
+import { gitSyncUiFixture } from './remote-config-ui-fixture'
 
-afterEach(() => { delete window.agentHost; delete window.desktop })
+afterEach(() => { delete window.agentHost; delete window.desktop; delete window.remoteVSCode })
 
 function fixture() {
   const target = { sessionId: 'ahp-session:/original', chatId: 'ahp-chat:/original/main', owner: { clientId: crypto.randomUUID(), machineName: 'Owner-B' } }
@@ -219,18 +221,134 @@ describe('Compact chat activity', () => {
     expect(setup.bridge.terminal).not.toHaveBeenCalled()
     await user.click(screen.getByText('Run checks', { exact: true }))
     await waitFor(() => expect(setup.bridge.terminal).toHaveBeenCalledOnce())
-    expect(screen.getByLabelText('Grouped output')).toHaveTextContent('Command preview')
+    expect(screen.getByLabelText('Grouped output on Owner-B')).toHaveTextContent('Command preview')
     await user.click(summary)
     await waitFor(() => expect(setup.bridge.releaseTerminal).toHaveBeenCalledExactlyOnceWith(expect.any(String), resource, vi.mocked(setup.bridge.terminal).mock.calls[0][2]))
     act(() => setup.emit())
     expect(setup.bridge.terminal).toHaveBeenCalledOnce()
     await user.click(summary)
     expect(setup.bridge.terminal).toHaveBeenCalledOnce()
-    expect(screen.queryByLabelText('Grouped output')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Grouped output on Owner-B')).not.toBeInTheDocument()
   })
 })
 
 describe('Agent Host chat UI', () => {
+  it('moves only the active header into its titlebar slot without restarting the conversation', async () => {
+    const setup = fixture()
+    const onDevices = vi.fn()
+    const user = userEvent.setup()
+    function DockedPanel({ active }: { active: boolean }) {
+      const [slot, setSlot] = useState<HTMLDivElement | null>(null)
+      return <>
+        <div ref={setSlot} aria-label="Titlebar slot" />
+        <AgentHostPanel task={demoTasks[1]} target={setup.target} headerTarget={slot} active={active}
+          onDevices={onDevices} onDetach={vi.fn()} onClose={vi.fn()} />
+      </>
+    }
+    const mounted = render(<DockedPanel active />)
+    const slot = screen.getByLabelText('Titlebar slot')
+    await within(slot).findByText('Connected')
+    const panel = screen.getByRole('complementary', { name: 'Agent Host task chat' })
+    expect(within(panel).queryByLabelText('Chat header')).not.toBeInTheDocument()
+    await user.type(within(panel).getByRole('textbox'), 'Keep my draft')
+    await user.click(within(slot).getByRole('button', { name: 'Chat details' }))
+    const details = screen.getByRole('dialog', { name: 'Chat details' })
+    expect(within(details).getByText(setup.target.sessionId)).toBeInTheDocument()
+    await user.click(within(details).getByRole('button', { name: 'Manage devices' }))
+    expect(onDevices).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    mounted.rerender(<DockedPanel active={false} />)
+    expect(within(slot).queryByLabelText('Chat header')).not.toBeInTheDocument()
+    mounted.rerender(<DockedPanel active />)
+    expect(within(slot).getAllByLabelText('Chat header')).toHaveLength(1)
+    expect(within(panel).getByRole('textbox')).toHaveValue('Keep my draft')
+    expect(setup.bridge.watch).toHaveBeenCalledOnce()
+    expect(setup.bridge.models).toHaveBeenCalledOnce()
+    expect(setup.bridge.unwatch).not.toHaveBeenCalled()
+    expect(setup.bridge.create).not.toHaveBeenCalled()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+  })
+
+  it('keeps a compact header and exposes full identities without reconnecting or losing the draft', async () => {
+    const setup = fixture()
+    const onDevices = vi.fn()
+    const onDetach = vi.fn()
+    const onClose = vi.fn()
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDevices={onDevices} onDetach={onDetach} onClose={onClose} />)
+    const header = screen.getByLabelText('Chat header')
+    expect(await within(header).findByText('Same original Host chat')).toHaveAttribute('title', 'Same original Host chat')
+    expect(within(header).getByRole('status')).toHaveTextContent('Connected')
+    expect(within(header).getByText('Copilot @ Owner-B')).toBeInTheDocument()
+    expect(screen.queryByText(setup.target.sessionId, { exact: true })).not.toBeInTheDocument()
+    await user.type(screen.getByRole('textbox', { name: 'Message Agent Host' }), 'Keep this draft')
+    const trigger = within(header).getByRole('button', { name: 'Chat details' })
+    await user.click(trigger)
+    expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    const details = screen.getByRole('dialog', { name: 'Chat details' })
+    for (const value of [setup.target.sessionId, setup.target.chatId, setup.target.owner.clientId, demoTasks[1].id, 'AHP 0.9.0']) {
+      expect(within(details).getByText(value, { exact: true })).toBeInTheDocument()
+    }
+    fireEvent(details, new Event('cancel', { cancelable: true }))
+    expect(screen.queryByRole('dialog', { name: 'Chat details' })).not.toBeInTheDocument()
+    expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    expect(trigger).toHaveFocus()
+    expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Keep this draft')
+    expect(setup.bridge.watch).toHaveBeenCalledOnce()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+    await user.click(within(header).getByRole('button', { name: 'Manage devices' }))
+    await user.click(within(header).getByRole('button', { name: 'Detach conversation' }))
+    await user.click(within(header).getByRole('button', { name: 'Hide chat panel' }))
+    expect(onDevices).toHaveBeenCalledOnce()
+    expect(onDetach).toHaveBeenCalledOnce()
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('keeps offline and read-only states visible without opening details', async () => {
+    const setup = fixture()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    const header = screen.getByLabelText('Chat header')
+    await within(header).findByText('Connected')
+    setup.view.state = 'offline'
+    setup.view.readOnly = true
+    setup.view.canSend = false
+    act(() => setup.emit())
+    expect(within(header).getByRole('status')).toHaveTextContent('Offline history')
+    expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
+    setup.view.state = 'connected'
+    act(() => setup.emit())
+    expect(within(header).getByRole('status')).toHaveTextContent('Read only')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('closes details when a panel becomes inactive or changes conversation', async () => {
+    const setup = fixture()
+    const user = userEvent.setup()
+    const props = { task: demoTasks[1], target: setup.target, onDetach: vi.fn(), onClose: vi.fn() }
+    const panel = render(<AgentHostPanel {...props} />)
+    await user.click(screen.getByRole('button', { name: 'Chat details' }))
+    expect(screen.getByRole('dialog', { name: 'Chat details' })).toBeInTheDocument()
+    panel.rerender(<AgentHostPanel {...props} active={false} />)
+    expect(screen.queryByRole('dialog', { name: 'Chat details' })).not.toBeInTheDocument()
+    panel.rerender(<AgentHostPanel {...props} target={{ ...setup.target, chatId: 'ahp-chat:/other' }} />)
+    expect(screen.queryByRole('dialog', { name: 'Chat details' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Chat details' })).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('exposes workspace context without task-only header actions', async () => {
+    const setup = fixture()
+    const user = userEvent.setup()
+    render(<AgentHostPanel workspace={{ id: 'workspace', name: 'Planning workspace' }} target={setup.target} onClose={vi.fn()} />)
+    await user.click(screen.getByRole('button', { name: 'Chat details' }))
+    const details = screen.getByRole('dialog', { name: 'Chat details' })
+    expect(within(details).getByText('Workspace', { exact: true })).toBeInTheDocument()
+    expect(within(details).getByText('Planning workspace')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Detach conversation' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Hide chat panel' })).not.toBeInTheDocument()
+    await user.click(within(details).getByRole('button', { name: 'Close Chat details' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
   it('settles an in-flight send while a different session is visible without replaying it', async () => {
     const { target, bridge } = fixture()
     let complete!: () => void
@@ -250,6 +368,65 @@ describe('Agent Host chat UI', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeEnabled())
     expect(bridge.send).toHaveBeenCalledOnce()
     expect(bridge.cancel).not.toHaveBeenCalled()
+  })
+
+  it('updates aliases during streaming without restarting watches or changing drafts, models, or protocol targets', async () => {
+    const setup = fixture()
+    const git = gitSyncUiFixture()
+    window.remoteVSCode = git.remote
+    const senderId = crypto.randomUUID()
+    git.setStatus({ ...git.getStatus(), machineAliases: { [setup.target.owner.clientId]: 'Office' } })
+    const user = userEvent.setup()
+    render(<MachineAliasesProvider workspaceId="workspace"><AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} /></MachineAliasesProvider>)
+    await screen.findByText('Copilot @ Office (Owner-B)')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Agent Host model' }), await screen.findByRole('option', { name: 'GPT-6' }))
+    await user.type(screen.getByRole('textbox', { name: 'Message Agent Host' }), 'Keep my next question')
+    const terminal = 'ahp-terminal:/streaming'
+    setup.view.chat!.activeTurn = {
+      id: 'streaming-turn', startedAt: '', message: { text: 'Original request', origin: { kind: 'user' }, _meta: { taskcontinuumActor: { clientId: senderId, username: 'Alice', machineName: 'Sender-A' } } },
+      responseParts: [
+        { kind: 'markdown', id: 'stream', content: 'Streaming answer' },
+        { kind: 'toolCall', toolCall: { toolCallId: 'terminal-tool', toolName: 'terminal', displayName: 'Live checks', status: 'running', content: [{ type: 'terminal', resource: terminal, title: 'Checks', result: { preview: 'Still running' } }] } },
+      ], usage: undefined,
+    } as ChatState['activeTurn']
+    act(() => setup.emit())
+    expect(await screen.findByLabelText('Checks on Office (Owner-B)')).toHaveTextContent('Still running')
+    await waitFor(() => expect(setup.bridge.terminal).toHaveBeenCalledOnce())
+    const terminalRequest = vi.mocked(setup.bridge.terminal).mock.calls[0]
+    git.setStatus({ ...git.getStatus(), machineAliases: { [setup.target.owner.clientId]: 'Build station', [senderId]: 'Portable' } })
+    await act(async () => git.notify())
+    expect(screen.getAllByText('Copilot @ Build station (Owner-B)')).toHaveLength(2)
+    expect(screen.getByLabelText('Checks on Build station (Owner-B)')).toHaveTextContent('Still running')
+    expect(within(screen.getByRole('log')).getByText('Portable (Sender-A)')).toBeInTheDocument()
+    expect(screen.getByText('Streaming answer')).toBeInTheDocument()
+    expect(screen.getByRole('textbox')).toHaveValue('Keep my next question')
+    expect(screen.getByRole('combobox', { name: 'Agent Host model' })).toHaveValue('gpt-6')
+    expect(readModelPreference(setup.target.owner.clientId, 'copilotcli')).toEqual({ model: { id: 'gpt-6' } })
+    expect(setup.bridge.watch).toHaveBeenCalledExactlyOnceWith(setup.target)
+    expect(setup.bridge.models).toHaveBeenCalledExactlyOnceWith(setup.target)
+    expect(setup.bridge.unwatch).not.toHaveBeenCalled()
+    expect(setup.bridge.terminal).toHaveBeenCalledOnce()
+    expect(setup.bridge.releaseTerminal).not.toHaveBeenCalled()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: 'Stop Agent Host response' }))
+    expect(setup.bridge.cancel).toHaveBeenCalledExactlyOnceWith(setup.target, 'streaming-turn')
+    git.setStatus({ ...git.getStatus(), machineAliases: {} })
+    await act(async () => git.notify())
+    expect(screen.getAllByText('Copilot @ Owner-B')).toHaveLength(2)
+    expect(screen.getByLabelText('Checks on Owner-B')).toBeInTheDocument()
+    expect(screen.getByRole('textbox')).toHaveValue('Keep my next question')
+    expect(setup.bridge.watch).toHaveBeenCalledOnce()
+    expect(setup.bridge.terminal).toHaveBeenCalledOnce()
+    expect(setup.bridge.releaseTerminal).not.toHaveBeenCalled()
+    await user.click(screen.getByText('Live checks'))
+    await waitFor(() => expect(setup.bridge.releaseTerminal).toHaveBeenCalledExactlyOnceWith(...terminalRequest))
+    setup.view.chat!.activeTurn = undefined
+    act(() => setup.emit())
+    await user.click(screen.getByRole('button', { name: 'Send to Agent Host' }))
+    expect(setup.bridge.send).toHaveBeenCalledExactlyOnceWith(setup.target, expect.any(String), 'Keep my next question', undefined, { id: 'gpt-6' })
+    expect(setup.target.owner.machineName).toBe('Owner-B')
+    expect(setup.bridge.create).not.toHaveBeenCalled()
+    expect(setup.bridge.createLocal).not.toHaveBeenCalled()
   })
 
   it('remembers the explicit model and options when reopening another task chat on the same owner', async () => {
@@ -584,7 +761,7 @@ describe('Agent Host chat UI', () => {
     setup.view.chat!.activeTurn = { id: 'turn', startedAt: '', message: { text: 'Run checks', origin: { kind: 'user' } }, responseParts: [{ kind: 'toolCall', toolCall: { toolCallId: 'tool', toolName: 'terminal', displayName: 'Run tests', status: 'running', content: [{ type: 'terminal', resource: terminal, title: 'Tests' }] } }], usage: undefined } as ChatState['activeTurn']
     setup.view.terminals[terminal] = { title: 'Tests', content: [{ type: 'unclassified', value: '\u001b[32mPASS\u001b[0m\n<script>not executable</script>' }], lifecycle: { status: 'running' }, claim: { kind: 'session', session: setup.target.sessionId, chat: setup.target.chatId } } as AgentHostView['terminals'][string]
     const rendered = render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
-    const output = await screen.findByLabelText('Tests')
+    const output = await screen.findByLabelText('Tests on Owner-B')
     expect(output).toHaveTextContent('PASS')
     expect(output).toHaveTextContent('<script>not executable</script>')
     expect(output.textContent).not.toContain('\u001b')
@@ -606,8 +783,8 @@ describe('Agent Host chat UI', () => {
     setup.view.terminals[resource] = { title: 'Historical output', content: [{ type: 'unclassified', value: 'Full output <script>inert</script>' }],
       lifecycle: { status: 'exited' }, claim: { kind: 'session', session: setup.target.sessionId, chat: setup.target.chatId } } as AgentHostView['terminals'][string]
     act(() => setup.emit())
-    await waitFor(() => expect(screen.getAllByLabelText('Historical output')).toHaveLength(2))
-    expect(screen.getAllByLabelText('Historical output')[0]).toHaveTextContent('Full output <script>inert</script>')
+    await waitFor(() => expect(screen.getAllByLabelText('Historical output on Owner-B')).toHaveLength(2))
+    expect(screen.getAllByLabelText('Historical output on Owner-B')[0]).toHaveTextContent('Full output <script>inert</script>')
     expect(document.querySelector('script')).toBeNull()
     await user.click(screen.getByText('Previous command'))
     await waitFor(() => expect(setup.bridge.releaseTerminal).toHaveBeenCalledOnce())
@@ -623,7 +800,7 @@ describe('Agent Host chat UI', () => {
     render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
     await user.click(await screen.findByText('Previous command'))
     await screen.findByRole('alert', { name: '' })
-    expect(screen.getByLabelText('Historical output')).toHaveTextContent('Preview before loading')
+    expect(screen.getByLabelText('Historical output on Owner-B')).toHaveTextContent('Preview before loading')
     expect(screen.getByText('Preview only - full terminal output has not loaded.')).toBeInTheDocument()
     act(() => { setup.emit(); setup.emit() })
     expect(setup.bridge.terminal).toHaveBeenCalledOnce()
@@ -633,7 +810,7 @@ describe('Agent Host chat UI', () => {
     setup.view.terminals[resource] = { title: 'Historical output', content: [{ type: 'unclassified', value: 'Loaded on retry' }],
       lifecycle: { status: 'exited' }, claim: { kind: 'session', session: setup.target.sessionId, chat: setup.target.chatId } } as AgentHostView['terminals'][string]
     act(() => setup.emit())
-    await waitFor(() => expect(screen.getByLabelText('Historical output')).toHaveTextContent('Loaded on retry'))
+    await waitFor(() => expect(screen.getByLabelText('Historical output on Owner-B')).toHaveTextContent('Loaded on retry'))
     expect(screen.queryByText('Preview only - full terminal output has not loaded.')).not.toBeInTheDocument()
   })
 

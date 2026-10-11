@@ -247,6 +247,53 @@ describe('canonical signed immutable remote records', () => {
     await expect(verifyRecord(wrongSetting, trust)).rejects.toThrow('owning device')
   })
 
+  it('shares signed display aliases without replacing identity revisions, invitations or session ownership', async () => {
+    const issuer = await make({ kind: 'device', payload: identity(a) })
+    const recipient = await make({ kind: 'device', payload: identity(b) }, b)
+    const grant = await make({ kind: 'invitation', payload: {
+      action: 'grant', issuerId: a.actor.deviceId, recipientId: b.actor.deviceId, grantId: randomUUID(),
+      issuerIdentityRef: issuer.operationId, recipientIdentityRef: recipient.operationId,
+      capability: 'ah-link', issuedAt: at, expiresAt: '2026-09-14T10:00:00.000Z',
+      routeRef: { identityRef: issuer.operationId, routeIndex: 0 },
+    } })
+    const targets = [target(), target('two', a)]
+    const binding = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets } })
+    const alias = await make({ kind: 'alias', payload: { action: 'set', deviceId: b.actor.deviceId, alias: 'Build workstation' } })
+    const sameName = await make({ kind: 'alias', payload: { action: 'set', deviceId: a.actor.deviceId, alias: 'Build workstation' } }, b)
+    const resolved = await resolveRecords([issuer, recipient, grant, binding, alias, sameName], trust)
+    expect(resolved.machineAliases).toEqual({ [a.actor.deviceId]: 'Build workstation', [b.actor.deviceId]: 'Build workstation' })
+    expect(resolved.devices).toEqual({ [a.actor.deviceId]: issuer, [b.actor.deviceId]: recipient })
+    expect(Object.values(resolved.invitations)).toEqual([grant])
+    expect(resolved.bindings['T-0001']).toEqual(targets)
+    expect(resolved.diagnostics).toEqual([])
+    expect(recordPath(alias)).toBe(join('.taskcontinuum', 'records', 'v1', 'aliases', b.actor.deviceId, `${alias.operationId}.json`))
+    await expect(verifyRecord(alias, { ...trust, authorize: () => false })).rejects.toThrow('does not authorize')
+    await expect(verifyRecord(alias, { ...trust, trustedKey: () => undefined })).rejects.toThrow('not trusted')
+  })
+
+  it('isolates concurrent alias conflicts from connectivity and clears all observed alias heads explicitly', async () => {
+    const left = await make({ kind: 'alias', payload: { action: 'set', deviceId: b.actor.deviceId, alias: 'Office' } })
+    const right = await make({ kind: 'alias', payload: { action: 'set', deviceId: b.actor.deviceId, alias: 'Laptop' } }, b)
+    const targets = [target(), target('two', a)]
+    const binding = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets } })
+    const conflicted = await resolveRecords([left, right, binding], trust)
+    expect(conflicted.machineAliases).toEqual({})
+    expect(conflicted.entities[`alias:${b.actor.deviceId}`].state).toBe('needs-resolution')
+    expect(conflicted.blocked).toBe(false)
+    expect(resolvedSettings(conflicted, b.actor.deviceId)).toEqual({ autoLink: true, tunnelEnabled: true, connectTimeoutMs: 45000 })
+    expect(conflicted.bindings['T-0001']).toEqual(targets)
+    expect(await resolveRecords([binding, right, left], trust)).toEqual(conflicted)
+    const clear = await make({ kind: 'alias', payload: { action: 'delete', deviceId: b.actor.deviceId }, parents: conflicted.heads[`alias:${b.actor.deviceId}`] })
+    const resolved = await resolveRecords([left, right, binding, clear], trust)
+    expect(resolved.machineAliases).toEqual({})
+    expect(resolved.entities[`alias:${b.actor.deviceId}`].state).toBe('deleted')
+    expect(resolved.diagnostics).toEqual([])
+  })
+
+  it.each(['', 'x'.repeat(81), 'Office\nLaptop', '\nOffice', 'Office\n', 'Office\0', 'Office\u2029'])('rejects invalid signed machine aliases (%#)', async (alias) => {
+    await expect(make({ kind: 'alias', payload: { action: 'set', deviceId: b.actor.deviceId, alias } })).rejects.toThrow()
+  })
+
   it('blocks safety-setting conflicts rather than falling through to permissive defaults', async () => {
     const yes = await make({ kind: 'setting', payload: { action: 'set', scope: 'workspace', settingKey: 'autoLink', value: true } })
     const no = await make({ kind: 'setting', payload: { action: 'delete', scope: 'workspace', settingKey: 'autoLink' } }, b)

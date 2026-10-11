@@ -36,7 +36,7 @@ test('keeps tool-heavy replies compact, accessible and readable at desktop and n
       TASKCONTINUUM_VSCODE_USER_DATA_DIR: join(root, 'no-legacy-sessions'),
     })
     app = await electron.launch({ args: [resolve('.')], cwd: resolve('.'), env: environment })
-    const page = await app.firstWindow()
+    let page = await app.firstWindow()
     page.on('pageerror', (error) => errors.push(error.message))
     await app.evaluate(({ BrowserWindow, dialog }) => {
       BrowserWindow.getAllWindows()[0].setSize(1440, 1000)
@@ -44,12 +44,39 @@ test('keeps tool-heavy replies compact, accessible and readable at desktop and n
     })
     await expect(page.getByRole('heading', { level: 1, name: 'Compact conversation' })).toBeVisible()
     await enableAutomaticLinks(app, page, profile)
+    const deviceId = await page.evaluate(async () => {
+      const sync = window.remoteVSCode!.gitSync!
+      const status = await sync.status()
+      if (!status.localDevice) throw new Error('The fixture has no enrolled local device.')
+      await sync.setMachineAlias(status.localDevice.deviceId, 'Build workstation', status.revision)
+      await sync.syncNow()
+      return status.localDevice.deviceId
+    })
+    await page.evaluate(() => window.workspace!.closeWorkspace())
+    await app.close()
+    app = undefined
+    delete environment.TASKCONTINUUM_WORKSPACE
+    app = await electron.launch({ args: [resolve('.')], cwd: resolve('.'), env: environment })
+    page = await app.firstWindow()
+    page.on('pageerror', (error) => errors.push(error.message))
+    await app.evaluate(({ BrowserWindow, dialog }, folder) => {
+      BrowserWindow.getAllWindows()[0].setSize(1440, 1000)
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [folder] })
+      dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false })
+    }, workspace)
+    await expect(page.getByRole('heading', { level: 1, name: 'Create your task repository' })).toBeVisible()
+    await page.getByRole('button', { name: 'Open workspace folder', exact: true }).click()
+    await expect(page.getByRole('heading', { level: 1, name: 'Compact conversation' })).toBeVisible()
+    const restored = await page.evaluate(() => window.remoteVSCode!.gitSync!.status())
+    expect(restored.error).toBeUndefined()
+    expect(restored.machineAliases?.[deviceId]).toBe('Build workstation')
     await page.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
     const picker = page.getByRole('complementary', { name: 'Agent Host sessions' })
     await picker.getByRole('tab', { name: 'Link', exact: true }).click()
     await picker.getByRole('button', { name: 'Link Original Host chat to T-0001' }).click()
     const panel = page.getByRole('complementary', { name: 'Agent Host task chat' })
-    await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
+    await expect(page.getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible()
+    await expect(page.getByLabel('Chat header')).toContainText('Build workstation')
     await expect(panel.getByRole('option', { name: 'GPT-6', exact: true })).toBeAttached()
     await panel.getByRole('combobox', { name: 'Agent Host model' }).selectOption('gpt-6')
     await panel.getByRole('textbox').fill('Review the startup flow and summarize the changes.')

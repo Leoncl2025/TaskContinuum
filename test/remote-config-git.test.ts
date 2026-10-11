@@ -80,6 +80,26 @@ async function fixture(count = 1, workspaceDirectory = '') {
 }
 
 describe('single selected checkout Git synchronization', () => {
+  it.each(['', 'Project With Spaces [AD]/Planning'])('reopens retained machine-alias publications without changing the workspace (%s)', async (folder) => {
+    const setup = await fixture(1, folder)
+    const first = await setup.replica()
+    await first.close()
+    const stateRoot = join(setup.root, 'state-0')
+    const directories = (await readdir(stateRoot)).filter((entry) => entry.startsWith('checkout-v2-'))
+    expect(directories).toHaveLength(1)
+    const retained = join(stateRoot, directories[0], 'publications.json')
+    const content = JSON.stringify({ schemaVersion: 1, kind: 'alias', payload: { action: 'set', deviceId: DEVICE, alias: 'Build workstation' } }) + '\n'
+    const file = { path: `.taskcontinuum/records/v1/aliases/${DEVICE}/${createHash('sha256').update(content).digest('hex')}.json`, content }
+    const saved = JSON.stringify([file]) + '\n'
+    await writeFile(retained, saved)
+    const before = await git(setup.clients[0], 'rev-parse', 'HEAD')
+    const reopened = await setup.replica(0, false)
+    expect(reopened.root).toBe(join(setup.clients[0], ...folder.split('/')))
+    expect(await readFile(retained, 'utf8')).toBe(saved)
+    expect(await git(setup.clients[0], 'rev-parse', 'HEAD')).toBe(before)
+    expect(await git(setup.clients[0], 'status', '--porcelain')).toBe('')
+  }, 60000)
+
   it('supports an AgentDesk folder below the repository root without moving its metadata', async () => {
     const folder = 'Project With Spaces [AD]/Planning'
     const setup = await fixture(2, folder)
@@ -242,6 +262,36 @@ describe('single selected checkout Git synchronization', () => {
     await git(checkout, 'push', '--quiet')
     await second.sync()
     await expect(first.sync()).rejects.toMatchObject({ code: 'integrity' })
+  }, 60000)
+
+  it.each(['', 'Project With Spaces [AD]/Planning'])('publishes signed machine aliases only inside their workspace and device-scoped metadata namespace (%s)', async (folder) => {
+    const setup = await fixture(2, folder)
+    const app = await setup.replica()
+    const before = await git(setup.clients[0], 'rev-parse', 'HEAD')
+    const author = immutableRecordSigner(7)
+    const workspaceId = randomUUID()
+    const signed = await createRecord({
+      kind: 'alias', workspaceId, actor: author.actor,
+      payload: { action: 'set', deviceId: DEVICE, alias: 'Build workstation' },
+    }, author.sign)
+    const file = { path: recordPath(signed).split(sep).join('/'), content: serializeRecord(signed) }
+    const repositoryPath = folder ? `${folder}/${file.path}` : file.path
+    expect((await app.sync([file])).publishedPaths).toEqual([file.path])
+    expect(await git(setup.remote, 'diff', '--name-only', before, BRANCH)).toBe(repositoryPath)
+    expect(await git(setup.remote, 'show', `${BRANCH}:${repositoryPath}`)).toBe(file.content.trim())
+    const receiver = await setup.replica(1)
+    await receiver.sync()
+    expect(await readRecords(receiver.root, {
+      workspaceId, trustedKey: new Map([[author.actor.deviceId, author.publicKey]]), authorize: () => true,
+    })).toEqual([signed])
+    for (const path of [
+      file.path.replace(DEVICE, 'not-a-device-id'),
+      file.path.replace('/aliases/', '/alias/'),
+      file.path.replace(`/${DEVICE}/`, `/${DEVICE}/nested/`),
+    ]) await expect(app.sync([{ ...file, path }])).rejects.toThrow()
+    expect(await git(app.root, 'status', '--porcelain')).toBe('')
+    expect(await readFile(join(setup.clients[0], 'README.md'), 'utf8')).toBe('Original task prose.\n')
+    if (folder) expect(await present(join(setup.clients[0], '.taskcontinuum'))).toBe(false)
   }, 60000)
 
   it.each(['autocrlf', 'attributes'] as const)('preserves signed records when Git materializes CRLF via %s', async (mode) => {

@@ -38,6 +38,8 @@ export type DevicePayload = {
   routes: RemoteDeviceRoute[]
 } | { action: 'remove'; deviceId: string }
 
+export type DeviceAliasPayload = { action: 'set'; deviceId: string; alias: string } | { action: 'delete'; deviceId: string }
+
 interface InvitationIdentity {
   issuerId: string
   recipientId: string
@@ -69,7 +71,7 @@ export type SettingPayload = SettingScope & (
   | { action: 'set'; settingKey: 'autoLink' | 'tunnelEnabled'; value: boolean }
   | { action: 'set'; settingKey: 'connectTimeoutMs'; value: number }
 )
-export interface RemotePayloads { device: DevicePayload; invitation: InvitationPayload; binding: BindingPayload; setting: SettingPayload }
+export interface RemotePayloads { device: DevicePayload; alias: DeviceAliasPayload; invitation: InvitationPayload; binding: BindingPayload; setting: SettingPayload }
 export type RemoteRecordKind = keyof RemotePayloads
 export interface RemoteRecordHeader {
   schemaVersion: 1
@@ -89,6 +91,7 @@ export type RemoteRecord<K extends RemoteRecordKind = RemoteRecordKind> = {
   }
 }[K]
 export type DeviceRecord = RemoteRecord<'device'>
+export type DeviceAliasRecord = RemoteRecord<'alias'>
 export type InvitationRecord = RemoteRecord<'invitation'>
 export type BindingRecord = RemoteRecord<'binding'>
 export type SettingRecord = RemoteRecord<'setting'>
@@ -114,6 +117,7 @@ export interface ResolvedRemoteConfig {
   heads: Record<string, string[]>
   /** Automatic-link eligible identities; incomplete historical values remain under entities with diagnostics. */
   devices: Record<string, DeviceRecord>
+  machineAliases: Record<string, string>
   invitations: Record<string, InvitationRecord>
   bindings: Record<string, SessionLink[]>
   settings: { workspace: Partial<RemoteSettings>; devices: Record<string, Partial<RemoteSettings>> }

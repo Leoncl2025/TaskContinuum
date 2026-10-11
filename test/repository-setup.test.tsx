@@ -49,6 +49,7 @@ function installNativeClipboardFixture(copyText: DesktopBridge['copyText']): voi
       security: { contextIsolated: true, sandboxed: true },
     })),
     close: vi.fn(async () => {}), minimize: vi.fn(async () => {}), toggleMaximize: vi.fn(async () => {}),
+    getFullScreen: vi.fn(async () => false), toggleFullScreen: vi.fn(async () => {}), onFullScreenChanged: vi.fn(() => () => {}),
   }
 }
 

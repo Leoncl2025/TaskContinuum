@@ -3,6 +3,7 @@ import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import { z } from 'zod'
 import type { WorkspaceGitSyncStatus } from '../../shared/gitSync'
 import type { RemoteSettingChanges } from './settingsFile'
+import { machineAliasChangeSchema } from './machineAlias'
 
 export interface GitSyncActions {
   status(root: string): Promise<WorkspaceGitSyncStatus>
@@ -11,6 +12,7 @@ export interface GitSyncActions {
   syncNow(root: string): Promise<void>
   revokeDevice(root: string, deviceId: string): Promise<void>
   setSettings(root: string, expectedRevision: string | null, changes: RemoteSettingChanges): Promise<void>
+  setMachineAlias(root: string, deviceId: string, alias: string | null, expectedRevision: string | null): Promise<void>
 }
 
 export function registerGitSyncBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>, service: GitSyncActions): void {
@@ -62,6 +64,14 @@ export function registerGitSyncBridge(requireWindow: (event: IpcMainInvokeEvent)
       const flag = request.value === null ? null : z.boolean().parse(request.value)
       await service.setSettings(root, request.expectedRevision, { [request.key]: flag })
     }
+  })
+  handle('machine-alias', async (_window, value) => {
+    const request = z.object({
+      deviceId: z.uuid(),
+      alias: machineAliasChangeSchema,
+      expectedRevision: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+    }).strict().parse(value)
+    await service.setMachineAlias(await currentRoot(), request.deviceId, request.alias, request.expectedRevision)
   })
   handle('open-settings', async () => {
     const root = await currentRoot()

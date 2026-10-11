@@ -9,6 +9,9 @@ export interface DesktopBridge {
   getInfo(): Promise<DesktopInfo>
   minimize(): Promise<void>
   toggleMaximize(): Promise<void>
+  getFullScreen(): Promise<boolean>
+  toggleFullScreen(): Promise<void>
+  onFullScreenChanged(listener: (fullScreen: boolean) => void): () => void
   close(): Promise<void>
   copyText(text: string): Promise<void>
 }

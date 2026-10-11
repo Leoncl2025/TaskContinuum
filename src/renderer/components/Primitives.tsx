@@ -13,8 +13,12 @@ export function Dialog({ title, onClose, children, className = '', closeDisabled
   const ref = useRef<HTMLDialogElement>(null)
   useEffect(() => {
     const dialog = ref.current
+    const previousFocus = document.activeElement
     dialog?.showModal()
-    return () => { if (dialog?.open) dialog.close() }
+    return () => {
+      if (dialog?.open) dialog.close()
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus()
+    }
   }, [])
   return (
     <dialog ref={ref} className={`dialog ${className}`} aria-label={title}

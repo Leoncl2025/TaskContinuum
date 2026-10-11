@@ -25,6 +25,8 @@ import { AgentHostSessionsSidebar } from './components/AgentHostSessionsSidebar'
 import type { AgentHostSession } from '../shared/agentHost'
 import { agentHostKey } from '../shared/agentHost'
 import { useSessionTitles } from './chat/useSessionTitles'
+import { machineLabel, useMachineAliases, useWorkspaceGitSync } from './machineAliases'
+import { MachineAliasesProvider } from './MachineAliasesProvider'
 import appIcon from '../../build/icon.png'
 
 type DialogName = 'quick-open' | 'settings' | 'remote-devices' | null
@@ -33,7 +35,7 @@ export default function App() {
   const workspaces = useWorkspaces()
   const [repositorySetup, setRepositorySetup] = useState<'new' | WorkspaceSnapshot | null>(null)
   return <>
-    <Workbench key={workspaces.state.current?.id ?? 'empty'} workspaces={workspaces} repositorySetupOpen={repositorySetup !== null} onCreateRepository={() => setRepositorySetup('new')} onPublishRepository={setRepositorySetup} />
+    <MachineAliasesProvider workspaceId={workspaces.state.current?.id ?? null}><Workbench key={workspaces.state.current?.id ?? 'empty'} workspaces={workspaces} repositorySetupOpen={repositorySetup !== null} onCreateRepository={() => setRepositorySetup('new')} onPublishRepository={setRepositorySetup} /></MachineAliasesProvider>
     {repositorySetup && <div className="repository-dialog-theme" data-theme={readLayout().theme}><RepositorySetup workspace={repositorySetup === 'new' ? null : repositorySetup} workspaces={workspaces} onClose={() => setRepositorySetup(null)} /></div>}
   </>
 }
@@ -46,6 +48,8 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
 }) {
   const workspace = workspaces.state.current
   const sessionTitles = useSessionTitles(workspace?.id)
+  const aliases = useMachineAliases()
+  const { error: machineAliasesError, refresh: refreshMachineAliases } = useWorkspaceGitSync()
   const [taskAgentOpen, setTaskAgentOpen] = useState(false)
   const links = useSessionLinks(!taskAgentOpen && workspace?.tasks.length ? workspace : null)
   const bindings = links.bindings
@@ -61,11 +65,13 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   const [selectedSessions, setSelectedSessions] = useState<Record<string, string | null>>({})
   const [visitedSessions, setVisitedSessions] = useState<string[]>([])
   const [dialog, setDialog] = useState<DialogName>(null)
+  const [chatHeaderTarget, setChatHeaderTarget] = useState<HTMLDivElement | null>(null)
   const [taskCreationMode, setTaskCreationMode] = useState<'form' | 'draft' | null>(null)
   const [taskAgentBusy, setTaskAgentBusy] = useState(false)
   const [createdTaskId, setCreatedTaskId] = useState<string | null>(null)
   const [compactPanel, setCompactPanel] = useState<'tasks' | 'chat' | 'details'>(() => workspace?.tasks.length ? 'chat' : 'details')
   const [desktop, setDesktop] = useState<DesktopInfo>()
+  const [fullScreen, setFullScreen] = useState(false)
   const [desktopError, setDesktopError] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const compact = useSyncExternalStore(subscribeCompact, isCompact, () => false)
@@ -95,6 +101,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   const sidebarVisible = compact ? compactPanel === 'tasks' : layout.sidebar
   const chatVisible = compact ? compactPanel === 'chat' : layout.chat
   const detailsVisible = compact ? compactPanel === 'details' : layout.details
+  const unifiedChatHeader = chatVisible && !taskAgentOpen && Boolean(activePanelKey)
   const sessionBusy = (Boolean(agentHostBinding) && agentHostBusy) || taskAgentBusy
   const workspaceLocked = repositorySetupOpen || taskCreationMode !== null || links.busy || sessionBusy || dialog === 'remote-devices'
   const connectionError = (taskAgentOpen ? null : links.error) ?? actionError
@@ -114,8 +121,12 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   useEffect(() => { saveLayout(layout) }, [layout])
   useEffect(() => {
     let mounted = true
-    void window.desktop?.getInfo().then((info) => { if (mounted) setDesktop(info) }).catch(() => { if (mounted) setDesktopError(true) })
-    return () => { mounted = false }
+    let changed = false
+    const bridge = window.desktop
+    const unlisten = bridge?.onFullScreenChanged((value) => { changed = true; if (mounted) setFullScreen(value) })
+    void bridge?.getInfo().then((info) => { if (mounted) setDesktop(info) }).catch(() => { if (mounted) setDesktopError(true) })
+    void bridge?.getFullScreen().then((value) => { if (mounted && !changed) setFullScreen(value) }).catch(() => { if (mounted) setDesktopError(true) })
+    return () => { mounted = false; unlisten?.() }
   }, [])
 
   const toggleSidebar = useCallback(() => {
@@ -205,7 +216,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
     else setLayout((value) => ({ ...value, sidebar: true }))
   }
 
-  function windowAction(action: 'minimize' | 'toggleMaximize' | 'close'): void {
+  function windowAction(action: 'minimize' | 'toggleMaximize' | 'toggleFullScreen' | 'close'): void {
     void window.desktop?.[action]().catch(() => setDesktopError(true))
   }
 
@@ -286,11 +297,12 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
       else if (event.target.closest('.task-details-panel')) setCompactPanel('details')
     }
   }}>
-    <header className="titlebar">
+    <header className="titlebar" aria-label="Workbench toolbar" data-chat-header={unifiedChatHeader}>
       <div className="app-brand"><span className="brand-mark"><img src={appIcon} alt="" width={24} height={24} /></span><span>Task Continuum</span></div>
-      <button type="button" className="command-center" onClick={() => { setQuickQuery(''); setDialog('quick-open') }}><Icon name="search" /><span>Search tasks and jump back in</span><kbd>Ctrl P</kbd></button>
+      <div className="titlebar-chat" ref={setChatHeaderTarget} hidden={!unifiedChatHeader} />
+      <button type="button" className="command-center" aria-label="Search tasks and jump back in" title="Search tasks (Ctrl+P)" onClick={() => { setQuickQuery(''); setDialog('quick-open') }}><Icon name="search" /><span>Search tasks and jump back in</span><kbd>Ctrl P</kbd></button>
       <div className="titlebar-actions">{workspaces.available && <IconButton icon="folder-opened" label="Switch workspace folder" disabled={workspaceLocked || workspaces.busy} onClick={openWorkspace} />}{!compact && <><IconButton icon="layout-sidebar-left" label="Toggle task sidebar" title="Toggle task sidebar (Ctrl+B)" aria-pressed={sidebarVisible} onClick={toggleSidebar} /><IconButton icon="comment-discussion" label="Toggle chat panel" title="Toggle chat panel (Ctrl+Alt+B)" aria-pressed={chatVisible} onClick={toggleChat} /><IconButton icon="layout-sidebar-right" label="Toggle task details" title="Toggle task details (Ctrl+Alt+D)" aria-pressed={detailsVisible} onClick={toggleDetails} /></>}</div>
-      {window.desktop && <div className="window-controls"><IconButton icon="chrome-minimize" label="Minimize window" onClick={() => windowAction('minimize')} /><IconButton icon="chrome-maximize" label="Maximize or restore window" onClick={() => windowAction('toggleMaximize')} /><IconButton icon="chrome-close" label="Close window" onClick={() => windowAction('close')} /></div>}
+      {window.desktop && <div className="window-controls"><IconButton icon={fullScreen ? 'screen-normal' : 'screen-full'} label={fullScreen ? 'Exit full screen' : 'Enter full screen'} title={`${fullScreen ? 'Exit' : 'Enter'} full screen (F11 / Shift+Alt+Enter)`} aria-pressed={fullScreen} onClick={() => windowAction('toggleFullScreen')} /><IconButton icon="chrome-minimize" label="Minimize window" onClick={() => windowAction('minimize')} /><IconButton icon="chrome-maximize" label="Maximize or restore window" disabled={fullScreen} onClick={() => windowAction('toggleMaximize')} /><IconButton icon="chrome-close" label="Close window" onClick={() => windowAction('close')} /></div>}
     </header>
 
     {compact && <nav className="compact-navigation" aria-label="Workspace panes">
@@ -300,6 +312,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
     </nav>}
 
     {workspaces.error && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{workspaces.error}</span><IconButton icon="close" label="Dismiss workspace error" onClick={() => workspaces.setError(null)} /></div>}
+    {machineAliasesError && dialog !== 'remote-devices' && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{machineAliasesError}</span><IconButton icon="refresh" label="Reload workspace machine aliases" onClick={() => { void refreshMachineAliases() }} /></div>}
     {connectionError && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{connectionError}</span>{links.error ? <IconButton icon="refresh" label="Reload session links" disabled={links.busy || sessionBusy} onClick={() => { setActionError(null); void links.reload() }} /> : <IconButton icon="close" label="Dismiss Agent Host error" onClick={() => setActionError(null)} />}</div>}
     <div className="workbench-body" style={{ '--sidebar-width': `${sizes.sidebar.width}px`, '--details-width': `${sizes.details.width}px` } as CSSProperties}>
       <nav className="activity-bar" aria-label="Workbench navigation">
@@ -320,7 +333,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
           {openTasks.map((id, index) => {
             const item = tasks.find((value) => value.id === id)!
             return <div key={id} className={`editor-tab ${id === selectedId ? 'selected' : ''}`}>
-              <button type="button" role="tab" aria-selected={id === selectedId} aria-controls="active-task" tabIndex={id === selectedId ? 0 : -1} onClick={() => selectTask(id)} onKeyDown={(event) => {
+              <button type="button" role="tab" title={item.title} aria-selected={id === selectedId} aria-controls="active-task" tabIndex={id === selectedId ? 0 : -1} onClick={() => selectTask(id)} onKeyDown={(event) => {
                 if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
                   event.preventDefault()
                   const next = (index + (event.key === 'ArrowRight' ? 1 : openTasks.length - 1)) % openTasks.length
@@ -335,7 +348,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
         </div>
         <div id="active-task" className="active-task" data-chat-visible={chatVisible}>
           <Activity mode={chatVisible ? 'visible' : 'hidden'}>
-            {chatPanels.map((panel) => <Activity key={panel.key} mode={!taskAgentOpen && panel.key === activePanelKey ? 'visible' : 'hidden'}><AgentHostPanel task={panel.task} target={panel.binding.agentHost} cachedTitle={sessionTitles.titles[agentHostKey(panel.binding.agentHost)]} onTitles={sessionTitles.remember} active={!taskAgentOpen && panel.key === activePanelKey} connectionRevision={agentHostRevision} onDetach={openAgentHostSessions} onClose={toggleChat} onDevices={window.remoteVSCode ? () => setDialog('remote-devices') : undefined} onSessions={openAgentHostSessions} onBusy={setAgentHostBusy} /></Activity>)}
+            {chatPanels.map((panel) => <Activity key={panel.key} mode={!taskAgentOpen && panel.key === activePanelKey ? 'visible' : 'hidden'}><AgentHostPanel task={panel.task} target={panel.binding.agentHost} headerTarget={unifiedChatHeader ? chatHeaderTarget : undefined} cachedTitle={sessionTitles.titles[agentHostKey(panel.binding.agentHost)]} onTitles={sessionTitles.remember} active={!taskAgentOpen && panel.key === activePanelKey} connectionRevision={agentHostRevision} onDetach={openAgentHostSessions} onClose={toggleChat} onDevices={window.remoteVSCode ? () => setDialog('remote-devices') : undefined} onSessions={openAgentHostSessions} onBusy={setAgentHostBusy} /></Activity>)}
             {taskAgentOpen && workspace && <LocalTaskAgent workspace={workspace} workspaces={workspaces} onCreated={taskCreated} onReviewDraft={() => setTaskCreationMode('draft')} onTaskChat={task ? showTaskChat : undefined} onClose={toggleChat} onBusy={setTaskAgentBusy} />}
             {!taskAgentOpen && !agentHostBinding && <aside className="chat-panel empty-chat" aria-label="Task chat">
               <header className="panel-header"><span>AGENT HOST</span><IconButton icon="close" label="Hide chat panel" onClick={toggleChat} /></header>
@@ -368,7 +381,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
       </main></Activity>
     </div>
 
-    <footer className="statusbar" aria-label="Workbench status"><span className="local-status"><Icon name={taskAgentOpen || agentHostBinding ? 'server-environment' : workspace ? 'folder' : 'repo'} />{taskAgentOpen ? 'TASK CREATION' : agentHostBinding ? 'AGENT HOST' : workspace ? 'LOCAL WORKSPACE' : 'NO WORKSPACE'}</span><span><Icon name="checklist" />{tasks.length} tasks</span><span>{selectedId ?? 'No task selected'}</span><span className="statusbar-spacer" /><span className="response-status" role="status">{workspaces.busy ? 'Loading workspace...' : links.busy ? 'Saving or loading session links...' : sessionBusy ? 'Agent Host active' : taskAgentOpen ? 'Local task creation chat' : agentHostBinding ? `Agent Host @ ${agentHostBinding.owner.machineName}` : workspace ? 'Select an Agent Host chat' : 'Create or open a task repository'}</span><button type="button" onClick={taskAgentOpen ? showChat : openAgentHostSessions}><Icon name={taskAgentOpen ? 'comment-discussion' : agentHostBinding ? 'link' : 'plug'} />{taskAgentOpen ? 'Task creation chat' : agentHostBinding ? 'Agent Host linked' : 'No Agent Host linked'}</button><span className="platform-status">{desktopError ? 'Desktop bridge error' : desktop ? `Desktop · ${desktop.version}` : 'Browser preview'}</span></footer>
+    <footer className="statusbar" aria-label="Workbench status"><span className="local-status"><Icon name={taskAgentOpen || agentHostBinding ? 'server-environment' : workspace ? 'folder' : 'repo'} />{taskAgentOpen ? 'TASK CREATION' : agentHostBinding ? 'AGENT HOST' : workspace ? 'LOCAL WORKSPACE' : 'NO WORKSPACE'}</span><span><Icon name="checklist" />{tasks.length} tasks</span><span>{selectedId ?? 'No task selected'}</span><span className="statusbar-spacer" /><span className="response-status" role="status" title={taskAgentOpen ? undefined : agentHostBinding?.owner.machineName}>{workspaces.busy ? 'Loading workspace...' : links.busy ? 'Saving or loading session links...' : sessionBusy ? 'Agent Host active' : taskAgentOpen ? 'Local task creation chat' : agentHostBinding ? `Agent Host @ ${machineLabel(agentHostBinding.owner, aliases)}` : workspace ? 'Select an Agent Host chat' : 'Create or open a task repository'}</span><button type="button" onClick={taskAgentOpen ? showChat : openAgentHostSessions}><Icon name={taskAgentOpen ? 'comment-discussion' : agentHostBinding ? 'link' : 'plug'} />{taskAgentOpen ? 'Task creation chat' : agentHostBinding ? 'Agent Host linked' : 'No Agent Host linked'}</button><span className="platform-status">{desktopError ? 'Desktop bridge error' : desktop ? `Desktop · ${desktop.version}` : 'Browser preview'}</span></footer>
 
     {taskCreationMode && workspace && <TaskCreationDialog workspace={workspace} workspaces={workspaces} initialMode={taskCreationMode} onCreated={taskCreated} onAgent={() => { setTaskCreationMode(null); setTaskAgentOpen(true); showChat() }} onClose={() => setTaskCreationMode(null)} />}
     {dialog === 'quick-open' && <Dialog title="Quick open" className="quick-open" onClose={() => setDialog(null)}><input className="quick-input" aria-label="Find a task" placeholder="Type a task name or ID…" value={quickQuery} onChange={(event) => setQuickQuery(event.target.value)} autoFocus /><div className="quick-results">{filterTasks(tasks, quickQuery, 'all').map((item) => <button type="button" key={item.id} onClick={() => { selectTask(item.id); setDialog(null) }}><Icon name="file-text" /><strong>{item.title}</strong><span>{item.id}</span></button>)}{!filterTasks(tasks, quickQuery, 'all').length && <p>No matching tasks.</p>}</div><p className="dialog-hint">Tab to a result · Enter to open · Esc to close</p></Dialog>}

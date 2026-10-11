@@ -22,6 +22,23 @@ afterEach(() => {
 })
 
 describe('native-only preload boundary', () => {
+  it('exposes scoped native full-screen state, toggle, and removable state notifications', async () => {
+    const bridge = window.desktop
+    if (!bridge) throw new Error('Desktop preload API missing.')
+    ipc.invoke.mockResolvedValueOnce(false)
+    expect(await bridge.getFullScreen()).toBe(false)
+    await bridge.toggleFullScreen()
+    expect(ipc.invoke.mock.calls).toEqual([['desktop:full-screen'], ['desktop:toggle-full-screen']])
+    const changed = vi.fn()
+    const unsubscribe = bridge.onFullScreenChanged(changed)
+    expect(ipc.on).toHaveBeenCalledWith('desktop:full-screen-changed', expect.any(Function))
+    const receive = ipc.on.mock.calls.find(([channel]) => channel === 'desktop:full-screen-changed')![1]
+    receive({}, true)
+    expect(changed).toHaveBeenCalledExactlyOnceWith(true)
+    unsubscribe()
+    expect(ipc.removeListener).toHaveBeenCalledExactlyOnceWith('desktop:full-screen-changed', receive)
+  })
+
   it('exposes only native sessions, workspace metadata and retained desktop/device APIs', () => {
     expect(ipc.expose.mock.calls.map(([name]) => name).sort()).toEqual(['agentHost', 'desktop', 'remoteVSCode', 'workspace'])
     for (const name of ['copilot', 'vscodeChat', 'sharedSessions']) expect(Reflect.has(window, name)).toBe(false)
@@ -132,6 +149,19 @@ describe('native-only preload boundary', () => {
       ['workspace:task-creation-context', workspaceId],
       ['workspace:create-task', create],
       ['workspace:task-agent-instructions', agent],
+    ])
+  })
+
+  it('forwards display-only machine alias edits separately from authenticated session targets', async () => {
+    const bridge = window.remoteVSCode?.gitSync
+    if (!bridge) throw new Error('Workspace synchronization preload API missing.')
+    const deviceId = crypto.randomUUID()
+    const revision = 'a'.repeat(64)
+    await bridge.setMachineAlias(deviceId, 'Build workstation', revision)
+    await bridge.setMachineAlias(deviceId, null, revision)
+    expect(ipc.invoke.mock.calls).toEqual([
+      ['remote-vscode:git-machine-alias', { deviceId, alias: 'Build workstation', expectedRevision: revision }],
+      ['remote-vscode:git-machine-alias', { deviceId, alias: null, expectedRevision: revision }],
     ])
   })
 
