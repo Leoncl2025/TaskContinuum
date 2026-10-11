@@ -48,6 +48,12 @@ key files are not deleted or imported into the new runtime.
 - Real task metadata, statuses, requirements, plans, and acceptance criteria read from
     the selected AgentDesk folder; manual refresh picks up external file changes.
 
+Consecutive routine tool calls appear in one collapsed activity row with a count
+and a live running summary. Expand it to inspect the original calls and their
+outputs; terminal output still loads on demand. Failures, cancellations, approval
+or authentication requests, and input prompts stay outside these groups. Text
+answers keep their original position, and reasoning remains separately collapsible.
+
 ## Desktop releases
 
 Download the Windows x64 installer or ZIP from

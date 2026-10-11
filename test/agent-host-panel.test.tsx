@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { Activity } from 'react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ChatState } from '@microsoft/agent-host-protocol'
+import type { ChatState, McpAuthRequiredReason, ResponsePart, ResponsePartKind, ToolCallCancellationReason, ToolCallCompletedState, ToolCallConfirmationReason, ToolCallContributorKind, ToolCallResponsePart, ToolCallStatus, ToolResultContentType, TurnState } from '@microsoft/agent-host-protocol'
 import { MessageKind } from '@microsoft/agent-host-protocol'
 import type { AgentHostBridge, AgentHostView } from '../src/shared/agentHost'
 import { AgentHostPanel } from '../src/renderer/components/AgentHostPanel'
@@ -45,6 +45,190 @@ function historicalOutput(view: AgentHostView, resource: string, duplicate = fal
       status: 'completed', content: duplicate ? [content, content] : [content] } }], usage: undefined,
   }] as ChatState['turns']
 }
+
+function completedTool(id: string, name = 'Read'): { kind: ResponsePartKind.ToolCall; toolCall: ToolCallCompletedState } {
+  return { kind: 'toolCall' as ResponsePartKind.ToolCall, toolCall: {
+    toolCallId: id, toolName: name, displayName: name, status: 'completed' as ToolCallStatus.Completed,
+    confirmed: 'not-needed' as ToolCallConfirmationReason.NotNeeded, invocationMessage: `Inspect ${id}`,
+    success: true, pastTenseMessage: `Inspected ${id}`, content: [{ type: 'text' as ToolResultContentType.Text, text: `Output for ${id}` }],
+  } }
+}
+
+function runningTool(id: string): ToolCallResponsePart {
+  return { kind: 'toolCall' as ResponsePartKind.ToolCall, toolCall: {
+    toolCallId: id, toolName: 'shell', displayName: 'Run checks', status: 'running' as ToolCallStatus.Running,
+    confirmed: 'not-needed' as ToolCallConfirmationReason.NotNeeded, invocationMessage: 'Run targeted tests',
+  } }
+}
+
+function responseHistory(view: AgentHostView, parts: ResponsePart[]): void {
+  view.chat!.turns = [{
+    id: 'activity-turn', state: 'complete' as TurnState.Complete, message: { text: 'Review the workspace', origin: { kind: MessageKind.User } },
+    responseParts: parts, usage: undefined,
+  }]
+}
+
+describe('Compact chat activity', () => {
+  it('collapses a long tool burst to one row while keeping reasoning and the answer readable', async () => {
+    const setup = fixture()
+    const tools = Array.from({ length: 40 }, (_, index) => completedTool(`read-${index}`))
+    responseHistory(setup.view, [
+      { kind: 'reasoning' as ResponsePartKind.Reasoning, id: 'reasoning', content: 'Inspection reasoning' },
+      { kind: 'markdown' as ResponsePartKind.Markdown, id: 'intro', content: 'I will inspect the relevant files.' },
+      ...tools,
+      { kind: 'markdown' as ResponsePartKind.Markdown, id: 'answer', content: '## Result\n\nThe answer stays in the conversation.' },
+    ])
+    const user = userEvent.setup()
+    const rendered = render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    const summary = await screen.findByLabelText('40 tool calls, completed')
+    const group = summary.closest('details')!
+    expect(group).not.toHaveAttribute('open')
+    expect(summary).toHaveTextContent('Read (40)')
+    expect(screen.getByText('I will inspect the relevant files.')).toBeVisible()
+    expect(screen.getByRole('heading', { name: 'Result' })).toBeVisible()
+    expect(screen.getByText('Inspection reasoning')).not.toBeVisible()
+    expect(rendered.container.querySelectorAll('.ahp-tool-entry')).toHaveLength(0)
+    expect(setup.bridge.terminal).not.toHaveBeenCalled()
+    await user.click(summary)
+    expect(group).toHaveAttribute('open')
+    expect(rendered.container.querySelectorAll('.ahp-tool-entry')).toHaveLength(40)
+    expect(screen.queryByText('Output for read-0')).not.toBeInTheDocument()
+    await user.click(within(group).getAllByText('Read', { exact: true })[0])
+    expect(screen.getByText('Output for read-0')).toBeVisible()
+    await user.click(summary)
+    expect(rendered.container.querySelectorAll('.ahp-tool-entry')).toHaveLength(0)
+    expect(screen.getByText('The answer stays in the conversation.')).toBeVisible()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+  })
+
+  it('does not group across text, reasoning, system notifications or input requests', async () => {
+    const setup = fixture()
+    responseHistory(setup.view, [
+      completedTool('first'), completedTool('second'),
+      { kind: 'markdown' as ResponsePartKind.Markdown, id: 'update', content: 'Found the relevant implementation.' },
+      completedTool('third', 'Search'), completedTool('fourth', 'Search'),
+      { kind: 'systemNotification' as ResponsePartKind.SystemNotification, content: 'Owner notification' },
+      { kind: 'inputRequest' as ResponsePartKind.InputRequest, request: { id: 'question', message: 'Choose the deployment target.' } },
+      { kind: 'reasoning' as ResponsePartKind.Reasoning, id: 'next-reasoning', content: 'Further reasoning' },
+      { kind: 'error' as ResponsePartKind.Error, error: { errorType: 'test-error', message: 'The turn could not continue.' } },
+      { kind: 'markdown' as ResponsePartKind.Markdown, id: 'answer', content: 'Final recommendation.' },
+    ])
+    const rendered = render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByText('Final recommendation.')
+    const body = rendered.container.querySelector('.message-assistant')!
+    expect([...body.children].map((element) => element.textContent)).toEqual([
+      'Copilot @ Owner-B', '2 tool callsRead (2)', 'Found the relevant implementation.',
+      '2 tool callsSearch (2)', 'Owner notification',
+      'Input required on Owner-BChoose the deployment target.', 'ReasoningFurther reasoning',
+      'The turn could not continue.', 'Final recommendation.',
+    ])
+    expect(screen.getByText('Choose the deployment target.')).toBeVisible()
+    expect(screen.getByRole('alert')).toHaveTextContent('The turn could not continue.')
+  })
+
+  const attentionTools: [string, ToolCallResponsePart['toolCall'], string][] = [
+    ['failure', { ...completedTool('attention', 'Run checks').toolCall, success: false, error: { message: 'Tests failed.' } }, 'Tests failed.'],
+    ['failure without details', { ...completedTool('attention', 'Run checks').toolCall, success: false }, 'The tool reported a failure. Review its output for details.'],
+    ['error despite success flag', { ...completedTool('attention', 'Run checks').toolCall, error: { message: 'Owner reported an error.' } }, 'Owner reported an error.'],
+    ['approval', { toolCallId: 'attention', toolName: 'shell', displayName: 'Run checks', status: 'pending-confirmation' as ToolCallStatus.PendingConfirmation, invocationMessage: 'Run the checks' }, 'Awaiting confirmation on Owner-B'],
+    ['result approval', { ...completedTool('attention', 'Run checks').toolCall, status: 'pending-result-confirmation' as ToolCallStatus.PendingResultConfirmation }, 'Awaiting confirmation on Owner-B'],
+    ['authentication', {
+      toolCallId: 'attention', toolName: 'shell', displayName: 'Run checks', status: 'auth-required' as ToolCallStatus.AuthRequired,
+      confirmed: 'not-needed' as ToolCallConfirmationReason.NotNeeded, invocationMessage: 'Run the checks',
+      contributor: { kind: 'mcp' as ToolCallContributorKind.MCP, customizationId: 'test-service' },
+      auth: { reason: 'insufficient-scope' as McpAuthRequiredReason.InsufficientScope, resource: { resource: 'https://example.invalid', authorization_servers: ['https://example.invalid'] } },
+    }, 'Authentication required on Owner-B'],
+    ['cancellation', { toolCallId: 'attention', toolName: 'shell', displayName: 'Run checks', status: 'cancelled' as ToolCallStatus.Cancelled, invocationMessage: 'Run the checks', reason: 'denied' as ToolCallCancellationReason.Denied, reasonMessage: 'The owner declined this command.' }, 'The owner declined this command.'],
+  ]
+  it.each(attentionTools)('keeps %s outside collapsed groups, with its notice visible even when details close', async (_name, toolCall, notice) => {
+    const setup = fixture()
+    responseHistory(setup.view, [
+      completedTool('first'), completedTool('second'),
+      { kind: 'toolCall' as ResponsePartKind.ToolCall, toolCall },
+      completedTool('third'), completedTool('fourth'),
+    ])
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    const title = await screen.findByText('Run checks', { exact: true })
+    expect(screen.getAllByLabelText('2 tool calls, completed')).toHaveLength(2)
+    expect(title.closest('.ahp-activity')).toBeNull()
+    expect(screen.getByText(notice)).toBeVisible()
+    await user.click(title)
+    expect(screen.getByText(notice)).toBeVisible()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+  })
+
+  it('updates live group summaries without overriding the user expansion choice', async () => {
+    const setup = fixture()
+    setup.view.chat!.activeTurn = {
+      id: 'live', startedAt: '', message: { text: 'Review', origin: { kind: MessageKind.User } },
+      responseParts: [completedTool('first'), runningTool('running')], usage: undefined,
+    }
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    const summary = await screen.findByLabelText('2 tool calls, 1 running')
+    expect(summary).toHaveTextContent('Running: Run targeted tests')
+    expect(summary.closest('details')).not.toHaveAttribute('open')
+    await user.click(summary)
+    await user.click(screen.getByText('Read', { exact: true }))
+    expect(screen.getByText('Output for first')).toBeVisible()
+    act(() => {
+      setup.view.chat!.activeTurn!.responseParts.push(completedTool('third', 'Search'))
+      setup.emit()
+    })
+    expect(screen.getByLabelText('3 tool calls, 1 running').closest('details')).toHaveAttribute('open')
+    expect(screen.getByText('Output for first')).toBeVisible()
+    await user.click(summary)
+    act(() => {
+      setup.view.chat!.activeTurn!.responseParts[1] = completedTool('running', 'Run checks')
+      setup.emit()
+    })
+    expect(screen.getByLabelText('3 tool calls, completed').closest('details')).not.toHaveAttribute('open')
+    expect(screen.queryByText('Output for first')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Stop Agent Host response' })).toBeEnabled()
+  })
+
+  it('surfaces a running tool failure immediately even if its group is collapsed', async () => {
+    const setup = fixture()
+    responseHistory(setup.view, [completedTool('first'), runningTool('second')])
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByLabelText('2 tool calls, 1 running')
+    const failed = completedTool('second', 'Run checks')
+    failed.toolCall.success = false
+    failed.toolCall.error = { message: 'Permission was revoked.' }
+    act(() => {
+      setup.view.chat!.turns[0].responseParts[1] = failed
+      setup.emit()
+    })
+    expect(screen.getByRole('alert')).toHaveTextContent('Permission was revoked.')
+    expect(screen.getByText('Run checks', { exact: true }).closest('details')).toHaveAttribute('open')
+    expect(screen.queryByLabelText('2 tool calls, 1 running')).not.toBeInTheDocument()
+  })
+
+  it('loads grouped terminal output only after both disclosures open and releases it when the group closes', async () => {
+    const setup = fixture()
+    const command = completedTool('command', 'Run checks')
+    const resource = 'ahp-terminal:/grouped-command'
+    command.toolCall.content = [{ type: 'terminal' as ToolResultContentType.Terminal, resource, title: 'Grouped output', result: { preview: 'Command preview' } }]
+    responseHistory(setup.view, [completedTool('first'), command])
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    const summary = await screen.findByLabelText('2 tool calls, completed')
+    expect(setup.bridge.terminal).not.toHaveBeenCalled()
+    await user.click(summary)
+    expect(setup.bridge.terminal).not.toHaveBeenCalled()
+    await user.click(screen.getByText('Run checks', { exact: true }))
+    await waitFor(() => expect(setup.bridge.terminal).toHaveBeenCalledOnce())
+    expect(screen.getByLabelText('Grouped output')).toHaveTextContent('Command preview')
+    await user.click(summary)
+    await waitFor(() => expect(setup.bridge.releaseTerminal).toHaveBeenCalledExactlyOnceWith(expect.any(String), resource, vi.mocked(setup.bridge.terminal).mock.calls[0][2]))
+    act(() => setup.emit())
+    expect(setup.bridge.terminal).toHaveBeenCalledOnce()
+    await user.click(summary)
+    expect(setup.bridge.terminal).toHaveBeenCalledOnce()
+    expect(screen.queryByLabelText('Grouped output')).not.toBeInTheDocument()
+  })
+})
 
 describe('Agent Host chat UI', () => {
   it('settles an in-flight send while a different session is visible without replaying it', async () => {

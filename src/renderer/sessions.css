@@ -73,10 +73,38 @@
 .session-link-list dt { color: var(--accent); }
 .session-link-list dd { margin: 0; overflow-wrap: anywhere; }
 .session-footer { display: flex; align-items: center; gap: 7px; margin: 12px 13px; color: var(--muted); font-size: 10px; }
-.ahp-tool { min-width: 0; margin-block: 10px; padding-block: 8px; border-block: 1px solid var(--border); font-size: 12px; }
-.ahp-tool summary { display: flex; align-items: center; gap: 7px; cursor: pointer; overflow-wrap: anywhere; }
-.ahp-tool summary strong { min-width: 0; flex: 1; }
-.ahp-tool summary > span:last-child { color: var(--muted); font-size: 11px; }
+.ahp-panel .message { padding: 14px 18px; }
+.ahp-panel .message > header { margin-bottom: 8px; }
+.ahp-panel .message-text { line-height: 1.65; }
+.ahp-tool, .ahp-activity { min-width: 0; margin-block: 6px; font-size: 12px; }
+.ahp-tool > summary, .ahp-activity > summary { display: flex; align-items: center; gap: 7px; min-width: 0; min-height: 28px; padding: 4px 6px; border-radius: 4px; color: var(--muted); cursor: pointer; list-style: none; }
+.ahp-tool > summary::-webkit-details-marker, .ahp-activity > summary::-webkit-details-marker { display: none; }
+.ahp-tool > summary:hover, .ahp-activity > summary:hover { background: var(--hover); color: var(--text); }
+.ahp-tool > summary:focus-visible, .ahp-activity > summary:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.ahp-tool > summary > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 500; }
+.ahp-tool-description, .ahp-activity-description { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.ahp-tool-status { flex-shrink: 0; margin-left: auto; font-size: 10px; }
+.ahp-disclosure { margin-left: auto; font-size: 12px; }
+.ahp-tool-status + .ahp-disclosure { margin-left: 0; }
+.ahp-tool[open] > summary > .ahp-disclosure, .ahp-activity[open] > summary > .ahp-disclosure { transform: rotate(90deg); }
+.ahp-tool-content { min-width: 0; padding: 6px 6px 4px 23px; }
+.ahp-tool-content:empty { display: none; }
+.ahp-tool-entry > .message-notice { margin: 4px 6px 8px 23px; }
+.ahp-tool-attention { border-left: 2px solid var(--accent); padding-left: 6px; margin-block: 8px; }
+.ahp-tool-attention > .ahp-tool > summary { color: var(--text); }
+.ahp-input-request { padding-block: 6px; font-size: 12px; }
+.ahp-input-request p { margin: 6px 0; }
+.ahp-reasoning > summary { font-size: 11px; }
+.ahp-reasoning > .message-markdown { padding: 6px 6px 6px 23px; color: var(--muted); }
+.ahp-activity { margin-block: 8px; border-radius: 6px; background: var(--raised); }
+.ahp-activity > summary { min-height: 32px; padding: 6px 8px; }
+.ahp-activity-label { flex-shrink: 0; font-size: 11px; font-weight: 500; }
+.ahp-activity[data-running="true"] > summary > .codicon:first-child { color: var(--accent); }
+.ahp-activity-details { margin: 0 8px 8px; padding-left: 8px; border-left: 1px solid var(--border); }
+.ahp-activity-details .ahp-tool { margin-block: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .ahp-activity .codicon-modifier-spin { animation: none; }
+}
 .ahp-terminal { max-width: 100%; max-height: 240px; overflow: auto; margin-block: 8px; padding: 8px; font: 12px/1.5 Consolas, monospace; white-space: pre; background: var(--editor-bg); }
 .ahp-terminal-output .message-notice { margin-block: 6px; }
 .ahp-terminal-output .text-button { font-size: 11px; }
