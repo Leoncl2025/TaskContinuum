@@ -8,7 +8,7 @@ import type { AgentHostSession, AgentHostTarget, AgentHostView } from '../src/sh
 import type { SessionLinksSnapshot } from '../src/shared/sessionBindings'
 import { agentHostKey } from '../src/shared/agentHost'
 
-test('restores the last task and exact selected chat across an actual desktop restart', async () => {
+test('restores all open task tabs, their order and the exact selected chat across an actual desktop restart', async () => {
   test.setTimeout(90000)
   const root = await mkdtemp(join(tmpdir(), 'continuum-selection-'))
   const workspace = join(root, 'workspace')
@@ -94,7 +94,7 @@ test('restores the last task and exact selected chat across an actual desktop re
   try {
     await Promise.all([join(workspace, '.agentdesk'), profile, discovery, environment.APPDATA, environment.LOCALAPPDATA].map((directory) => mkdir(directory, { recursive: true })))
     await writeFile(join(workspace, '.agentdesk', 'config.json'), JSON.stringify({ schemaVersion: '1.0', workspace: 'Selection fixture' }))
-    for (const [id, title] of [['T-0001', 'Initial task'], ['T-0002', 'Remembered task']]) {
+    for (const [id, title] of [['T-0001', 'Clean up codes'], ['T-0002', 'Fix Connection issues'], ['T-0003', 'Closed task']]) {
       await mkdir(join(workspace, 'tasks', id), { recursive: true })
       await writeFile(join(workspace, 'tasks', id, 'task.json'), JSON.stringify({
         schemaVersion: '1.0', id, title, type: 'feature', status: 'backlog', priority: 'P2', relations: { level: 'task', parent: null },
@@ -102,20 +102,27 @@ test('restores the last task and exact selected chat across an actual desktop re
     }
     await writeFile(callFile, '[]')
     await launch()
-    await expect(page!.getByRole('tab', { name: 'Initial task', exact: true })).toHaveAttribute('aria-selected', 'true')
+    await expect(page!.getByRole('tab', { name: 'Clean up codes', exact: true })).toHaveAttribute('aria-selected', 'true')
     await page!.getByRole('button', { name: 'Search tasks and jump back in', exact: true }).click()
-    await page!.getByRole('dialog', { name: 'Quick open' }).getByRole('button', { name: /Remembered task/ }).click()
+    await page!.getByRole('dialog', { name: 'Quick open' }).getByRole('button', { name: /Fix Connection issues/ }).click()
     await page!.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
     await page!.getByRole('button', { name: 'Open Selected remembered chat', exact: true }).click()
     await expect(page!.getByLabel('Chat header').getByText('Selected remembered chat', { exact: true })).toBeVisible()
+    await page!.getByRole('button', { name: 'Search tasks and jump back in', exact: true }).click()
+    await page!.getByRole('dialog', { name: 'Quick open' }).getByRole('button', { name: /Closed task/ }).click()
+    await page!.getByRole('button', { name: 'Close Closed task', exact: true }).click()
+    await expect(page!.getByRole('tab', { name: 'Fix Connection issues', exact: true })).toHaveAttribute('aria-selected', 'true')
     const workspaceId = (await page!.evaluate(() => window.workspace!.getState())).current!.id
-    const saved = await page!.evaluate((key) => JSON.parse(localStorage.getItem(key)!), `taskcontinuum:workbench-selection:v1:${workspaceId}`)
-    expect(saved).toMatchObject({ taskId: 'T-0002', sessions: { 'T-0002': `ahp:${agentHostKey(selectedChat)}` } })
+    const saved = await page!.evaluate((key) => JSON.parse(localStorage.getItem(key)!), `taskcontinuum:workbench-selection:v2:${workspaceId}`)
+    expect(saved).toMatchObject({ taskId: 'T-0002', openTaskIds: ['T-0001', 'T-0002'], sessions: { 'T-0002': `ahp:${agentHostKey(selectedChat)}` } })
     await app!.close()
     app = undefined
     await writeFile(callFile, '[]')
     await launch()
-    await expect(page!.getByRole('tab', { name: 'Remembered task', exact: true })).toHaveAttribute('aria-selected', 'true')
+    await expect(page!.getByRole('tablist', { name: 'Open tasks' }).getByRole('tab')).toHaveText(['Clean up codes', 'Fix Connection issues'])
+    await expect(page!.getByRole('tab', { name: 'Fix Connection issues', exact: true })).toHaveAttribute('aria-selected', 'true')
+    await expect(page!.getByRole('tab', { name: 'Clean up codes', exact: true })).toHaveAttribute('aria-selected', 'false')
+    await expect(page!.getByRole('tab', { name: 'Closed task', exact: true })).toHaveCount(0)
     await expect(page!.getByLabel('Chat header').getByText('Selected remembered chat', { exact: true })).toBeVisible()
     expect(JSON.parse(await readFile(callFile, 'utf8'))).toEqual([{ channel: 'watch', target: selectedChat }])
     await page!.getByLabel('Chat header').getByRole('button', { name: 'Chat details', exact: true }).click()

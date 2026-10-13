@@ -133,7 +133,7 @@ describe('workspace switching in the desktop workbench', () => {
     await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
     await user.click(await screen.findByRole('button', { name: 'Open Second chat' }))
     await waitFor(() => expect(agentHost.watch).toHaveBeenCalledWith(secondChat))
-    const saved = localStorage.getItem(`taskcontinuum:workbench-selection:v1:${first.id}`)
+    const saved = localStorage.getItem(`taskcontinuum:workbench-selection:v2:${first.id}`)
     expect(JSON.parse(saved!)).toMatchObject({ taskId: 'T-0003', sessions: { 'T-0003': sessionBindingKey({ agentHost: secondChat }) } })
     mounted.unmount()
     vi.mocked(agentHost.watch).mockClear()
@@ -141,8 +141,10 @@ describe('workspace switching in the desktop workbench', () => {
     vi.mocked(bridge.getSessionLinks).mockImplementation(() => new Promise((resolve) => { release = resolve }))
     render(<App />)
     await waitFor(() => expect(screen.getByRole('tab', { name: 'Remembered task' })).toHaveAttribute('aria-selected', 'true'))
+    expect(within(screen.getByRole('tablist', { name: 'Open tasks' })).getAllByRole('tab').map((tab) => tab.textContent))
+      .toEqual(['Actual UI task', 'Remembered task'])
     expect(agentHost.watch).not.toHaveBeenCalled()
-    expect(localStorage.getItem(`taskcontinuum:workbench-selection:v1:${first.id}`)).toBe(saved)
+    expect(localStorage.getItem(`taskcontinuum:workbench-selection:v2:${first.id}`)).toBe(saved)
     await act(async () => release(snapshot))
     await waitFor(() => expect(agentHost.watch).toHaveBeenCalledExactlyOnceWith(secondChat))
     expect(bridge.updateSessionLink).not.toHaveBeenCalled()
@@ -276,6 +278,29 @@ describe('workspace switching in the desktop workbench', () => {
     expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
   })
 
+  it('restores ordered open tabs, skips missing tasks and keeps a closed inactive tab closed after restart', async () => {
+    const { first } = fixtures()
+    first.tasks.push({ ...first.tasks[0], id: 'T-0003', title: 'Clean up codes' })
+    first.tasks.push({ ...first.tasks[0], id: 'T-0004', title: 'Other open task' })
+    localStorage.setItem(`taskcontinuum:workbench-selection:v2:${first.id}`, JSON.stringify({
+      version: 2, taskId: 'T-0004', openTaskIds: ['T-0003', 'T-9999', 'T-0002', 'T-0004'], sessions: {},
+    }))
+    const user = userEvent.setup()
+    const mounted = render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    const titles = () => within(screen.getByRole('tablist', { name: 'Open tasks' })).getAllByRole('tab').map((tab) => tab.textContent)
+    expect(titles()).toEqual(['Clean up codes', 'Actual UI task', 'Other open task'])
+    expect(screen.getByRole('tab', { name: 'Other open task' })).toHaveAttribute('aria-selected', 'true')
+    await user.click(screen.getByRole('button', { name: 'Close Actual UI task' }))
+    expect(titles()).toEqual(['Clean up codes', 'Other open task'])
+    expect(screen.getByRole('tab', { name: 'Other open task' })).toHaveAttribute('aria-selected', 'true')
+    mounted.unmount()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Other open task' })).toHaveAttribute('aria-selected', 'true'))
+    expect(titles()).toEqual(['Clean up codes', 'Other open task'])
+  })
+
   it('keeps all task tabs closed across restart and handles a removed remembered task', async () => {
     const { first } = fixtures()
     const user = userEvent.setup()
@@ -288,6 +313,7 @@ describe('workspace switching in the desktop workbench', () => {
     await waitFor(() => expect(screen.getByRole('combobox', { name: 'Workspace' })).toHaveValue(first.id))
     expect(within(screen.getByRole('tablist', { name: 'Open tasks' })).queryAllByRole('tab')).toEqual([])
     mounted.unmount()
+    localStorage.removeItem(`taskcontinuum:workbench-selection:v2:${first.id}`)
     localStorage.setItem(`taskcontinuum:workbench-selection:v1:${first.id}`, JSON.stringify({
       version: 1, taskId: 'T-9999', sessions: {},
     }))

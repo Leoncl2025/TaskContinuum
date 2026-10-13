@@ -84,23 +84,28 @@ To link an existing session:
 
 ### Last task and session selection
 
-The desktop remembers the last selected task and the selected chat for each task
+The desktop remembers open task tabs in their original order, the active task,
+and the selected chat for each task
 in its local application profile, separately for each workspace. Returning to a
-workspace or restarting Task Continuum restores that task and exact
+workspace or restarting Task Continuum restores those tabs, the active task and exact
 `(owner.clientId, sessionId, chatId)` from the current validated bindings.
 Discovery titles, aliases, hostname changes and the order of bindings do not
 change the selected identity.
 
-The preference contains only a task ID and session selection keys. It never
+The preference contains only task/tab IDs and session selection keys. It never
 publishes to Git, creates a binding, grants permission, creates a native session,
 or sends a message. Normal owner authorization and read-only checks still apply.
 An offline Host does not erase the selection. If the selected chat was removed
 or replaced, the panel asks for a current selection instead of opening a different
 chat. Closing every task tab and unlinking the active chat preserve the explicit
-empty selection. A removed task falls back to the first available task.
+empty selection. Closed tabs are not reopened, and missing tasks are skipped.
+A removed active task falls back to the first available task.
 Corrupt or unavailable local storage is reported; navigation remains usable.
 The preference retains selections for up to 1,000 recently used tasks per workspace.
 Drafts and chat contents are not saved by this preference.
+Active-only preferences from the previous version retain their active task and
+session. The complete open-tab list is saved locally by this version; old records
+cannot reconstruct tabs that were never recorded.
 
 ### Last-known chat titles
 

@@ -58,7 +58,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   const tasks = workspace?.tasks ?? []
   const requestedId = selection.taskId === undefined ? tasks[0]?.id ?? null : selection.taskId
   const selectedId = requestedId !== null && !tasks.some((item) => item.id === requestedId) ? tasks[0]?.id ?? null : requestedId
-  const [tabIds, setOpenTasks] = useState(() => selectedId ? [selectedId] : [])
+  const tabIds = selection.openTaskIds ?? (selectedId ? [selectedId] : [])
   const openTasks = [...new Set([...tabIds.filter((id) => tasks.some((item) => item.id === id)), ...(selectedId ? [selectedId] : [])])]
   const [query, setQuery] = useState('')
   const [quickQuery, setQuickQuery] = useState('')
@@ -169,8 +169,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   function selectTask(id: string): void {
     rememberChat()
     currentTaskId.current = id
-    selection.selectTask(id)
-    setOpenTasks((current) => current.includes(id) ? current : [...current, id])
+    selection.selectTask(id, openTasks)
     setCompactPanel('chat')
   }
 
@@ -194,9 +193,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
 
   function closeTask(id: string): void {
     rememberChat()
-    const remaining = openTasks.filter((item) => item !== id)
-    setOpenTasks(remaining)
-    if (selectedId === id) selection.selectTask(remaining.at(-1) ?? null)
+    selection.closeTask(id, openTasks, selectedId)
   }
 
   function showChat(): void {
@@ -240,7 +237,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
 
   function selectSession(taskId: string, binding: SessionBinding): void {
     rememberChat()
-    selection.selectSession(taskId, sessionBindingKey(binding))
+    selection.selectSession(taskId, sessionBindingKey(binding), openTasks)
     selectTask(taskId)
     showTaskChat()
   }
