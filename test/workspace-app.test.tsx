@@ -11,6 +11,7 @@ import type { AgentHostBridge, AgentHostSession, AgentHostTarget, AgentHostView 
 import type { AgentHostCreation, AgentHostWorker } from '../src/shared/agentHostCreation'
 import { agentHostTargetFixture } from './immutable-bindings-fixture'
 import { gitSyncUiFixture } from './remote-config-ui-fixture'
+import { sessionBindingKey } from '../src/renderer/chat/sessionBindings'
 
 afterEach(() => { delete window.workspace; delete window.agentHost; delete window.remoteVSCode; vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
@@ -107,6 +108,207 @@ async function selectCreationTarget(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('workspace switching in the desktop workbench', () => {
+  it('restores the last task and exact chat after restart without opening a default chat during link loading', async () => {
+    const { first, repository, bridge, agentHost, target } = creationFixture()
+    const firstChat = agentHostTargetFixture('remembered-session')
+    const secondChat = { ...firstChat, chatId: 'ahp-chat:/remembered-session/second' }
+    first.tasks.push({ ...first.tasks[0], id: 'T-0003', title: 'Remembered task' })
+    const snapshot: SessionLinksSnapshot = {
+      document: { schemaVersion: '2.1', bindings: {
+        'T-0002': [{ provider: 'agent-host', ...target }],
+        'T-0003': [{ provider: 'agent-host', ...firstChat }, { provider: 'agent-host', ...secondChat }],
+      } }, revision: 'a'.repeat(64),
+    }
+    repository[first.id] = snapshot
+    vi.mocked(agentHost.list).mockResolvedValue({ sessions: [
+      { ...firstChat, title: 'First chat', provider: 'copilotcli', updatedAt: '', canSend: true },
+      { ...secondChat, title: 'Second chat', provider: 'copilotcli', updatedAt: '', canSend: true },
+    ], warnings: [] })
+    const user = userEvent.setup()
+    const mounted = render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    await user.click(screen.getByRole('button', { name: 'Search tasks and jump back in' }))
+    await user.click(within(screen.getByRole('dialog', { name: 'Quick open' })).getByRole('button', { name: /Remembered task/ }))
+    await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
+    await user.click(await screen.findByRole('button', { name: 'Open Second chat' }))
+    await waitFor(() => expect(agentHost.watch).toHaveBeenCalledWith(secondChat))
+    const saved = localStorage.getItem(`taskcontinuum:workbench-selection:v1:${first.id}`)
+    expect(JSON.parse(saved!)).toMatchObject({ taskId: 'T-0003', sessions: { 'T-0003': sessionBindingKey({ agentHost: secondChat }) } })
+    mounted.unmount()
+    vi.mocked(agentHost.watch).mockClear()
+    let release!: (value: SessionLinksSnapshot) => void
+    vi.mocked(bridge.getSessionLinks).mockImplementation(() => new Promise((resolve) => { release = resolve }))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Remembered task' })).toHaveAttribute('aria-selected', 'true'))
+    expect(agentHost.watch).not.toHaveBeenCalled()
+    expect(localStorage.getItem(`taskcontinuum:workbench-selection:v1:${first.id}`)).toBe(saved)
+    await act(async () => release(snapshot))
+    await waitFor(() => expect(agentHost.watch).toHaveBeenCalledExactlyOnceWith(secondChat))
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+    expect(agentHost.create).not.toHaveBeenCalled()
+    expect(agentHost.send).not.toHaveBeenCalled()
+  })
+
+  it.each(['owner', 'chat', 'removed'] as const)('does not replace a saved session when its %s binding no longer matches', async (change) => {
+    const { first, repository, agentHost, target } = creationFixture()
+    const savedKey = sessionBindingKey({ agentHost: target })
+    const replacement = change === 'owner'
+      ? { ...target, owner: { ...target.owner, clientId: crypto.randomUUID() } }
+      : { ...target, chatId: 'ahp-chat:/replacement' }
+    repository[first.id] = {
+      document: { schemaVersion: '2.1', bindings: { 'T-0002': change === 'removed' ? [] : [{ provider: 'agent-host', ...replacement }] } },
+      revision: 'a'.repeat(64),
+    }
+    localStorage.setItem(`taskcontinuum:workbench-selection:v1:${first.id}`, JSON.stringify({
+      version: 1, taskId: 'T-0002', sessions: { 'T-0002': savedKey },
+    }))
+    const user = userEvent.setup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    expect(await screen.findByText(/last selected session is no longer linked/)).toBeInTheDocument()
+    expect(agentHost.watch).not.toHaveBeenCalled()
+    expect(agentHost.create).not.toHaveBeenCalled()
+    expect(agentHost.send).not.toHaveBeenCalled()
+  })
+
+  it('restores workspace-specific sessions even when the workspaces have identical task IDs', async () => {
+    const { first, second, repository, agentHost, target, bridge } = creationFixture()
+    const preferred = { ...target, chatId: 'ahp-chat:/preferred' }
+    const other = { ...target, owner: { clientId: crypto.randomUUID(), machineName: 'Other-workspace-owner' } }
+    repository[first.id] = {
+      document: { schemaVersion: '2.1', bindings: { 'T-0002': [{ provider: 'agent-host', ...target }, { provider: 'agent-host', ...preferred }] } },
+      revision: 'a'.repeat(64),
+    }
+    repository[second.id] = {
+      document: { schemaVersion: '2.1', bindings: { 'T-0002': [{ provider: 'agent-host', ...other }] } },
+      revision: 'b'.repeat(64),
+    }
+    vi.mocked(agentHost.list).mockResolvedValue({ sessions: [
+      { ...target, title: 'Original selection', provider: 'copilotcli', updatedAt: '', canSend: true },
+      { ...preferred, title: 'Preferred selection', provider: 'copilotcli', updatedAt: '', canSend: true },
+    ], warnings: [] })
+    const user = userEvent.setup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
+    await user.click(await screen.findByRole('button', { name: 'Open Preferred selection' }))
+    await waitFor(() => expect(agentHost.watch).toHaveBeenCalledWith(preferred))
+    await user.click(screen.getByRole('button', { name: 'Back to tasks' }))
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Workspace' })).toBeEnabled())
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Workspace' }), second.id)
+    await waitFor(() => expect(agentHost.watch).toHaveBeenCalledWith(other))
+    vi.mocked(agentHost.watch).mockClear()
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Workspace' })).toBeEnabled())
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Workspace' }), first.id)
+    await waitFor(() => expect(agentHost.watch).toHaveBeenCalledExactlyOnceWith(preferred))
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+    expect(agentHost.create).not.toHaveBeenCalled()
+    expect(agentHost.send).not.toHaveBeenCalled()
+  })
+
+  it('preserves a cleared session across restart even when other bindings are still present', async () => {
+    const { first, repository, agentHost, target } = creationFixture()
+    repository[first.id] = { document: { schemaVersion: '2.1', bindings: { 'T-0002': [{ provider: 'agent-host', ...target }] } }, revision: 'a'.repeat(64) }
+    localStorage.setItem(`taskcontinuum:workbench-selection:v1:${first.id}`, JSON.stringify({
+      version: 1, taskId: 'T-0002', sessions: { 'T-0002': null },
+    }))
+    const user = userEvent.setup()
+    let mounted = render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Workspace' })).toBeEnabled())
+    mounted.unmount()
+    mounted = render(<App />)
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Actual UI task' })).toHaveAttribute('aria-selected', 'true'))
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Workspace' })).toBeEnabled())
+    expect(screen.queryByRole('complementary', { name: 'Agent Host task chat' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/last selected session is no longer linked/)).not.toBeInTheDocument()
+    expect(agentHost.watch).not.toHaveBeenCalled()
+    expect(agentHost.create).not.toHaveBeenCalled()
+    expect(agentHost.send).not.toHaveBeenCalled()
+    mounted.unmount()
+  })
+
+  it('keeps the active chat when a different chat is unlinked while local preferences cannot be read', async () => {
+    const { first, repository, agentHost, target } = creationFixture()
+    const other = { ...target, chatId: 'ahp-chat:/other' }
+    repository[first.id] = {
+      document: { schemaVersion: '2.1', bindings: { 'T-0002': [{ provider: 'agent-host', ...target }, { provider: 'agent-host', ...other }] } },
+      revision: 'a'.repeat(64),
+    }
+    vi.mocked(agentHost.list).mockResolvedValue({ sessions: [
+      { ...target, title: 'Active chat', provider: 'copilotcli', updatedAt: '', canSend: true },
+      { ...other, title: 'Other chat', provider: 'copilotcli', updatedAt: '', canSend: true },
+    ], warnings: [] })
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('Storage denied') })
+    const user = userEvent.setup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    await waitFor(() => expect(agentHost.watch).toHaveBeenCalledExactlyOnceWith(target))
+    await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
+    await user.click(await screen.findByRole('button', { name: 'Unlink Other chat' }))
+    await user.click(within(screen.getByRole('region', { name: 'Detach conversation' })).getByRole('button', { name: 'Detach session' }))
+    await waitFor(() => expect(repository[first.id].document.bindings['T-0002']).toEqual([{ provider: 'agent-host', ...target }]))
+    expect(screen.getByRole('complementary', { name: 'Agent Host task chat' })).toBeInTheDocument()
+    expect(agentHost.watch).toHaveBeenCalledExactlyOnceWith(target)
+    expect(agentHost.create).not.toHaveBeenCalled()
+    expect(agentHost.send).not.toHaveBeenCalled()
+  })
+
+  it('retains a remembered offline chat while preserving owner authorization checks', async () => {
+    const { first, repository, agentHost, target, bridge } = creationFixture()
+    repository[first.id] = { document: { schemaVersion: '2.1', bindings: { 'T-0002': [{ provider: 'agent-host', ...target }] } }, revision: 'a'.repeat(64) }
+    localStorage.setItem(`taskcontinuum:workbench-selection:v1:${first.id}`, JSON.stringify({
+      version: 1, taskId: 'T-0002', sessions: { 'T-0002': sessionBindingKey({ agentHost: target }) },
+    }))
+    vi.mocked(agentHost.watch).mockRejectedValue(new Error('Owner authorization is required.'))
+    const user = userEvent.setup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Owner authorization is required.')
+    expect(agentHost.watch).toHaveBeenCalledExactlyOnceWith(target)
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
+  })
+
+  it('keeps all task tabs closed across restart and handles a removed remembered task', async () => {
+    const { first } = fixtures()
+    const user = userEvent.setup()
+    let mounted = render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    await user.click(screen.getByRole('button', { name: 'Close Actual UI task' }))
+    mounted.unmount()
+    mounted = render(<App />)
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Workspace' })).toHaveValue(first.id))
+    expect(within(screen.getByRole('tablist', { name: 'Open tasks' })).queryAllByRole('tab')).toEqual([])
+    mounted.unmount()
+    localStorage.setItem(`taskcontinuum:workbench-selection:v1:${first.id}`, JSON.stringify({
+      version: 1, taskId: 'T-9999', sessions: {},
+    }))
+    render(<App />)
+    expect(await screen.findByRole('tab', { name: 'Actual UI task' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('reports unavailable local preference storage without preventing task navigation', async () => {
+    fixtures()
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('Storage denied') })
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('Storage denied') })
+    const user = userEvent.setup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('last opened task and session could not be read')
+    await user.click(screen.getByRole('tab', { name: 'Actual UI task' }))
+    expect(screen.getByRole('alert')).toHaveTextContent('could not be saved')
+    expect(screen.getByRole('tab', { name: 'Actual UI task' })).toHaveAttribute('aria-selected', 'true')
+  })
+
   it('shows only the selected task conversation in the titlebar and retains drafts across task switches', async () => {
     const { first, repository, target, agentHost, bridge } = creationFixture()
     const other = { ...target, sessionId: 'ahp-session:/other', chatId: 'ahp-chat:/other/main',

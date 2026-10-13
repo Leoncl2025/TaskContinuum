@@ -4,6 +4,7 @@ import type { DesktopInfo } from '../shared/desktop'
 import { filterTasks } from '../shared/tasks'
 import type { WorkspaceSnapshot } from '../shared/workspace'
 import { useSessionLinks } from './chat/useSessionLinks'
+import { useWorkbenchSelection } from './chat/useWorkbenchSelection'
 import { sessionBindingKey } from './chat/sessionBindings'
 import type { SessionBinding } from './chat/sessionBindings'
 import { taskSessionLinks } from '../shared/sessionBindings'
@@ -48,21 +49,22 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
 }) {
   const workspace = workspaces.state.current
   const sessionTitles = useSessionTitles(workspace?.id)
+  const selection = useWorkbenchSelection(workspace?.id)
   const aliases = useMachineAliases()
   const { error: machineAliasesError, refresh: refreshMachineAliases } = useWorkspaceGitSync()
   const [taskAgentOpen, setTaskAgentOpen] = useState(false)
   const links = useSessionLinks(!taskAgentOpen && workspace?.tasks.length ? workspace : null)
   const bindings = links.bindings
   const tasks = workspace?.tasks ?? []
-  const [requestedId, setSelectedId] = useState<string | null>(() => workspace?.tasks[0]?.id ?? null)
+  const requestedId = selection.taskId === undefined ? tasks[0]?.id ?? null : selection.taskId
   const selectedId = requestedId !== null && !tasks.some((item) => item.id === requestedId) ? tasks[0]?.id ?? null : requestedId
-  const [tabIds, setOpenTasks] = useState(() => workspace?.tasks.slice(0, 1).map((item) => item.id) ?? [])
+  const [tabIds, setOpenTasks] = useState(() => selectedId ? [selectedId] : [])
   const openTasks = [...new Set([...tabIds.filter((id) => tasks.some((item) => item.id === id)), ...(selectedId ? [selectedId] : [])])]
   const [query, setQuery] = useState('')
   const [quickQuery, setQuickQuery] = useState('')
   const [layout, setLayout] = useState(readLayout)
   const [sidebarView, setSidebarView] = useState<'tasks' | 'sessions'>('tasks')
-  const [selectedSessions, setSelectedSessions] = useState<Record<string, string | null>>({})
+  const selectedSessions = selection.sessions
   const [visitedSessions, setVisitedSessions] = useState<string[]>([])
   const [dialog, setDialog] = useState<DialogName>(null)
   const [chatHeaderTarget, setChatHeaderTarget] = useState<HTMLDivElement | null>(null)
@@ -80,12 +82,10 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   const task = tasks.find((item) => item.id === selectedId)
   const primaryPanel = task || taskAgentOpen ? 'chat' : 'details'
   const taskBindings = task ? bindings[task.id] ?? [] : []
-  let activeKey = task ? selectedSessions[task.id] : undefined
-  if (task && activeKey === undefined && taskBindings.length) {
-    activeKey = sessionBindingKey(taskBindings[0])
-    setSelectedSessions({ ...selectedSessions, [task.id]: activeKey })
-  }
+  const activeKey = task ? Object.hasOwn(selectedSessions, task.id) ? selectedSessions[task.id]
+    : taskBindings[0] ? sessionBindingKey(taskBindings[0]) : undefined : undefined
   const activeBinding = taskBindings.find((binding) => sessionBindingKey(binding) === activeKey)
+  const missingSelectedSession = links.ready && typeof activeKey === 'string' && !activeBinding
   const agentHostBinding = activeBinding?.agentHost
   const activePanelKey = task && activeBinding ? `${task.id}:${sessionBindingKey(activeBinding)}` : undefined
   const panelKeys = new Set([...visitedSessions, ...activePanelKey ? [activePanelKey] : []])
@@ -112,6 +112,10 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
     return () => { scope.active = false }
   }, [])
   useEffect(() => { currentTaskId.current = selectedId }, [selectedId])
+  const rememberDefaultSession = selection.rememberDefaultSession
+  useEffect(() => {
+    if (task && activeBinding && links.ready) rememberDefaultSession(task.id, sessionBindingKey(activeBinding))
+  }, [task, activeBinding, links.ready, rememberDefaultSession])
   useEffect(() => {
     const scope = { active: sidebarVisible && sidebarView === 'sessions' }
     sessionViewLifetime.current = scope
@@ -165,7 +169,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   function selectTask(id: string): void {
     rememberChat()
     currentTaskId.current = id
-    setSelectedId(id)
+    selection.selectTask(id)
     setOpenTasks((current) => current.includes(id) ? current : [...current, id])
     setCompactPanel('chat')
   }
@@ -192,7 +196,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
     rememberChat()
     const remaining = openTasks.filter((item) => item !== id)
     setOpenTasks(remaining)
-    if (selectedId === id) setSelectedId(remaining.at(-1) ?? null)
+    if (selectedId === id) selection.selectTask(remaining.at(-1) ?? null)
   }
 
   function showChat(): void {
@@ -236,7 +240,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
 
   function selectSession(taskId: string, binding: SessionBinding): void {
     rememberChat()
-    setSelectedSessions((current) => ({ ...current, [taskId]: sessionBindingKey(binding) }))
+    selection.selectSession(taskId, sessionBindingKey(binding))
     selectTask(taskId)
     showTaskChat()
   }
@@ -275,7 +279,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
     if (taskId === selectedId && key === activeKey && agentHostBusy) throw new Error('Wait for the current Agent Host operation to finish before detaching this session.')
     await links.detach(taskId, binding)
     if (!creationLifetime.current.active) return
-    setSelectedSessions((current) => current[taskId] === key ? { ...current, [taskId]: null } : current)
+    if (selectedSessions[taskId] === key || taskId === selectedId && key === activeKey) selection.clearSession(taskId, key)
   }
 
   function openWorkspace(): void {
@@ -312,6 +316,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
     </nav>}
 
     {workspaces.error && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{workspaces.error}</span><IconButton icon="close" label="Dismiss workspace error" onClick={() => workspaces.setError(null)} /></div>}
+    {selection.error && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{selection.error}</span><IconButton icon="close" label="Dismiss selection memory error" onClick={selection.dismissError} /></div>}
     {machineAliasesError && dialog !== 'remote-devices' && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{machineAliasesError}</span><IconButton icon="refresh" label="Reload workspace machine aliases" onClick={() => { void refreshMachineAliases() }} /></div>}
     {connectionError && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{connectionError}</span>{links.error ? <IconButton icon="refresh" label="Reload session links" disabled={links.busy || sessionBusy} onClick={() => { setActionError(null); void links.reload() }} /> : <IconButton icon="close" label="Dismiss Agent Host error" onClick={() => setActionError(null)} />}</div>}
     <div className="workbench-body" style={{ '--sidebar-width': `${sizes.sidebar.width}px`, '--details-width': `${sizes.details.width}px` } as CSSProperties}>
@@ -357,6 +362,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
                 <span className="chat-welcome-icon"><Icon name="comment-discussion" /></span>
                 <h2>{task ? 'Keep the conversation moving' : 'Your task conversations, front and center'}</h2>
                 <p>{!task ? 'Select a task to open its Agent Host chat.' : taskBindings.length ? `Choose a linked session for ${task.id} in the Agent Host sessions sidebar.` : `No Agent Host chat is linked to ${task.id}. Link an existing chat or create one from the Agent Host sessions sidebar.`}</p>
+                {missingSelectedSession && <p role="status">The last selected session is no longer linked to this task. Choose a current session; no replacement was opened.</p>}
                 <p className="muted">Local SDK and Companion sessions are not supported. Existing session data is left untouched.</p>
                 {task && workspace && <button type="button" className="primary-button" disabled={links.busy} onClick={openAgentHostSessions}>Browse Agent Host sessions</button>}
               </div>

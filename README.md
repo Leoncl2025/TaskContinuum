@@ -7,6 +7,7 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
 - **Smooth cross-device session switching:** move between local and remote
   conversations while preserving each session's draft in memory.
 - Multiple conversations per task.
+- Device-local restoration of the last selected task and each task's selected chat.
 - Searchable task trees, task tabs, and read-only planning documents.
 - Task creation through the UI, a local agent, or CLI.
 - Streaming Markdown, model options, image attachments, and terminal output.
@@ -52,6 +53,20 @@ Choose a model beside the composer. Approvals remain on the owner machine.
 Reconnection preserves the original session and never automatically replays
 messages. Unlinking does not delete history. Unsent drafts are not guaranteed
 across restarts.
+
+Restarting Task Continuum or reopening a workspace restores its last selected
+task and exact linked chat, including the owner, session and chat identities.
+The selection is stored only in this device's application profile, separately for
+each workspace; it is not written to task files, Git or another device. The first
+task/chat remains the default when nothing has been remembered.
+Restoration waits for current bindings and uses normal Host authorization. An
+offline chat stays selected; an unlinked or replaced chat is not silently
+substituted. Choose another chat from **Current** if the saved one is no longer
+linked. Missing tasks fall back to the first available task, and closing all task
+tabs or unlinking the selected chat retains that explicit empty selection.
+Only selection identifiers are saved, not drafts, messages, credentials or
+permissions. Storage failures are reported while current navigation remains
+usable.
 
 Consecutive routine tool calls appear in one collapsed activity row with a count
 and a live running summary. Expand it to inspect the original calls and their

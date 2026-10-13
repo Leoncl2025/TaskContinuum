@@ -82,6 +82,26 @@ To link an existing session:
   VS Code journal saves. Stop targets the exact active turn, with read/send access.
   Provider sign-in, tool confirmations and agent questions still use the owner UI.
 
+### Last task and session selection
+
+The desktop remembers the last selected task and the selected chat for each task
+in its local application profile, separately for each workspace. Returning to a
+workspace or restarting Task Continuum restores that task and exact
+`(owner.clientId, sessionId, chatId)` from the current validated bindings.
+Discovery titles, aliases, hostname changes and the order of bindings do not
+change the selected identity.
+
+The preference contains only a task ID and session selection keys. It never
+publishes to Git, creates a binding, grants permission, creates a native session,
+or sends a message. Normal owner authorization and read-only checks still apply.
+An offline Host does not erase the selection. If the selected chat was removed
+or replaced, the panel asks for a current selection instead of opening a different
+chat. Closing every task tab and unlinking the active chat preserve the explicit
+empty selection. A removed task falls back to the first available task.
+Corrupt or unavailable local storage is reported; navigation remains usable.
+The preference retains selections for up to 1,000 recently used tasks per workspace.
+Drafts and chat contents are not saved by this preference.
+
 ### Last-known chat titles
 
 The Current tree and chat header retain titles learned from discovery and live
