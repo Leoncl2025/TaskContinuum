@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AgentHostCreationHost } from '../../shared/agentHostCreation'
+import { agentHostProtocolDescription } from '../../shared/agentHost'
 import type { LocalAgentHostCreation, LocalAgentHostCreateRequest } from '../../shared/localAgentHostCreation'
 import type { WorkspaceSnapshot } from '../../shared/workspace'
 import type { useWorkspaces } from '../useWorkspaces'
@@ -156,7 +157,7 @@ export function LocalTaskAgent({ workspace, workspaces, onCreated, onReviewDraft
       }}
     /> : <section className="local-task-agent" aria-label="Local Agent Host session">
     {loading && <p role="status">Opening a local Agent Host session for this repository...</p>}
-    {!loading && !hosts.some((host) => host.available) && <p role="status">No supported local Agent Host is available. Start VS Code with a signed-in Copilot provider and AHP 0.9.0, then reload local hosts.</p>}
+    {!loading && !hosts.some((host) => host.available) && <p role="status">No supported local Agent Host is available. Start VS Code with a signed-in Copilot provider and {agentHostProtocolDescription}, then reload local hosts.</p>}
     {hosts.filter((host) => !host.available).map((host) => <p key={host.hostId} className="muted">{host.name}: {host.error || 'Unavailable'}</p>)}
     {creation && <p role="status">{creation.state === 'creating' ? 'Creating the local session...' : creation.state === 'uncertain' ? 'Session creation outcome is uncertain. Only the original session will be checked; creation is not replayed.' : creation.session ? 'The saved local session is no longer available.' : 'Local session creation failed.'} {creation.error}</p>}
     {!loading && (!operationId || creation?.state === 'failed') && <>

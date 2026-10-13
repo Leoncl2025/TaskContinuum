@@ -17,6 +17,8 @@ import { openSshTunnel } from '../src/main/shared/ssh'
 import { AgentHostConnection } from '../src/main/agentHostConnection'
 import { AgentHostRegistry } from '../src/main/agentHostRegistry'
 import type { AgentHostEndpoint } from '../src/main/agentHostProtocol'
+import { requireAgentHostProtocolVersion } from '../src/main/agentHostProtocol'
+import { agentHostProtocolVersions } from '../src/shared/agentHost'
 import { VSCodeDeviceHost } from '../src/main/vscodeDeviceHost'
 import { VSCodeDeviceClient } from '../src/main/vscodeDeviceClient'
 import { deviceInvitationSchema } from '../src/main/vscodeDeviceProtocol'
@@ -85,6 +87,7 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
     await expect(WebSocketTransport.connect(`ws://127.0.0.1:${port}/?tkn=wrong-token`)).rejects.toThrow()
     ssh = await startSshFixture(join(root, 'ssh'), port)
     tunnel = await openSshTunnel('owner-machine', port, ssh.config, new AbortController().signal)
+    let protocolVersion: string | undefined
     for (let index = 0; index < 2; index++) {
       phase = `Client ${index + 1} WebSocket connection`
       const transport = await WebSocketTransport.connect(`ws://127.0.0.1:${index === 0 ? port : tunnel.port}/?tkn=${token}`)
@@ -92,13 +95,17 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
       clients.push(client)
       client.connect()
       phase = `Client ${index + 1} protocol initialization`
-      const initialized = await client.initialize({ clientId: clientIds[index], protocolVersions: ['0.9.0'] })
+      const initialized = await client.initialize({ clientId: clientIds[index], protocolVersions: [...agentHostProtocolVersions] })
+      const selectedVersion = requireAgentHostProtocolVersion(initialized.protocolVersion)
+      if (protocolVersion) expect(selectedVersion).toBe(protocolVersion)
+      protocolVersion = selectedVersion
       expect(initialized.terminalCommandPrefix).toBe('!')
       const { result } = await client.subscribe('ahp-root://')
       expect(result.snapshot?.resource).toBe('ahp-root://')
       await client.ping()
       console.log(JSON.stringify({ client: index + 1, protocolVersion: initialized.protocolVersion, subscribed: result.snapshot?.resource }))
     }
+    if (!protocolVersion) throw new Error('The isolated Host did not negotiate a supported protocol.')
     phase = 'Isolated empty session creation'
     const catalog = (await clients[0].subscribe('ahp-root://')).result.snapshot?.state as RootState
     const provider = catalog.agents.find((agent) => agent.provider.toLowerCase().includes('copilot'))?.provider
@@ -151,7 +158,7 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
     bindingFixtures.push(bindingsB)
     const owner = { clientId: randomUUID(), machineName: hostname() }
     const participant = { clientId: randomUUID(), username: 'Observer', machineName: 'Viewer-A' }
-    const endpoint: AgentHostEndpoint = { schemaVersion: 2, type: 'standalone', pid: host.pid!, instanceId: randomUUID(), connectionToken: token, protocolVersion: '0.9.0', endpoint: { type: 'tcp', host: '127.0.0.1', port } }
+    const endpoint: AgentHostEndpoint = { schemaVersion: 2, type: 'standalone', pid: host.pid!, instanceId: randomUUID(), connectionToken: token, protocolVersion, endpoint: { type: 'tcp', host: '127.0.0.1', port } }
     await writeFile(join(discovery, 'host.json'), JSON.stringify(endpoint))
     const target = { sessionId: session, chatId: chat, owner }
     const protector = { available: () => true, encrypt: (value: string) => Buffer.from(value), decrypt: (value: Buffer) => value.toString() }
@@ -318,7 +325,7 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
       ? [...envelope.action.data.matchAll(/AHP_\w+:(\d+)/g)].map((match) => receivedAt - Number(match[1])) : [])
     expect(sshTimings.length).toBeGreaterThan(0)
     expect(Math.max(...sshTimings)).toBeLessThan(2000)
-    const report = { protocolVersion: '0.9.0', provider, productionClientVerified: true, productionPairedSshVerified: true, ownerInitiatedBeforeCompletion: true, nativeCreationAndBindingVerified: true, creationRecoveryWithoutReplay: true, createdSessionCancellationVerified: true, revocationVerified: true, sameSession: true, sameChat: true, otherSessionUnchanged: true, observedBeforeCompletion: true, reconnect: recovered.type, executionCount: 3, pairedConnections, modelGenerationRequested: false, maximumLoopbackOutputLatencyMs: Math.max(...timings), maximumSshFirstOutputLatencyMs: Math.max(...sshTimings), sshConnections: ssh.forwardedConnections(), chatActions: [...new Set(firstChatEvents.map(({ envelope }) => envelope.action.type))], limitation: 'Three Host-local commands (one cancelled), native creation and bindings through the production paired SSH gateway on one machine; no real Copilot model delta, native tool integration or physical-network latency verified.' }
+    const report = { protocolVersion, provider, productionClientVerified: true, productionPairedSshVerified: true, ownerInitiatedBeforeCompletion: true, nativeCreationAndBindingVerified: true, creationRecoveryWithoutReplay: true, createdSessionCancellationVerified: true, revocationVerified: true, sameSession: true, sameChat: true, otherSessionUnchanged: true, observedBeforeCompletion: true, reconnect: recovered.type, executionCount: 3, pairedConnections, modelGenerationRequested: false, maximumLoopbackOutputLatencyMs: Math.max(...timings), maximumSshFirstOutputLatencyMs: Math.max(...sshTimings), sshConnections: ssh.forwardedConnections(), chatActions: [...new Set(firstChatEvents.map(({ envelope }) => envelope.action.type))], limitation: 'Three Host-local commands (one cancelled), native creation and bindings through the production paired SSH gateway on one machine; no real Copilot model delta, native tool integration or physical-network latency verified.' }
     console.log(JSON.stringify(report))
     await test.info().attach('ahp-proof-of-concept', { body: Buffer.from(JSON.stringify(report, null, 2)), contentType: 'application/json' })
   } catch (error) {

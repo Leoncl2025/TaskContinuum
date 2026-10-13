@@ -407,7 +407,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
         <dt>Owner ID</dt><dd><code>{clientId}</code></dd>
         <dt>Session ID</dt><dd><code>{sessionId}</code></dd>
         <dt>Chat ID</dt><dd><code>{chatId}</code></dd>
-        <dt>Protocol</dt><dd>AHP 0.9.0</dd>
+        <dt>Protocol</dt><dd>{view?.protocolVersion ? `AHP ${view.protocolVersion}` : 'Not negotiated'}</dd>
       </dl>
       {headerTarget && <div className="dialog-actions" role="group" aria-label="Chat actions">{chatActions}</div>}
     </Dialog>}

@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentHostRegistry } from '../src/main/agentHostRegistry'
 import type { AgentHostEndpoint } from '../src/main/agentHostProtocol'
+import { agentHostProtocolDescription } from '../src/shared/agentHost'
 
 const mocks = vi.hoisted(() => ({
   discover: vi.fn(),
@@ -14,7 +15,7 @@ vi.mock('../src/main/agentHostTransport', () => ({
 }))
 vi.mock('@microsoft/agent-host-protocol/client', () => ({ AhpClient: mocks.client }))
 
-const hostWarning = 'A local Agent Host could not be read. Check that it is running and supports AHP 0.9.0.'
+const hostWarning = `A local Agent Host could not be read. Check that it is running and supports ${agentHostProtocolDescription}.`
 const skipWarning = 'Some local Agent Host sessions could not be read and were skipped.'
 const cleanupWarning = 'Some local Agent Host session subscriptions could not be released.'
 const privateError = 'Could not restore C:\\private\\missing-project: internal RPC failure'
@@ -41,7 +42,7 @@ function fixture(
 ) {
   const client = {
     connect: vi.fn(),
-    initialize: vi.fn(async () => {}),
+    initialize: vi.fn(async () => ({ protocolVersion: '0.9.0', serverSeq: 0, snapshots: [] })),
     request: vi.fn(async (method: string, params: { channel: string; cursor?: string }) => {
       if (method === 'listSessions') return pages[params.cursor ? 1 : 0]
       if (method === 'subscribe' && snapshots.has(params.channel)) return snapshots.get(params.channel)

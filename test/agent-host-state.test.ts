@@ -8,6 +8,23 @@ const initial = { resource, fromSeq: 10, state: { resource, title: 'Original Hos
 const action = (serverSeq: number, value: Record<string, unknown>) => ({ channel: resource, serverSeq, origin: undefined, action: value }) as unknown as ActionEnvelope
 
 describe('Agent Host incremental chat state', () => {
+  it('preserves post-0.9 background-work updates without replacing history or changing send guards', () => {
+    const chat = new AgentHostChatState(resource)
+    chat.snapshot(initial)
+    const work = { id: 'background-shell', kind: 'shell', label: 'Background build',
+      startedAt: '2026-10-13T00:00:00Z', command: 'build' }
+    chat.apply(action(11, { type: 'chat/backgroundWorkSet', work }))
+    expect(chat.value?.backgroundWork).toEqual([work])
+    expect(chat.value?.turns).toEqual([])
+    expect(chat.sendState.readOnly).toBe(false)
+    expect(chat.sendState.activeTurnId).toBeUndefined()
+    work.label = 'Changed caller input'
+    expect(chat.value?.backgroundWork?.[0].label).toBe('Background build')
+    chat.apply(action(12, { type: 'chat/backgroundWorkRemoved', id: work.id }))
+    expect(chat.value?.backgroundWork).toEqual([])
+    expect(chat.lastSequence).toBe(12)
+  })
+
   it('applies streamed text before completion and ignores replayed events', () => {
     const chat = new AgentHostChatState(resource)
     chat.snapshot(initial)

@@ -12,12 +12,39 @@ guide. Existing sessions, profiles and key files are left untouched.
 
 ## Agent Host (AHP)
 
-Only **Host-owned Copilot sessions** using the official AHP 0.9.0 protocol are
+Only **Host-owned Copilot sessions** negotiating AHP 1.0.0, 0.10.0, or 0.9.0 are
 supported. Both Task Continuum desktops need compatible builds. B needs a running
-VS Code 1.137 Agent Host supporting AHP 0.9.0 and its normal provider sign-in.
+VS Code Agent Host with one of those protocol baselines and its normal provider sign-in.
 Enable **Automatic workspace links** for the task workspace on both desktops
 before reading or writing bindings; an unconfigured workspace reads task documents
 only. See [workspace enrollment](workspace-git-sync.md).
+
+### Protocol compatibility
+
+The npm SDK is pinned to `@microsoft/agent-host-protocol` 1.0.0. Package and wire
+versions are distinct: VS Code shipped the pre-1.0 wire version 0.10.0, but there
+is no corresponding 0.10.0 npm release. See the upstream
+[SDK changelog](https://github.com/microsoft/agent-host-protocol/blob/v1.0.0/clients/typescript/CHANGELOG.md)
+and [VS Code compatibility update](https://github.com/microsoft/vscode/commit/51ec2ee42fdaa95257129e1dcea2f64cb7ae55e3).
+
+Discovery validates the version-2 descriptor, live process, credentials and local
+endpoint, but does not require its advertised version to equal a client baseline.
+Initialization offers 1.0.0, 0.10.0 and 0.9.0 and validates the Host's selection.
+For example, a 0.10.0 Host may select 0.10.0 or its supported 0.9.0 baseline, and a
+1.1.0 development Host may select 1.0.0. Malformed descriptors and unsupported or
+unoffered initialize responses are still rejected; discovery alone is not proof
+of compatibility.
+
+The remote gateway preserves the owner's negotiated wire version and requires
+the caller to offer it. It does not label a newer stream as 0.9.0. Update both
+Task Continuum desktops if the caller cannot accept the owner's version.
+**Chat details > Protocol** shows the negotiated version, or **Not negotiated**
+before a successful handshake.
+
+This upgrade does not clear locks, remove bindings, recreate sessions or send
+prompts. A live session missing from discovery can be caused by an older client
+rejecting the descriptor's protocol version; upgrade the client rather than
+deleting that session.
 
 The selected AgentDesk folder may live inside a larger Git checkout. For example:
 

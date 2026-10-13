@@ -4,6 +4,11 @@ import type { SessionOwner } from './sessionBindings'
 import type { AgentHostCreateRequest, AgentHostCreation, AgentHostCreationHost, AgentHostCreationLocation, AgentHostWorker } from './agentHostCreation'
 import type { LocalAgentHostCreateRequest, LocalAgentHostCreation } from './localAgentHostCreation'
 
+// VS Code shipped the pre-1.0 wire version 0.10.0 without a matching npm release.
+export const agentHostProtocolVersions = ['1.0.0', '0.10.0', '0.9.0'] as const
+export type AgentHostProtocolVersion = typeof agentHostProtocolVersions[number]
+export const agentHostProtocolDescription = `AHP ${agentHostProtocolVersions.join(' / ')}`
+
 export interface AgentHostTarget {
   sessionId: string
   chatId: string
@@ -20,6 +25,7 @@ export interface AgentHostSession extends AgentHostTarget {
 export interface AgentHostView {
   target: AgentHostTarget
   state: 'connecting' | 'connected' | 'offline'
+  protocolVersion?: AgentHostProtocolVersion
   chat?: ChatState
   terminals: Record<string, TerminalState>
   terminalStatus?: Record<string, { state: 'loading' | 'error'; error?: string }>

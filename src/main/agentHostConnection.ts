@@ -5,14 +5,15 @@ import { AhpClient } from '@microsoft/agent-host-protocol/client'
 import type { AhpTransport, Subscription } from '@microsoft/agent-host-protocol/client'
 import { MessageKind, sessionReducer, terminalReducer } from '@microsoft/agent-host-protocol'
 import type { ActionEnvelope, ChatTurnStartedAction, ChatTurnCancelledAction, InitializeResult, MessageEmbeddedResourceAttachment, ModelSelection, SessionModelInfo, SessionState, Snapshot, TerminalState } from '@microsoft/agent-host-protocol'
-import type { AgentHostTarget, AgentHostView } from '../shared/agentHost'
+import type { AgentHostProtocolVersion, AgentHostTarget, AgentHostView } from '../shared/agentHost'
+import { agentHostProtocolVersions } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
 import { modelConfigErrors } from '../shared/agentHostModelConfig'
 import { AgentHostChatState } from './agentHostState'
 import { agentHostDiagnosticChannel, logAgentHostDiagnostic } from './agentHostDiagnostics'
 import type { AgentHostDiagnosticDetails, AgentHostDiagnosticEvent } from './agentHostDiagnostics'
-import { agentHostKey, agentHostModelInfoSchema, agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminalIdSchema } from './agentHostProtocol'
+import { agentHostKey, agentHostModelInfoSchema, agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminalIdSchema, requireAgentHostProtocolVersion } from './agentHostProtocol'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 
 export type AgentHostEvent = { type: 'action'; envelope: ActionEnvelope } | { type: 'snapshot'; snapshot: Snapshot } | { type: 'state' }
@@ -50,7 +51,7 @@ export class AgentHostConnection {
   private heartbeat?: ReturnType<typeof setInterval>
   private failures = 0
   private readonly file: string
-  private initialized?: InitializeResult
+  private initialized?: InitializeResult & { protocolVersion: AgentHostProtocolVersion }
   private modelCatalog?: {
     active: ActiveConnection
     models?: ModelCatalog
@@ -75,7 +76,7 @@ export class AgentHostConnection {
     const chat = this.chat.value
     const pending = this.commands.find((command) => command.state === 'pending' || command.state === 'uncertain')
     const readOnly = this.readOnly
-    return { target: this.target, state: this.state, chat,
+    return { target: this.target, state: this.state, protocolVersion: this.initialized?.protocolVersion, chat,
       terminals: Object.fromEntries([...this.snapshots].filter(([resource]) => this.referencedTerminals.has(resource)).map(([resource, snapshot]) => [resource, structuredClone(snapshot.state) as TerminalState])),
       terminalStatus: Object.fromEntries([...this.terminalStatus].filter(([resource]) => this.referencedTerminals.has(resource)).map(([resource, status]) => [resource, { ...status }])),
       canSend: this.connected && !readOnly && !pending && !this.sending && !chat?.activeTurn && !chat?.draft?.text && !chat?.draft?.attachments?.length && !chat?.queuedMessages?.length, readOnly,
@@ -216,8 +217,8 @@ export class AgentHostConnection {
         this.current = active
         this.modelCatalog = undefined
         client.connect()
-        this.initialized = await client.initialize({ clientId: randomUUID(), protocolVersions: ['0.9.0'] })
-        if (this.initialized.protocolVersion !== '0.9.0') throw new Error('Unsupported Agent Host protocol.')
+        const initialized = await client.initialize({ clientId: randomUUID(), protocolVersions: [...agentHostProtocolVersions] })
+        this.initialized = { ...initialized, protocolVersion: requireAgentHostProtocolVersion(initialized.protocolVersion) }
         advance('session')
         this.snapshots.clear()
         this.subscribing.clear()

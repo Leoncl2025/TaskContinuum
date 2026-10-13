@@ -14,7 +14,8 @@ import type { AgentHostEndpoint } from '../src/main/agentHostProtocol'
 import { AgentHostConnection } from '../src/main/agentHostConnection'
 import { startAgentHostFixture } from './agent-host-fixture'
 import { modelConfigFixture } from './agent-host-model-fixture'
-import { agentHostModelInfoSchema } from '../src/main/agentHostProtocol'
+import { agentHostModelInfoSchema, requireAgentHostProtocolVersion } from '../src/main/agentHostProtocol'
+import { agentHostProtocolVersions } from '../src/shared/agentHost'
 
 describe('AHP original chat connection', () => {
   it('rejects an older remote gateway rather than letting it discard the explicit model', async () => {
@@ -258,7 +259,8 @@ describe('Agent Host endpoints', () => {
     const client = new AhpClient(await connectLocalAgentHost(endpoint!, abort.signal), { requestTimeoutMs: 5000 })
     client.connect()
     try {
-      await client.initialize({ clientId: randomUUID(), protocolVersions: ['0.9.0'] })
+      const initialized = await client.initialize({ clientId: randomUUID(), protocolVersions: [...agentHostProtocolVersions] })
+      requireAgentHostProtocolVersion(initialized.protocolVersion)
       const { result, subscription } = await client.subscribe('ahp-root://')
       try {
         const root = result.snapshot?.state as import('@microsoft/agent-host-protocol').RootState
@@ -275,6 +277,7 @@ describe('Agent Host endpoints', () => {
     const endpoints = (await discoverAgentHosts([join(process.env.APPDATA!, 'Code', 'agent-host', 'local-endpoint', 'entries')])).filter((endpoint) => endpoint.type === 'editor')
     expect(endpoints.length).toBeGreaterThan(0)
     let verified = 0
+    const versions: { advertised: string; negotiated?: string; state: 'ok' | 'failed' }[] = []
     for (const endpoint of endpoints) {
       const abort = new AbortController()
       const timer = setTimeout(() => abort.abort(), 5000)
@@ -282,14 +285,15 @@ describe('Agent Host endpoints', () => {
       try {
         client = new AhpClient(await connectLocalAgentHost(endpoint, abort.signal), { requestTimeoutMs: 3000 })
         client.connect()
-        const result = await client.initialize({ clientId: randomUUID(), protocolVersions: ['0.9.0'] })
-        expect(result.protocolVersion).toBe('0.9.0')
+        const result = await client.initialize({ clientId: randomUUID(), protocolVersions: [...agentHostProtocolVersions] })
+        requireAgentHostProtocolVersion(result.protocolVersion)
         await client.ping()
+        versions.push({ advertised: endpoint.protocolVersion, negotiated: result.protocolVersion, state: 'ok' })
         verified++
-      } catch { continue }
+      } catch { versions.push({ advertised: endpoint.protocolVersion, state: 'failed' }) }
       finally { clearTimeout(timer); abort.abort(); await client?.shutdown() }
     }
-    console.log(JSON.stringify({ installedEditorHostsVerified: verified, modelPrompts: 0 }))
+    console.log(JSON.stringify({ installedEditorHostsVerified: verified, versions, modelPrompts: 0 }))
     expect(verified).toBeGreaterThan(0)
   }, 60000)
 

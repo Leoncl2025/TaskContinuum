@@ -7,7 +7,7 @@ import type { ActionEnvelope, ChatState, Message, RootState, SessionState, Snaps
 import type { AgentHostEndpoint } from '../src/main/agentHostProtocol'
 import { modelConfigFixture } from './agent-host-model-fixture'
 
-export async function startAgentHostFixture(initializeMeta?: Record<string, unknown>) {
+export async function startAgentHostFixture(initializeMeta?: Record<string, unknown>, protocolVersion = '0.9.0') {
   const server = createServer()
   const sockets = new WebSocketServer({ server })
   const hostId = randomUUID()
@@ -18,6 +18,7 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
   const session: SessionState = { provider: 'copilotcli', title: chat.title, status: 1, lifecycle: 'ready' as SessionState['lifecycle'], activeClients: [], chats: [{ resource: chatId, title: chat.title, status: 1, modifiedAt: chat.modifiedAt }, { resource: 'ahp-chat:/private-other', title: 'Unshared sibling title', status: 1, modifiedAt: chat.modifiedAt }], defaultChat: chatId }
   const subscriptions = new Map<import('ws').WebSocket, Set<string>>()
   const dispatches: unknown[] = []
+  const initializations: string[][] = []
   let loseNextSend = false
   let stallRoot = false
   let modelQueries = 0
@@ -68,7 +69,10 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
     socket.on('message', (data) => {
       const message = JSON.parse(data.toString())
       let result: unknown = {}
-      if (message.method === 'initialize') result = { protocolVersion: '0.9.0', serverSeq: sequence, snapshots: [], ...(initializeMeta ? { _meta: initializeMeta } : {}) }
+      if (message.method === 'initialize') {
+        initializations.push([...message.params.protocolVersions])
+        result = { protocolVersion, serverSeq: sequence, snapshots: [], ...(initializeMeta ? { _meta: initializeMeta } : {}) }
+      }
       else if (message.method === 'listSessions') result = { items: [{ resource: sessionId, ...session, createdAt: chat.modifiedAt, modifiedAt: chat.modifiedAt }] }
       else if (message.method === 'subscribe') {
         if (message.params.channel === 'ahp-root://') {
@@ -106,13 +110,13 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
   })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
-  const endpoint: AgentHostEndpoint = { schemaVersion: 2, type: 'standalone', pid: process.pid, instanceId: hostId, connectionToken: randomUUID(), protocolVersion: '0.9.0', endpoint: { type: 'tcp', host: '127.0.0.1', port: (server.address() as { port: number }).port } }
+  const endpoint: AgentHostEndpoint = { schemaVersion: 2, type: 'standalone', pid: process.pid, instanceId: hostId, connectionToken: randomUUID(), protocolVersion, endpoint: { type: 'tcp', host: '127.0.0.1', port: (server.address() as { port: number }).port } }
   const holdSnapshot = (resource: string) => {
     let release!: () => void
     terminalDelays.set(resource, new Promise<void>((resolve) => { release = resolve }))
     return () => { terminalDelays.delete(resource); release() }
   }
-  return { endpoint, hostId, sessionId, chatId, dispatches, action, snapshot, addTerminal, historyTerminals, terminalAction,
+  return { endpoint, hostId, sessionId, chatId, dispatches, initializations, action, snapshot, addTerminal, historyTerminals, terminalAction,
     historyText: (count: number, text: string) => {
       chat = { ...chat, turns: Array.from({ length: count }, (_, index) => ({
         id: `history-${index}`, state: 'complete', message: { text: `Question ${index}`, origin: { kind: MessageKind.User } },

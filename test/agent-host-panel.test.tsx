@@ -17,7 +17,7 @@ afterEach(() => { delete window.agentHost; delete window.desktop; delete window.
 function fixture() {
   const target = { sessionId: 'ahp-session:/original', chatId: 'ahp-chat:/original/main', owner: { clientId: crypto.randomUUID(), machineName: 'Owner-B' } }
   const listeners = new Set<Parameters<AgentHostBridge['onView']>[0]>()
-  const view: AgentHostView = { target, state: 'connected', canSend: true, readOnly: false, terminals: {}, chat: { resource: target.chatId, title: 'Same original Host chat', modifiedAt: '', status: 1, turns: [] } }
+  const view: AgentHostView = { target, state: 'connected', protocolVersion: '0.9.0', canSend: true, readOnly: false, terminals: {}, chat: { resource: target.chatId, title: 'Same original Host chat', modifiedAt: '', status: 1, turns: [] } }
   let watchId = ''
   const bridge: AgentHostBridge = {
     list: vi.fn(async () => ({ sessions: [], warnings: [] })),
@@ -233,6 +233,18 @@ describe('Compact chat activity', () => {
 })
 
 describe('Agent Host chat UI', () => {
+  it.each(['0.9.0', '0.10.0', '1.0.0', undefined] as const)('shows the actual negotiated protocol in chat details (%s)', async (version) => {
+    const setup = fixture()
+    setup.view.protocolVersion = version
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByText('Connected', { exact: true })
+    await user.click(screen.getByRole('button', { name: 'Chat details' }))
+    expect(within(screen.getByRole('dialog', { name: 'Chat details' })).getByText(version ? `AHP ${version}` : 'Not negotiated')).toBeInTheDocument()
+    expect(setup.bridge.create).not.toHaveBeenCalled()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+  })
+
   it('moves only the active header into its titlebar slot without restarting the conversation', async () => {
     const setup = fixture()
     const onDevices = vi.fn()

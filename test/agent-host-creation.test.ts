@@ -19,6 +19,7 @@ import { createAgentHostCreationCallerFixture, createPairedAgentHostCreationFixt
 import { agentHostTargetFixture, createImmutableBindingsFixture } from './immutable-bindings-fixture'
 import { taskSessionLinks } from '../src/shared/sessionBindings'
 import { captureAgentHostDiagnostics, startAgentHostDiagnostics, stopAgentHostDiagnostics } from '../src/main/agentHostDiagnostics'
+import { agentHostProtocolVersions } from '../src/shared/agentHost'
 
 type Fixture = Awaited<ReturnType<typeof createPairedAgentHostCreationFixture>> & { bindings: Awaited<ReturnType<typeof createImmutableBindingsFixture>> }
 const fixtures: Fixture[] = []
@@ -50,6 +51,24 @@ async function records(worker: Fixture) {
 }
 
 describe('worker-authoritative native Agent Host creation', () => {
+  it.each(agentHostProtocolVersions)('creates and binds once through a Host advertising AHP %s', async (version) => {
+    const worker = await fixture()
+    worker.native.setProtocol(version)
+    await writeFile(join(worker.discovery, 'host.json'), JSON.stringify({ ...worker.native.endpoint, protocolVersion: version }))
+    expect((await worker.workers()).hosts[0]).toMatchObject({ hostId: worker.native.hostId, available: true })
+    await worker.begin()
+    const session = await ready(worker)
+    expect(session.owner).toEqual(worker.owner)
+    expect((await readRepositorySessionLinks(worker.workspace)).document.bindings['T-0007'])
+      .toEqual([expect.objectContaining({ sessionId: session.sessionId, chatId: session.chatId, owner: worker.owner })])
+    expect(await worker.begin()).toMatchObject({ state: 'ready', session })
+    expect(worker.native.creations).toHaveLength(1)
+    for (const call of worker.native.calls.filter((call) => call.method === 'initialize')) {
+      expect(call.params?.protocolVersions).toEqual([...agentHostProtocolVersions])
+    }
+    expect(worker.native.calls.some((call) => call.method === 'deleteSession' || call.method === 'dispatchAction')).toBe(false)
+  })
+
   it('abandons an unbound creation without deleting its chat or links, survives restart, and releases the reservation', async () => {
     const worker = await fixture()
     const caller = await callerFixture(worker)
@@ -902,7 +921,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     worker.native.setProvider('unrelated-provider')
     expect((await worker.workers()).hosts[0]).toMatchObject({ hostId: worker.native.hostId, available: false, error: expect.stringContaining('copilotcli') })
     worker.native.setProvider('copilotcli')
-    await writeFile(join(worker.discovery, 'host.json'), JSON.stringify({ ...worker.native.endpoint, protocolVersion: '0.8.0' }))
+    await writeFile(join(worker.discovery, 'host.json'), JSON.stringify({ ...worker.native.endpoint, protocolVersion: 'invalid-version' }))
     expect((await worker.workers()).hosts[0]).toMatchObject({ available: false, error: expect.stringContaining('unsupported') })
     await writeFile(join(worker.discovery, 'host.json'), JSON.stringify(worker.native.endpoint))
     worker.native.setProtocol('0.8.0')

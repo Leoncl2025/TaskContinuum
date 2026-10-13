@@ -7,10 +7,11 @@ import { AhpErrorCodes } from '@microsoft/agent-host-protocol'
 import type { CreateSessionParams, SessionState } from '@microsoft/agent-host-protocol'
 import { z } from 'zod'
 import type { AgentHostSession, AgentHostTarget } from '../shared/agentHost'
+import { agentHostProtocolDescription, agentHostProtocolVersions } from '../shared/agentHost'
 import type { AgentHostCreationHost } from '../shared/agentHostCreation'
 import type { SessionOwner } from '../shared/sessionBindings'
 import { AgentHostConnection } from './agentHostConnection'
-import { agentHostChatIdSchema, agentHostIdSchema, agentHostKey, agentHostSessionIdSchema, agentHostSessionSchema, agentHostTargetSchema } from './agentHostProtocol'
+import { agentHostAdvertisedVersionSchema, agentHostChatIdSchema, agentHostIdSchema, agentHostKey, agentHostSessionIdSchema, agentHostSessionSchema, agentHostTargetSchema, requireAgentHostProtocolVersion } from './agentHostProtocol'
 import type { AgentHostEndpoint } from './agentHostProtocol'
 import { connectLocalAgentHost, discoverAgentHosts } from './agentHostTransport'
 import { canonicalPolicyRoot } from './linkedSessionPolicy'
@@ -99,7 +100,7 @@ export class AgentHostRegistry {
         } finally { await connection.close() }
       } catch (error) {
         current.set(endpoint.instanceId, { hostId: endpoint.instanceId, name, available: false,
-          error: error instanceof AgentHostCreationError ? error.message : 'This exact local Host is offline or does not support AHP 0.9.0.' })
+          error: error instanceof AgentHostCreationError ? error.message : `This exact local Host is offline or does not support ${agentHostProtocolDescription}.` })
       }
     }))
     for (const host of await this.unavailableCreationHosts()) if (!current.has(host.hostId) && current.size < 128) current.set(host.hostId, host)
@@ -123,7 +124,7 @@ export class AgentHostRegistry {
           if (info.isSymbolicLink() || info.nlink !== 1) continue
           const value = metadata.parse(await readJsonBounded(file, 16384))
           let error: string | undefined
-          if (value.protocolVersion !== '0.9.0' || value.schemaVersion !== 2) error = 'This Host discovery version is unsupported. Creation requires AHP 0.9.0 and a version 2 descriptor.'
+          if (!agentHostAdvertisedVersionSchema.safeParse(value.protocolVersion).success || value.schemaVersion !== 2) error = `This Host discovery format is unsupported. Creation requires a version 2 descriptor and negotiated ${agentHostProtocolDescription}.`
           else try { process.kill(value.pid, 0) } catch { error = 'This advertised Agent Host process is offline.' }
           if (error) hosts.push({ hostId: value.instanceId, name: `Agent Host ${value.instanceId.slice(0, 12)}`, available: false, error })
         } catch { continue }
@@ -144,8 +145,8 @@ export class AgentHostRegistry {
     try {
       client = new AhpClient(await connectLocalAgentHost(endpoint, cancellation), { requestTimeoutMs: 5000 })
       client.connect()
-      const initialized = await client.initialize({ clientId: randomUUID(), protocolVersions: ['0.9.0'] })
-      if (initialized.protocolVersion !== '0.9.0') throw new AgentHostCreationError('The selected Host does not support AHP 0.9.0.')
+      const initialized = await client.initialize({ clientId: randomUUID(), protocolVersions: [...agentHostProtocolVersions] })
+      requireAgentHostProtocolVersion(initialized.protocolVersion)
       return { client, signal: cancellation, close }
     } catch (error) { await close(); throw error }
   }
@@ -262,7 +263,8 @@ export class AgentHostRegistry {
       try {
         client = new AhpClient(await connectLocalAgentHost(endpoint, abort.signal), { requestTimeoutMs: 5000 })
         client.connect()
-        await client.initialize({ clientId: randomUUID(), protocolVersions: ['0.9.0'] })
+        const initialized = await client.initialize({ clientId: randomUUID(), protocolVersions: [...agentHostProtocolVersions] })
+        requireAgentHostProtocolVersion(initialized.protocolVersion)
         let cursor: string | undefined
         do {
           const catalog = await client.request('listSessions', { channel: 'ahp-root://', limit: 100, ...(cursor ? { cursor } : {}) })
@@ -297,7 +299,7 @@ export class AgentHostRegistry {
           if (catalog.nextCursor === cursor) break
           cursor = catalog.nextCursor
         } while (cursor && sessions.length < 1000)
-      } catch { warnings.add('A local Agent Host could not be read. Check that it is running and supports AHP 0.9.0.') }
+      } catch { warnings.add(`A local Agent Host could not be read. Check that it is running and supports ${agentHostProtocolDescription}.`) }
       finally { abort.abort(); await client?.shutdown() }
     }
     const counts = new Map<string, number>()

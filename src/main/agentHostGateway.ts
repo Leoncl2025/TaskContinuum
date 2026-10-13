@@ -3,10 +3,11 @@ import { randomUUID } from 'node:crypto'
 import { WebSocketServer, WebSocket } from 'ws'
 import { z } from 'zod'
 import type { ActionEnvelope, SessionState, Snapshot } from '@microsoft/agent-host-protocol'
+import { AhpErrorCodes } from '@microsoft/agent-host-protocol'
 import type { AgentHostTarget } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
-import { agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminalIdSchema } from './agentHostProtocol'
+import { AgentHostProtocolError, agentHostAdvertisedVersionSchema, agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminalIdSchema, requireAgentHostProtocolVersion } from './agentHostProtocol'
 import { AGENT_HOST_TRACE_HEADER, agentHostDiagnosticChannel, agentHostDiagnosticMethod, logAgentHostDiagnostic, withAgentHostDiagnosticTrace } from './agentHostDiagnostics'
 import type { AgentHostDiagnosticDetails } from './agentHostDiagnostics'
 import type { AgentHostConnection } from './agentHostConnection'
@@ -21,7 +22,7 @@ export interface AgentHostGatewayOptions {
 }
 const rpcSchema = z.object({ jsonrpc: z.literal('2.0'), id: z.union([z.number().int().nonnegative(), z.string().max(128)]).optional(), method: z.string().max(100), params: z.record(z.string(), z.unknown()) }).strict()
 const subscribeSchema = z.object({ channel: z.string().max(512), delivery: z.unknown().optional(), view: z.unknown().optional() }).strict()
-const initializeSchema = z.object({ channel: z.literal('ahp-root://'), clientId: z.string().min(1).max(128), protocolVersions: z.array(z.string()).min(1).max(10), initialSubscriptions: z.array(z.string().max(512)).max(18).optional(), locale: z.string().max(100).optional(), clientInfo: z.unknown().optional() }).strict()
+const initializeSchema = z.object({ channel: z.literal('ahp-root://'), clientId: z.string().min(1).max(128), protocolVersions: z.array(agentHostAdvertisedVersionSchema).min(1).max(10), initialSubscriptions: z.array(z.string().max(512)).max(18).optional(), locale: z.string().max(100).optional(), clientInfo: z.unknown().optional() }).strict()
 const reconnectSchema = z.object({ channel: z.literal('ahp-root://'), clientId: z.string().min(1).max(128), lastSeenServerSeq: z.number().int().nonnegative(), subscriptions: z.array(z.string().max(512)).max(18) }).strict()
 const dispatchSchema = z.object({ channel: z.string().max(512), clientSeq: z.number().int().nonnegative(), action: z.record(z.string(), z.unknown()) }).strict()
 
@@ -298,7 +299,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
               let resources: string[]
               if (request.method === 'initialize') {
                 const params = initializeSchema.parse(request.params)
-                if (!params.protocolVersions.includes('0.9.0')) throw new Error('Unsupported protocol version.')
+                requireAgentHostProtocolVersion(connection.handshake.protocolVersion, params.protocolVersions)
                 resources = params.initialSubscriptions ?? []
               } else resources = reconnectSchema.parse(request.params).subscriptions
               if (resources.length > 2 || new Set(resources).size !== resources.length || resources.some((item) => item !== target.sessionId && item !== target.chatId)) throw new Error('Channel not authorized.')
@@ -420,6 +421,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
               }
               if (id !== undefined) send({ jsonrpc: '2.0', id, error: error instanceof TerminalUnavailableError
                 ? { code: -32000, message: 'Terminal output is unavailable from the owner Host. Retry manually.' }
+                : error instanceof AgentHostProtocolError ? { code: AhpErrorCodes.UnsupportedProtocolVersion, message: error.message }
                 : { code: -32602, message: 'Command, channel, or session access is not authorized.' } })
               else fail('invalid-frame')
             } else if (!closed) fail('access-changed')

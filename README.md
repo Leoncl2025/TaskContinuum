@@ -36,8 +36,11 @@ it. CLI creation remains local. Refresh after external edits.
 
 ## Agent Host Sessions
 
-Chat requires a running VS Code Agent Host supporting **AHP 0.9.0** and an
+Chat requires a running VS Code Agent Host negotiating **AHP 1.0.0, 0.10.0, or 0.9.0** and an
 authorized Copilot provider on the execution machine.
+Host discovery versions are not treated as the negotiated wire version.
+See [protocol compatibility](docs/remote-vscode.md#protocol-compatibility) before
+upgrading a multi-device setup; existing sessions and bindings are retained.
 
 Enable **Automatic workspace links**, then use:
 
