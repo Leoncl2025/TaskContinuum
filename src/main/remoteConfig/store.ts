@@ -342,8 +342,22 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     return true
   }
 
+  private seedAuthorizationCache(): void {
+    if (this.authorizationCache || this.pendingMutations || this.closed) return
+    const cached = this.verifiedSnapshot
+    const trust = this.options.trust
+    if (!cached || cached.snapshot.resolution.blocked
+      || cached.trustedKey !== trust.trustedKey || cached.authorize !== trust.authorize
+      || cached.allowKeyRotation !== trust.allowKeyRotation || cached.allowDeviceReactivation !== trust.allowDeviceReactivation) return
+    // Startup already verified these records; fingerprint, lock and expiry checks below still apply.
+    this.authorizationCache = { inputs: cached.inputs,
+      snapshot: { document: structuredClone(cached.snapshot.document), revision: cached.snapshot.revision },
+      from: cached.from, until: cached.until }
+  }
+
   private async authorizationSnapshot(): Promise<{ snapshot: SessionLinksSnapshot; generation: number }> {
     for (let attempt = 0; attempt < 3; attempt++) {
+      this.seedAuthorizationCache()
       const readOnlyLock = this.readOnlyLock
       const reusable = this.authorizationCache
       if (!this.pendingMutations && reusable) {

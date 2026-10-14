@@ -27,6 +27,7 @@ import { VSCodeDeviceClient } from '../src/main/vscodeDeviceClient'
 import { AuthorizationWatch } from '../src/main/shared/authorizationWatch'
 import * as inputChecks from '../src/main/remoteConfig/authorizationInputs'
 import * as storeLocks from '../src/main/remoteConfig/storeLock'
+import * as recordReads from '../src/main/remoteConfig/records'
 
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
@@ -135,6 +136,67 @@ describe('verified Agent Host authorization fast path', () => {
     } finally { release(); await background; await reading }
   }, 10000)
 
+  it.each(['pending', 'export', 'status'] as const)('acquires the first permission lease under 1s during a blocked read-only %s query', async (query) => {
+    const f = await fixture({ count: 32 })
+    await f.store.read()
+    f.read.mockClear()
+    await recordLocalLink(f.profile, f.root, 'T-0001', { provider: 'agent-host', ...f.target }, f.target.owner)
+    const access = new AgentHostAuthorization(f.profile, async () => f.target.owner)
+    cleanup.push(async () => access.close())
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const originalRead = recordReads.readRecords
+    const diskRead = vi.spyOn(recordReads, 'readRecords').mockImplementationOnce(async (...args) => {
+      entered()
+      await gate
+      return originalRead(...args)
+    })
+    let finished = false
+    const background = (query === 'pending' ? f.store.getPendingRecords() : query === 'export' ? f.store.exportRecords() : f.store.status())
+      .then(() => { finished = true })
+    await started
+    let acquiring: ReturnType<AgentHostAuthorization['acquire']> | undefined
+    try {
+      let complete = false
+      const start = performance.now()
+      acquiring = access.acquire(f.root).then((lease) => { complete = true; return lease })
+      await expect.poll(() => complete, { timeout: 1000, interval: 10 }).toBe(true)
+      const lease = await acquiring
+      expect(performance.now() - start).toBeLessThan(1000)
+      expect(lease.current()).toBe(true)
+      expect(lease.localTargets).toEqual([f.target])
+      expect(f.read).not.toHaveBeenCalled()
+      expect(finished).toBe(false)
+    } finally { release(); await background; await acquiring; diskRead.mockRestore() }
+  }, 10000)
+
+  it('does not change the authority fingerprint for unrelated files at the record root', async () => {
+    const f = await fixture()
+    const before = await inputChecks.authorizationInputs(f.recordsRoot, f.outboxRoot, f.stateDirectory)
+    await writeFile(join(f.recordsRoot, 'build-output.txt'), 'This artifact is not an access grant.')
+    expect(await inputChecks.authorizationInputs(f.recordsRoot, f.outboxRoot, f.stateDirectory)).toBe(before)
+    const record = join(f.recordsRoot, recordPath(f.records[0]))
+    const bytes = await readFile(record, 'utf8')
+    await writeFile(record, bytes.replace('T-0001', 'T-0002'))
+    expect(await inputChecks.authorizationInputs(f.recordsRoot, f.outboxRoot, f.stateDirectory)).not.toBe(before)
+  })
+
+  it('checks mutable state bytes rather than timestamp-only changes or restored modification times', async () => {
+    const f = await fixture()
+    const file = join(f.stateDirectory, 'store.json')
+    const timestamp = await stat(file)
+    const before = await inputChecks.authorizationInputs(f.recordsRoot, f.outboxRoot, f.stateDirectory)
+    await utimes(file, timestamp.atime, new Date(timestamp.mtimeMs + 2000))
+    expect(await inputChecks.authorizationInputs(f.recordsRoot, f.outboxRoot, f.stateDirectory)).toBe(before)
+    const content = await readFile(file, 'utf8')
+    await writeFile(file, content.replace('"schemaVersion":1', '"schemaVersion":2'))
+    await utimes(file, timestamp.atime, timestamp.mtime)
+    expect(await inputChecks.authorizationInputs(f.recordsRoot, f.outboxRoot, f.stateDirectory)).not.toBe(before)
+    await expect(f.store.acquireAuthorization()).rejects.toMatchObject({ code: 'unsupported-state' })
+  })
+
   it('waits only for an in-process read-only lock to become ready, not for its blocked query', async () => {
     const f = await fixture()
     const before = await readRepositorySessionLinksForAuthorization(f.root)
@@ -174,6 +236,7 @@ describe('verified Agent Host authorization fast path', () => {
   it('does not restart a cold authorization read when a subsequent read-only transaction acquires the lock', async () => {
     const f = await fixture()
     await f.store.read()
+    f.trust.trustedKey = () => f.author.publicKey
     f.read.mockClear()
     let release!: () => void
     let entered!: () => void
@@ -584,6 +647,7 @@ describe('verified Agent Host authorization fast path', () => {
 
   it('fails closed when trust changes during an in-flight read rather than installing stale success', async () => {
     const f = await fixture()
+    f.trust.trustedKey = () => f.author.publicKey
     let release!: () => void
     let entered!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
@@ -618,6 +682,7 @@ describe('verified Agent Host authorization fast path', () => {
 
   it('waits when a follow-up transaction already holds the lock as the cold read finishes', async () => {
     const f = await fixture()
+    f.trust.trustedKey = () => f.author.publicKey
     let release!: () => void
     let entered!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
@@ -659,6 +724,7 @@ describe('verified Agent Host authorization fast path', () => {
   })
   it('rejects a detached backend after an in-flight read completes', async () => {
     const f = await fixture()
+    f.trust.trustedKey = () => f.author.publicKey
     let release!: () => void
     let entered!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
@@ -673,11 +739,12 @@ describe('verified Agent Host authorization fast path', () => {
 
   it('falls back to the original full verification if ongoing synchronization prevents cache reuse', async () => {
     const f = await fixture()
-    let timestamp = Date.now()
+    f.trust.trustedKey = () => f.author.publicKey
+    let writes = 0
     f.read.mockImplementation(async () => {
       const snapshot = await f.originalRead()
-      timestamp += 2000
-      await utimes(f.outboxRoot, new Date(timestamp), new Date(timestamp))
+      const state = join(f.stateDirectory, 'store.json')
+      await writeFile(state, `${(await readFile(state, 'utf8')).trimEnd()}${' '.repeat(++writes)}\n`)
       return snapshot
     })
     expect((await readRepositorySessionLinksForAuthorization(f.root)).document.bindings['T-0001']).toBeDefined()
@@ -832,4 +899,68 @@ describe('verified Agent Host authorization fast path', () => {
       await native.close()
     }
   }, 20000)
+
+  it('opens the first remote connection with 351 records before queued background queries finish', async () => {
+    const f = await fixture({ count: 351 })
+    const native = await startAgentHostFixture()
+    const target = { ...f.target, sessionId: native.sessionId, chatId: native.chatId }
+    const before = await f.store.read()
+    await f.store.writeBinding('T-0001', { provider: 'agent-host', ...target }, before.revision)
+    await recordLocalLink(f.profile, f.root, 'T-0001', { provider: 'agent-host', ...target }, target.owner)
+    await f.store.read()
+    f.read.mockClear()
+    const access = new AgentHostAuthorization(f.profile, async () => target.owner)
+    const connection = new AgentHostConnection(target, f.profile, (signal) => connectLocalAgentHost(native.endpoint, signal))
+    const host = new VSCodeDeviceHost(f.profile, { available: () => true, encrypt: (text) => Buffer.from(text), decrypt: (bytes) => bytes.toString() })
+    host.setAgentHostAccess({ connection: async () => connection } as unknown as AgentHostRegistry,
+      (root) => locallyLinkedAgentHostSessions(f.profile, root, target.owner), undefined, (root) => access.acquire(root))
+    const pair = await host.pair({ clientId: randomUUID(), machineName: 'First connection', username: 'Tester' }, newSshKeyPair().publicKey)
+    await host.setWorkspace(pair.id, f.root, true)
+    const port = await host.start()
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const readRecords = recordReads.readRecords
+    const diskRead = vi.spyOn(recordReads, 'readRecords').mockImplementationOnce(async (...args) => {
+      entered()
+      await gate
+      return readRecords(...args)
+    })
+    let backgroundFinished = false
+    const background = f.store.status().then(() => { backgroundFinished = true })
+    await started
+    const queued = [f.store.status(), f.store.getPendingRecords(), f.store.exportRecords()]
+    const abort = new AbortController()
+    let client: AhpClient | undefined
+    try {
+      const start = performance.now()
+      client = new AhpClient(await connectAgentHostWebSocket(
+        `ws://127.0.0.1:${port}/device/agent-host?target=${Buffer.from(JSON.stringify(target)).toString('base64url')}`,
+        { headers: { Host: `127.0.0.1:${port}`, Authorization: `Bearer ${pair.token}` } }, abort.signal), { requestTimeoutMs: 1000 })
+      client.connect()
+      await client.initialize({ clientId: randomUUID(), protocolVersions: ['0.9.0', '1.0.0'] })
+      await client.subscribe(target.chatId)
+      await client.ping()
+      const elapsedMs = performance.now() - start
+      expect(elapsedMs).toBeLessThan(1000)
+      expect(backgroundFinished).toBe(false)
+      expect(f.read).not.toHaveBeenCalled()
+      expect(native.dispatches).toHaveLength(0)
+      console.log(JSON.stringify({ coldGatewayRecords: 351, connectionAndPingMs: Math.round(elapsedMs), permissionFullReads: f.read.mock.calls.length }))
+      await host.revoke(pair.id)
+      await expect(client.ping()).rejects.toThrow()
+      expect(native.dispatches).toHaveLength(0)
+    } finally {
+      release()
+      await Promise.all([background, ...queued])
+      diskRead.mockRestore()
+      abort.abort()
+      await client?.shutdown()
+      await host.close()
+      access.close()
+      await connection.close()
+      await native.close()
+    }
+  }, 30000)
 })

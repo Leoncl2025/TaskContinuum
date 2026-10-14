@@ -374,6 +374,12 @@ lease is reacquired through the full authorization path; there is no stale-grant
 fallback. The two-second connection monitor remains a lightweight revocation and
 expiry check, not a periodic rebuild of workspace configuration.
 
+The first connection after startup can also reuse the full signed snapshot already
+verified by workspace initialization or a configuration read. It does not need a
+previously connected chat to warm the permission cache. Before reuse, current
+record/state fingerprints, trust policy, overlay, grant expiry and lock ownership
+are still checked; queued mutations or changed inputs cannot use the shortcut.
+
 Remote reconnection waits only for the exact owner in the selected workspace.
 An already-known trusted owner can reconnect while global startup restoration,
 other peers and Git synchronization are still busy. A missing owner/invitation
@@ -408,6 +414,13 @@ During lock admission, authorization waits only for the in-process read-only
 holder to finish journal/state preparation and expose its verified lock context.
 It does not treat that short startup window as an external lock conflict or
 wait for the holder's full query. Unknown external locks still fail closed.
+
+Only the outer record-root directory identity participates in the fingerprint;
+unrelated code or build files beside `.taskcontinuum` do not change authority.
+Every record directory and file retains its metadata checks. Mutable local state
+is checked by bounded content hashes and file identity, so delayed Windows change
+timestamps cannot force a rebuild, while same-size edits with restored timestamps
+are still detected.
 
 Configuration snapshots also reuse their verified result across unchanged reads
 and repeated binding revision checks, rather than rescanning and verifying the same history.

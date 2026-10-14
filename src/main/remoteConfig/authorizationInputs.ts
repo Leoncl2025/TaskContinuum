@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { lstat, readdir, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
 import { remoteConfigLimits } from '../../shared/remoteConfig'
-import { checkedDirectory, RemoteConfigError } from './records'
+import { checkedDirectory, readCheckedFile, RemoteConfigError } from './records'
 
 export interface AuthorizationTransactionLock { dev: bigint; ino: bigint }
 
@@ -10,7 +10,7 @@ export interface AuthorizationTransactionLock { dev: bigint; ino: bigint }
 export async function authorizationInputs(recordsRoot: string, outboxRoot: string, stateDirectory: string, ownedLock?: AuthorizationTransactionLock): Promise<string> {
   const rows: string[] = []
   let entries = 0
-  async function stamp(path: string, directory: boolean): Promise<boolean> {
+  async function stamp(path: string, directory: boolean, identityOnly = false): Promise<boolean> {
     let info
     try { info = await lstat(path, { bigint: true }) }
     catch (error) {
@@ -21,11 +21,13 @@ export async function authorizationInputs(recordsRoot: string, outboxRoot: strin
     if (info.isSymbolicLink() || (directory ? !info.isDirectory() : !info.isFile() || info.nlink !== 1n)) {
       throw new RemoteConfigError('unsafe-path', 'Authorization inputs must be real directories and single-link regular files.')
     }
-    rows.push(`${path}:${info.dev}:${info.ino}:${info.mode}:${info.nlink}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`)
+    const identity = `${path}:${info.dev}:${info.ino}:${info.mode}:${info.nlink}`
+    rows.push(identityOnly ? identity : `${identity}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`)
     return true
   }
   async function tree(root: string): Promise<void> {
-    if (!await stamp(root, true)) return
+    // Sibling code/build files do not change authority; retain root identity and scan every record.
+    if (!await stamp(root, true, true)) return
     rows.push(`${root}:canonical:${await realpath(root)}`)
     const base = await checkedDirectory(root, ['.taskcontinuum', 'records', 'v1'])
     if (!base) { rows.push(`${root}:no-records`); return }
@@ -54,7 +56,14 @@ export async function authorizationInputs(recordsRoot: string, outboxRoot: strin
   if (!state.isDirectory() || state.isSymbolicLink()) throw new RemoteConfigError('unsafe-path', 'Authorization state directory must not be a filesystem link.')
   // Creating/removing store.lock changes the directory timestamps on every full read.
   rows.push(`${stateDirectory}:${canonicalState}:${state.dev}:${state.ino}:${state.mode}`)
-  await Promise.all(['store.json', 'pending-operations.json'].map((name) => stamp(join(stateDirectory, name), false)))
+  await Promise.all(([['store.json', 2 * 1024 * 1024], ['pending-operations.json', remoteConfigLimits.totalBytes]] as const).map(async ([name, maximum]) => {
+    const file = join(stateDirectory, name)
+    if (await stamp(file, false, true)) {
+      const content = await readCheckedFile(stateDirectory, file, maximum)
+      // Mutable state is fenced by bytes and identity, not delayed NTFS change timestamps.
+      rows.push(`${file}:content:${createHash('sha256').update(content).digest('hex')}`)
+    }
+  }))
   try {
     const lock = await lstat(join(stateDirectory, 'store.lock'), { bigint: true })
     if (!ownedLock || !lock.isFile() || lock.isSymbolicLink() || lock.nlink !== 1n || lock.dev !== ownedLock.dev || lock.ino !== ownedLock.ino) {
