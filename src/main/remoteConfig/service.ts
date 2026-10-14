@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { watch } from 'node:fs'
+import type { FSWatcher } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import ssh2 from 'ssh2'
@@ -61,6 +63,12 @@ interface Runtime {
   replica?: Replica
   disposeBackend(): void
   snapshot?: RemoteConfigSnapshot
+  refreshWork?: Promise<RemoteConfigSnapshot>
+  refreshGeneration: number
+  statusKey?: string
+  bindingKey?: string
+  recordWatchers: FSWatcher[]
+  refreshTimer?: ReturnType<typeof setTimeout>
   status: WorkspaceGitSyncStatus
   ownRevision: string
   grants: Map<string, string>
@@ -87,6 +95,7 @@ export interface WorkspaceSyncOptions {
   identity?(): Promise<Awaited<ReturnType<typeof readClientIdentity>>>
   createReplica?(options: GitReplicaOptions): Promise<Replica>
   onChange(root: string): void
+  onBindingsChanged?(root: string): void
 }
 
 function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -148,10 +157,9 @@ export class WorkspaceSyncService {
   }
   private error(runtime: Runtime, error: unknown): void {
     const message = error instanceof Error ? error.message : 'Workspace synchronization failed.'
-    const changed = runtime.status.error !== message || runtime.status.state !== 'error'
     runtime.status.error = message
     runtime.status.state = 'error'
-    if (changed) this.options.onChange(runtime.root)
+    this.publishStatus(runtime)
   }
   private async checkUpstream(runtime: Runtime, opening = false): Promise<void> {
     try {
@@ -180,11 +188,18 @@ export class WorkspaceSyncService {
     }
     return values
   }
-  private async refresh(runtime: Runtime): Promise<RemoteConfigSnapshot> {
-    const before = JSON.stringify(runtime.status)
-    const snapshot = await runtime.store.read()
+  private publishStatus(runtime: Runtime): void {
+    if (runtime.closed || this.closed) return
+    const key = JSON.stringify(runtime.status)
+    if (runtime.statusKey === key) return
+    runtime.statusKey = key
+    this.options.onChange(runtime.root)
+  }
+
+  private applySnapshot(runtime: Runtime, snapshot: RemoteConfigSnapshot): void {
+    const changed = runtime.snapshot?.revision !== snapshot.revision
     runtime.snapshot = snapshot
-    runtime.status.pending = (await runtime.store.getPendingRecords()).length
+    runtime.status.pending = snapshot.pendingOperationIds.length
     runtime.status.revision = snapshot.revision
     runtime.status.provisionalTasks = snapshot.provisional
     runtime.status.conflicts = [...new Set(snapshot.resolution.diagnostics.map((issue) => issue.entityKey ?? issue.code))]
@@ -201,12 +216,55 @@ export class WorkspaceSyncService {
         peers.set(id, { deviceId: id, machineName: name, state: operational ? 'discovered' : 'blocked', ...(operational ? {} : { error: 'The device identity is inactive, conflicted, or missing its control endpoint.' }) })
       }
     }
-    runtime.status.peers = [...peers.values()]
-    if (before !== JSON.stringify(runtime.status)) {
-      this.connectionsChanged(runtime.root)
-      this.options.onChange(runtime.root)
+    runtime.status.peers = [...peers.values()].sort((left, right) => left.deviceId.localeCompare(right.deviceId))
+    if (changed) this.connectionsChanged(runtime.root)
+    this.publishStatus(runtime)
+    const bindingKey = canonicalJson({ document: snapshot.document, blocked: snapshot.resolution.blocked,
+      provisional: snapshot.provisional, awaitingSync: snapshot.awaitingSync })
+    if (runtime.bindingKey !== bindingKey) {
+      runtime.bindingKey = bindingKey
+      this.options.onBindingsChanged?.(runtime.root)
     }
-    return snapshot
+  }
+
+  private refresh(runtime: Runtime): Promise<RemoteConfigSnapshot> {
+    if (runtime.refreshWork) return runtime.refreshWork
+    const work = Promise.resolve().then(async () => {
+      for (;;) {
+        const generation = runtime.refreshGeneration
+        const snapshot = await runtime.store.read()
+        if (runtime.closed || this.closed) throw new Error('Workspace synchronization is closed.')
+        // A real edit that arrived during this read must not be replaced by its older projection.
+        if (generation !== runtime.refreshGeneration) continue
+        this.applySnapshot(runtime, snapshot)
+        return snapshot
+      }
+    }).finally(() => { if (runtime.refreshWork === work) runtime.refreshWork = undefined })
+    runtime.refreshWork = work
+    return work
+  }
+
+  private requestRefresh(runtime: Runtime): void {
+    if (runtime.closed || this.closed) return
+    runtime.refreshGeneration++
+    if (!runtime.refreshWork) void this.refresh(runtime).catch((error: unknown) => this.error(runtime, error))
+  }
+
+  private watchRecords(runtime: Runtime): void {
+    for (const root of [runtime.metadata.recordsRoot, runtime.store.options.outboxRoot]) {
+      const watcher = watch(root, { recursive: true, persistent: false }, (_event, name) => {
+        if (runtime.closed || this.closed) return
+        if (name !== null && !String(name).replaceAll('\\', '/').startsWith('.taskcontinuum')) return
+        clearTimeout(runtime.refreshTimer)
+        runtime.refreshTimer = setTimeout(() => {
+          runtime.refreshTimer = undefined
+          this.requestRefresh(runtime)
+        }, 50)
+        runtime.refreshTimer.unref()
+      })
+      watcher.on('error', (error) => this.error(runtime, error))
+      runtime.recordWatchers.push(watcher)
+    }
   }
 
   private async admitRecords(runtime: Runtime, records: RemoteRecord[]): Promise<void> {
@@ -506,31 +564,30 @@ export class WorkspaceSyncService {
       onStatus: (status) => {
         runtime.status.state = status.state === 'running' ? 'syncing' : status.state === 'stopped' ? 'disabled' : status.state === 'error' ? 'error' : runtime.status.error ? 'error' : 'idle'
         if (status.error) runtime.status.error = status.error
-        this.options.onChange(root)
+        this.publishStatus(runtime)
       },
     })
-    const changed = () => { this.connectionsChanged(root); this.options.onChange(root) }
+    const changed = () => { this.connectionsChanged(root); this.publishStatus(runtime) }
     const overlay = new BindingOverlay({
       workspaceId: enrollment.workspaceId, recipientId: local.clientId, trust,
       markerFile: join(directory, 'store', 'binding-overlays.json'),
       requestSync: () => scheduler.request('ssh-binding'),
-      onChange: changed, onError: (error) => this.error(runtime, error),
+      onChange: () => { this.connectionsChanged(root); this.requestRefresh(runtime) }, onError: (error) => this.error(runtime, error),
     })
     const config = new RemoteConfigStore({
       workspaceRoot: root, recordsRoot: metadata.recordsRoot, outboxRoot: join(directory, 'outbox'), stateDirectory: join(directory, 'store'),
       workspaceId: enrollment.workspaceId, actor: { deviceId: local.clientId, keyId: sshFingerprint(client.publicKey) }, sign, trust, overlay,
       onLocalChange: (records, snapshot) => {
-        runtime.snapshot = snapshot
-        runtime.status.settings = this.settings(snapshot, local.clientId)
-        this.connectionsChanged(root)
+        runtime.refreshGeneration++
+        this.applySnapshot(runtime, snapshot)
         scheduler.request('configuration-change')
         this.track(runtime, Promise.resolve().then(() => this.notify(runtime, records)))
         if (records.some((record) => record.kind === 'setting')) {
-          if (!runtime.status.settings.autoLink || !runtime.status.settings.tunnelEnabled) this.track(runtime, this.disconnect(runtime))
+          if (!runtime.status.settings?.autoLink || !runtime.status.settings?.tunnelEnabled) this.track(runtime, this.disconnect(runtime))
           else this.reconcilePeers(runtime)
         }
       },
-      onChange: changed, onError: (error) => this.error(runtime, error),
+      onError: (error) => this.error(runtime, error),
     })
     const control = new PeerControlServer({
       workspaceId: enrollment.workspaceId, localId: local.clientId, keyPair: client, port: metadata.controlPort,
@@ -600,6 +657,7 @@ export class WorkspaceSyncService {
       root, directory, metadata, enrollment, local, localClientKey: client, store: config, scheduler, control, peers, settings, replica,
       disposeBackend: () => {}, status: { enabled: enrollment.enabled, workspaceId: enrollment.workspaceId, intervalMs: 15000, state: 'starting', pending: 0, provisionalTasks: [], conflicts: [], peers: [], revision: null, settingsFile: settings.file,
         localDevice: { deviceId: local.clientId, machineName: local.machineName }, machineAliases: {} },
+      refreshGeneration: 0, recordWatchers: [],
       ownRevision: '', grants: new Map(), grantedPairs: new Map(Object.entries(metadata.managedPairs)), importedGrants: new Map(), network: new Set(), peerAgain: false, peerConnections: new Map(), recoveredOwners: new Set(), closed: false, generation: 0, grantWork: new Set(), connectionAbort: new AbortController(),
     }
     try {
@@ -613,7 +671,7 @@ export class WorkspaceSyncService {
       this.blockedBackends.get(root)?.()
       this.blockedBackends.delete(root)
       runtime.disposeBackend = await registerRepositorySessionLinksBackend(root, {
-        read: () => config.read(),
+        read: () => this.refresh(runtime),
         readForAuthorization: () => config.readForAuthorization(),
         acquireAuthorization: () => config.acquireAuthorization(),
         writeBinding: async (taskId, target, revision, beforeWrite) => {
@@ -631,6 +689,7 @@ export class WorkspaceSyncService {
           })
         },
       })
+      this.watchRecords(runtime)
       this.runtimes.set(root, runtime)
       await this.refresh(runtime)
       try { await settings.start() } catch (error) { this.error(runtime, error) }
@@ -638,6 +697,8 @@ export class WorkspaceSyncService {
       else runtime.status.state = 'disabled'
       return runtime
     } catch (error) {
+      clearTimeout(runtime.refreshTimer)
+      for (const watcher of runtime.recordWatchers) watcher.close()
       runtime.disposeBackend()
       await control.close()
       await config.close()
@@ -656,7 +717,6 @@ export class WorkspaceSyncService {
   async status(root: string): Promise<WorkspaceGitSyncStatus> {
     const runtime = await this.ensure(root, false)
     if (!runtime) return { enabled: false, intervalMs: 15000, state: 'disabled', pending: 0, provisionalTasks: [], conflicts: [], peers: [], revision: null }
-    try { await this.refresh(runtime) } catch (error) { this.error(runtime, error) }
     return structuredClone(runtime.status)
   }
   async syncNow(root: string): Promise<void> {
@@ -694,7 +754,7 @@ export class WorkspaceSyncService {
     await this.disconnect(runtime)
     await this.enrollments.disable(root)
     runtime.status.state = 'disabled'
-    this.options.onChange(root)
+    this.publishStatus(runtime)
   }
 
   private async cycle(runtime: Runtime, signal: AbortSignal): Promise<void> {
@@ -728,6 +788,7 @@ export class WorkspaceSyncService {
     signal.throwIfAborted()
     if (!publishedRecords) throw new Error('Git synchronization completed without validating its records. No configuration was accepted.')
     await this.cacheRecords(publishedRecords, runtime.metadata.recordsRoot)
+    runtime.refreshGeneration++
     runtime.status.lastSyncedAt = new Date().toISOString()
     runtime.status.error = undefined
     await this.refresh(runtime)
@@ -969,7 +1030,7 @@ export class WorkspaceSyncService {
   }
 
   private async notify(runtime: Runtime, records: RemoteRecord[]): Promise<void> {
-    if (!this.networkAllowed(runtime)) return
+    if (!records.some((record) => record.kind === 'binding') || !this.networkAllowed(runtime)) return
     const snapshot = await this.refresh(runtime)
     for (const record of records) {
       if (record.kind !== 'binding') continue
@@ -1059,6 +1120,8 @@ export class WorkspaceSyncService {
     await Promise.all([...this.starting.values()])
     for (const runtime of this.runtimes.values()) {
       runtime.closed = true
+      clearTimeout(runtime.refreshTimer)
+      for (const watcher of runtime.recordWatchers) watcher.close()
       runtime.connectionAbort.abort()
       await Promise.all([...runtime.recoveredOwners].map((id) => this.options.devices.disconnectOwner(runtime.root, id)))
       runtime.recoveredOwners.clear()
@@ -1067,6 +1130,7 @@ export class WorkspaceSyncService {
       await runtime.control.close()
       await Promise.all([...runtime.network])
       await runtime.settings.close()
+      await runtime.refreshWork?.catch(() => undefined)
       await runtime.store.close()
       await runtime.replica?.close()
       runtime.disposeBackend()

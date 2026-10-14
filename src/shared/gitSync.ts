@@ -32,6 +32,7 @@ export interface WorkspaceGitSyncBridge {
   setMachineAlias(deviceId: string, alias: string | null, expectedRevision: string | null): Promise<void>
   setSetting(key: 'autoLink' | 'tunnelEnabled' | 'connectTimeoutMs', value: boolean | number | null, expectedRevision: string | null): Promise<void>
   openSettings(): Promise<void>
+  onStatusChanged(listener: () => void): () => void
   onBindingsChanged(listener: () => void): () => void
 }
 import type { RemoteSettings } from './remoteConfig'

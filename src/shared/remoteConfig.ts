@@ -143,6 +143,7 @@ export interface PendingBindingMarker { operationId: string; taskId: string }
 export interface RemoteConfigSnapshot extends SessionLinksSnapshot {
   initialized: boolean
   records: RemoteRecord[]
+  pendingOperationIds: string[]
   resolution: ResolvedRemoteConfig
   provisional: string[]
   awaitingSync: PendingBindingMarker[]

@@ -23,6 +23,7 @@ import { AgentHostRegistry } from '../src/main/agentHostRegistry'
 import { AgentHostCreationClient } from '../src/main/agentHostCreationClient'
 import { agentHostCreationWorkspaceId } from '../src/main/agentHostCreationService'
 import { startAgentHostCreationFixture } from './agent-host-creation-fixture'
+import type { RemoteConfigSnapshot } from '../src/shared/remoteConfig'
 
 const execute = promisify(execFile)
 const roots: string[] = []
@@ -141,10 +142,11 @@ async function fixture(count: number, workspaceDirectory = '', additionalWorkspa
     }, (root, owner, signal) => service.whenOwnerConnected(root, owner, signal))
     cleanup.push(async () => devices.close())
     const onChange = vi.fn()
+    const onBindingsChanged = vi.fn()
     let publicationGate: Promise<void> | undefined
     let releasePublication: (() => void) | undefined
     const serviceOptions: WorkspaceSyncOptions = {
-      directory: data, identity: async () => identity, keys: { get: async (purpose) => purpose === 'client' ? clientKey : hostKey }, tunnels, host: hostApi, devices, onChange,
+      directory: data, identity: async () => identity, keys: { get: async (purpose) => purpose === 'client' ? clientKey : hostKey }, tunnels, host: hostApi, devices, onChange, onBindingsChanged,
       createReplica: async (options) => {
         const replica = await GitReplica.open(options)
         return {
@@ -168,7 +170,7 @@ async function fixture(count: number, workspaceDirectory = '', additionalWorkspa
     cleanup.push(() => service.close())
     cleanup.push(async () => { releasePrivateGrant?.(); releasePublication?.(); releaseTunnel?.() })
     peers.push({
-      folder, checkout, data, identity, service, host, devices, onChange, blocked,
+      folder, checkout, data, identity, service, host, devices, onChange, onBindingsChanged, blocked,
       holdPublication: () => { publicationGate = new Promise<void>((resolve) => { releasePublication = resolve }) },
       releasePublication: () => { releasePublication?.(); publicationGate = undefined },
       holdPrivateGrant: () => { privateGrantStarted = false; privateGrantGate = new Promise<void>((resolve) => { releasePrivateGrant = resolve }) },
@@ -205,6 +207,70 @@ async function settle(peers: Awaited<ReturnType<typeof fixture>>['peers']) {
   }
   throw new Error(`Peers did not converge: ${JSON.stringify(await Promise.all(peers.map((peer) => peer.service.status(peer.folder))))}`)
 }
+
+it('serves 100 status requests without queuing configuration work and separates status from binding changes', async () => {
+  const { peers: [peer] } = await fixture(1)
+  await peer.service.enable(peer.folder)
+  await peer.service.whenConnectionsSettled(peer.folder)
+  const before = await peer.service.status(peer.folder)
+  const read = vi.spyOn(RemoteConfigStore.prototype, 'read')
+  const pending = vi.spyOn(RemoteConfigStore.prototype, 'getPendingRecords')
+  peer.onChange.mockClear()
+  peer.onBindingsChanged.mockClear()
+  const results = await Promise.all(Array.from({ length: 100 }, () => peer.service.status(peer.folder)))
+  for (const status of results) expect(status).toEqual(before)
+  expect(read).not.toHaveBeenCalled()
+  expect(pending).not.toHaveBeenCalled()
+  expect(peer.onChange).not.toHaveBeenCalled()
+  expect(peer.onBindingsChanged).not.toHaveBeenCalled()
+  results[0].peers.push({ deviceId: 'display-only', machineName: 'Injected copy', state: 'offline' })
+  expect((await peer.service.status(peer.folder)).peers).toEqual(before.peers)
+  await peer.service.setMachineAlias(peer.folder, peer.identity.clientId, 'Desktop label', before.revision)
+  await peer.service.whenConnectionsSettled(peer.folder)
+  expect((await peer.service.status(peer.folder)).machineAliases?.[peer.identity.clientId]).toBe('Desktop label')
+  expect(peer.onChange).toHaveBeenCalled()
+  expect(peer.onBindingsChanged).not.toHaveBeenCalled()
+  const bindings = await readRepositorySessionLinks(peer.folder)
+  const target = { owner: { clientId: peer.identity.clientId, machineName: peer.identity.machineName },
+    sessionId: 'copilotcli:/bounded-status', chatId: 'ahp-chat:/bounded-status' }
+  await updateRepositoryAgentHostLink(peer.folder, 'T-0001', target, bindings.revision)
+  expect(peer.onBindingsChanged).toHaveBeenCalledTimes(1)
+  expect((await peer.service.status(peer.folder)).revision).not.toBe(bindings.revision)
+}, 60000)
+
+it('coalesces backend refresh callers and does not overwrite a newer edit with an older in-flight snapshot', async () => {
+  const { peers: [peer] } = await fixture(1)
+  await peer.service.enable(peer.folder)
+  await peer.service.whenConnectionsSettled(peer.folder)
+  const runtimes: Map<string, unknown> = Reflect.get(peer.service, 'runtimes')
+  const runtime = runtimes.get(await canonicalPolicyRoot(peer.folder))
+  expect(runtime).toBeDefined()
+  const refresh = () => Reflect.apply(Reflect.get(peer.service, 'refresh'), peer.service, [runtime]) as Promise<RemoteConfigSnapshot>
+  const originalRead = RemoteConfigStore.prototype.read
+  let release!: () => void, entered!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const started = new Promise<void>((resolve) => { entered = resolve })
+  const read = vi.spyOn(RemoteConfigStore.prototype, 'read').mockImplementationOnce(async function (this: RemoteConfigStore) {
+    const snapshot = await originalRead.call(this)
+    entered()
+    await gate
+    return snapshot
+  })
+  const calls = Array.from({ length: 20 }, refresh)
+  let edit: Promise<void> | undefined
+  try {
+    await started
+    expect(read).toHaveBeenCalledOnce()
+    const before = await peer.service.status(peer.folder)
+    edit = peer.service.setMachineAlias(peer.folder, peer.identity.clientId, 'Newer alias', before.revision)
+    await expect.poll(async () => (await peer.service.status(peer.folder)).machineAliases?.[peer.identity.clientId]).toBe('Newer alias')
+    release()
+    const snapshots = await Promise.all(calls)
+    await edit
+    expect(snapshots.every((snapshot) => snapshot.resolution.machineAliases[peer.identity.clientId] === 'Newer alias')).toBe(true)
+    expect((await peer.service.status(peer.folder)).machineAliases?.[peer.identity.clientId]).toBe('Newer alias')
+  } finally { release(); await Promise.all(calls); await edit }
+}, 60000)
 
 it('converges A/B/C over real SSH using only each peer\'s selected checkout', async () => {
   const { peers, remote } = await fixture(3)

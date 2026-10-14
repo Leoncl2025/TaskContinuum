@@ -6,6 +6,7 @@ export function gitSyncUiFixture() {
   let status: WorkspaceGitSyncStatus = { enabled: false, state: 'disabled', intervalMs: 15000, pending: 0, provisionalTasks: [], conflicts: [], peers: [], revision: null }
   let revision = 0
   const listeners = new Set<() => void>()
+  const statusListeners = new Set<() => void>()
   const api: WorkspaceGitSyncBridge = {
     status: vi.fn(async () => status),
     enable: vi.fn(async () => { status = { ...status, enabled: true, state: 'idle' }; return true }),
@@ -18,14 +19,17 @@ export function gitSyncUiFixture() {
       if (alias?.trim()) machineAliases[deviceId] = alias.trim()
       else delete machineAliases[deviceId]
       status = { ...status, machineAliases, conflicts: status.conflicts.filter((key) => key !== `alias:${deviceId}`), revision: (++revision).toString(16).padStart(64, '0') }
-      for (const listener of listeners) listener()
+      for (const listener of statusListeners) listener()
     }),
     setSetting: vi.fn(async () => {}),
     openSettings: vi.fn(async () => {}),
+    onStatusChanged: (listener) => { statusListeners.add(listener); return () => { statusListeners.delete(listener) } },
     onBindingsChanged: (listener) => { listeners.add(listener); return () => { listeners.delete(listener) } },
   }
   const remote: RemoteVSCodeBridge = {
     gitSync: api,
   }
-  return { api, remote, notify: () => { for (const listener of listeners) listener() }, getStatus: () => status, setStatus: (value: WorkspaceGitSyncStatus) => { status = value } }
+  return { api, remote, notify: () => { for (const listener of statusListeners) listener() },
+    notifyBindings: () => { for (const listener of listeners) listener() },
+    getStatus: () => status, setStatus: (value: WorkspaceGitSyncStatus) => { status = value } }
 }

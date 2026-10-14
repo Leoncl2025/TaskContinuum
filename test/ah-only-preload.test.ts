@@ -189,4 +189,22 @@ describe('native-only preload boundary', () => {
     stop()
     expect(ipc.removeListener).toHaveBeenCalledWith('remote-vscode:git-bindings-changed', ipc.on.mock.calls[0][1])
   })
+
+  it('keeps status-only notifications separate from session binding changes', () => {
+    const api = window.remoteVSCode!.gitSync!
+    const status = vi.fn(), bindings = vi.fn()
+    const stopStatus = api.onStatusChanged(status)
+    const stopBindings = api.onBindingsChanged(bindings)
+    const onStatus = ipc.on.mock.calls.find(([name]) => name === 'remote-vscode:git-status-changed')![1]
+    const onBindings = ipc.on.mock.calls.find(([name]) => name === 'remote-vscode:git-bindings-changed')![1]
+    onStatus({})
+    expect(status).toHaveBeenCalledOnce()
+    expect(bindings).not.toHaveBeenCalled()
+    onBindings({})
+    expect(bindings).toHaveBeenCalledOnce()
+    stopStatus()
+    stopBindings()
+    expect(ipc.removeListener).toHaveBeenCalledWith('remote-vscode:git-status-changed', onStatus)
+    expect(ipc.removeListener).toHaveBeenCalledWith('remote-vscode:git-bindings-changed', onBindings)
+  })
 })

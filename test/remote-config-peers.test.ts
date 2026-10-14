@@ -58,9 +58,12 @@ describe('reciprocal peer orchestration', () => {
     let armed = false
     const links = new PeerLinks({
       localId: 'A', localIdentityRevision: () => 'identity-A', authorize: async () => {}, issue: async () => {},
-      connect: async () => ({ notify: async (payload) => { sent.push(payload) }, close: () => {} }),
+      connect: async () => ({ notify: async (payload) => {
+        sent.push(payload)
+        if (armed && payload === 'first' && !late) late = links.notify('late-op', 'late', ['B'])
+      }, close: () => {} }),
       disconnected: async () => {}, onError: (error) => { throw error },
-      onChanged: () => { if (armed && sent.includes('first') && !late) late = links.notify('late-op', 'late', ['B']) },
+      onChanged: () => {},
     })
     await links.reconcile([peer('B')], [grant('B')])
     armed = true
@@ -69,5 +72,26 @@ describe('reciprocal peer orchestration', () => {
     await late
     expect(sent).toEqual(['first', 'late'])
     await links.close()
+  })
+
+  it('does not broadcast unchanged peers while still checking grants and reporting real transitions', async () => {
+    const changed = vi.fn()
+    const issue = vi.fn(async () => {})
+    const links = new PeerLinks({
+      localId: 'A', localIdentityRevision: () => 'identity-A', authorize: async () => {}, issue,
+      connect: async () => ({ notify: async () => {}, close: () => {} }),
+      disconnected: async () => {}, onChanged: changed, onError: (error) => { throw error },
+    })
+    try {
+      await links.reconcile([peer('B'), peer('C')], [])
+      changed.mockClear()
+      issue.mockClear()
+      await links.reconcile([peer('B'), peer('C')], [])
+      expect(changed).not.toHaveBeenCalled()
+      expect(issue).toHaveBeenCalledTimes(2)
+      await links.reconcile([peer('B'), peer('C')], [grant('B'), grant('C')])
+      expect(changed).toHaveBeenCalled()
+      expect(links.status().map((item) => item.state)).toEqual(['linked', 'linked'])
+    } finally { await links.close() }
   })
 })

@@ -53,6 +53,13 @@ export class PeerLinks {
 
   status(): GitSyncPeer[] { return [...this.states.values()].map((state) => ({ ...state })) }
 
+  private setState(state: GitSyncPeer): void {
+    const previous = this.states.get(state.deviceId)
+    if (previous?.machineName === state.machineName && previous.state === state.state && previous.error === state.error) return
+    this.states.set(state.deviceId, state)
+    this.options.onChanged()
+  }
+
   async reconcile(peers: PublicPeer[], incoming: PublicPeerGrant[], enabled = true): Promise<void> {
     if (this.closed) throw new Error('Peer links are closed.')
     this.enabled = enabled
@@ -95,8 +102,7 @@ export class PeerLinks {
       if (prior && (!grant || prior.grant !== grant.operationId || prior.connection.connected && !await prior.connection.connected())) await this.drop(id)
       let connectionFailure: { error: unknown } | undefined
       if (grant && !this.connections.has(id)) {
-        this.states.set(id, { deviceId: id, machineName: peer.machineName, state: 'connecting' })
-        this.options.onChanged()
+        this.setState({ deviceId: id, machineName: peer.machineName, state: 'connecting' })
         try {
           const connection = await this.options.connect(peer, grant)
           if (!active() || this.currentGrant(peer)?.operationId !== grant.operationId) { connection.close(); await this.options.disconnected(id); return }
@@ -107,7 +113,7 @@ export class PeerLinks {
       await this.options.issue(peer)
       if (!active()) return
       if (connectionFailure) throw connectionFailure.error
-      this.states.set(id, { deviceId: id, machineName: peer.machineName, state: this.connections.has(id) ? 'linked' : 'discovered' })
+      this.setState({ deviceId: id, machineName: peer.machineName, state: this.connections.has(id) ? 'linked' : 'discovered' })
       await this.deliver(id)
     } catch (error) {
       const connection = this.connections.get(id)
@@ -115,8 +121,8 @@ export class PeerLinks {
       this.connections.delete(id)
       try { await this.options.disconnected(id) } catch (cleanupError) { this.options.onError(cleanupError) }
       if (!active()) return
-      this.states.set(id, { deviceId: id, machineName: peer.machineName, state: 'offline', error: error instanceof Error ? error.message : 'The peer link failed.' })
-    } finally { this.options.onChanged() }
+      this.setState({ deviceId: id, machineName: peer.machineName, state: 'offline', error: error instanceof Error ? error.message : 'The peer link failed.' })
+    }
   }
 
   async notify(operationId: string, payload: unknown, recipients: string[]): Promise<void> {
@@ -153,9 +159,9 @@ export class PeerLinks {
     const active = this.connections.get(id)
     active?.connection.close()
     this.connections.delete(id)
-    this.states.delete(id)
+    const changed = this.states.delete(id)
     await this.options.disconnected(id)
-    this.options.onChanged()
+    if (changed) this.options.onChanged()
   }
 
   async pause(): Promise<void> {

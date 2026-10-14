@@ -27,7 +27,6 @@ import { VSCodeDeviceClient } from '../src/main/vscodeDeviceClient'
 import { AuthorizationWatch } from '../src/main/shared/authorizationWatch'
 import * as inputChecks from '../src/main/remoteConfig/authorizationInputs'
 import * as storeLocks from '../src/main/remoteConfig/storeLock'
-import * as recordReads from '../src/main/remoteConfig/records'
 
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
@@ -147,8 +146,8 @@ describe('verified Agent Host authorization fast path', () => {
     let entered!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
     const started = new Promise<void>((resolve) => { entered = resolve })
-    const originalRead = recordReads.readRecords
-    const diskRead = vi.spyOn(recordReads, 'readRecords').mockImplementationOnce(async (...args) => {
+    const originalRead = inputChecks.authorizationInputs
+    const diskRead = vi.spyOn(inputChecks, 'authorizationInputs').mockImplementationOnce(async (...args) => {
       entered()
       await gate
       return originalRead(...args)
@@ -408,6 +407,26 @@ describe('verified Agent Host authorization fast path', () => {
     expect(await readRepositorySessionLinksForAuthorization(f.root)).toEqual(initial)
     expect(f.read).not.toHaveBeenCalled()
     expect(f.authorize).not.toHaveBeenCalled()
+  })
+
+  it('reuses one verified snapshot for status, pending records and exports without re-verifying each record', async () => {
+    const f = await fixture({ count: 32 })
+    const before = await f.store.read()
+    f.authorize.mockClear()
+    const status = await f.store.status()
+    const pending = await f.store.getPendingRecords()
+    const files = await f.store.exportRecords()
+    expect(status.revision).toBe(before.revision)
+    expect(status.pendingOperationIds).toEqual(before.pendingOperationIds)
+    expect(pending.map((record) => record.operationId)).toEqual(before.pendingOperationIds)
+    expect(files).toHaveLength(before.records.length)
+    expect(f.authorize).not.toHaveBeenCalled()
+    await f.store.writeBinding('T-0001', null, before.revision)
+    const changed = await f.store.read()
+    expect(changed.pendingOperationIds).toHaveLength(1)
+    expect((await f.store.getPendingRecords()).map((record) => record.operationId)).toEqual(changed.pendingOperationIds)
+    f.deny()
+    await expect(f.store.exportRecords()).rejects.toMatchObject({ code: 'blocked-export' })
   })
 
   it('expires cached invitation resolution and rechecks changed lifetime policy even with unchanged files', async () => {
@@ -921,8 +940,8 @@ describe('verified Agent Host authorization fast path', () => {
     let entered!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
     const started = new Promise<void>((resolve) => { entered = resolve })
-    const readRecords = recordReads.readRecords
-    const diskRead = vi.spyOn(recordReads, 'readRecords').mockImplementationOnce(async (...args) => {
+    const readRecords = inputChecks.authorizationInputs
+    const diskRead = vi.spyOn(inputChecks, 'authorizationInputs').mockImplementationOnce(async (...args) => {
       entered()
       await gate
       return readRecords(...args)

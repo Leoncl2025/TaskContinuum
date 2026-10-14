@@ -961,7 +961,7 @@ describe('workspace switching in the desktop workbench', () => {
     await user.click(screen.getByRole('button', { name: `Unlink ${target.sessionId}` }))
     const confirmation = screen.getByRole('region', { name: 'Detach conversation' })
     repository[first.id] = { document: { schemaVersion: '2.1', bindings: {} }, revision: 'b'.repeat(64) }
-    await act(async () => remote.notify())
+    await act(async () => remote.notifyBindings())
     expect(await within(confirmation).findByRole('alert')).toHaveTextContent('The task binding changed.')
     expect(within(confirmation).getByRole('button', { name: 'Detach session' })).toBeDisabled()
     expect(bridge.updateSessionLink).not.toHaveBeenCalled()

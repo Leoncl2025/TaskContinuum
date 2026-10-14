@@ -94,7 +94,7 @@ if (parameters.has('workbench')) {
     gitSync: {
       status: async () => status, enable: unsupported, disable: unsupported, syncNow: unsupported,
       revokeDevice: unsupported, setMachineAlias: unsupported, setSetting: unsupported, openSettings: unsupported,
-      onBindingsChanged: () => () => {},
+      onStatusChanged: () => () => {}, onBindingsChanged: () => () => {},
     },
   }
   window.desktop = {

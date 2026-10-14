@@ -380,6 +380,22 @@ previously connected chat to warm the permission cache. Before reuse, current
 record/state fingerprints, trust policy, overlay, grant expiry and lock ownership
 are still checked; queued mutations or changed inputs cannot use the shortcut.
 
+UI synchronization status is a copy of the runtime's latest projection, not a new
+configuration transaction. Initialization, actual local edits, accepted sync
+results and overlay changes update that projection. Status, pending-operation
+IDs and binding revision come from the same verified snapshot. Device-status and
+scheduler notifications use `git-status-changed`; only changes to the effective
+binding projection use `git-bindings-changed`. Neither UI projection is an
+authorization grant.
+
+The shared status hook permits one request in flight and coalesces notifications
+received during it into a follow-up. Backend refresh callers also share one read;
+real changes during a read request another pass before publishing its projection.
+Unchanged peer reconciliation does not broadcast another state change. Pending
+record queries, status summaries and exports reuse verified snapshots instead of
+forcing a second full scan solely to calculate a pending count. Idle status
+polling remains available without building a queue of configuration reads.
+
 Remote reconnection waits only for the exact owner in the selected workspace.
 An already-known trusted owner can reconnect while global startup restoration,
 other peers and Git synchronization are still busy. A missing owner/invitation

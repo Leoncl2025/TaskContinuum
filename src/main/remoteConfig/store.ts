@@ -268,6 +268,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     }
     return {
       document, revision, initialized: state.initialized, records, resolution,
+      pendingOperationIds: this.pendingRecords({ canonical, outbox }).map((record) => record.operationId),
       provisional: overlay?.provisional ?? [], awaitingSync: overlay?.awaitingSync ?? [],
     }
   }
@@ -427,19 +428,19 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
 
   getPendingRecords(): Promise<RemoteRecord[]> {
     return this.transaction(async (state, recovered) => {
-      const sources = await this.sources(state)
-      const snapshot = await this.snapshot(state, sources)
-      return { value: this.pendingRecords(sources), changed: recovered, snapshot }
+      const snapshot = await this.snapshot(state)
+      const pending = new Set(snapshot.pendingOperationIds)
+      return { value: snapshot.records.filter((record) => pending.has(record.operationId)), changed: recovered, snapshot }
     }, false)
   }
 
   /** Returns canonical bytes and Git-relative paths, without writing or publishing them. */
   exportRecords(pendingOnly = false): Promise<RemoteRecordFile[]> {
     return this.transaction(async (state, recovered) => {
-      const sources = await this.sources(state)
-      const snapshot = await this.snapshot(state, sources)
+      const snapshot = await this.snapshot(state)
       if (snapshot.resolution.blocked) throw new RemoteConfigError('blocked-export', 'Invalid or unauthorized configuration cannot be exported for publication.')
-      const records = pendingOnly ? this.pendingRecords(sources) : snapshot.records
+      const pending = new Set(snapshot.pendingOperationIds)
+      const records = pendingOnly ? snapshot.records.filter((record) => pending.has(record.operationId)) : snapshot.records
       const value = records.map((record) => ({ path: recordPath(record).split(sep).join('/'), content: serializeRecord(record) }))
       return { value, changed: recovered, snapshot }
     }, false)
@@ -457,11 +458,10 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
 
   status(): Promise<RemoteConfigStoreStatus> {
     return this.transaction(async (state, recovered) => {
-      const sources = await this.sources(state)
-      const snapshot = await this.snapshot(state, sources)
+      const snapshot = await this.snapshot(state)
       const value: RemoteConfigStoreStatus = {
         workspaceId: this.options.workspaceId, initialized: snapshot.initialized, revision: snapshot.revision,
-        pendingOperationIds: this.pendingRecords(sources).map((record) => record.operationId),
+        pendingOperationIds: snapshot.pendingOperationIds,
         provisionalTasks: snapshot.provisional, awaitingSync: snapshot.awaitingSync, blocked: snapshot.resolution.blocked,
         conflicts: Object.values(snapshot.resolution.entities).flatMap((entity) => entity.state === 'needs-resolution' || entity.state === 'blocked'
           ? [{ entityKey: entity.key, kind: entity.kind, state: entity.state, heads: entity.records.filter((record) => entity.heads.includes(record.operationId)) }] : []),

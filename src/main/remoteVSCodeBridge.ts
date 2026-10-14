@@ -18,7 +18,8 @@ import { FileTransferService } from './fileTransferService'
 import { startFileTransferMcpBridge } from './fileTransferMcpBridge'
 import { FileTransferBudget } from './fileTransferBudget'
 
-export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>, onConfigurationChanged: () => void = () => {}) {
+export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>,
+  onStatusChanged: () => void = () => {}, onBindingsChanged: () => void = () => {}) {
   const protector = {
     available: () => safeStorage.isEncryptionAvailable() && (process.platform !== 'linux' || safeStorage.getSelectedStorageBackend() !== 'basic_text'),
     encrypt: (value: string) => safeStorage.encryptString(value), decrypt: (value: Buffer) => safeStorage.decryptString(value),
@@ -59,7 +60,7 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     })
   const gitSync = new WorkspaceSyncService({
     directory: app.getPath('userData'), keys, tunnels, host, devices,
-    identity: clientIdentity, onChange: onConfigurationChanged,
+    identity: clientIdentity, onChange: onStatusChanged, onBindingsChanged,
   })
   registerGitSyncBridge(requireWindow, currentRoot, gitSync)
   const recovery = gitSync.restore().then(() => tunnels.startRecovery(async () => {

@@ -87,15 +87,33 @@ it('does not let an older refresh overwrite a newer status or surface a supersed
   const latest = { ...fixture.getStatus(), machineAliases: { [owner.clientId]: 'Latest' } }
   fixture.setStatus(latest)
   await act(async () => fixture.notify())
-  expect(screen.getByText('Latest (Actual-host)')).toBeInTheDocument()
+  expect(fixture.api.status).toHaveBeenCalledOnce()
   await act(async () => resolveOld({ ...latest, machineAliases: { [owner.clientId]: 'Obsolete' } }))
+  expect(screen.getByText('Latest (Actual-host)')).toBeInTheDocument()
   expect(screen.queryByText('Obsolete (Actual-host)')).not.toBeInTheDocument()
   vi.mocked(fixture.api.status).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectOld = reject }))
-  act(() => fixture.notify())
+  await act(async () => fixture.notify())
   await act(async () => fixture.notify())
   await act(async () => rejectOld(new Error('Obsolete status failure')))
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   expect(screen.getByText('Latest (Actual-host)')).toBeInTheDocument()
+})
+
+it('coalesces 100 status notifications into one in-flight request and one follow-up', async () => {
+  const fixture = gitSyncUiFixture()
+  window.remoteVSCode = fixture.remote
+  let finish!: (status: WorkspaceGitSyncStatus) => void
+  vi.mocked(fixture.api.status).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+  render(<MachineAliasesProvider workspaceId="workspace-one"><AliasLabel /><StatusError /></MachineAliasesProvider>)
+  await act(async () => {})
+  await act(async () => { for (let index = 0; index < 100; index++) fixture.notify() })
+  expect(fixture.api.status).toHaveBeenCalledOnce()
+  const latest = { ...fixture.getStatus(), machineAliases: { [owner.clientId]: 'Latest' } }
+  fixture.setStatus(latest)
+  await act(async () => finish({ ...latest, machineAliases: { [owner.clientId]: 'Obsolete' } }))
+  expect(fixture.api.status).toHaveBeenCalledTimes(2)
+  expect(screen.getByText('Latest (Actual-host)')).toBeInTheDocument()
+  expect(screen.queryByText('Obsolete (Actual-host)')).not.toBeInTheDocument()
 })
 
 it('clears the previous workspace immediately and discards its in-flight refresh after switching', async () => {
@@ -110,8 +128,9 @@ it('clears the previous workspace immediately and discards its in-flight refresh
   vi.mocked(fixture.api.status)
     .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve }))
     .mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve }))
-  act(() => fixture.notify())
+  await act(async () => fixture.notify())
   rendered.rerender(<MachineAliasesProvider workspaceId="workspace-two"><AliasLabel /><StatusError /></MachineAliasesProvider>)
+  await act(async () => {})
   expect(screen.queryByText('First workspace (Actual-host)')).not.toBeInTheDocument()
   expect(screen.getByText(owner.machineName)).toBeInTheDocument()
   await act(async () => resolveSecond({ ...fixture.getStatus(), machineAliases: { [owner.clientId]: 'Second workspace' } }))
