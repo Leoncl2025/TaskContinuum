@@ -55,7 +55,7 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
       if (!gitSync.sessionAccessReady(root)) throw new Error('The workspace is not ready for Agent Host access.')
       const access = await agentHosts.access.acquire(root)
       if (!gitSync.sessionAccessReady(root)) throw new Error('Workspace access changed while connecting.')
-      return access
+      return { ...access, current: () => gitSync.sessionAccessReady(root) && access.current() }
     })
   const gitSync = new WorkspaceSyncService({
     directory: app.getPath('userData'), keys, tunnels, host, devices,

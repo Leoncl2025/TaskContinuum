@@ -74,6 +74,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
   private acquiringAuthorization?: Promise<SessionLinksAuthorization>
   private transactionLock?: AuthorizationTransactionLock
   private readOnlyLock?: AuthorizationTransactionLock
+  private readOnlyPreparing?: Promise<void>
   private pendingMutations = 0
   private verifiedSnapshot?: {
     inputs: string; state: string; snapshot: RemoteConfigSnapshot; from: number; until: number
@@ -130,11 +131,14 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     if (failures.length && !this.options.onError) throw new RemoteConfigError('delivery-failed', `The configuration was durably saved, but ${failures.length} local change notification(s) failed. Retry delivery, not the edit.`)
   }
   private async transaction<T>(action: (state: StoreState, recovered: RemoteRecord[]) => Promise<TransactionResult<T>>, mutates = true): Promise<T> {
-    this.generation++
-    if (mutates) this.pendingMutations++
+    // Read-only queue churn is not an authority change.
+    if (mutates) { this.generation++; this.pendingMutations++ }
     const previous = this.pending
+    let readOnlyReady: (() => void) | undefined
+    const preparing = !mutates ? new Promise<void>((resolve) => { readOnlyReady = resolve }) : undefined
     const operation = this.measure('configuration.transaction', 'response', async () => {
       await this.measure('configuration.transaction', 'queue', async () => { await previous })
+      if (preparing) this.readOnlyPreparing = preparing
       if (this.closed) throw new RemoteConfigError('closed', 'The remote configuration store is closed.')
       await this.directory(this.options.stateDirectory)
       await this.directory(this.options.outboxRoot)
@@ -151,7 +155,11 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
         this.transactionLock = lock.identity
         const recovered = await this.measure('configuration.transaction', 'journal', () => this.recoverJournal())
         const state = await this.measure('configuration.transaction', 'state', () => this.state())
-        if (!mutates) this.readOnlyLock = this.transactionLock
+        if (!mutates) {
+          this.readOnlyLock = this.transactionLock
+          if (this.readOnlyPreparing === preparing) this.readOnlyPreparing = undefined
+          readOnlyReady?.()
+        }
         return await action(state, recovered)
       } finally {
         this.readOnlyLock = undefined
@@ -159,7 +167,11 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
         await lock.release()
       }
     }).catch((error: unknown) => { this.verifiedSnapshot = undefined; this.accessWatch.invalidate(); throw error })
-      .finally(() => { if (mutates) this.pendingMutations-- })
+      .finally(() => {
+        if (this.readOnlyPreparing === preparing) this.readOnlyPreparing = undefined
+        readOnlyReady?.()
+        if (mutates) this.pendingMutations--
+      })
     this.pending = operation.then(() => undefined, () => undefined)
     const result = await operation
     if (result.changed.length) await this.measure('configuration.transaction', 'notify', async () => this.notify(result.changed, result.snapshot ?? await this.read()))
@@ -321,16 +333,24 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     return { snapshot: await this.readForAuthorization(), current: () => false }
   }
 
+  private async retryReadOnlyInputs(error: unknown, lock: AuthorizationTransactionLock | undefined): Promise<boolean> {
+    if (this.readOnlyLock !== lock) return true
+    const preparing = this.readOnlyPreparing
+    if (!(error instanceof RemoteConfigError) || error.code !== 'store-busy' || !preparing) return false
+    // Wait for our own verified lock context, not the full background read.
+    await preparing
+    return true
+  }
+
   private async authorizationSnapshot(): Promise<{ snapshot: SessionLinksSnapshot; generation: number }> {
-    const inputs = () => this.inputs('authorization.store')
     for (let attempt = 0; attempt < 3; attempt++) {
       const readOnlyLock = this.readOnlyLock
       const reusable = this.authorizationCache
-      if (!this.pendingMutations && readOnlyLock && reusable) {
+      if (!this.pendingMutations && reusable) {
         let currentInputs: string
         try { currentInputs = await this.inputs('authorization.store', readOnlyLock) }
         catch (error) {
-          if (this.readOnlyLock !== readOnlyLock || this.pendingMutations || reusable !== this.authorizationCache) continue
+          if (this.pendingMutations || reusable !== this.authorizationCache || await this.retryReadOnlyInputs(error, readOnlyLock)) continue
           throw error
         }
         const now = this.options.trust.now?.() ?? Date.now()
@@ -340,17 +360,19 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
           return { snapshot: reusable.snapshot, generation: this.generation }
         }
       }
+      const queuedGeneration = this.generation
       const pending = this.pending
       await this.measure('authorization.store', 'queue', async () => { await pending })
-      if (pending !== this.pending) {
+      if (queuedGeneration !== this.generation) {
         logAgentHostDiagnostic('authorization.store', { scope: this.options.workspaceRoot, step: 'retry', status: 'scheduled', attempt: attempt + 1, reason: 'generation-changed' })
         continue
       }
       if (this.closed) throw new RemoteConfigError('closed', 'The remote configuration store is closed.')
       const generation = this.generation
+      const beforeLock = this.readOnlyLock
       let before: string
-      try { before = await inputs() }
-      catch (error) { if (generation !== this.generation) continue; throw error }
+      try { before = await this.inputs('authorization.store', beforeLock) }
+      catch (error) { if (generation !== this.generation || await this.retryReadOnlyInputs(error, beforeLock)) continue; throw error }
       if (generation !== this.generation) continue
       const now = this.options.trust.now?.() ?? Date.now()
       const cached = this.authorizationCache
@@ -366,9 +388,10 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       // A read can finish while its change notifications have already queued another transaction.
       // Capture our generation before awaiting it, not the generation of that newer lock holder.
       if (afterGeneration !== this.generation) continue
+      const afterLock = this.readOnlyLock
       let after: string
-      try { after = await inputs() }
-      catch (error) { if (afterGeneration !== this.generation) continue; throw error }
+      try { after = await this.inputs('authorization.store', afterLock) }
+      catch (error) { if (afterGeneration !== this.generation || await this.retryReadOnlyInputs(error, afterLock)) continue; throw error }
       if (before !== after || afterGeneration !== this.generation || this.closed) continue
       const snapshot = { document: fresh.document, revision: fresh.revision }
       if (!fresh.resolution.blocked) this.authorizationCache = { inputs: after, snapshot: structuredClone(snapshot), from: now, until: this.nextExpiry(fresh.resolution.records, now) }
@@ -393,7 +416,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       const sources = await this.sources(state)
       const snapshot = await this.snapshot(state, sources)
       return { value: this.pendingRecords(sources), changed: recovered, snapshot }
-    })
+    }, false)
   }
 
   /** Returns canonical bytes and Git-relative paths, without writing or publishing them. */
@@ -405,7 +428,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       const records = pendingOnly ? this.pendingRecords(sources) : snapshot.records
       const value = records.map((record) => ({ path: recordPath(record).split(sep).join('/'), content: serializeRecord(record) }))
       return { value, changed: recovered, snapshot }
-    })
+    }, false)
   }
 
   async getSettings(deviceId = this.options.actor.deviceId): Promise<RemoteSettingsSnapshot> {
@@ -431,7 +454,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
         diagnostics: snapshot.resolution.diagnostics,
       }
       return { value, changed: recovered, snapshot }
-    })
+    }, false)
   }
 
   /** Reconcile only against accepted Git records, never against an SSH-provided snapshot. */

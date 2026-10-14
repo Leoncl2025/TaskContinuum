@@ -17,6 +17,7 @@ import { agentHostCreateCommandSchema, agentHostCreateRequestSchema, agentHostCr
 import { fileDeviceRequest } from './fileTransferHttp'
 import type { FileRoute } from './fileTransferHttp'
 import { FileTransferError, transferFailure } from '../shared/fileTransfer'
+import { abortable } from './shared/abortable'
 import type { TransferDevice } from '../shared/fileTransfer'
 
 const peerSchema = z.object({ id: z.uuid(), root: z.string().min(1), invitation: deviceInvitationSchema,
@@ -27,16 +28,6 @@ const peerSchema = z.object({ id: z.uuid(), root: z.string().min(1), invitation:
 type Peer = z.infer<typeof peerSchema>
 type Connection = { port: number; close(): void }
 type Active = { tunnel: Connection; abort: AbortController; refreshed: number }
-
-function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const cancelled = () => { signal.removeEventListener('abort', cancelled); reject(signal.reason) }
-    if (signal.aborted) cancelled()
-    else signal.addEventListener('abort', cancelled, { once: true })
-    void work.then((value) => { signal.removeEventListener('abort', cancelled); resolve(value) },
-      (error: unknown) => { signal.removeEventListener('abort', cancelled); reject(error) })
-  })
-}
 
 export class VSCodeDeviceClient {
   private peers: Peer[] = []

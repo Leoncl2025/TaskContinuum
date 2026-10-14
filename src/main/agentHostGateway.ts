@@ -12,9 +12,14 @@ import { AGENT_HOST_TRACE_HEADER, agentHostDiagnosticChannel, agentHostDiagnosti
 import type { AgentHostDiagnosticDetails } from './agentHostDiagnostics'
 import type { AgentHostConnection } from './agentHostConnection'
 import { isAgentHostTurnBoundary } from './agentHostConnection'
-import { AgentHostGatewayScheduler } from './agentHostGatewayScheduler'
+import { AgentHostGatewayScheduler, GATEWAY_LIMITS } from './agentHostGatewayScheduler'
+import { abortable } from './shared/abortable'
 
-export interface AgentHostAccess { canSend: boolean; actor: { clientId: string; machineName: string; username?: string } }
+export interface AgentHostAccess {
+  canSend: boolean
+  actor: { clientId: string; machineName: string; username?: string }
+  current?(): boolean
+}
 export interface AgentHostGatewayOptions {
   port(): number | undefined
   authorize(token: string, target: AgentHostTarget, send: boolean): Promise<AgentHostAccess>
@@ -35,6 +40,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
   let bufferedEventBytes = 0
   let terminalLeases = 0
   let pendingUpgrades = 0
+  const upgrades = new Set<AbortController>()
   server.on('upgrade', (request, socket, head) => {
     const suppliedTrace = z.uuid().safeParse(request.headers[AGENT_HOST_TRACE_HEADER])
     const traceId = suppliedTrace.success ? suppliedTrace.data : randomUUID()
@@ -51,6 +57,16 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
     void (async () => {
       if (request.headers.origin || request.headers.host !== `127.0.0.1:${options.port()}` || (request.url?.length ?? 0) > 4096 || sockets.clients.size + pendingUpgrades >= 32) throw new Error('Denied.')
       pendingUpgrades++
+      const abort = new AbortController()
+      const abandoned = () => abort.abort(new DOMException('The connection handshake was abandoned.', 'AbortError'))
+      const timeout = setTimeout(() => abort.abort(new DOMException('The connection handshake timed out.', 'TimeoutError')), GATEWAY_LIMITS.queueWaitMs)
+      timeout.unref()
+      upgrades.add(abort)
+      socket.once('close', abandoned)
+      socket.once('end', abandoned)
+      socket.once('error', abandoned)
+      // Observe a peer's FIN while authorization is pending, before WebSocket takes over.
+      socket.resume()
       try {
         const url = new URL(request.url ?? '/', 'http://127.0.0.1')
         if (url.pathname !== '/device/agent-host' || [...url.searchParams.keys()].join() !== 'target') throw new Error('Denied.')
@@ -58,12 +74,15 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
         target = selectedTarget
         const token = request.headers.authorization?.replace(/^Bearer /, '') ?? ''
         advance('authorization')
-        await withAgentHostDiagnosticTrace(traceId, () => options.authorize(token, selectedTarget, false))
+        await abortable(withAgentHostDiagnosticTrace(traceId, () => options.authorize(token, selectedTarget, false)), abort.signal)
+        abort.signal.throwIfAborted()
         advance('native')
-        const connection = await options.connection(selectedTarget)
-        await connection.open()
+        const connection = await abortable(options.connection(selectedTarget), abort.signal)
+        abort.signal.throwIfAborted()
+        await abortable(connection.open(), abort.signal)
+        abort.signal.throwIfAborted()
         advance('authorization')
-        const access = await withAgentHostDiagnosticTrace(traceId, () => options.authorize(token, selectedTarget, false))
+        const access = await abortable(withAgentHostDiagnosticTrace(traceId, () => options.authorize(token, selectedTarget, false)), abort.signal)
         if (socket.destroyed) {
           logAgentHostDiagnostic('gateway.upgrade', { target: selectedTarget, traceId, status: 'closed', step, reason: 'client-closed', elapsedMs: performance.now() - started })
           return
@@ -72,6 +91,11 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
         sockets.handleUpgrade(request, socket, head, (client) => serve(client, connection, token, selectedTarget, access, traceId))
         logAgentHostDiagnostic('gateway.upgrade', { target: selectedTarget, traceId, status: 'ok', step, elapsedMs: performance.now() - started })
       } finally {
+        clearTimeout(timeout)
+        socket.off('close', abandoned)
+        socket.off('end', abandoned)
+        socket.off('error', abandoned)
+        upgrades.delete(abort)
         pendingUpgrades--
       }
     })().catch((error: unknown) => {
@@ -100,9 +124,12 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
     let urgent = false
     let pendingRequests = 0
     let closeReason: AgentHostDiagnosticDetails['reason']
+    let access = initialAccess
     const authorize = async (send: boolean) => {
-      const access = await withAgentHostDiagnosticTrace(traceId, () => options.authorize(token, target, send))
+      if (closed || socket.readyState !== WebSocket.OPEN) throw new Error('Access changed.')
+      if (!access.current?.()) access = await withAgentHostDiagnosticTrace(traceId, () => options.authorize(token, target, send))
       if (closed || socket.readyState !== WebSocket.OPEN || access.canSend !== initialAccess.canSend) throw new Error('Access changed.')
+      if (send && !access.canSend) throw new Error('Send access is not authorized.')
       return access
     }
     const fail = (reason: NonNullable<AgentHostDiagnosticDetails['reason']>) => {
@@ -435,5 +462,13 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
     })
   }
 
-  return { revalidate: () => { for (const check of checks) check() }, close: () => { for (const socket of sockets.clients) socket.terminate(); sockets.close(); checks.clear() } }
+  return {
+    revalidate: () => { for (const check of checks) check() },
+    close: () => {
+      for (const abort of upgrades) abort.abort(new DOMException('The session gateway closed.', 'AbortError'))
+      for (const socket of sockets.clients) socket.terminate()
+      sockets.close()
+      checks.clear()
+    },
+  }
 }

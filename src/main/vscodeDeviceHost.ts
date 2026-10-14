@@ -118,15 +118,25 @@ export class VSCodeDeviceHost {
     for (const workspace of pair.workspaces) {
       if (send && !workspace.canSend) continue
       let linked: AgentHostTarget[]
+      let lease: AgentHostAuthorizationLease | undefined
       try {
-        linked = this.agentHosts.access
-          ? (await this.agentHosts.access(workspace.root)).localTargets
-          : await this.agentHosts.linked(workspace.root)
+        lease = await this.agentHosts.access?.(workspace.root)
+        linked = lease ? lease.localTargets : await this.agentHosts.linked(workspace.root)
       } catch (error) { scopeError = error; continue }
       if (!linked.some((item) => agentHostKey(item) === agentHostKey(target))) continue
       const current = this.state!.pairs.find((item) => item.id === pair.id)
       if (!current || !this.permitted(pair.id) || JSON.stringify(current.workspaces) !== policy) throw new Error('Device policy changed.')
-      return { canSend: workspace.canSend, actor: pair.participant }
+      const actor = JSON.stringify(pair.participant)
+      const authority = this.agentHosts
+      const binding = lease
+      return { canSend: workspace.canSend, actor: pair.participant, ...(binding ? {
+        current: () => {
+          const current = this.state?.pairs.find((item) => item.id === pair.id)
+          return !this.closed && this.agentHosts === authority && !!current && current.token === token
+            && this.permitted(pair.id) && JSON.stringify(current.workspaces) === policy
+            && JSON.stringify(current.participant) === actor && binding.current()
+        },
+      } : {}) }
     }
     throw new Error('The exact Agent Host chat has not been locally confirmed for an available workspace.', { cause: scopeError })
   }

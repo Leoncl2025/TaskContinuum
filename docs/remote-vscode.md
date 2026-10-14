@@ -367,6 +367,13 @@ authorization lease: ordinary requests and outgoing event batches check the live
 pairing, expiry, exact chat and read/send scope without rereading those files or
 waiting behind read-only synchronization transactions.
 
+The gateway keeps that verified lease per live socket. Heartbeats, periodic
+connection checks, models and streaming batches use its memory-only `current`
+check while pairing, scope, receipts, trust and expiry remain valid. A changed
+lease is reacquired through the full authorization path; there is no stale-grant
+fallback. The two-second connection monitor remains a lightweight revocation and
+expiry check, not a periodic rebuild of workspace configuration.
+
 Remote reconnection waits only for the exact owner in the selected workspace.
 An already-known trusted owner can reconnect while global startup restoration,
 other peers and Git synchronization are still busy. A missing owner/invitation
@@ -388,10 +395,22 @@ are never deleted to recover access.
 
 On invalidation, unchanged verified inputs can be revalidated without waiting for
 an unrelated in-process read-only configuration transaction. This requires the
-exact owned lock, unchanged input metadata/trust/overlay/expiry and no queued
-mutations; pending writes and external locks cannot use this path. Configuration
-snapshots also reuse their verified result across unchanged reads and repeated
-binding revision checks, rather than rescanning and verifying the same history.
+exact owned lock when a transaction is active, unchanged input
+metadata/trust/overlay/expiry and no queued mutations; pending writes and external
+locks cannot use this path.
+
+Configuration status queries, pending-record queries and public exports are
+read-only. Queuing them does not advance the mutation generation or repeatedly restart an in-flight
+verified authorization read. A later read-only holder can be checked with its
+owned lock without waiting for that holder; actual writes still invalidate the
+generation and cannot be bypassed.
+During lock admission, authorization waits only for the in-process read-only
+holder to finish journal/state preparation and expose its verified lock context.
+It does not treat that short startup window as an external lock conflict or
+wait for the holder's full query. Unknown external locks still fail closed.
+
+Configuration snapshots also reuse their verified result across unchanged reads
+and repeated binding revision checks, rather than rescanning and verifying the same history.
 Reuse is versioned and copy-isolated: changes, corruption, links, trust revocation,
 expiry and unresolved provisional state still require verification or deny access.
 Record leaf reads have a bounded I/O budget; empty overlays do not independently
@@ -442,6 +461,12 @@ than accumulating stale work. Initialization is a barrier for subsequent
 requests. Every processed request still checks current authorization before
 work and before its response; send/cancel additionally recheck send access
 before dispatch. Snapshot responses precede buffered incremental events.
+
+WebSocket admission has the same ten-second deadline as the client handshake.
+An abandoned connection or gateway shutdown cancels admission promptly, releasing
+its pending-upgrade slot instead of later opening a native connection for a
+departed peer. Shared native connections and shared authorization reads are not
+destroyed by a single peer's cancellation.
 
 Reconnection refreshes **state**, not execution. Delivery UUID/hash records are
 persisted before dispatch; uncertain outcomes survive desktop restart and are never

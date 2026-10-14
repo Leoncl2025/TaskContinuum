@@ -26,6 +26,7 @@ import { AgentHostRegistry as NativeRegistry } from '../src/main/agentHostRegist
 import { VSCodeDeviceClient } from '../src/main/vscodeDeviceClient'
 import { AuthorizationWatch } from '../src/main/shared/authorizationWatch'
 import * as inputChecks from '../src/main/remoteConfig/authorizationInputs'
+import * as storeLocks from '../src/main/remoteConfig/storeLock'
 
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
@@ -106,6 +107,96 @@ describe('verified Agent Host authorization fast path', () => {
       expect(f.read).toHaveBeenCalledOnce() // Only the blocked sync, not the 100 authorization checks.
       console.log(JSON.stringify({ memoryAuthorizationChecks: 100, elapsedMs: Math.round(elapsed), additionalFullReads: 0 }))
     } finally { release(); await sync }
+  }, 10000)
+
+  it.each(['pending', 'export', 'status'] as const)('keeps verified authorization under 1s while a read-only %s query is blocked', async (query) => {
+    const f = await fixture({ count: 32 })
+    const before = await readRepositorySessionLinksForAuthorization(f.root)
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const authorize = f.trust.authorize
+    f.trust.authorize = async (record) => { entered(); await gate; return authorize(record) }
+    const background = query === 'pending' ? f.store.getPendingRecords() : query === 'export' ? f.store.exportRecords() : f.store.status()
+    await started
+    let reading: Promise<unknown> | undefined
+    try {
+      f.read.mockClear()
+      let completed = false
+      const start = performance.now()
+      reading = readRepositorySessionLinksForAuthorization(f.root).then((snapshot) => {
+        expect(snapshot).toEqual(before)
+        completed = true
+      })
+      await expect.poll(() => completed, { timeout: 1000, interval: 10 }).toBe(true)
+      expect(performance.now() - start).toBeLessThan(1000)
+      expect(f.read).not.toHaveBeenCalled()
+    } finally { release(); await background; await reading }
+  }, 10000)
+
+  it('waits only for an in-process read-only lock to become ready, not for its blocked query', async () => {
+    const f = await fixture()
+    const before = await readRepositorySessionLinksForAuthorization(f.root)
+    let lockReady!: () => void, lockEntered!: () => void, readReady!: () => void, readEntered!: () => void
+    const lockGate = new Promise<void>((resolve) => { lockReady = resolve })
+    const lockStarted = new Promise<void>((resolve) => { lockEntered = resolve })
+    const readGate = new Promise<void>((resolve) => { readReady = resolve })
+    const readStarted = new Promise<void>((resolve) => { readEntered = resolve })
+    const acquire = storeLocks.acquireStoreLock
+    const lock = vi.spyOn(storeLocks, 'acquireStoreLock').mockImplementationOnce(async (...args) => {
+      const owned = await acquire(...args)
+      lockEntered()
+      await lockGate
+      return owned
+    })
+    const authorize = f.trust.authorize
+    f.trust.authorize = async (record) => { readEntered(); await readGate; return authorize(record) }
+    let backgroundDone = false
+    const background = f.store.status().then(() => { backgroundDone = true })
+    await lockStarted
+    let reading: Promise<unknown> | undefined
+    try {
+      let completed = false
+      reading = readRepositorySessionLinksForAuthorization(f.root).then((snapshot) => {
+        expect(snapshot).toEqual(before)
+        completed = true
+      })
+      await new Promise<void>((resolve) => setTimeout(resolve, 30))
+      expect(completed).toBe(false)
+      lockReady()
+      await readStarted
+      await expect.poll(() => completed, { timeout: 1000, interval: 10 }).toBe(true)
+      expect(backgroundDone).toBe(false)
+    } finally { lockReady(); readReady(); await background; await reading; lock.mockRestore() }
+  }, 10000)
+
+  it('does not restart a cold authorization read when a subsequent read-only transaction acquires the lock', async () => {
+    const f = await fixture()
+    await f.store.read()
+    f.read.mockClear()
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    let background: Promise<unknown> | undefined
+    f.read.mockImplementationOnce(async () => {
+      const snapshot = await f.originalRead()
+      const authorize = f.trust.authorize
+      f.trust.authorize = async (record) => { entered(); await gate; return authorize(record) }
+      background = f.store.status()
+      await started
+      return snapshot
+    })
+    let reading: ReturnType<typeof readRepositorySessionLinksForAuthorization> | undefined
+    try {
+      let completed = false
+      reading = readRepositorySessionLinksForAuthorization(f.root).then((snapshot) => { completed = true; return snapshot })
+      await started
+      await expect.poll(() => completed, { timeout: 1000, interval: 10 }).toBe(true)
+      expect((await reading).document.bindings['T-0001']).toHaveLength(1)
+      expect(f.read).toHaveBeenCalledOnce()
+    } finally { release(); await background; await reading }
   }, 10000)
 
   it('invalidates connected-session leases on receipt removal, trust revocation and external record changes', async () => {
@@ -673,6 +764,72 @@ describe('verified Agent Host authorization fast path', () => {
       await connection.close()
       await native.close()
       await stopAgentHostDiagnostics()
+    }
+  }, 20000)
+
+  it('answers remote heartbeats while a status read holds the configuration lock and the access lease needs refreshing', async () => {
+    const f = await fixture({ count: 32 })
+    const native = await startAgentHostFixture()
+    const target = { ...f.target, sessionId: native.sessionId, chatId: native.chatId }
+    const before = await f.store.read()
+    await f.store.writeBinding('T-0001', { provider: 'agent-host', ...target }, before.revision)
+    await recordLocalLink(f.profile, f.root, 'T-0001', { provider: 'agent-host', ...target }, target.owner)
+    const connection = new AgentHostConnection(target, f.profile, (signal) => connectLocalAgentHost(native.endpoint, signal))
+    const access = new AgentHostAuthorization(f.profile, async () => target.owner)
+    const acquire = vi.spyOn(access, 'acquire')
+    const host = new VSCodeDeviceHost(f.profile, { available: () => true, encrypt: (text) => Buffer.from(text), decrypt: (bytes) => bytes.toString() })
+    host.setAgentHostAccess({ connection: async () => connection } as unknown as AgentHostRegistry,
+      (root) => locallyLinkedAgentHostSessions(f.profile, root, target.owner), undefined, (root) => access.acquire(root))
+    const pair = await host.pair({ clientId: randomUUID(), machineName: 'Heartbeat client', username: 'Tester' }, newSshKeyPair().publicKey)
+    await host.setWorkspace(pair.id, f.root, true)
+    const port = await host.start()
+    const abort = new AbortController()
+    const client = new AhpClient(await connectAgentHostWebSocket(
+      `ws://127.0.0.1:${port}/device/agent-host?target=${Buffer.from(JSON.stringify(target)).toString('base64url')}`,
+      { headers: { Host: `127.0.0.1:${port}`, Authorization: `Bearer ${pair.token}` } }, abort.signal), { requestTimeoutMs: 1000 })
+    client.connect()
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    let background: Promise<unknown> | undefined
+    try {
+      await client.initialize({ clientId: randomUUID(), protocolVersions: ['0.9.0', '1.0.0'] })
+      const lease = await access.acquire(f.root)
+      const authorize = f.trust.authorize
+      f.trust.authorize = async (record) => { entered(); await gate; return authorize(record) }
+      background = f.store.status()
+      await started
+      await writeFile(join(f.root, 'unrelated-code.txt'), 'A code edit does not change session access.')
+      await expect.poll(() => lease.current()).toBe(false)
+      f.read.mockClear()
+      acquire.mockClear()
+      const begin = performance.now()
+      await client.ping()
+      const refreshed = performance.now() - begin
+      expect(refreshed).toBeLessThan(1000)
+      expect(acquire).toHaveBeenCalledOnce()
+      acquire.mockClear()
+      const warm = performance.now()
+      for (let index = 0; index < 20; index++) await client.ping()
+      const elapsedMs = performance.now() - warm
+      expect(elapsedMs).toBeLessThan(250)
+      expect(acquire).not.toHaveBeenCalled()
+      expect(f.read).not.toHaveBeenCalled()
+      expect(native.dispatches).toHaveLength(0)
+      console.log(JSON.stringify({ refreshedGatewayPingMs: Math.round(refreshed), warmGatewayPings: 20, elapsedMs: Math.round(elapsedMs), extraFullReads: f.read.mock.calls.length }))
+      await recordLocalLink(f.profile, f.root, 'T-0001', undefined, target.owner)
+      await expect(client.ping()).rejects.toThrow()
+      expect(native.dispatches).toHaveLength(0)
+    } finally {
+      release()
+      await background
+      abort.abort()
+      await client.shutdown()
+      await host.close()
+      access.close()
+      await connection.close()
+      await native.close()
     }
   }, 20000)
 })
