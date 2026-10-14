@@ -5,6 +5,13 @@ import type { RemoteVSCodeBridge } from '../shared/remoteVSCode'
 import type { AgentHostBridge, AgentHostView } from '../shared/agentHost'
 
 const bridge: DesktopBridge = {
+  links: {
+    open: (request) => ipcRenderer.invoke('desktop:chat-link-open', request),
+    status: (request) => ipcRenderer.invoke('desktop:chat-link-status', request),
+    preview: (request) => ipcRenderer.invoke('desktop:chat-link-preview', request),
+    save: (request) => ipcRenderer.invoke('desktop:chat-link-save', request),
+    cancel: (request) => ipcRenderer.invoke('desktop:chat-link-cancel', request),
+  },
   getInfo: async () => {
     const info: Omit<DesktopInfo, 'security'> = await ipcRenderer.invoke('desktop:info')
     return { ...info, security: { contextIsolated: process.contextIsolated, sandboxed: process.sandboxed } }

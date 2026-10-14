@@ -9,6 +9,7 @@ import type { WorkspaceSnapshot } from '../../shared/workspace'
 import { CHAT_IMAGE_TYPES } from '../../shared/chatAttachments'
 import type { ChatImageAttachment } from '../../shared/chatAttachments'
 import { ChatMarkdown } from './ChatMarkdown'
+import { ChatLinkTargetContext } from '../chat/chatLinkContext'
 import { ChatImagePicker, ChatImages, ChatImageStatus } from './ChatImages'
 import { useChatImageInput } from '../chat/useChatImageInput'
 import { readModelPreference, saveModelPreference } from '../chat/modelPreferences'
@@ -396,7 +397,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       <div className="ahp-chat-secondary-actions">{chatActions}</div>
     </div>
   </HeaderTag>
-  return <aside className="chat-panel ahp-panel" aria-label={workspace ? 'Agent Host task creation chat' : 'Agent Host task chat'}>
+  return <ChatLinkTargetContext.Provider value={{ target, active }}><aside className="chat-panel ahp-panel" aria-label={workspace ? 'Agent Host task creation chat' : 'Agent Host task chat'}>
     {headerTarget ? active && createPortal(header, headerTarget) : header}
     {detailsOpen && <Dialog title="Chat details" className="ahp-chat-details" onClose={() => setDetailsKey(undefined)}>
       <dl>
@@ -452,5 +453,5 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
         </div>
       </div>
     </form>
-  </aside>
+  </aside></ChatLinkTargetContext.Provider>
 }

@@ -6,6 +6,22 @@ uses the running desktop's file-transfer service, not a separate SSH account,
 public file URL, or model/chat send command. Nothing is transferred on MCP
 startup, initialization, or tool discovery.
 
+## Clickable files in chat
+
+The desktop also reuses this service when the user clicks a chat's file link.
+That UI path does not require installing the MCP stdio server. It resolves the
+file's execution-owner identity to the existing pairing, requests one explicit
+file and keeps the received snapshot in the same private inbox. Absolute paths
+and source-session-relative links do not use the receiver's path as a fallback.
+
+The UI previews escaped UTF-8 text or validated raster images and can save a
+copy through a native destination dialog. It never automatically executes file
+contents or sends them to a chat/model. Trust, protected-path checks, transfer
+budgets, byte/hash validation and expiry are unchanged. The source session's
+current chat authorization is checked in addition to file-device access.
+See [clickable chat links](remote-vscode.md#clickable-chat-links) for supported
+addresses, preview limits and recovery behavior.
+
 ## Install in the actual MCP Host/client
 
 The execution Host/client must support MCP stdio servers, and its operator must

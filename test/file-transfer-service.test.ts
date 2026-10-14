@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { FileTransferService } from '../src/main/fileTransferService'
 import { FileTransferBudget } from '../src/main/fileTransferBudget'
 import type { VSCodeDeviceClient } from '../src/main/vscodeDeviceClient'
-import { exportRequestSchema, FILE_TRANSFER_LIMITS, FileTransferError } from '../src/shared/fileTransfer'
+import { exportRequestSchema, FILE_TRANSFER_LIMITS, FileTransferError, transferFailure } from '../src/shared/fileTransfer'
 import type { ExportManifest, ExportRequest } from '../src/shared/fileTransfer'
 
 const cleanups: (() => Promise<void>)[] = []
@@ -44,6 +44,31 @@ async function fixture(data = Buffer.from('some log data')) {
 }
 
 describe('file transfer inbox', () => {
+  it('drains trusted file readers during shutdown and interrupts their access checkpoints', async () => {
+    const setup = await fixture()
+    const start = await setup.api.fetch(setup.request)
+    await expect.poll(async () => (await setup.api.status(start.transferId)).state).toBe('delivered')
+    const fileId = (await setup.api.status(start.transferId)).files[0].fileId
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const ready = new Promise<void>((resolve) => { entered = resolve })
+    const reader = setup.service.withDeliveredFile(setup.workspace, start.transferId, fileId, async (_file, _handle, check) => {
+      entered()
+      await gate
+      await check()
+    })
+    await ready
+    let closed = false
+    const closing = setup.service.close().then(() => { closed = true })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(closed).toBe(false)
+    release()
+    await expect(reader.catch(transferFailure)).resolves.toMatchObject({ code: 'UNAVAILABLE' })
+    await closing
+    expect(closed).toBe(true)
+  })
+
   it('delivers and hashes a multichunk file, deduplicates request IDs and pages UTF-8 without splitting a character', async () => {
     const text = 'abcd\u4f60\u597d'.repeat(70_000)
     const setup = await fixture(Buffer.from(text))

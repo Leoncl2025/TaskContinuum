@@ -107,6 +107,47 @@ Active-only preferences from the previous version retain their active task and
 session. The complete open-tab list is saved locally by this version; old records
 cannot reconstruct tabs that were never recorded.
 
+### Clickable chat links
+
+HTTP(S) links open in the receiver's default browser on explicit click; normal
+browser sign-in applies. Task-document web links use the same behavior. No link
+or Markdown image starts a request merely because a message renders. HTML,
+`javascript:`, `data:`, `command:` and unsupported application schemes remain
+inert. Markdown images are explicit preview links rather than automatic downloads.
+
+File links in chat are owned by the exact original chat target, not by an alias,
+hostname guess or whichever device has the same path. The receiver revalidates
+that target's workspace binding and resolves the original owner to an existing
+enabled pairing. Remote files use the existing authenticated transfer service,
+limits, checksums and private inbox. Local-owner file links use the same snapshot
+and protected-file rules on this computer. No MCP installation, native session
+creation, prompt, extra sharing permission or new public endpoint is needed.
+
+Supported addresses include absolute Windows/POSIX paths, local `file:` URLs and
+source locations such as `file:///C:/Work/code.ts:42` or `/home/owner/code.ts#L42`.
+Percent-encoded names are decoded without passing line numbers as filenames.
+Relative links use the original session's single verified file working directory,
+including through the paired AHP gateway. If that directory is unavailable or
+ambiguous, use an absolute link; the receiving workspace is never substituted.
+Network share file URLs are not supported by the existing transfer source policy.
+Task-document file references without an original chat owner cannot choose a
+remote device and report that missing context instead of guessing.
+
+Clicking a file shows transfer progress and then a read-only preview. UTF-8 text
+uses bounded pages and previews at most 256 KiB; PNG/JPEG/GIF/WebP images up to
+5 MiB are validated before display. HTML and source code remain escaped text,
+not executable content. Binary, oversized or otherwise unsupported previews
+report a reason and offer **Save local copy** after delivery. Save uses the native
+destination picker, preserves the original file and verifies the received bytes.
+It never launches executables or scripts. Closing a transferring dialog cancels
+the operation. Interrupted transfers are not automatically resumed; clicking the
+link again explicitly requests a new snapshot.
+
+File reads and saving still require the same paired-device and current chat
+access. Source app-private storage, credentials, symlinks and other protected
+sources stay denied. File access errors are displayed without navigating the
+desktop away from its conversation; streaming and unsent drafts are unaffected.
+
 ### Last-known chat titles
 
 The Current tree and chat header retain titles learned from discovery and live

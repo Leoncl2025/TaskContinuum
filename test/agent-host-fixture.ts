@@ -117,6 +117,7 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
     return () => { terminalDelays.delete(resource); release() }
   }
   return { endpoint, hostId, sessionId, chatId, dispatches, initializations, action, snapshot, addTerminal, historyTerminals, terminalAction,
+    setWorkingDirectories: (directories: string[]) => { session.workingDirectories = [...directories] },
     historyText: (count: number, text: string) => {
       chat = { ...chat, turns: Array.from({ length: count }, (_, index) => ({
         id: `history-${index}`, state: 'complete', message: { text: `Question ${index}`, origin: { kind: MessageKind.User } },

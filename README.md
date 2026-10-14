@@ -11,6 +11,8 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
 - Searchable task trees, task tabs, and read-only planning documents.
 - Task creation through the UI, a local agent, or CLI.
 - Streaming Markdown, model options, image attachments, and terminal output.
+- Clickable web links and source-owned file links, with authenticated remote
+  transfer, safe text/image previews and local-copy saving.
 - Collapsible tool activity keeps answers readable without losing execution details.
 - Compact layouts, resizable panels, dark/light themes, and cached chat titles.
 - Native full screen: press **F11** or **Shift+Alt+Enter**, or use the titlebar's
@@ -71,6 +73,19 @@ selection; other tabs can be remembered once opened in this version.
 Only tab and selection identifiers are saved, not drafts, messages, credentials or
 permissions. Storage failures are reported while current navigation remains
 usable.
+
+### Clickable links
+
+HTTP(S) links in chats and task documents open in your default browser only when
+clicked. File links in a chat use that chat's original execution owner: remote
+files are fetched through the existing paired-device file-transfer service, not
+looked up on the receiving machine. Absolute paths and `file:` URLs are supported;
+relative links use the original chat's single verified working directory.
+
+Received text and supported images open in a read-only preview with progress,
+cancel and **Save local copy**. Files and scripts are never executed automatically.
+Private application files remain blocked, and pairing and current chat access
+are revalidated. See [file-link behavior](docs/remote-vscode.md#clickable-chat-links).
 
 Consecutive routine tool calls appear in one collapsed activity row with a count
 and a live running summary. Expand it to inspect the original calls and their

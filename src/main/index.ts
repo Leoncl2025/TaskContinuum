@@ -9,6 +9,7 @@ import { registerRemoteVSCodeBridge } from './remoteVSCodeBridge'
 import { registerWindowZoom, WindowZoomPreferences } from './windowZoom'
 import { registerWindowFullscreen, toggleWindowFullscreen } from './windowFullscreen'
 import { registerAgentHostBridge } from './agentHostBridge'
+import { registerChatLinkBridge } from './chatLinkBridge'
 import { startAgentHostDiagnostics, stopAgentHostDiagnostics } from './agentHostDiagnostics'
 
 app.setName('Task Continuum')
@@ -153,6 +154,7 @@ void app.whenReady().then(async () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('remote-vscode:git-bindings-changed')
   })
   await remoteVSCode.filesReady
+  registerChatLinkBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.chatLinks)
   agentHost = registerAgentHostBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.agentHosts)
   await createWindow()
   app.on('activate', () => {

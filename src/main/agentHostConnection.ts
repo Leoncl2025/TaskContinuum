@@ -98,7 +98,8 @@ export class AgentHostConnection {
     if (resource === this.target.sessionId) {
       const state = snapshot.state as SessionState
       return { ...snapshot, state: { provider: state.provider, title: state.title, lifecycle: state.lifecycle, status: state.status,
-        activeClients: [], chats: structuredClone(state.chats.filter((chat) => chat.resource === this.target.chatId)), defaultChat: this.target.chatId } }
+        activeClients: [], chats: structuredClone(state.chats.filter((chat) => chat.resource === this.target.chatId)), defaultChat: this.target.chatId,
+        ...(state.workingDirectories ? { workingDirectories: structuredClone(state.workingDirectories) } : {}) } }
     }
     return structuredClone(snapshot)
   }
