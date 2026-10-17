@@ -44,7 +44,7 @@ it('streams the exact AHP chat through paired SSH with immutable bindings and re
     const pair = await host.pair(participant, key.publicKey)
     await host.setWorkspace(pair.id, await canonicalPolicyRoot(tasksB), true)
     const port = await host.start()
-    ssh.allow(pair.id, key.publicKey, port, pair.expiresAt, true)
+    ssh.allow(pair.id, key.publicKey, port, pair.expiresAt)
     await client.import(tasksA, deviceInvitationSchema.parse({ schemaVersion: 2, provider: 'vscode-copilot-device', id: pair.id, ownerId: await host.ownerId(), ownerClientId: owner.clientId, machineName: hostname(), participant, token: pair.token, expiresAt: pair.expiresAt, port,
       devTunnel: { kind: 'dev-tunnel', tunnelId: `taskcontinuum-${'f'.repeat(32)}.jpe1`, sshPort: ssh.port, hostPublicKey: ssh.publicKey, clientPublicKey: key.publicKey } }), true)
     const linked = await updateRepositoryAgentHostLink(tasksB, 'T-0001', target, linksB.snapshot.revision)

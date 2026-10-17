@@ -25,6 +25,53 @@ const cleanup: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const action of cleanup.splice(0).reverse()) await action() })
 const timeout = () => AbortSignal.timeout(4000)
 
+it('uses durable key-bound metadata access with fresh signed short-lived requests and immediate revocation', async () => {
+  const f = await fixture()
+  let allowed = true
+  f.control.revoke(f.grant.id)
+  f.host.revoke(f.grant.id)
+  const durable = { id: f.grant.id }
+  f.control.allow(durable, f.senderId, f.key.publicKey, () => allowed)
+  f.host.allowTrust(durable.id, f.key.publicKey, f.port, () => allowed)
+  const options = f.options
+  const base = Date.now()
+  for (const days of [0, 2, 40]) {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(base + days * 86400000)
+    try { expect(await callPeer(options, 'link', {}, timeout())).toEqual(f.invitation) }
+    finally { vi.useRealTimers() }
+  }
+  const request = createPeerRequest(options, 'link', {})
+  expect(Date.parse(request.expiresAt) - Date.parse(request.timestamp)).toBeLessThanOrEqual(60000)
+  const tooLong = resign(request, { expiresAt: new Date(Date.now() + 86400000).toISOString() }, f.key)
+  expect((await postPeerRequest(f.port, tooLong, timeout())).status).toBe(403)
+  allowed = false
+  await expect(callPeer(options, 'link', {}, timeout())).rejects.toThrow()
+  expect(() => f.control.allow({ id: randomUUID() }, f.senderId, f.key.publicKey, () => false)).toThrow()
+  expect(() => f.host.allowTrust(randomUUID(), f.key.publicKey, f.port, () => false)).toThrow()
+})
+
+it('does not release an in-flight durable response after trust is revoked', async () => {
+  const f = await fixture()
+  let allowed = true
+  const grant = { id: f.grant.id }
+  f.control.allow(grant, f.senderId, f.key.publicKey, () => allowed)
+  f.host.allowTrust(grant.id, f.key.publicKey, f.port, () => allowed)
+  let entered!: () => void, release!: () => void
+  const started = new Promise<void>((resolve) => { entered = resolve })
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  f.onLink.mockImplementation(async () => { entered(); await gate; return f.invitation })
+  const result = callPeer(f.options, 'link', {}, timeout()).then(
+    () => false, () => true)
+  try {
+    await started
+    allowed = false
+    f.control.revoke(grant.id)
+    release()
+    expect(await result).toBe(true)
+  } finally { release(); await result }
+})
+
 async function fixture(overrides: Partial<PeerControlServerOptions> = {}) {
   const hostKey = newSshKeyPair()
   const key = newSshKeyPair()
@@ -34,7 +81,7 @@ async function fixture(overrides: Partial<PeerControlServerOptions> = {}) {
   const grant = { id: randomUUID(), expiresAt: new Date(Date.now() + 600000).toISOString() }
   const applied: RemoteRecord[] = []
   const authorize = vi.fn((id: string, publicKey: string) => id === senderId && publicKey === key.publicKey)
-  const onLink = vi.fn(() => invitation)
+  const onLink = vi.fn<PeerControlServerOptions['onLink']>(() => invitation)
   const onBinding = vi.fn<PeerControlServerOptions['onBinding']>(async (id, payload) => {
     try {
       const trust = {
@@ -55,8 +102,8 @@ async function fixture(overrides: Partial<PeerControlServerOptions> = {}) {
   const { port } = await control.start()
   const host = await startSessionSshHost(hostKey)
   cleanup.push(() => host.close())
-  control.allow(grant, senderId, key.publicKey)
-  host.allow(grant.id, key.publicKey, port, grant.expiresAt, true)
+  control.allow(grant, senderId, key.publicKey, () => true)
+  host.allowTrust(grant.id, key.publicKey, port, () => true)
   const route = { kind: 'dev-tunnel' as const, tunnelId: 'taskcontinuum-test.jpe1', sshPort: host.port, hostPublicKey: hostKey.publicKey, clientPublicKey: key.publicKey }
   const invitation = deviceInvitationSchema.parse({
     schemaVersion: 2, provider: 'vscode-copilot-device', id: randomUUID(), ownerId: localId, ownerClientId: randomUUID(),
@@ -69,7 +116,7 @@ async function fixture(overrides: Partial<PeerControlServerOptions> = {}) {
   const options: CallPeerOptions = {
     workspaceId, local: { deviceId: senderId, keyPair: key },
     recipient: { deviceId: localId, clientPublicKey: hostKey.publicKey, hostPublicKey: hostKey.publicKey },
-    grantId: grant.id, expiresAt: grant.expiresAt, route, targetPort: port, transport: { connect },
+    grantId: grant.id, route, targetPort: port, transport: { connect },
   }
   const signing = ssh2.utils.parseKey(key.privateKey)
   if (signing instanceof Error || Array.isArray(signing)) throw new Error('Invalid fixture key')
@@ -206,15 +253,14 @@ describe('authenticated peer metadata transport', () => {
     expect(peer.onLink).not.toHaveBeenCalled()
   })
 
-  it.each(['workspace', 'recipient', 'recipient-key', 'sender', 'sender-key', 'expiry'] as const)('rejects a signed request with a mismatched %s', async (field) => {
+  it.each(['workspace', 'recipient', 'recipient-key', 'sender', 'sender-key'] as const)('rejects a signed request with a mismatched %s', async (field) => {
     const peer = await fixture()
     const route = await peer.bridge()
     const request = createPeerRequest(peer.options, 'link', {})
     const changes: Partial<PeerControlRequestBody> = field === 'workspace' ? { workspaceId: randomUUID() }
       : field === 'recipient' ? { recipientId: randomUUID() }
         : field === 'recipient-key' ? { recipientKeyId: sshFingerprint(newSshKeyPair().publicKey) }
-          : field === 'sender' ? { senderId: randomUUID() }
-            : field === 'expiry' ? { expiresAt: new Date(Date.now() + 30000).toISOString() } : {}
+          : field === 'sender' ? { senderId: randomUUID() } : {}
     const changed = resign(request, changes, peer.key)
     if (field === 'sender-key') changed.senderKeyId = sshFingerprint(newSshKeyPair().publicKey)
     const code = field === 'workspace' ? 'wrong-workspace' : field === 'recipient' || field === 'recipient-key' ? 'wrong-recipient' : 'invalid-grant'
@@ -238,7 +284,7 @@ describe('authenticated peer metadata transport', () => {
     expect(peer.onLink).toHaveBeenCalledTimes(1)
   })
 
-  it('rejects stale/future signatures and expired grants, and never refreshes expired authorization', async () => {
+  it('rejects stale/future signatures and expired requests without extending their signed lifetime', async () => {
     let now = Date.now()
     const peer = await fixture({ now: () => now })
     const request = createPeerRequest(peer.options, 'link', {})
@@ -247,10 +293,10 @@ describe('authenticated peer metadata transport', () => {
         status: 408, body: { error: { code: 'stale-request' } },
       })
     }
-    now = Date.parse(peer.grant.expiresAt) + 1
-    expect(await postPeerRequest(peer.port, request, timeout())).toMatchObject({ status: 403, body: { error: { code: 'expired-grant' } } })
-    expect(() => peer.control.allow(peer.grant, peer.senderId, peer.key.publicKey)).toThrow('expired')
-    await expect(callPeer({ ...peer.options, expiresAt: new Date(Date.now() - 1).toISOString() }, 'link', {}, timeout())).rejects.toMatchObject({ code: 'expired-grant' })
+    const expiry = Date.parse(request.timestamp) + 1000
+    now = expiry + 1
+    expect(await postPeerRequest(peer.port, resign(request, { expiresAt: new Date(expiry).toISOString() }, peer.key), timeout())).toMatchObject({ status: 403, body: { error: { code: 'expired-request' } } })
+    expect(() => peer.control.allow(peer.grant, peer.senderId, peer.key.publicKey, () => false)).toThrow(new PeerControlError('invalid-grant'))
     expect(peer.connect).not.toHaveBeenCalled()
     expect(peer.onLink).not.toHaveBeenCalled()
   })
@@ -281,7 +327,7 @@ describe('authenticated peer metadata transport', () => {
     expect(await postPeerRequest(peer.port, createPeerRequest(peer.options, 'link', {}), timeout())).toMatchObject({ status: 429, body: { error: { code: 'busy' } } })
     expect(await postPeerRequest(peer.port, first, timeout())).toMatchObject({ status: 409 })
     now += PEER_CONTROL_REPLAY_TTL_MS + 1
-    const fresh = resign(createPeerRequest(peer.options, 'link', {}), { timestamp: new Date(now).toISOString() }, peer.key)
+    const fresh = resign(createPeerRequest(peer.options, 'link', {}), { timestamp: new Date(now).toISOString(), expiresAt: new Date(now + 60000).toISOString() }, peer.key)
     expect(await postPeerRequest(peer.port, fresh, timeout())).toMatchObject({ status: 200 })
     expect(await postPeerRequest(peer.port, first, timeout())).toMatchObject({ status: 408 })
   })
@@ -454,7 +500,7 @@ describe('authenticated peer metadata transport', () => {
     await peer.control.close()
     await expect(peer.control.start()).rejects.toMatchObject({ code: 'closed' })
     await expect(postPeerRequest(peer.port, createPeerRequest(peer.options, 'link', {}), timeout())).rejects.toThrow()
-    expect(() => peer.control.allow(peer.grant, peer.senderId, peer.key.publicKey)).toThrow('closed')
+    expect(() => peer.control.allow(peer.grant, peer.senderId, peer.key.publicKey, () => true)).toThrow('closed')
     expect(peer.onLink).not.toHaveBeenCalled()
   })
 
@@ -480,7 +526,7 @@ describe('authenticated peer metadata transport', () => {
     })
     cleanup.push(() => restarted.close())
     expect(await restarted.start()).toEqual({ port: savedPort })
-    restarted.allow(peer.grant, peer.senderId, peer.key.publicKey)
+    restarted.allow(peer.grant, peer.senderId, peer.key.publicKey, () => true)
     expect(await callPeer(options, 'binding.changed', peer.notification, timeout())).toMatchObject({
       operationId: peer.notification.operation.operationId, result: 'provisional',
     })
@@ -561,13 +607,13 @@ describe('authenticated peer metadata transport', () => {
     expect(endpoint).toEqual({ tunnelId: 'taskcontinuum-control.jpe1', sshPort, hostPublicKey: (await hostKeys.get('host')).publicKey })
     endpoint.tunnelId = 'modified-copy.jpe1'
     expect(manager.publicEndpoint()!.tunnelId).toBe('taskcontinuum-control.jpe1')
-    const grant = { id: randomUUID(), expiresAt: new Date(Date.now() + 60000).toISOString() }
-    control.allow(grant, clientId, clientPair.publicKey)
-    const route = manager.authorize(grant, clientPair.publicKey, port, true)
+    const grant = { id: randomUUID() }
+    control.allow(grant, clientId, clientPair.publicKey, () => true)
+    const route = manager.authorizeTrust(grant.id, clientPair.publicKey, port, () => true)
     expect(await callPeer({
       workspaceId, local: { deviceId: clientId, keyPair: clientPair },
       recipient: { deviceId: hostId, clientPublicKey: hostPair.publicKey, hostPublicKey: route.hostPublicKey },
-      route, grantId: grant.id, expiresAt: grant.expiresAt, targetPort: port, transport: client,
+      route, grantId: grant.id, targetPort: port, transport: client,
     }, 'link', {}, timeout())).toEqual({ invitation: 'private-live-response' })
     online = false
     expect(manager.publicEndpoint()).toBeUndefined()

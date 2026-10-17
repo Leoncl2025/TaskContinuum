@@ -140,10 +140,17 @@ export class ManagedDevTunnels {
     return { tunnelId: this.publication.tunnelId, sshPort: this.host.port, hostPublicKey: this.host.publicKey }
   }
 
-  authorize(grant: { id: string; expiresAt: string }, clientPublicKey: string, bridgePort: number, device = false): DevTunnelRoute {
+  authorize(grant: { id: string; expiresAt: string }, clientPublicKey: string, bridgePort: number): DevTunnelRoute {
     if (!this.host || !this.publication || !this.cloudHost?.connected()) throw new Error('Publish this machine before creating a Dev Tunnel invitation.')
     const route = devTunnelRouteSchema.parse({ kind: 'dev-tunnel', tunnelId: this.publication.tunnelId, sshPort: this.host.port, hostPublicKey: this.host.publicKey, clientPublicKey })
-    this.host.allow(grant.id, clientPublicKey, bridgePort, grant.expiresAt, device)
+    this.host.allow(grant.id, clientPublicKey, bridgePort, grant.expiresAt)
+    return route
+  }
+
+  authorizeTrust(grantId: string, clientPublicKey: string, bridgePort: number, current: () => boolean): DevTunnelRoute {
+    if (!this.host || !this.publication || !this.cloudHost?.connected()) throw new Error('Publish this machine before authorizing metadata trust.')
+    const route = devTunnelRouteSchema.parse({ kind: 'dev-tunnel', tunnelId: this.publication.tunnelId, sshPort: this.host.port, hostPublicKey: this.host.publicKey, clientPublicKey })
+    this.host.allowTrust(grantId, clientPublicKey, bridgePort, current)
     return route
   }
 

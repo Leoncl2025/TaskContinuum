@@ -8,7 +8,7 @@ import type { DeviceRecord, RemoteRecord } from '../src/shared/remoteConfig'
 import { WorkspaceSyncService } from '../src/main/remoteConfig/service'
 import type { WorkspaceSyncOptions } from '../src/main/remoteConfig/service'
 import { LocalEnrollments } from '../src/main/remoteConfig/enrollment'
-import { appendRecord, createRecord } from '../src/main/remoteConfig/records'
+import { appendRecord, createRecord, readRecords } from '../src/main/remoteConfig/records'
 import type { RecordInput } from '../src/main/remoteConfig/records'
 import { canonicalPolicyRoot } from '../src/main/linkedSessionPolicy'
 import { newSshKeyPair } from '../src/main/devTunnel/sessionSsh'
@@ -81,7 +81,7 @@ async function fixture(known = false, unrelatedWorkspace = false, discovered = t
     grants.push(await record({ kind: 'invitation', payload: {
       action: 'grant', capability: 'ah-link', issuerId: member.identity.clientId, recipientId: a.identity.clientId,
       grantId: randomUUID(), issuerIdentityRef: identities[index].operationId, recipientIdentityRef: identities[0].operationId,
-      issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 3600000).toISOString(),
+      issuedAt: new Date().toISOString(), lifetime: 'until-revoked',
       routeRef: { identityRef: identities[index].operationId, routeIndex: 0 },
     } }, member))
   }
@@ -136,6 +136,7 @@ async function fixture(known = false, unrelatedWorkspace = false, discovered = t
     host: { pair: vi.fn(async () => { throw new Error('Unexpected local pairing.') }), list: async () => [], start: async () => 32001,
       ownerId: async () => a.identity.clientId, revoke: async () => {}, setWorkspace: async () => {} },
     tunnels: { publish, publicEndpoint: () => ({ ...a.route, hostPublicKey: a.host.publicKey }),
+      authorizeTrust: (_grant, publicKey) => ({ ...a.route, hostPublicKey: a.host.publicKey, clientPublicKey: publicKey }),
       authorize: (_grant, publicKey) => ({ ...a.route, hostPublicKey: a.host.publicKey, clientPublicKey: publicKey }), revoke: () => {}, connect: vi.fn(async () => ({ port: 33001, close: vi.fn() })) },
   }
   const service = new WorkspaceSyncService(options)
@@ -169,6 +170,24 @@ it.each([false, true])('opens only B with a %s known invitation while global res
   if (!known) expect(f.link.mock.calls[0][0].recipient.deviceId).toBe(f.target.owner.clientId)
   expect(f.socket.send).not.toHaveBeenCalled()
   expect(await f.devices.ownerConnected(f.root, f.target.owner.clientId)).toBe(true)
+})
+
+it('renews an expired private credential through current trust without changing public records or pairing identity', fixtureOptions, async () => {
+  const f = await fixture(true)
+  const before = await readRecords(f.recordsRoot)
+  const expired = f.invitations[0]
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(Date.parse(expired.expiresAt) + 1)
+  f.invitations[0] = { ...expired, expiresAt: new Date(Date.now() + 30 * 86400000).toISOString(), token: randomBytes(32).toString('base64url') }
+  expect(await f.devices.reconnectOwner(f.root, f.target.owner, new AbortController().signal)).toBe(false)
+  expect(await f.devices.agentHostTransport(f.root, f.target, new AbortController().signal)).toBe(f.socket)
+  expect(f.link).toHaveBeenCalledOnce()
+  expect(f.requests.mock.calls[0][2]).toBe(f.invitations[0].token)
+  expect(f.requests.mock.calls[0][2]).not.toBe(expired.token)
+  expect(f.invitations[0].id).toBe(expired.id)
+  expect(await readRecords(f.recordsRoot)).toEqual(before)
+  expect(f.publish).not.toHaveBeenCalled()
+  expect(f.socket.send).not.toHaveBeenCalled()
 })
 
 it('resolves B as soon as its identity is verified while C reconciliation and Git never finish', fixtureOptions, async () => {
@@ -233,23 +252,25 @@ it.each(['owner', 'machine', 'host-pin', 'recipient', 'client-key'] as const)('r
   expect(f.websocket).not.toHaveBeenCalled()
 })
 
-it.each(['machine', 'disabled', 'revoked', 'expired-grant', 'removed-owner'] as const)('does not accept a %s target even with a saved private invitation', fixtureOptions, async (mode) => {
+it.each(['machine', 'disabled', 'revoked', 'revoked-grant', 'removed-owner'] as const)('does not accept a %s target even with a saved private invitation', fixtureOptions, async (mode) => {
   const f = await fixture(true)
   let owner = f.target.owner
   if (mode === 'machine') owner = { ...owner, machineName: 'Different-Machine' }
   if (mode === 'disabled') await f.service.disable(f.root)
   if (mode === 'revoked') await f.service.revokeDevice(f.root, owner.clientId)
   if (mode === 'removed-owner') await appendRecord(f.recordsRoot, await f.record({ kind: 'device', parents: [f.identities[1].operationId], payload: { action: 'remove', deviceId: owner.clientId } }))
-  if (mode === 'expired-grant') {
+  if (mode === 'revoked-grant') {
     f.holdPublication()
     const grant = f.grants[0]
     if (grant.kind !== 'invitation' || grant.payload.action !== 'grant') throw new Error('Fixture grant unavailable.')
     await appendRecord(f.recordsRoot, await f.record({ kind: 'invitation', parents: [grant.operationId],
-      payload: { ...grant.payload, grantId: randomUUID(), issuedAt: new Date(Date.now() - 7200000).toISOString(), expiresAt: new Date(Date.now() - 3600000).toISOString() } }))
+      payload: { action: 'revoke', issuerId: grant.payload.issuerId, recipientId: grant.payload.recipientId,
+        grantId: grant.payload.grantId, issuerIdentityRef: grant.payload.issuerIdentityRef,
+        recipientIdentityRef: grant.payload.recipientIdentityRef, revokes: grant.operationId } }))
   }
   const abort = new AbortController()
   const pending = f.service.whenOwnerConnected(f.root, owner, abort.signal)
-  if (mode === 'expired-grant') {
+  if (mode === 'revoked-grant') {
     const rejected = expect(pending).rejects.toThrow()
     await vi.waitFor(() => expect(f.publish).toHaveBeenCalled(), { timeout: 5000 })
     abort.abort()

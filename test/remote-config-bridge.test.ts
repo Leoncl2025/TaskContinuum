@@ -41,6 +41,11 @@ function setup() {
 }
 
 describe('Git synchronization IPC boundary', () => {
+  it('does not expose a legacy trust migration or compatibility switch', () => {
+    setup()
+    expect(mocks.handlers.has('remote-vscode:git-durable-trust')).toBe(false)
+  })
+
   it('requires local confirmation before enabling publication and preserves the selected root', async () => {
     const { service, invoke, currentRoot, requireWindow } = setup()
     expect(await invoke('enable')).toBe(false)

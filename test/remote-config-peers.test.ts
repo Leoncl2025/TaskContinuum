@@ -6,7 +6,7 @@ function peer(id: string): PublicPeer {
   return { deviceId: id, machineName: `Machine-${id}`, username: 'owner', clientPublicKey: 'validated', hostPublicKey: 'validated', identityRevision: `identity-${id}`, route: { tunnelId: 'owner.eus', sshPort: 10000, controlPort: 10001 } }
 }
 function grant(id: string): PublicPeerGrant {
-  return { operationId: `grant-${id}`, grantId: `pair-${id}`, issuerId: id, recipientId: 'A', expiresAt: '2099-01-01T00:00:00Z', issuerIdentityRef: `identity-${id}`, recipientIdentityRef: 'identity-A' }
+  return { operationId: `grant-${id}`, grantId: `pair-${id}`, issuerId: id, recipientId: 'A', issuerIdentityRef: `identity-${id}`, recipientIdentityRef: 'identity-A' }
 }
 
 describe('reciprocal peer orchestration', () => {

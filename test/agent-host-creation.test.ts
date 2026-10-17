@@ -298,7 +298,7 @@ describe('worker-authoritative native Agent Host creation', () => {
     const worker = await fixture()
     const ssh = await startSessionSshHost(creationFixtureKey())
     const signal = new AbortController()
-    ssh.allow(worker.pair.id, worker.key.publicKey, worker.port, worker.pair.expiresAt, true)
+    ssh.allow(worker.pair.id, worker.key.publicKey, worker.port, worker.pair.expiresAt)
     const bridge = await openSessionSshBridge(createConnection(ssh.port, '127.0.0.1'), { key: worker.key, hostPublicKey: ssh.publicKey, grantId: worker.pair.id, targetPort: worker.port, signal: signal.signal })
     let raw: AhpClient | undefined
     try {

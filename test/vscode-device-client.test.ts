@@ -37,7 +37,7 @@ async function fixture(recoverOwner?: ConstructorParameters<typeof VSCodeDeviceC
   const port = await host.start()
   const ssh = await startSessionSshHost(newSshKeyPair())
   resources.ssh = ssh
-  ssh.allow(pair.id, clientKey.publicKey, port, pair.expiresAt, true)
+  ssh.allow(pair.id, clientKey.publicKey, port, pair.expiresAt)
   const invitation = deviceInvitationSchema.parse({ schemaVersion: 2, provider: 'vscode-copilot-device', id: pair.id, ownerId: await host.ownerId(), ownerClientId: target.owner.clientId,
     machineName: target.owner.machineName, participant, token: pair.token, expiresAt: pair.expiresAt, port,
     devTunnel: { kind: 'dev-tunnel', tunnelId: `taskcontinuum-${'a'.repeat(32)}.jpe1`, sshPort: ssh.port, hostPublicKey: ssh.publicKey, clientPublicKey: clientKey.publicKey } })
@@ -226,7 +226,8 @@ describe('paired native Agent Host SSH transport', () => {
     await expect(setup.client.agentHostTransport(mode === 'workspace' ? setup.otherWorkspace : setup.workspace, target, new AbortController().signal)).rejects.toThrow()
     expect(setup.transport).not.toHaveBeenCalled()
     expect(websocket).not.toHaveBeenCalled()
-    if (mode === 'machine' || mode === 'disabled' || mode === 'expired') expect(recover).not.toHaveBeenCalled()
+    if (mode === 'machine' || mode === 'disabled') expect(recover).not.toHaveBeenCalled()
+    if (mode === 'expired') expect(recover).toHaveBeenCalledOnce()
   })
 
   it('cancels target recovery immediately, aborts its wait and never opens a late socket', async () => {

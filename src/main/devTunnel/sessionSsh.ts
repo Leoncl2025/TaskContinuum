@@ -7,8 +7,11 @@ import ssh2 from 'ssh2'
 import type { Connection } from 'ssh2'
 import { z } from 'zod'
 import { sshPublicKeySchema } from './protocol'
+import { DEVICE_TRUST_LIMITS, PRIVATE_DEVICE_LIFETIME_MS } from '../../shared/deviceTrust'
 
-type Access = { id: string; key: Buffer; port: number; expires: number }
+type Access = { id: string; key: Buffer; port: number } & (
+  { kind: 'metadata'; current: () => boolean } | { kind: 'device'; expires: number }
+)
 export type SshKeyPair = { publicKey: string; privateKey: string }
 const FORWARDED_SOCKET_IDLE_MS = 60_000
 
@@ -43,10 +46,11 @@ export async function startSessionSshHost(key: SshKeyPair, port = 0) {
   const grants = new Map<string, Access>()
   const connections = new Map<Connection, string | undefined>()
   const sockets = new Set<Socket>()
+  const metadataSockets = new Set<Socket>()
   let closed = false
   let closing: Promise<void> | undefined
   const server = new ssh2.Server({ hostKeys: [key.privateKey], ident: 'TaskContinuum', banner: '' }, (connection) => {
-    if (closed || connections.size >= 32) { connection.end(); return }
+    if (closed || connections.size >= DEVICE_TRUST_LIMITS.devices * 2) { connection.end(); return }
     connections.set(connection, undefined)
     const loginTimer = setTimeout(() => connection.end(), 10000)
     loginTimer.unref()
@@ -54,12 +58,15 @@ export async function startSessionSshHost(key: SshKeyPair, port = 0) {
     let access: Access | undefined
     let attempts = 0
     let expiry: ReturnType<typeof setTimeout> | undefined
-    const allowed = () => access && grants.get(access.id) === access && access.expires > Date.now()
+    const allowed = () => access && grants.get(access.id) === access
+      && (access.kind === 'metadata' ? access.current() : access.expires > Date.now())
     connection.on('error', () => {})
     connection.on('close', () => { clearTimeout(loginTimer); clearTimeout(expiry); connections.delete(connection) })
     connection.on('authentication', (context) => {
       const candidate = grants.get(context.username)
-      if (++attempts > 5 || !candidate || candidate.expires <= Date.now() || context.method !== 'publickey'
+      const peers = [...connections].filter(([peer, id]) => peer !== connection && id && grants.get(id)?.kind === candidate?.kind)
+      if (++attempts > 5 || !candidate || (candidate.kind === 'metadata' ? !candidate.current() : candidate.expires <= Date.now()) || context.method !== 'publickey'
+        || peers.length >= DEVICE_TRUST_LIMITS.devices
         || context.key.algo !== 'ssh-ed25519' || !context.key.data.equals(candidate.key)) { context.reject(['publickey']); return }
       const parsed = ssh2.utils.parseKey(`ssh-ed25519 ${candidate.key.toString('base64')}`)
       if (parsed instanceof Error || context.signature && parsed.verify(context.blob!, context.signature, context.hashAlgo) !== true) { context.reject(['publickey']); return }
@@ -68,7 +75,7 @@ export async function startSessionSshHost(key: SshKeyPair, port = 0) {
       clearTimeout(expiry)
       const checkExpiry = () => {
         if (!allowed()) { connection.end(); return }
-        expiry = setTimeout(checkExpiry, Math.min(86400000, Math.max(1, candidate.expires - Date.now())))
+        expiry = setTimeout(checkExpiry, candidate.kind === 'metadata' ? 1000 : Math.min(86400000, Math.max(1, candidate.expires - Date.now())))
         expiry.unref()
       }
       checkExpiry()
@@ -77,12 +84,16 @@ export async function startSessionSshHost(key: SshKeyPair, port = 0) {
     connection.on('request', (_accept, reject) => reject?.())
     connection.on('session', (_accept, reject) => reject())
     connection.on('tcpip', (accept, reject, info) => {
-      if (!allowed() || info.destIP !== '127.0.0.1' || info.destPort !== access!.port || sockets.size >= 64) { reject(); return }
+      const metadata = access?.kind === 'metadata'
+      const count = metadata ? metadataSockets.size : sockets.size - metadataSockets.size
+      const limit = DEVICE_TRUST_LIMITS.devices * (metadata ? 1 : 2)
+      if (!allowed() || info.destIP !== '127.0.0.1' || info.destPort !== access!.port || count >= limit) { reject(); return }
       const socket = createConnection({ host: '127.0.0.1', port: access!.port })
       sockets.add(socket)
+      if (metadata) metadataSockets.add(socket)
       // AHP heartbeats run every 15 seconds; the forward must outlive scheduling jitter.
       socket.setTimeout(FORWARDED_SOCKET_IDLE_MS, () => socket.destroy())
-      socket.once('close', () => sockets.delete(socket))
+      socket.once('close', () => { sockets.delete(socket); metadataSockets.delete(socket) })
       socket.once('error', () => { reject(); socket.destroy() })
       socket.once('connect', () => {
         if (!allowed()) { reject(); socket.destroy(); return }
@@ -96,20 +107,38 @@ export async function startSessionSshHost(key: SshKeyPair, port = 0) {
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve) })
   const address = server.address()
   if (!address || typeof address === 'string') { server.close(); throw new Error('The private SSH endpoint could not bind.') }
+  function register(access: Access): void {
+    z.uuid().parse(access.id)
+    z.number().int().min(1024).max(65535).parse(access.port)
+    if (closed) throw new Error('The private SSH endpoint is closed.')
+    for (const [id, existing] of grants) {
+      if (existing.kind === 'device' ? existing.expires <= Date.now() : !existing.current()) {
+        grants.delete(id)
+        for (const [connection, grantId] of connections) if (grantId === id) connection.end()
+      }
+    }
+    const prior = grants.get(access.id)
+    const limit = DEVICE_TRUST_LIMITS.devices * (access.kind === 'metadata' ? DEVICE_TRUST_LIMITS.workspaces : 1)
+    if ((!prior || prior.kind !== access.kind) && [...grants.values()].filter((item) => item.kind === access.kind).length >= limit) {
+      throw new Error(`The ${access.kind} SSH grant capacity is exhausted.`)
+    }
+    if (prior && prior.kind === access.kind && prior.key.equals(access.key) && prior.port === access.port) {
+      if (prior.kind === 'metadata' && access.kind === 'metadata') { prior.current = access.current; return }
+      if (prior.kind === 'device' && access.kind === 'device' && prior.expires === access.expires) return
+    }
+    for (const [connection, grantId] of connections) if (grantId === access.id) connection.end()
+    grants.set(access.id, access)
+  }
   return {
     port: address.port, publicKey: key.publicKey,
-    allow(id: string, publicKey: string, port: number, expiresAt: string, device = false): void {
-      z.uuid().parse(id)
-      z.number().int().min(1024).max(65535).parse(port)
+    allow(id: string, publicKey: string, port: number, expiresAt: string): void {
       const expires = Date.parse(z.iso.datetime().parse(expiresAt))
-      if (closed || expires <= Date.now() || expires > Date.now() + (device ? 31 * 24 : 25) * 60 * 60 * 1000) throw new Error('This SSH grant is expired or invalid.')
-      for (const [grantId, grant] of grants) if (grant.expires <= Date.now()) grants.delete(grantId)
-      if (!grants.has(id) && grants.size >= 32) throw new Error('The private SSH invitation limit is 32.')
-      const parsedKey = Buffer.from(sshPublicKeySchema.parse(publicKey).split(' ')[1], 'base64')
-      const prior = grants.get(id)
-      if (prior && prior.key.equals(parsedKey) && prior.port === port && prior.expires === expires) return
-      for (const [connection, grantId] of connections) if (grantId === id) connection.end()
-      grants.set(id, { id, key: parsedKey, port, expires })
+      if (expires <= Date.now() || expires > Date.now() + PRIVATE_DEVICE_LIFETIME_MS + 60000) throw new Error('This private SSH credential is expired or invalid.')
+      register({ id, key: Buffer.from(sshPublicKeySchema.parse(publicKey).split(' ')[1], 'base64'), port, kind: 'device', expires })
+    },
+    allowTrust(id: string, publicKey: string, port: number, current: () => boolean): void {
+      if (typeof current !== 'function' || !current()) throw new Error('This metadata SSH trust is not currently authorized.')
+      register({ id, key: Buffer.from(sshPublicKeySchema.parse(publicKey).split(' ')[1], 'base64'), port, kind: 'metadata', current })
     },
     revoke(id: string): void {
       grants.delete(id)

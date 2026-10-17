@@ -516,7 +516,7 @@ describe('effective repository binding backend and durable immutable store', () 
     const grantPayload = {
       action: 'grant' as const, issuerId: a.actor.deviceId, recipientId: b.actor.deviceId, grantId: randomUUID(),
       issuerIdentityRef: own.operationId, recipientIdentityRef: peer.operationId,
-      capability: 'ah-link' as const, issuedAt: new Date(issued).toISOString(), expiresAt: new Date(issued + 3600000).toISOString(),
+      capability: 'ah-link' as const, issuedAt: new Date(issued).toISOString(), lifetime: 'until-revoked' as const,
       routeRef: { identityRef: own.operationId, routeIndex: 0 },
     }
     const grant = await f.store.append('invitation', grantPayload)

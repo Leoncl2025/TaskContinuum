@@ -184,7 +184,7 @@ describe('owned document contract integration', () => {
         action: 'grant', capability: 'ah-link', grantId: randomUUID(),
         issuerId: signer.actor.deviceId, recipientId: recipient.actor.deviceId,
         issuerIdentityRef: device.operationId, recipientIdentityRef: device.operationId,
-        issuedAt: '2026-09-14T00:00:00Z', expiresAt: '2026-09-15T00:00:00Z',
+        issuedAt: '2026-09-14T00:00:00Z', lifetime: 'until-revoked',
         routeRef: { identityRef: device.operationId, routeIndex: 0 },
       },
     }, signer.sign)

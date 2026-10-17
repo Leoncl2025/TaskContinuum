@@ -19,6 +19,7 @@ import type { AgentHostCreationWorkspace } from '../shared/agentHostCreation'
 import type { FileTransferSource } from './fileTransferSource'
 import { chunkRequestSchema, exportRequestSchema, FileTransferError, transferFailure, transferLookupSchema } from '../shared/fileTransfer'
 import { FileTransferBudget } from './fileTransferBudget'
+import { DEVICE_TRUST_LIMITS, PRIVATE_DEVICE_LIFETIME_MS, PRIVATE_DEVICE_RENEWAL_MS } from '../shared/deviceTrust'
 import type { AgentHostAuthorizationLease } from './agentHostAuthorization'
 
 const workspacePolicySchema = z.object({ root: z.string().min(1), canSend: z.boolean() }).strict()
@@ -26,9 +27,9 @@ const pairingSchema = z.object({ id: z.uuid(), participant: remoteClientSchema, 
   token: z.string().regex(/^[a-zA-Z0-9_-]{43}$/), expiresAt: z.iso.datetime(),
   // Preserve retired grants as opaque data, never as authorization or session discovery.
   sessions: z.array(z.unknown()).max(32).optional(),
-  workspaces: z.array(workspacePolicySchema).max(10).default([]),
+  workspaces: z.array(workspacePolicySchema).max(DEVICE_TRUST_LIMITS.workspaces).default([]),
 }).strict()
-const stateSchema = z.object({ ownerId: z.uuid(), port: z.number().int().min(1024).max(65535).optional(), pairs: z.array(pairingSchema).max(32) }).strict()
+const stateSchema = z.object({ ownerId: z.uuid(), port: z.number().int().min(1024).max(65535).optional(), pairs: z.array(pairingSchema).max(DEVICE_TRUST_LIMITS.devices) }).strict()
 type Pairing = z.infer<typeof pairingSchema>
 export interface DeviceProtector { available(): boolean; encrypt(value: string): Buffer; decrypt(value: Buffer): string }
 
@@ -184,21 +185,29 @@ export class VSCodeDeviceHost {
     return operation
   }
 
-  async pair(participant: Pairing['participant'], publicKey: string): Promise<Pairing> {
+  async pair(participant: Pairing['participant'], publicKey: string, renew = false): Promise<Pairing> {
     remoteClientSchema.parse(participant)
     sshPublicKeySchema.parse(publicKey)
-    return this.update((state) => {
+    let renewed = false
+    const pair = await this.update((state) => {
       const existing = state.pairs.find((pair) => pair.participant.clientId === participant.clientId)
       if (existing) {
         if (existing.publicKey !== publicKey || JSON.stringify(existing.participant) !== JSON.stringify(participant)) throw new Error('The paired device identity changed. Revoke it before pairing again.')
+        if (renew && Date.parse(existing.expiresAt) <= Date.now() + PRIVATE_DEVICE_RENEWAL_MS) {
+          existing.token = randomBytes(32).toString('base64url')
+          existing.expiresAt = new Date(Date.now() + PRIVATE_DEVICE_LIFETIME_MS).toISOString()
+          renewed = true
+        }
         if (Date.parse(existing.expiresAt) <= Date.now()) throw new Error('The device pairing expired. Revoke it before pairing again.')
         return structuredClone(existing)
       }
-      if (state.pairs.length >= 32) throw new Error('Device pairing limit reached.')
-      const pair: Pairing = { id: randomUUID(), participant, publicKey, token: randomBytes(32).toString('base64url'), expiresAt: new Date(Date.now() + 30 * 86400000).toISOString(), workspaces: [] }
+      if (state.pairs.length >= DEVICE_TRUST_LIMITS.devices) throw new Error('Device pairing limit reached.')
+      const pair: Pairing = { id: randomUUID(), participant, publicKey, token: randomBytes(32).toString('base64url'), expiresAt: new Date(Date.now() + PRIVATE_DEVICE_LIFETIME_MS).toISOString(), workspaces: [] }
       state.pairs.push(pair)
       return structuredClone(pair)
     })
+    if (renewed) this.agentHostGateway?.revalidate()
+    return pair
   }
 
   async list(): Promise<Pairing[]> { await this.load(); return structuredClone(this.state!.pairs) }

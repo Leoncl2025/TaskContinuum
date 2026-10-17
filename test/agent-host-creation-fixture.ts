@@ -230,7 +230,7 @@ export async function createAgentHostCreationCallerFixture(worker: Awaited<Retur
   const workspace = join(worker.root, 'caller-workspace'), profile = join(worker.root, 'caller-profile')
   await writeCreationTaskWorkspace(workspace)
   const ssh = await startSessionSshHost(creationFixtureKey())
-  ssh.allow(worker.pair.id, worker.key.publicKey, worker.port, worker.pair.expiresAt, true)
+  ssh.allow(worker.pair.id, worker.key.publicKey, worker.port, worker.pair.expiresAt)
   let connections = 0
   let devices: VSCodeDeviceClient
   let client: AgentHostCreationClient

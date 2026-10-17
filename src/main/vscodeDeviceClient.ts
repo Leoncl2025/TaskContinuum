@@ -319,7 +319,7 @@ export class VSCodeDeviceClient {
     if (peers.length > 1) throw new Error('The Agent Host owner has ambiguous device invitations.')
     const peer = peers[0]
     if (!peer) return undefined
-    if (!peer.enabled || Date.parse(peer.invitation.expiresAt) <= Date.now()) throw new Error('The owner connection is disabled or expired.')
+    if (!peer.enabled) throw new Error('The owner connection is disabled.')
     if (peer.invitation.machineName.toLowerCase() !== owner.machineName.toLowerCase()) throw new Error('The Agent Host owner identity does not match the paired device.')
     return peer
   }
@@ -338,6 +338,7 @@ export class VSCodeDeviceClient {
     const canonical = await abortable(this.root(root), signal)
     const peer = this.ownerPeer(canonical, owner)
     if (!peer) return false
+    if (Date.parse(peer.invitation.expiresAt) <= Date.now()) return false
     const current = AbortSignal.any([signal, this.lifetime.signal, this.peerChangeSignal(peer)])
     await abortable(this.validateRecipient(peer.invitation), current)
     this.checkPeer(peer)
@@ -362,7 +363,8 @@ export class VSCodeDeviceClient {
       await abortable(this.load(), readiness)
       const canonical = await abortable(this.root(root), readiness)
       const selected = this.ownerPeer(canonical, target.owner)
-      if (selected) readiness = AbortSignal.any([readiness, this.peerChangeSignal(selected)])
+      const renewing = selected && Date.parse(selected.invitation.expiresAt) <= Date.now()
+      if (selected && !renewing) readiness = AbortSignal.any([readiness, this.peerChangeSignal(selected)])
       if (this.recoverOwner && !await abortable(this.ownerConnected(canonical, target.owner.clientId), readiness)) {
         step = 'workspace-recovery'
         const recoveryStarted = performance.now()
@@ -372,7 +374,12 @@ export class VSCodeDeviceClient {
       }
       const peer = this.ownerPeer(canonical, target.owner)
       if (!peer) throw new Error('Enable automatic workspace links on both devices and wait for the exact Agent Host owner to connect. Git alone does not grant access.')
-      if (selected && selected !== peer) throw new Error('The selected device connection or identity changed.')
+      if (Date.parse(peer.invitation.expiresAt) <= Date.now()) throw new Error('The owner connection credential is expired.')
+      if (selected && selected !== peer && (!renewing || selected.id !== peer.id
+        || selected.invitation.id !== peer.invitation.id || selected.invitation.ownerId !== peer.invitation.ownerId
+        || selected.invitation.devTunnel.hostPublicKey !== peer.invitation.devTunnel.hostPublicKey
+        || selected.invitation.devTunnel.clientPublicKey !== peer.invitation.devTunnel.clientPublicKey
+        || JSON.stringify(selected.invitation.participant) !== JSON.stringify(peer.invitation.participant))) throw new Error('The selected device connection or identity changed.')
       readiness = AbortSignal.any([readiness, this.peerChangeSignal(peer)])
       step = 'tunnel'
       await abortable(this.validateRecipient(peer.invitation), readiness)

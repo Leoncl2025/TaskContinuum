@@ -5,9 +5,10 @@ import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import ssh2 from 'ssh2'
 import { TunnelRelayTunnelClient } from '@microsoft/dev-tunnels-connections'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { newSshKeyPair, openSessionSshBridge, startSessionSshHost } from '../src/main/devTunnel/sessionSsh'
 import { sshFingerprint, sshPublicKeySchema } from '../src/main/devTunnel/protocol'
+import { DEVICE_TRUST_LIMITS, PRIVATE_DEVICE_LIFETIME_MS } from '../src/shared/deviceTrust'
 
 const cleanup: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const action of cleanup.splice(0).reverse()) await action() })
@@ -25,10 +26,75 @@ async function fixture() {
   const grantId = randomUUID()
   host.allow(grantId, key.publicKey, address.port, new Date(Date.now() + 60000).toISOString())
   const options = { key, hostPublicKey: hostKey.publicKey, grantId, targetPort: address.port, signal: new AbortController().signal }
-  return { host, options }
+  return { host, options, http }
 }
 
 describe('application-managed SSH', () => {
+  it('budgets private device and per-workspace metadata grants separately', async () => {
+    const { host, options } = await fixture()
+    const expiresAt = new Date(Date.now() + PRIVATE_DEVICE_LIFETIME_MS).toISOString()
+    for (let index = 1; index < DEVICE_TRUST_LIMITS.devices; index++) {
+      host.allow(randomUUID(), options.key.publicKey, options.targetPort, expiresAt)
+    }
+    const metadata: string[] = []
+    for (let index = 0; index < DEVICE_TRUST_LIMITS.devices * DEVICE_TRUST_LIMITS.workspaces; index++) {
+      const id = randomUUID()
+      host.allowTrust(id, options.key.publicKey, options.targetPort, () => true)
+      metadata.push(id)
+    }
+    expect(() => host.allow(randomUUID(), options.key.publicKey, options.targetPort, expiresAt)).toThrow('device SSH grant capacity')
+    expect(() => host.allowTrust(randomUUID(), options.key.publicKey, options.targetPort, () => true)).toThrow('metadata SSH grant capacity')
+    host.allowTrust(metadata[0], options.key.publicKey, options.targetPort, () => true)
+    host.revoke(metadata[0])
+    host.allowTrust(randomUUID(), options.key.publicKey, options.targetPort, () => true)
+    host.revoke(options.grantId)
+    host.allow(options.grantId, options.key.publicKey, options.targetPort, expiresAt)
+    const tunnel = await openSessionSshBridge(createConnection(host.port, '127.0.0.1'), options)
+    cleanup.push(tunnel.close)
+    expect(await (await fetch(`http://127.0.0.1:${tunnel.port}`)).text()).toBe('Original Bridge')
+  })
+
+  it('reserves metadata connections and forwards when both private device budgets are full', async () => {
+    const { host, options, http } = await fixture()
+    const metadata = randomUUID()
+    host.allowTrust(metadata, options.key.publicKey, options.targetPort, () => true)
+    const devices = await Promise.all(Array.from({ length: DEVICE_TRUST_LIMITS.devices }, async () => {
+      const tunnel = await openSessionSshBridge(createConnection(host.port, '127.0.0.1'), options)
+      cleanup.push(tunnel.close)
+      return tunnel
+    }))
+    expect(devices).toHaveLength(DEVICE_TRUST_LIMITS.devices)
+    await expect(openSessionSshBridge(createConnection(host.port, '127.0.0.1'), options)).rejects.toThrow()
+    let forwards = 0
+    const errors: Error[] = []
+    http.on('connection', () => { forwards++ })
+    for (const device of devices) for (let index = 0; index < 2; index++) {
+      const socket = createConnection(device.port, '127.0.0.1')
+      socket.on('error', (error) => { errors.push(error) })
+      socket.write('GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n')
+      cleanup.push(() => { socket.destroy() })
+    }
+    await vi.waitFor(() => expect(forwards).toBe(DEVICE_TRUST_LIMITS.devices * 2), { timeout: 5000 })
+    const control = await openSessionSshBridge(createConnection(host.port, '127.0.0.1'), { ...options, grantId: metadata })
+    cleanup.push(control.close)
+    expect(await (await fetch(`http://127.0.0.1:${control.port}`)).text()).toBe('Original Bridge')
+    expect(errors).toEqual([])
+  }, 15000)
+
+  it('closes an established durable metadata tunnel when its current trust is withdrawn', async () => {
+    const { host, options } = await fixture()
+    host.revoke(options.grantId)
+    let trusted = true
+    host.allowTrust(options.grantId, options.key.publicKey, options.targetPort, () => trusted)
+    const tunnel = await openSessionSshBridge(createConnection(host.port, '127.0.0.1'), options)
+    cleanup.push(tunnel.close)
+    expect(await (await fetch(`http://127.0.0.1:${tunnel.port}`)).text()).toBe('Original Bridge')
+    trusted = false
+    await expect(fetch(`http://127.0.0.1:${tunnel.port}`, { signal: AbortSignal.timeout(2500) })).rejects.toThrow()
+    await expect(openSessionSshBridge(createConnection(host.port, '127.0.0.1'), options)).rejects.toThrow('SSH')
+    expect(await (await fetch(`http://127.0.0.1:${options.targetPort}`)).text()).toBe('Original Bridge')
+  })
+
   it('loads Dev Tunnels through the main process CommonJS entry point', () => {
     const require = createRequire(import.meta.url)
     expect(require('@microsoft/dev-tunnels-connections')).toHaveProperty('TunnelRelayTunnelClient', expect.any(Function))
