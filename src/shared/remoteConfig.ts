@@ -51,7 +51,7 @@ export type InvitationPayload = InvitationIdentity & ({
   action: 'grant'
   capability: 'ah-link'
   issuedAt: string
-  expiresAt: string
+  lifetime: 'until-revoked'
   routeRef: { identityRef: string; routeIndex: number }
 } | { action: 'revoke'; revokes: string })
 export type BindingPayload =
@@ -95,7 +95,7 @@ export type DeviceAliasRecord = RemoteRecord<'alias'>
 export type InvitationRecord = RemoteRecord<'invitation'>
 export type BindingRecord = RemoteRecord<'binding'>
 export type SettingRecord = RemoteRecord<'setting'>
-export type RemoteEntityState = 'active' | 'deleted' | 'needs-resolution' | 'blocked' | 'expired'
+export type RemoteEntityState = 'active' | 'deleted' | 'needs-resolution' | 'blocked'
 export interface RemoteConfigDiagnostic {
   code: string
   message: string

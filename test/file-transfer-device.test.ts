@@ -60,7 +60,7 @@ async function fixture() {
   const pair = await host.pair(participant, key.publicKey)
   await host.setWorkspace(pair.id, workspace, false)
   const port = await host.start()
-  ssh.allow(pair.id, key.publicKey, port, pair.expiresAt, true)
+  ssh.allow(pair.id, key.publicKey, port, pair.expiresAt)
   const client = new VSCodeDeviceClient(receiverProfile, protector, (invitation, signal) => openSessionSshBridge(createConnection(ssh.port, '127.0.0.1'), {
     key, hostPublicKey: invitation.devTunnel.hostPublicKey, grantId: invitation.id, targetPort: invitation.port, signal,
   }), async (invitation) => {

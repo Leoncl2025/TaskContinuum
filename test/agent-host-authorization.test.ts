@@ -429,7 +429,7 @@ describe('verified Agent Host authorization fast path', () => {
     await expect(f.store.exportRecords()).rejects.toMatchObject({ code: 'blocked-export' })
   })
 
-  it('expires cached invitation resolution and rechecks changed lifetime policy even with unchanged files', async () => {
+  it('reuses stable trust across days and rechecks changed trust policy even with unchanged files', async () => {
     const f = await fixture()
     const peer = immutableRecordSigner(2)
     let now = Date.parse('2026-09-24T10:00:00.000Z')
@@ -445,7 +445,7 @@ describe('verified Agent Host authorization fast path', () => {
     const grant = await createRecord({ workspaceId: f.workspaceId, actor: f.author.actor, kind: 'invitation', createdAt: new Date(now).toISOString(),
       payload: { action: 'grant', issuerId: f.author.actor.deviceId, recipientId: peer.actor.deviceId, grantId: randomUUID(),
         issuerIdentityRef: devices[0].operationId, recipientIdentityRef: devices[1].operationId, capability: 'ah-link',
-        issuedAt: new Date(now).toISOString(), expiresAt: new Date(now + 1000).toISOString(),
+        issuedAt: new Date(now).toISOString(), lifetime: 'until-revoked',
         routeRef: { identityRef: devices[0].operationId, routeIndex: 0 },
       } }, f.author.sign)
     for (const record of [...devices, grant]) await appendRecord(f.recordsRoot, record)
@@ -454,10 +454,10 @@ describe('verified Agent Host authorization fast path', () => {
     f.authorize.mockClear()
     expect(Object.values((await f.store.read()).resolution.invitations)).toEqual([grant])
     expect(f.authorize).not.toHaveBeenCalled()
-    now += 1001
-    expect((await f.store.read()).resolution.invitations).toEqual({})
-    expect(f.authorize).toHaveBeenCalled()
-    f.trust.maximumInvitationLifetimeMs = 500
+    now += 365 * 86400000
+    expect(Object.values((await f.store.read()).resolution.invitations)).toEqual([grant])
+    expect(f.authorize).not.toHaveBeenCalled()
+    f.trust.authorize = () => false
     expect((await f.store.read()).resolution.blocked).toBe(true)
   })
 

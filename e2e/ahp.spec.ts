@@ -174,7 +174,7 @@ test('subscribes two clients to an isolated actual VS Code Agent Host', async ()
     const pair = await deviceHost.pair(participant, key.publicKey)
     await deviceHost.setWorkspace(pair.id, await canonicalPolicyRoot(tasksB), true)
     const gatewayPort = await deviceHost.start()
-    managedSsh.allow(pair.id, key.publicKey, gatewayPort, pair.expiresAt, true)
+    managedSsh.allow(pair.id, key.publicKey, gatewayPort, pair.expiresAt)
     await deviceClient.import(tasksA, deviceInvitationSchema.parse({ schemaVersion: 2, provider: 'vscode-copilot-device', id: pair.id, ownerId: await deviceHost.ownerId(), ownerClientId: owner.clientId, machineName: hostname(), participant, token: pair.token, expiresAt: pair.expiresAt, port: gatewayPort,
       devTunnel: { kind: 'dev-tunnel', tunnelId: `taskcontinuum-${'f'.repeat(32)}.jpe1`, sshPort: managedSsh.port, hostPublicKey: managedSsh.publicKey, clientPublicKey: key.publicKey } }), true)
     const linked = await updateRepositoryAgentHostLink(tasksB, 'T-0001', target, bindingsB.snapshot.revision)

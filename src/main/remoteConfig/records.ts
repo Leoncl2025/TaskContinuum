@@ -61,14 +61,14 @@ const invitationIdentity = {
 const invitationPayloadSchema = z.discriminatedUnion('action', [
   z.object({
     ...invitationIdentity, action: z.literal('grant'), capability: z.literal('ah-link'),
-    issuedAt: timestampSchema, expiresAt: timestampSchema,
+    issuedAt: timestampSchema, lifetime: z.literal('until-revoked'),
     routeRef: z.object({ identityRef: operationIdSchema, routeIndex: z.number().int().min(0).max(7) }).strict(),
   }).strict(),
   z.object({ ...invitationIdentity, action: z.literal('revoke'), revokes: operationIdSchema }).strict(),
 ]).superRefine((value, context) => {
   if (value.issuerId === value.recipientId) context.addIssue({ code: 'custom', message: 'An invitation must address another device.' })
-  if (value.action === 'grant' && (value.routeRef.identityRef !== value.issuerIdentityRef || Date.parse(value.expiresAt) <= Date.parse(value.issuedAt))) {
-    context.addIssue({ code: 'custom', message: 'An invitation must reference its issuer route and a positive lifetime.' })
+  if (value.action === 'grant' && value.routeRef.identityRef !== value.issuerIdentityRef) {
+    context.addIssue({ code: 'custom', message: 'A trust grant must reference its issuer route.' })
   }
 })
 const bindingPayloadSchema = z.discriminatedUnion('action', [
@@ -175,6 +175,10 @@ export async function createRecord<K extends RemoteRecordKind>(input: RecordInpu
 
 /** Parses and checks the content hash, not authorization. Use verifyRecord before trusting it. */
 export function parseRecord(input: unknown): RemoteRecord {
+  if (input && typeof input === 'object' && 'kind' in input && input.kind === 'invitation'
+    && 'payload' in input && input.payload && typeof input.payload === 'object' && 'expiresAt' in input.payload) {
+    throw new RemoteConfigError('unsupported-invitation-format', 'Expiring and null-expiry invitation records are unsupported. Use a clean until-revoked trust baseline; existing records were not changed.')
+  }
   const encoded = canonicalJson(input)
   if (Buffer.byteLength(encoded) > remoteConfigLimits.recordBytes) throw new RemoteConfigError('resource-limit', 'A remote configuration record exceeds the 32 KiB limit.')
   let record: RemoteRecord
@@ -195,7 +199,6 @@ export interface RecordTrust {
   authorize(record: RemoteRecord): Awaitable<boolean>
   allowKeyRotation?(record: RemoteRecord<'device'>, previous: RemoteRecord<'device'>): Awaitable<boolean>
   allowDeviceReactivation?(record: RemoteRecord<'device'>): Awaitable<boolean>
-  maximumInvitationLifetimeMs?: number
   now?: () => number
   /** Changes whenever any dynamic trust callback result can change; absent means no authorization caching. */
   authorizationVersion?(): string
@@ -228,8 +231,7 @@ export async function verifyRecord(input: unknown, trust: RecordTrust): Promise<
   if (record.kind === 'invitation') {
     if (record.actor.deviceId !== record.payload.issuerId) deny('Only the invitation issuer can grant or revoke access.')
     if (record.payload.action === 'grant') {
-      const lifetime = Date.parse(record.payload.expiresAt) - Date.parse(record.payload.issuedAt)
-      if (lifetime > (trust.maximumInvitationLifetimeMs ?? 24 * 60 * 60 * 1000) || Date.parse(record.payload.issuedAt) > (trust.now?.() ?? Date.now()) + 60000) deny('The invitation exceeds the locally enrolled lifetime policy.')
+      if (Date.parse(record.payload.issuedAt) > (trust.now?.() ?? Date.now()) + 60000) deny('The trust grant issuance time is in the future.')
     }
   }
   if (record.kind === 'binding' && record.payload.action === 'set') {
@@ -461,8 +463,7 @@ export async function resolveRecords(inputs: readonly unknown[], trust: RecordTr
       } else if (!resolution.devices[value.issuerId] || !resolution.devices[value.recipientId]) {
         entity.state = 'blocked'
         diagnostics.push({ code: 'incomplete-link-metadata', message: 'Automatic linking requires complete public username and scoped control-port metadata for both enrolled identities.', entityKey: entity.key, operationId: record.operationId })
-      } else if (Date.parse(value.expiresAt) <= (trust.now?.() ?? Date.now())) entity.state = 'expired'
-      else resolution.invitations[entity.key] = record
+      } else resolution.invitations[entity.key] = record
     }
     if (record.kind === 'binding' && record.payload.action === 'set') {
       const targets = bindingTargets(record.payload)

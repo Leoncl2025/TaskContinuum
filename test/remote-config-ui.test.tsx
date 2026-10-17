@@ -38,6 +38,13 @@ it('requires an explicit enrollment action and exposes immediate synchronization
   expect(api.disable).toHaveBeenCalledOnce()
 })
 
+it('uses durable trust directly without a migration switch', async () => {
+  enrolled()
+  render(<WorkspaceGitSyncControls />)
+  expect(await screen.findByText(/Private credentials renew without daily Git grants/)).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Enable durable device trust' })).not.toBeInTheDocument()
+})
+
 it('shows provisional and conflict states on notification without waiting for polling', async () => {
   const fixture = gitSyncUiFixture()
   window.remoteVSCode = fixture.remote

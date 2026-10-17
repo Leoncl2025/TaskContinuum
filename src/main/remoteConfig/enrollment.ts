@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { sshFingerprint, sshPublicKeySchema } from '../devTunnel/protocol'
 import { canonicalPolicyRoot } from '../linkedSessionPolicy'
 import { readJsonBounded, writeJsonAtomic } from '../shared/storage'
+import { DEVICE_TRUST_LIMITS } from '../../shared/deviceTrust'
 
 const pinSchema = z.object({
   clientPublicKey: sshPublicKeySchema,
@@ -18,7 +19,7 @@ const enrollmentSchema = z.object({
   admitNewDevices: z.boolean(),
   pins: z.record(z.uuid(), pinSchema),
 }).strict()
-const enrollmentsSchema = z.object({ schemaVersion: z.literal(1), workspaces: z.array(enrollmentSchema).max(10) }).strict()
+const enrollmentsSchema = z.object({ schemaVersion: z.literal(1), workspaces: z.array(enrollmentSchema).max(DEVICE_TRUST_LIMITS.workspaces) }).strict()
 export type WorkspaceEnrollment = z.infer<typeof enrollmentSchema>
 
 export function initialWorkspaceId(remote: string, workspaceRelativePath = ''): string {
@@ -78,7 +79,7 @@ export class LocalEnrollments {
       let row = rows.find((item) => item.root === canonical)
       if (row && row.workspaceId !== workspaceId) throw new Error('The enrolled workspace identity changed. Automatic synchronization is blocked.')
       if (!row) {
-        if (rows.length >= 10) throw new Error('The Git enrollment limit is 10 workspaces.')
+        if (rows.length >= DEVICE_TRUST_LIMITS.workspaces) throw new Error(`The Git enrollment limit is ${DEVICE_TRUST_LIMITS.workspaces} workspaces.`)
         row = { root: canonical, workspaceId, enabled: true, admitNewDevices, pins: {} }
         rows.push(row)
       } else {
@@ -115,7 +116,7 @@ export class LocalEnrollments {
         throw new Error(`The SSH identity changed for ${deviceId}. Verify the new key and reenroll explicitly.`)
       }
       if (!pin && !explicitlyTrusted && !row.admitNewDevices) throw new Error(`Device ${deviceId} awaits local enrollment trust.`)
-      if (!pin && Object.keys(row.pins).length >= 32) throw new Error('The enrolled workspace device limit is 32.')
+      if (!pin && Object.keys(row.pins).length >= DEVICE_TRUST_LIMITS.devices) throw new Error(`The enrolled workspace device limit is ${DEVICE_TRUST_LIMITS.devices}.`)
       row.pins[deviceId] = { clientPublicKey, hostPublicKey, blocked: false }
     })
   }

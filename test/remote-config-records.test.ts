@@ -42,6 +42,51 @@ async function folder(): Promise<string> {
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))) })
 
 describe('canonical signed immutable remote records', () => {
+  it('accepts only signed until-revoked trust, stable across time but invalid after revocation or identity removal', async () => {
+    const issuer = await make({ kind: 'device', payload: identity(a) }, a)
+    const recipient = await make({ kind: 'device', payload: identity(b) }, b)
+    const durable = await make({ kind: 'invitation', payload: {
+      action: 'grant', issuerId: a.actor.deviceId, recipientId: b.actor.deviceId, grantId: randomUUID(),
+      issuerIdentityRef: issuer.operationId, recipientIdentityRef: recipient.operationId, capability: 'ah-link',
+      issuedAt: at, lifetime: 'until-revoked',
+      routeRef: { identityRef: issuer.operationId, routeIndex: 0 },
+    } })
+    if (durable.kind !== 'invitation' || durable.payload.action !== 'grant') throw new Error('Invalid fixture.')
+    const bytes = serializeRecord(durable)
+    const history = [issuer, recipient, durable]
+    for (const days of [2, 30, 90, 365]) {
+      const later = { ...trust, now: () => Date.parse(at) + days * 86400000 }
+      const resolved = await resolveRecords(history, later)
+      expect(resolved.blocked).toBe(false)
+      expect(Object.values(resolved.invitations)).toEqual([durable])
+    }
+    expect(serializeRecord(durable)).toBe(bytes)
+    const revoked = await make({ kind: 'invitation', parents: [durable.operationId], payload: {
+      action: 'revoke', issuerId: a.actor.deviceId, recipientId: b.actor.deviceId, grantId: durable.payload.grantId,
+      issuerIdentityRef: issuer.operationId, recipientIdentityRef: recipient.operationId, revokes: durable.operationId,
+    } })
+    expect(Object.values((await resolveRecords([...history, revoked], trust)).invitations)).toEqual([])
+    const { lifetime: _lifetime, ...oldPayload } = durable.payload
+    void _lifetime
+    for (const expiresAt of [null, new Date(Date.parse(at) + 86400000).toISOString()]) {
+      expect(() => parseRecord({ ...durable, payload: { ...oldPayload, expiresAt } })).toThrow('unsupported')
+      expect(() => parseRecord({ ...durable, payload: { ...durable.payload, expiresAt } })).toThrow('unsupported')
+    }
+    expect(() => parseRecord({ ...durable, payload: oldPayload })).toThrow()
+    const removed = await make({ kind: 'device', parents: [recipient.operationId], payload: { action: 'remove', deviceId: b.actor.deviceId } }, b)
+    expect(Object.values((await resolveRecords([...history, removed], trust)).invitations)).toEqual([])
+    const newIdentity = identity(c)
+    if (newIdentity.action !== 'publish') throw new Error('Invalid fixture.')
+    const rotation = await make({ kind: 'device', parents: [recipient.operationId], payload: { ...newIdentity, deviceId: b.actor.deviceId } }, b)
+    const changedKeys = await resolveRecords([...history, rotation], trust)
+    expect(changedKeys.diagnostics.some((issue) => issue.code === 'key-rotation-required')).toBe(true)
+    expect(Object.values(changedKeys.invitations)).toEqual([])
+    const missing = await resolveRecords(history.filter((r) => r.operationId !== issuer.operationId), trust)
+    expect(missing.blocked).toBe(true)
+    await expect(verifyRecord({ ...durable, payload: { ...durable.payload, recipientId: c.actor.deviceId } }, trust)).rejects.toThrow('hash')
+    await expect(make({ kind: 'invitation', payload: { ...durable.payload, issuedAt: new Date(Date.parse(at) + 366 * 86400000).toISOString() } }).then((r) => verifyRecord(r, trust))).rejects.toThrow('future')
+  })
+
   it('canonicalizes sorted JSON without lossy coercion or non-JSON values', () => {
     expect(canonicalJson({ z: [1, -0, true, null], a: { z: '😀', a: 'line\nbreak' } })).toBe('{"a":{"a":"line\\nbreak","z":"😀"},"z":[1,0,true,null]}')
     const cycle: { self?: unknown } = {}
@@ -49,6 +94,30 @@ describe('canonical signed immutable remote records', () => {
     for (const value of [undefined, NaN, Infinity, 1.5, new Date(), cycle, ['\uD800'], [undefined], JSON.parse('{"__proto__":{}}')]) {
       expect(() => canonicalJson(value)).toThrow()
     }
+  })
+
+  it.each([null, '2026-09-15T09:00:00.000Z'])('rejects correctly signed old invitation files (%s) without rewriting history or accepting a partial configuration', async (expiresAt) => {
+    const issuer = await make({ kind: 'device', payload: identity(a) }, a)
+    const recipient = await make({ kind: 'device', payload: identity(b) }, b)
+    const body = { schemaVersion: 1, kind: 'invitation', workspaceId, nonce: randomUUID(), actor: a.actor, parents: [], createdAt: at,
+      payload: { action: 'grant', capability: 'ah-link', issuerId: a.actor.deviceId, recipientId: b.actor.deviceId, grantId: randomUUID(),
+        issuerIdentityRef: issuer.operationId, recipientIdentityRef: recipient.operationId, issuedAt: at, expiresAt,
+        routeRef: { identityRef: issuer.operationId, routeIndex: 0 } } }
+    const bytes = Buffer.from(`TaskCon.RemoteConfig.v1\n${canonicalJson(body)}`, 'utf8')
+    const signature = a.sign(bytes)
+    expect(verify(null, bytes, a.verificationKey, signature)).toBe(true)
+    const signed = { ...body, signature: { algorithm: 'ed25519', value: signature.toString('base64') } }
+    const old = { ...signed, operationId: createHash('sha256').update(canonicalJson(signed)).digest('hex') }
+    const serialized = canonicalJson(old) + '\n'
+    const directory = await folder()
+    const file = join(directory, '.taskcontinuum', 'records', 'v1', 'invitations', a.actor.deviceId, b.actor.deviceId, `${old.operationId}.json`)
+    await mkdir(dirname(file), { recursive: true })
+    await writeFile(file, serialized)
+    await expect(readRecords(directory)).rejects.toThrow('unsupported')
+    const resolution = await resolveRecords([issuer, recipient, old], trust)
+    expect(resolution.blocked).toBe(true)
+    expect(resolution.invitations).toEqual({})
+    expect(await readFile(file, 'utf8')).toBe(serialized)
   })
 
   it('signs canonical bytes once and deduplicates parent ordering and retries', async () => {
@@ -253,7 +322,7 @@ describe('canonical signed immutable remote records', () => {
     const grant = await make({ kind: 'invitation', payload: {
       action: 'grant', issuerId: a.actor.deviceId, recipientId: b.actor.deviceId, grantId: randomUUID(),
       issuerIdentityRef: issuer.operationId, recipientIdentityRef: recipient.operationId,
-      capability: 'ah-link', issuedAt: at, expiresAt: '2026-09-14T10:00:00.000Z',
+      capability: 'ah-link', issuedAt: at, lifetime: 'until-revoked',
       routeRef: { identityRef: issuer.operationId, routeIndex: 0 },
     } })
     const targets = [target(), target('two', a)]
@@ -310,7 +379,7 @@ describe('canonical signed immutable remote records', () => {
     const payload = {
       action: 'grant' as const, issuerId: a.actor.deviceId, recipientId: b.actor.deviceId, grantId: randomUUID(),
       issuerIdentityRef: issuer.operationId, recipientIdentityRef: recipient.operationId,
-      capability: 'ah-link' as const, issuedAt: at, expiresAt: '2026-09-14T10:00:00.000Z',
+      capability: 'ah-link' as const, issuedAt: at, lifetime: 'until-revoked' as const,
       routeRef: { identityRef: issuer.operationId, routeIndex: 0 },
     }
     const grant = await make({ kind: 'invitation', payload })
@@ -323,10 +392,9 @@ describe('canonical signed immutable remote records', () => {
     expect((await resolveRecords([replay, revoke, issuer, recipient, grant], trust)).invitations).toEqual({})
     const regrant = await make({ kind: 'invitation', payload: { ...payload, grantId: randomUUID() }, parents: [revoke.operationId, replay.operationId] })
     expect(Object.values((await resolveRecords([regrant, replay, revoke, issuer, recipient, grant], trust)).invitations)).toEqual([regrant])
-    const expired = await resolveRecords([issuer, recipient, grant], { ...trust, now: () => Date.parse('2026-09-14T10:00:01.000Z') })
-    expect(expired.invitations).toEqual({})
-    expect(expired.entities[entityKey(grant)].state).toBe('expired')
-    await expect(verifyRecord(grant, { ...trust, maximumInvitationLifetimeMs: 1000 })).rejects.toThrow('lifetime')
+    const later = await resolveRecords([issuer, recipient, grant], { ...trust, now: () => Date.parse('2027-09-14T10:00:01.000Z') })
+    expect(Object.values(later.invitations)).toEqual([grant])
+    expect(later.entities[entityKey(grant)].state).toBe('active')
   })
 
   it('does not reactivate removed identities, and requires explicit policy for key rotation', async () => {
@@ -354,7 +422,7 @@ describe('canonical signed immutable remote records', () => {
       const grant = await make({ kind: 'invitation', payload: {
         action: 'grant', issuerId: a.actor.deviceId, recipientId: b.actor.deviceId, grantId: randomUUID(),
         issuerIdentityRef: old.operationId, recipientIdentityRef: peer.operationId, capability: 'ah-link',
-        issuedAt: at, expiresAt: '2026-09-14T10:00:00.000Z', routeRef: { identityRef: old.operationId, routeIndex: 0 },
+        issuedAt: at, lifetime: 'until-revoked', routeRef: { identityRef: old.operationId, routeIndex: 0 },
       } })
       const bound = await make({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [target()] } })
       expect(await verifyRecord(old, trust)).toEqual(old)

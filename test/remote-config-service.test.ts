@@ -109,9 +109,14 @@ async function fixture(count: number, workspaceDirectory = '', additionalWorkspa
     const tunnels: WorkspaceSyncOptions['tunnels'] = {
       publish: async () => { if (tunnelGate) { tunnelStarted = true; await tunnelGate; tunnelFinished = true } },
       publicEndpoint: () => ({ tunnelId, sshPort: ssh.port, hostPublicKey: hostKey.publicKey }),
-      authorize: (grant, publicKey, port, device) => {
-        ssh.allow(grant.id, publicKey, port, grant.expiresAt, device)
+      authorize: (grant, publicKey, port) => {
+        ssh.allow(grant.id, publicKey, port, grant.expiresAt)
         activeGrants.add(grant.id)
+        return { kind: 'dev-tunnel', tunnelId, sshPort: ssh.port, hostPublicKey: hostKey.publicKey, clientPublicKey: publicKey }
+      },
+      authorizeTrust: (id, publicKey, port, current) => {
+        ssh.allowTrust(id, publicKey, port, current)
+        activeGrants.add(id)
         return { kind: 'dev-tunnel', tunnelId, sshPort: ssh.port, hostPublicKey: hostKey.publicKey, clientPublicKey: publicKey }
       },
       revoke: (id) => { ssh.revoke(id); activeGrants.delete(id) },
@@ -208,6 +213,58 @@ async function settle(peers: Awaited<ReturnType<typeof fixture>>['peers']) {
   throw new Error(`Peers did not converge: ${JSON.stringify(await Promise.all(peers.map((peer) => peer.service.status(peer.folder))))}`)
 }
 
+it('issues only until-revoked trust and keeps public history stable across days, renewal and restart', async () => {
+  const { remote, peers } = await fixture(2)
+  for (const peer of peers) await peer.service.enable(peer.folder)
+  await settle(peers)
+  const [a, b] = peers
+  const baseline = await readRecords(a.folder)
+  const grants = baseline.filter((record) => record.kind === 'invitation' && record.payload.action === 'grant' && record.payload.lifetime === 'until-revoked')
+  expect(grants).toHaveLength(2)
+  expect(baseline.filter((record) => record.kind === 'invitation')).toHaveLength(2)
+  const ids = baseline.map((record) => record.operationId)
+  const head = await git(remote, '--git-dir', remote, 'rev-parse', 'main')
+  const privateIds = await Promise.all(peers.map(async (peer) => (await peer.host.list()).map((pair) => pair.id)))
+  await settle(peers)
+  expect((await readRecords(a.folder)).map((record) => record.operationId)).toEqual(ids)
+  const base = Date.now()
+  vi.useFakeTimers({ toFake: ['Date'] })
+  try {
+    for (const days of [2, 7, 32]) {
+      vi.setSystemTime(base + days * 86400000)
+      await settle(peers)
+      expect((await readRecords(a.folder)).map((record) => record.operationId)).toEqual(ids)
+      expect(await git(remote, '--git-dir', remote, 'rev-parse', 'main')).toBe(head)
+      for (const peer of peers) {
+        await peer.service.whenConnectionsSettled(peer.folder)
+        expect((await peer.service.status(peer.folder)).peers, `Day ${days} ${peer.identity.machineName}`).toEqual([
+          expect.objectContaining({ state: 'linked' }),
+        ])
+        expect((await peer.host.list()).every((pair) => Date.parse(pair.expiresAt) > Date.now())).toBe(true)
+      }
+      expect(await Promise.all(peers.map(async (peer) => (await peer.host.list()).map((pair) => pair.id)))).toEqual(privateIds)
+    }
+    a.service = await a.restart()
+    b.service = await b.restart()
+    await settle(peers)
+    expect((await readRecords(a.folder)).map((record) => record.operationId)).toEqual(ids)
+    expect(await b.devices.ownerConnected(b.folder, a.identity.clientId)).toBe(true)
+    const runtime = Reflect.get(a.service, 'runtimes').get(await canonicalPolicyRoot(a.folder))
+    const store = Reflect.get(runtime, 'store')
+    if (!(store instanceof RemoteConfigStore)) throw new Error('The fixture store is unavailable.')
+    Reflect.get(runtime, 'grants').clear()
+    const grant = grants.find((record) => record.kind === 'invitation' && record.payload.issuerId === a.identity.clientId)
+    if (grant?.kind !== 'invitation' || grant.payload.action !== 'grant') throw new Error('The outgoing trust fixture is unavailable.')
+    await store.append('invitation', {
+      action: 'revoke', issuerId: grant.payload.issuerId, recipientId: grant.payload.recipientId, grantId: grant.payload.grantId,
+      issuerIdentityRef: grant.payload.issuerIdentityRef, recipientIdentityRef: grant.payload.recipientIdentityRef, revokes: grant.operationId,
+    })
+    await expect.poll(async () => (await a.host.list()).every((pair) => !pair.workspaces.some((policy) => policy.root === a.folder.toLowerCase()))).toBe(true)
+    await expect(b.devices.connectOwner(b.folder, a.identity.clientId)).rejects.toThrow()
+    expect(await b.devices.ownerConnected(b.folder, a.identity.clientId)).toBe(false)
+  } finally { vi.useRealTimers() }
+}, 240000)
+
 it('serves 100 status requests without queuing configuration work and separates status from binding changes', async () => {
   const { peers: [peer] } = await fixture(1)
   await peer.service.enable(peer.folder)
@@ -244,7 +301,13 @@ it('coalesces backend refresh callers and does not overwrite a newer edit with a
   await peer.service.whenConnectionsSettled(peer.folder)
   const runtimes: Map<string, unknown> = Reflect.get(peer.service, 'runtimes')
   const runtime = runtimes.get(await canonicalPolicyRoot(peer.folder))
-  expect(runtime).toBeDefined()
+  if (!runtime || typeof runtime !== 'object') throw new Error('The workspace runtime was not initialized.')
+  const scheduler = Reflect.get(runtime, 'scheduler')
+  if (!(scheduler instanceof RemoteSyncScheduler)) throw new Error('The workspace scheduler was not initialized.')
+  // Setup publication also reads the store; isolate the refresh callers being counted.
+  await scheduler.whenIdle()
+  await scheduler.stop()
+  await peer.service.whenConnectionsSettled(peer.folder)
   const refresh = () => Reflect.apply(Reflect.get(peer.service, 'refresh'), peer.service, [runtime]) as Promise<RemoteConfigSnapshot>
   const originalRead = RemoteConfigStore.prototype.read
   let release!: () => void, entered!: () => void

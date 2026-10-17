@@ -81,6 +81,135 @@ Existing pairs can continue independently of another offline device. Repeated
 polling and restarts reuse stable identities, saved ports and existing grants;
 requests and private tokens are not stored in the public records.
 
+## Durable device trust (one format, breaking change)
+
+Public `invitation/grant` records require `lifetime: "until-revoked"` and do not
+have an `expiresAt` field. Timestamp expiry and `expiresAt: null` are both
+rejected, including correctly signed old records. There is no compatibility
+reader, migration button, enrollment flag, downgrade mode or daily renewal
+branch. Enabling automatic links uses this format directly.
+
+A grant is bound to the exact issuer/recipient identity publications, signing
+key and route identity. An unchanged relationship reuses its signed operation
+across elapsed days, reloads, reconnections and restarts. Real identity/route
+changes can require new operations; machine aliases do not change identity.
+Revocation tombstones are not automatically reinstated. Device removal, pin
+revocation, unapproved key changes, conflicting history and missing accepted
+records still block access.
+
+Metadata SSH access and private device SSH credentials have separate APIs and
+budgets. Metadata access requires the enrolled SSH key, the exact workspace/device
+grant and a mandatory live trust callback. Each control request has a signed
+nonce/timestamp and an at-most-60-second lifetime. Replay detection and
+authorization before and after asynchronous work remain enforced. The durable
+relationship opens only the metadata port, not an OS shell or session port.
+Established metadata connections recheck trust at least every second and before
+forwarding; explicit revocation closes them.
+
+Session/file access uses a separate encrypted private device credential, issued
+for 30 days and renewed within one hour of expiry through the authenticated
+metadata exchange. Renewal rotates the token without a public Git write,
+preserves the pairing ID and all existing workspace scopes, and invalidates old
+gateway authorization. An expired saved credential can reach the trusted renewal
+path; it cannot authenticate a session itself. Private SSH registration enforces
+the same 30-day lifetime with one minute of clock tolerance, rather than the old
+mixed 25-hour/31-day rules. Session bindings, owner receipts, identity pins and
+read/send checks still apply. Renewal never recreates a session or replays a prompt.
+Revoked private workspace scopes are removed from the verified snapshot even
+before the metadata grant registry has been restored. Concurrent cleanup is
+coalesced, and a later private grant waits for that cleanup before restoring scope.
+
+SSH registration permits 32 private-device grants and, separately, up to
+32 devices x 10 enrolled workspaces = 320 metadata grants. Live SSH connections
+retain separate 32-connection device and metadata budgets (64 combined), so
+private session traffic cannot consume every metadata slot. Registration is not
+a promise of unlimited simultaneous connections. Forwarding has separate
+64-device-channel and 32-metadata-channel budgets; saturated session forwards
+cannot consume the control channel budget either.
+
+### Coordinated cutover, not deletion in an accepted history
+
+All participants must use the new build and a clean configuration baseline.
+Opening old invitation history fails closed with an unsupported-format error;
+the program does not rewrite it, silently omit it, or convert old grants.
+
+**Deleting only invitation JSON files is not sufficient.** Accepted operation
+IDs, causal parents, locally retained publications and Git ancestry protect
+against removal and rollback. Clearing one cache is not a supported reset.
+
+For an intentional fresh start:
+
+1. Pause and stop every participant, including temporarily offline publishers.
+   Back up the old workspace and each private profile; keep that old environment
+   separate from the new one.
+2. Create a new, empty public-configuration baseline with a new workspace identity:
+   use a new repository, or a new task-workspace relative path in the repository.
+   Copy task documents, not the old `.taskcontinuum` configuration, accepted-state
+   caches or outboxes. Use fresh private profiles for this coordinated cutover.
+   A fresh clone of the same old workspace or a branch switch alone is not a new
+   trust baseline.
+3. Enroll only the intended devices on the new build. Reconfirm session bindings
+   on their actual owners; do not copy private tokens or owner receipts to
+   manufacture access. Previously revoked devices must not be reenrolled.
+4. Verify exact participants, read/send boundaries and revocation, then sync and
+   restart twice. Unchanged grants and the Git head must remain stable. Do not
+   allow old clients or old outboxes to publish into this new baseline.
+
+This is an operator-approved new trust domain, not an in-place migration or
+compaction. The implementation does not perform this cleanup on live data.
+There is no supported in-place history reset in this change.
+
+### History cost
+
+The 10,000-record/64-MiB immutable-history guards and 32-KiB per-record guard
+remain. Normal trust no longer consumes one record per day, but actual edits,
+explicit revocations and deliberate regrants still accumulate. Cold verification
+and filesystem freshness checks still scale with retained history. There is no
+automatic compactor.
+
+[The cost regression](../test/durable-trust-cost.test.ts) constructs two fixed
+devices and 50/400/1,000 explicit grant/revoke decisions, all in the new format.
+It persists accepted state, closes the store, then measures cold reopen, initial
+authorization, 100 warm lease checks and unchanged refresh. It reports metadata
+checks, directory reads, opens, JSON parses, signature verifications, elapsed
+time and the actual difference in public operation IDs. Fixture construction is
+outside the measured interval. Warm-cache results are not a claim that history
+has constant cost.
+
+Measured on Windows with no other test runner active:
+
+| Trust decisions (+2 devices) | Cold ms | Metadata checks | Directory reads | File opens | JSON parses | Signature checks |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 50 | 160 | 291 | 21 | 58 | 53 | 52 |
+| 400 | 777 | 1691 | 21 | 408 | 403 | 402 |
+| 1000 | 1916 | 4091 | 21 | 1008 | 1003 | 1002 |
+
+Initial authorization took 19/29/51 ms and inspected 73/423/1023 metadata
+entries, seven directories and one file, with zero JSON parses or signature
+checks. Unchanged refresh took 27/46/75 ms and inspected 78/428/1028 metadata
+entries and seven directories, opened five files, parsed one local-state JSON
+and performed zero signature checks. Each set of 100 warm checks took 2 ms with
+zero filesystem, parse or signature operations. Actual public-record growth was
+zero at all three sizes. These are local fixtures, not remote deployment results.
+
+### Related limit/lifecycle audit
+
+| Area | Finding and disposition |
+| --- | --- |
+| Public trust | Fixed: a stable relationship no longer periodically creates immutable Git records. |
+| SSH grant slots | Fixed: per-device private grants and per-workspace metadata grants no longer compete for one 32-entry registry. Separate live connection budgets protect the control path. |
+| Private credential lifecycle | Fixed: expiry can use current public trust to renew; renewal retains the pairing identity and other workspace scopes instead of revoking/recreating the pair. |
+| Local/remote chat connection caches | Still a lifecycle defect: [local](../src/main/agentHostRegistry.ts) 64 and [remote](../src/main/agentHostManager.ts) 32 entries accumulate until manager shutdown, not just while a view is open. A safe fix needs ownership/idle eviction protecting running sends, uncertain delivery, terminals and native empty-session subscriptions; blindly closing old connections can lose an empty native draft. |
+| Per-chat delivery ledger | Still a growth limit: [the ledger](../src/main/agentHostConnection.ts) retains up to 1,000 delivery IDs, including terminal states, and then refuses another send. It needs durable deduplication checkpoints/archival, not arbitrary deletion or a larger number. |
+| Session creation history | Still a growth limit: [worker operations](../src/main/agentHostCreationService.ts) and [caller history](../src/main/agentHostCreationClient.ts) retain up to 1,000 operations. Failed/abandoned entries also occupy capacity. Archival must preserve operation-ID replay protection and uncertain native outcomes. |
+| Device/workspace history | Still coarse accounting: [private client storage](../src/main/vscodeDeviceClient.ts) counts workspace/owner entries toward 32, not distinct physical devices. [Enrollment](../src/main/remoteConfig/enrollment.ts) counts paused workspaces toward 10 and revoked identity tombstones toward 32. Separate live capacity from retained revocation identity before adding removal/re-enrollment UX. |
+| Session bindings | Product/protocol constraints remain: 1,000 linked sessions/tasks, one owner/session claim even for distinct chat IDs, and a 32-KiB complete signed task-binding payload. Effective per-task capacity can be lower than the workspace session count. Parent/child and multi-chat linking need a separate explicit design. |
+| Retained configuration | Cold verification is history-sized; unchanged refresh still scans record metadata. A later compactor needs accepted-head commitments, signed ancestry, revocations, offline-peer policy and explicit cutover. Do not delete accepted history or merely raise the cap. |
+| Request/transfer guards | Retained intentionally: short signed request lifetime, replay TTL/capacity, bounded concurrent handlers, transport timeouts, 16 active UI watches and file-transfer byte/count quotas. Transfers expire and are cleaned after 24 hours; their 128 retained-item limit is not a permanent lifetime counter. |
+
+The audit identifies remaining work explicitly; this trust change does not
+silently redesign chat ownership, deduplication or all application resource limits.
+
 ## Machine aliases
 
 In **Remote devices > Automatic workspace links**, use the alias editor beside

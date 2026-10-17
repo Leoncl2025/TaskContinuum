@@ -70,6 +70,7 @@ export function WorkspaceGitSyncControls() {
       {enabled && <button type="button" className="secondary-button" disabled={busy} onClick={() => { void run(() => api.syncNow()) }}><Icon name="sync" />Sync now</button>}
       {status?.settingsFile && <button type="button" className="secondary-button" disabled={busy} onClick={() => { void run(() => api.openSettings()) }}><Icon name="settings-gear" />Edit local configuration</button>}
     </div>
+    {enabled && <p className="muted workspace-links-meta">Device trust lasts until revoked. Private credentials renew without daily Git grants.</p>}
     {status && (status.pending > 0 || status.lastSyncedAt) && <p role="status" className="workspace-links-meta">
       {status.pending > 0 && `${status.pending} pending`}{status.pending > 0 && status.lastSyncedAt && ' · '}{status.lastSyncedAt && `Last synced ${new Date(status.lastSyncedAt).toLocaleTimeString()}`}
     </p>}

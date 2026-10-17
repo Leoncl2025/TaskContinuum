@@ -17,6 +17,46 @@ const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { for (const close of cleanup.splice(0)) await close() })
 
 describe('device-scoped native Agent Host gateway', () => {
+  it('renews private credentials only when explicitly requested near expiry and invalidates the old token', async () => {
+    const root = await mkdtemp(join(process.cwd(), '.test-ah-private-renew-'))
+    let host = new VSCodeDeviceHost(root, protector)
+    const participant = { clientId: randomUUID(), username: 'Tester', machineName: 'Trusted peer' }
+    const key = newSshKeyPair()
+    const pair = await host.pair(participant, key.publicKey)
+    const port = await host.start()
+    const base = Date.now()
+    try {
+      const same = await host.pair(participant, key.publicKey, true)
+      expect(same).toEqual(pair)
+      const workspaces = [join(root, 'first'), join(root, 'second')]
+      await Promise.all(workspaces.map((path) => mkdir(path)))
+      await host.setWorkspace(pair.id, workspaces[0], true)
+      await host.setWorkspace(pair.id, workspaces[1], false)
+      const scopes = (await host.list())[0].workspaces
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(base + 30 * 86400000 - 1800000)
+      const renewed = await host.pair(participant, key.publicKey, true)
+      expect(renewed.id).toBe(pair.id)
+      expect(renewed.token).not.toBe(pair.token)
+      expect(renewed.workspaces).toEqual(scopes)
+      expect(Date.parse(renewed.expiresAt) - Date.now()).toBe(30 * 86400000)
+      await expect(deviceRequest(port, port, pair.token, '/device/identity', {}, AbortSignal.timeout(2000))).rejects.toMatchObject({ status: 403 })
+      expect(await deviceRequest(port, port, renewed.token, '/device/identity', {}, AbortSignal.timeout(2000))).toMatchObject({ deviceId: pair.id })
+      await expect(host.pair(participant, newSshKeyPair().publicKey, true)).rejects.toThrow('identity changed')
+      vi.setSystemTime(base + 62 * 86400000)
+      await expect(host.pair(participant, key.publicKey)).rejects.toThrow('expired')
+      const recovered = await host.pair(participant, key.publicKey, true)
+      expect(recovered.id).toBe(pair.id)
+      expect(recovered.workspaces).toEqual(scopes)
+      expect(recovered.token).not.toBe(renewed.token)
+      await expect(deviceRequest(port, port, renewed.token, '/device/identity', {}, AbortSignal.timeout(2000))).rejects.toMatchObject({ status: 403 })
+      await host.close()
+      host = new VSCodeDeviceHost(root, protector)
+      expect((await host.list())[0]).toEqual(recovered)
+      expect(await readFile(join(root, 'remote-vscode-device-host.json'), 'utf8')).not.toContain(recovered.token)
+    } finally { vi.useRealTimers(); await host.close(); await rm(root, { recursive: true, force: true }) }
+  })
+
   it('keeps device identity across restart and scopes the native catalog to workspace permissions', async () => {
     const root = await mkdtemp(join(process.cwd(), '.test-ah-device-host-'))
     const workspace = join(root, 'tasks')

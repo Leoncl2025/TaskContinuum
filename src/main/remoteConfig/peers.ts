@@ -15,7 +15,6 @@ export interface PublicPeerGrant {
   grantId: string
   issuerId: string
   recipientId: string
-  expiresAt: string
   issuerIdentityRef: string
   recipientIdentityRef: string
 }
@@ -48,7 +47,6 @@ export class PeerLinks {
     disconnected(peerId: string): Promise<void>
     onChanged(): void
     onError(error: unknown): void
-    now?: () => number
   }) {}
 
   status(): GitSyncPeer[] { return [...this.states.values()].map((state) => ({ ...state })) }
@@ -74,8 +72,7 @@ export class PeerLinks {
 
   private currentGrant(peer: PublicPeer): PublicPeerGrant | undefined {
     const grant = this.incoming.get(peer.deviceId)
-    return grant && Date.parse(grant.expiresAt) > (this.options.now?.() ?? Date.now())
-      && grant.issuerIdentityRef === peer.identityRevision
+    return grant && grant.issuerIdentityRef === peer.identityRevision
       && grant.recipientIdentityRef === this.options.localIdentityRevision() ? grant : undefined
   }
 

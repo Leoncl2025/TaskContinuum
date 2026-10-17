@@ -7,6 +7,7 @@ import { z } from 'zod'
 import { devTunnelRouteSchema, sshFingerprint, sshPublicKeySchema } from '../devTunnel/protocol'
 import type { DevTunnelRoute } from '../devTunnel/protocol'
 import type { SshKeyPair } from '../devTunnel/sessionSsh'
+import { DEVICE_TRUST_LIMITS, PEER_REQUEST_LIFETIME_MS } from '../../shared/deviceTrust'
 
 export const PEER_CONTROL_PATH = '/peer-control/v1'
 export const PEER_CONTROL_MAX_BYTES = 256 * 1024
@@ -49,7 +50,7 @@ const errors = {
   'wrong-workspace': [403, 'The metadata request belongs to another workspace.'],
   'wrong-recipient': [403, 'The metadata request is addressed to another device identity.'],
   'invalid-grant': [403, 'The metadata grant is missing, revoked, or bound to another identity.'],
-  'expired-grant': [403, 'The metadata grant has expired.'],
+  'expired-request': [403, 'The signed metadata request has expired or exceeds its lifetime.'],
   'unauthorized': [403, 'The sender is not currently trusted for this workspace.'],
   'invalid-signature': [401, 'The metadata request does not prove the sender private key.'],
   'stale-request': [408, 'The signed metadata request is stale or its clock is too far ahead.'],
@@ -118,7 +119,6 @@ export interface PeerRequestIdentity {
   local: { deviceId: string; keyPair: SshKeyPair }
   recipient: { deviceId: string; clientPublicKey: string }
   grantId: string
-  expiresAt: string
 }
 export interface CallPeerOptions extends PeerRequestIdentity {
   recipient: PeerRequestIdentity['recipient'] & { hostPublicKey: string }
@@ -187,7 +187,7 @@ export function createPeerRequest(options: PeerRequestIdentity, kind: PeerContro
     senderKeyId: sshFingerprint(options.local.keyPair.publicKey),
     recipientKeyId: sshFingerprint(options.recipient.clientPublicKey),
     grantId: options.grantId,
-    expiresAt: options.expiresAt,
+    expiresAt: new Date(Date.now() + PEER_REQUEST_LIFETIME_MS).toISOString(),
     nonce: randomBytes(32).toString('base64url'),
     timestamp: new Date().toISOString(),
     kind,
@@ -229,10 +229,10 @@ function readBody(message: IncomingMessage, signal: AbortSignal): Promise<Buffer
   })
 }
 
-type Grant = { id: string; senderId: string; publicKey: string; expiresAt: string; expires: number }
+type Grant = { id: string; senderId: string; publicKey: string; current: () => boolean }
 
 /** This listener grants metadata access only. The owner must separately register the same grant
- * with ManagedDevTunnels.authorize(grant, publicKey, controlPort, true), never a session port. */
+ * with ManagedDevTunnels.authorizeTrust, never a session port. */
 export class PeerControlServer {
   private readonly http: Server
   private readonly sockets = new Set<Socket>()
@@ -286,19 +286,18 @@ export class PeerControlServer {
     return this.starting
   }
 
-  allow(grant: { id: string; expiresAt: string }, senderId: string, publicKey: string): void {
+  allow(grant: { id: string }, senderId: string, publicKey: string, current: () => boolean): void {
     z.uuid().parse(grant.id)
     z.uuid().parse(senderId)
     sshPublicKeySchema.parse(publicKey)
-    const expires = Date.parse(z.iso.datetime().parse(grant.expiresAt))
     if (this.closed) throw new PeerControlError('closed')
-    if (expires <= this.now() || expires > this.now() + 31 * 24 * 60 * 60 * 1000) throw new PeerControlError('expired-grant')
-    for (const [id, existing] of this.grants) if (existing.expires <= this.now()) this.revoke(id)
+    if (typeof current !== 'function' || !current()) throw new PeerControlError('invalid-grant')
+    for (const [id, existing] of this.grants) if (!existing.current()) this.revoke(id)
     const previous = this.grants.get(grant.id)
-    if (previous?.senderId === senderId && previous.publicKey === publicKey && previous.expiresAt === grant.expiresAt) return
-    if (!previous && this.grants.size >= 32) throw new PeerControlError('busy')
+    if (previous?.senderId === senderId && previous.publicKey === publicKey) { previous.current = current; return }
+    if (!previous && this.grants.size >= DEVICE_TRUST_LIMITS.devices) throw new PeerControlError('busy')
     if (previous) this.revoke(grant.id)
-    this.grants.set(grant.id, { ...grant, senderId, publicKey, expires })
+    this.grants.set(grant.id, { id: grant.id, senderId, publicKey, current })
   }
 
   revoke(grantId: string): void {
@@ -312,10 +311,13 @@ export class PeerControlServer {
     if (request.recipientId !== this.options.localId || request.recipientKeyId !== this.keyId) throw new PeerControlError('wrong-recipient')
     const grant = this.grants.get(request.grantId)
     if (!grant || prior && prior !== grant || grant.senderId !== request.senderId
-      || sshFingerprint(grant.publicKey) !== request.senderKeyId || grant.expiresAt !== request.expiresAt) throw new PeerControlError('invalid-grant')
-    if (grant.expires <= this.now()) throw new PeerControlError('expired-grant')
+      || sshFingerprint(grant.publicKey) !== request.senderKeyId || !grant.current()) throw new PeerControlError('invalid-grant')
     const timestamp = Date.parse(request.timestamp)
     if (timestamp > this.now() + futureSkewMs || this.now() - timestamp > PEER_CONTROL_MAX_AGE_MS) throw new PeerControlError('stale-request')
+    const requestExpiry = Date.parse(request.expiresAt)
+    if (requestExpiry <= this.now() || requestExpiry <= Date.parse(request.timestamp)
+        || requestExpiry - Date.parse(request.timestamp) > PEER_REQUEST_LIFETIME_MS
+        || requestExpiry > this.now() + PEER_REQUEST_LIFETIME_MS + futureSkewMs) throw new PeerControlError('expired-request')
     return grant
   }
 
@@ -480,14 +482,13 @@ export async function callPeer(options: CallPeerOptions, kind: PeerControlKind, 
   const route = devTunnelRouteSchema.parse(options.route)
   z.number().int().min(1024).max(65535).parse(options.targetPort)
   if (route.clientPublicKey !== options.local.keyPair.publicKey || route.hostPublicKey !== options.recipient.hostPublicKey) throw new PeerControlError('invalid-key')
-  const expires = Date.parse(z.iso.datetime().parse(options.expiresAt)) - Date.now()
-  if (expires <= 0) throw new PeerControlError('expired-grant')
+  const expires = PEER_REQUEST_LIFETIME_MS
   const timeoutMs = z.number().int().min(10).max(120000).parse(options.timeoutMs ?? 30000)
   const deadline = new AbortController()
   const combined = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal
   if (combined.aborted) throw new PeerControlError('aborted')
   let signed = createPeerRequest(options, kind, payload)
-  const timeout = setTimeout(() => deadline.abort(new PeerControlError(expires <= timeoutMs ? 'expired-grant' : 'timeout')), Math.min(expires, timeoutMs))
+  const timeout = setTimeout(() => deadline.abort(new PeerControlError(expires <= timeoutMs ? 'expired-request' : 'timeout')), Math.min(expires, timeoutMs))
   timeout.unref()
   activeCalls++
   const work = async () => {

@@ -67,7 +67,7 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     const pairs = (await host.list()).filter((pair) => Date.parse(pair.expiresAt) > Date.now())
     if (pairs.length) {
       const port = await host.start()
-      for (const pair of pairs) tunnels.authorize(pair, pair.publicKey, port, true)
+      for (const pair of pairs) tunnels.authorize(pair, pair.publicKey, port)
     }
     await gitSync.restoreControlGrants()
   })).then(() => gitSync.startRestored())

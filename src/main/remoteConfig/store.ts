@@ -65,7 +65,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
   private pending: Promise<unknown> = Promise.resolve()
   private readonly listeners = new Set<LocalChangeListener>()
   private closed = false
-  private authorizationCache?: { inputs: string; snapshot: SessionLinksSnapshot; from: number; until: number }
+  private authorizationCache?: { inputs: string; snapshot: SessionLinksSnapshot; from: number }
   private authorizing?: Promise<{ snapshot: SessionLinksSnapshot; generation: number }>
   private generation = 0
   private readonly accessWatch = new AuthorizationWatch()
@@ -77,7 +77,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
   private readOnlyPreparing?: Promise<void>
   private pendingMutations = 0
   private verifiedSnapshot?: {
-    inputs: string; state: string; snapshot: RemoteConfigSnapshot; from: number; until: number
+    inputs: string; state: string; snapshot: RemoteConfigSnapshot; from: number
     trustedKey: RecordTrust['trustedKey']; authorize: RecordTrust['authorize']
     allowKeyRotation: RecordTrust['allowKeyRotation']; allowDeviceReactivation: RecordTrust['allowDeviceReactivation']
   }
@@ -211,7 +211,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       const now = this.options.trust.now?.() ?? Date.now()
       const cached = this.verifiedSnapshot
       const trust = this.options.trust
-      if (cached?.inputs === before && cached.state === currentState && now >= cached.from && now < cached.until
+      if (cached?.inputs === before && cached.state === currentState && now >= cached.from
         && cached.trustedKey === trust.trustedKey && cached.authorize === trust.authorize
         && cached.allowKeyRotation === trust.allowKeyRotation && cached.allowDeviceReactivation === trust.allowDeviceReactivation) {
         logAgentHostDiagnostic('configuration.snapshot', { scope: this.options.workspaceRoot, step: 'cache', status: 'ok', reason: 'cache-hit' })
@@ -223,7 +223,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       const after = await this.inputs('configuration.snapshot', this.transactionLock)
       if (before === after && !snapshot.resolution.blocked) {
         this.verifiedSnapshot = { inputs: after, state: canonicalJson(state), snapshot: structuredClone(snapshot), from: now,
-          until: this.nextExpiry(snapshot.resolution.records, now), trustedKey: trust.trustedKey, authorize: trust.authorize,
+          trustedKey: trust.trustedKey, authorize: trust.authorize,
           allowKeyRotation: trust.allowKeyRotation, allowDeviceReactivation: trust.allowDeviceReactivation }
       }
       return snapshot
@@ -231,17 +231,12 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     return this.resolveSnapshot(state, sources)
   }
 
-  private nextExpiry(records: readonly RemoteRecord[], now: number): number {
-    return Math.min(Infinity, ...records.flatMap((record) => record.kind === 'invitation' && record.payload.action === 'grant'
-      && Date.parse(record.payload.expiresAt) > now ? [Date.parse(record.payload.expiresAt)] : []))
-  }
-
   private async inputs(event: 'authorization.store' | 'configuration.snapshot', ownedLock?: AuthorizationTransactionLock): Promise<string> {
     const version = this.options.trust.authorizationVersion!()
     const files = await this.measure(event, 'inputs', () => authorizationInputs(this.options.recordsRoot, this.options.outboxRoot, this.options.stateDirectory, ownedLock))
     const overlay = await this.measure(event, 'overlay', async () => this.options.overlay?.authorizationRevision())
     if (version !== this.options.trust.authorizationVersion!()) throw new RemoteConfigError('authorization-changed', 'The enrolled trust changed during authorization.')
-    return JSON.stringify([files, version, this.options.trust.workspaceId, this.options.trust.maximumInvitationLifetimeMs, overlay])
+    return JSON.stringify([files, version, this.options.trust.workspaceId, overlay])
   }
 
   private async resolveSnapshot(state: StoreState, sources?: RecordSources): Promise<RemoteConfigSnapshot> {
@@ -324,7 +319,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
         current: () => {
           const now = this.options.trust.now?.() ?? Date.now()
           return !this.closed && unchanged() && version === this.options.trust.authorizationVersion?.()
-            && now >= cached.from && now < cached.until && overlay === this.options.overlay?.currentAuthorizationRevision()
+            && now >= cached.from && overlay === this.options.overlay?.currentAuthorizationRevision()
         },
       }
       this.sessionAuthorization = lease
@@ -353,7 +348,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     // Startup already verified these records; fingerprint, lock and expiry checks below still apply.
     this.authorizationCache = { inputs: cached.inputs,
       snapshot: { document: structuredClone(cached.snapshot.document), revision: cached.snapshot.revision },
-      from: cached.from, until: cached.until }
+      from: cached.from }
   }
 
   private async authorizationSnapshot(): Promise<{ snapshot: SessionLinksSnapshot; generation: number }> {
@@ -370,7 +365,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
         }
         const now = this.options.trust.now?.() ?? Date.now()
         if (!this.closed && !this.pendingMutations && this.readOnlyLock === readOnlyLock && reusable === this.authorizationCache
-          && reusable.inputs === currentInputs && now >= reusable.from && now < reusable.until) {
+          && reusable.inputs === currentInputs && now >= reusable.from) {
           logAgentHostDiagnostic('authorization.store', { scope: this.options.workspaceRoot, step: 'queue', status: 'ok', reason: 'cache-hit', elapsedMs: 0 })
           return { snapshot: reusable.snapshot, generation: this.generation }
         }
@@ -391,7 +386,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       if (generation !== this.generation) continue
       const now = this.options.trust.now?.() ?? Date.now()
       const cached = this.authorizationCache
-      if (cached?.inputs === before && now >= cached.from && now < cached.until) {
+      if (cached?.inputs === before && now >= cached.from) {
         logAgentHostDiagnostic('authorization.store', { scope: this.options.workspaceRoot, step: 'cache', status: 'ok', reason: 'cache-hit' })
         return { snapshot: cached.snapshot, generation }
       }
@@ -409,7 +404,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
       catch (error) { if (afterGeneration !== this.generation || await this.retryReadOnlyInputs(error, afterLock)) continue; throw error }
       if (before !== after || afterGeneration !== this.generation || this.closed) continue
       const snapshot = { document: fresh.document, revision: fresh.revision }
-      if (!fresh.resolution.blocked) this.authorizationCache = { inputs: after, snapshot: structuredClone(snapshot), from: now, until: this.nextExpiry(fresh.resolution.records, now) }
+      if (!fresh.resolution.blocked) this.authorizationCache = { inputs: after, snapshot: structuredClone(snapshot), from: now }
       return { snapshot, generation: afterGeneration }
     }
     const reading = this.read()
@@ -590,7 +585,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     for (const operation of operations) {
       if (operation.payload.action === 'publish' || operation.payload.action === 'grant' || operation.payload.action === 'set') {
         const entity = after.entities[entityKey(operation)]
-        if (entity.state !== 'active') throw new RemoteConfigError('inactive-change', 'The new value is removed, revoked or expired. Explicit reenrollment or a new authorized grant is required; no operation was written.')
+        if (entity.state !== 'active') throw new RemoteConfigError('inactive-change', 'The new value is removed or revoked. Explicit reenrollment or a new authorized grant is required; no operation was written.')
       }
     }
   }

@@ -6,6 +6,7 @@ import { isAbsolute, join, relative, sep } from 'node:path'
 import ssh2 from 'ssh2'
 import { z } from 'zod'
 import type { WorkspaceGitSyncStatus } from '../../shared/gitSync'
+import { PRIVATE_DEVICE_RENEWAL_MS } from '../../shared/deviceTrust'
 import type { AgentHostTarget } from '../../shared/agentHost'
 import type { DeviceRecord, RemoteConfigSnapshot, RemoteRecord } from '../../shared/remoteConfig'
 import { readClientIdentity } from '../clientIdentity'
@@ -73,7 +74,7 @@ interface Runtime {
   ownRevision: string
   grants: Map<string, string>
   grantedPairs: Map<string, string>
-  importedGrants: Map<string, string>
+  revokingPairs: Map<string, Promise<void>>
   network: Set<Promise<void>>
   peerWork?: Promise<void>
   peerAgain: boolean
@@ -89,7 +90,7 @@ type Replica = Pick<GitReplica, 'root' | 'workspaceRelativePath' | 'remote' | 'b
 export interface WorkspaceSyncOptions {
   directory: string
   keys: Pick<DeviceSshKeys, 'get'>
-  tunnels: Pick<ManagedDevTunnels, 'publish' | 'publicEndpoint' | 'authorize' | 'revoke' | 'connect'>
+  tunnels: Pick<ManagedDevTunnels, 'publish' | 'publicEndpoint' | 'authorize' | 'authorizeTrust' | 'revoke' | 'connect'>
   host: Pick<VSCodeDeviceHost, 'pair' | 'setWorkspace' | 'start' | 'ownerId' | 'list' | 'revoke'>
   devices: Pick<VSCodeDeviceClient, 'import' | 'connectOwner' | 'reconnectOwner' | 'disconnectOwner' | 'ownerConnected' | 'publicIdentities'>
   identity?(): Promise<Awaited<ReturnType<typeof readClientIdentity>>>
@@ -196,6 +197,25 @@ export class WorkspaceSyncService {
     this.options.onChange(runtime.root)
   }
 
+  private revokePairScope(runtime: Runtime, peerId: string, pairId: string): Promise<void> {
+    const pending = runtime.revokingPairs.get(peerId)
+    if (pending) return pending
+    this.options.tunnels.revoke(pairId)
+    const work = Promise.resolve().then(async () => {
+      const pairs = await this.options.host.list()
+      if (pairs.some((pair) => pair.id === pairId)) await this.options.host.setWorkspace(pairId, runtime.root, null)
+      if (runtime.grantedPairs.get(peerId) !== pairId) return
+      runtime.grantedPairs.delete(peerId)
+      delete runtime.metadata.managedPairs[peerId]
+      await writeJsonAtomic(join(runtime.directory, 'runtime.json'), runtime.metadata)
+    }).finally(() => {
+      if (runtime.revokingPairs.get(peerId) === work) runtime.revokingPairs.delete(peerId)
+    })
+    runtime.revokingPairs.set(peerId, work)
+    this.track(runtime, work)
+    return work
+  }
+
   private applySnapshot(runtime: Runtime, snapshot: RemoteConfigSnapshot): void {
     const changed = runtime.snapshot?.revision !== snapshot.revision
     runtime.snapshot = snapshot
@@ -205,6 +225,20 @@ export class WorkspaceSyncService {
     runtime.status.conflicts = [...new Set(snapshot.resolution.diagnostics.map((issue) => issue.entityKey ?? issue.code))]
     runtime.status.settings = this.settings(snapshot, runtime.local.clientId)
     runtime.status.machineAliases = snapshot.resolution.machineAliases
+    for (const [grantId, peerId] of runtime.grants) {
+      const current = Object.values(snapshot.resolution.invitations).some((record) => record.payload.action === 'grant'
+        && record.payload.grantId === grantId && record.payload.issuerId === runtime.local.clientId && record.payload.recipientId === peerId)
+      if (current && !runtime.enrollment.pins[peerId]?.blocked) continue
+      runtime.control.revoke(grantId)
+      this.options.tunnels.revoke(grantId)
+      runtime.grants.delete(grantId)
+    }
+    for (const [peerId, pairId] of runtime.grantedPairs) {
+      const current = Object.values(snapshot.resolution.invitations).some((record) => record.payload.action === 'grant'
+        && record.payload.issuerId === runtime.local.clientId && record.payload.recipientId === peerId)
+      if (current && !runtime.enrollment.pins[peerId]?.blocked) continue
+      void this.revokePairScope(runtime, peerId, pairId)
+    }
     const peers = new Map(runtime.peers.status().map((peer) => [peer.deviceId, peer]))
     for (const [id, pin] of Object.entries(runtime.enrollment.pins)) {
       if (id === runtime.local.clientId) continue
@@ -393,7 +427,7 @@ export class WorkspaceSyncService {
       const own = snapshot.resolution.devices[runtime.local.clientId]
       const invitation = Object.values(snapshot.resolution.invitations).find((record) => record.payload.action === 'grant'
         && record.payload.issuerId === owner.clientId && record.payload.recipientId === runtime.local.clientId)
-      const grant = invitation?.payload.action === 'grant' && Date.parse(invitation.payload.expiresAt) > Date.now()
+      const grant = invitation?.payload.action === 'grant'
         && invitation.payload.issuerIdentityRef === peer.identityRevision && invitation.payload.recipientIdentityRef === own?.operationId
         ? { operationId: invitation.operationId, ...invitation.payload } : undefined
       if (grantRevision && grant?.operationId !== grantRevision) throw new Error('The selected owner grant changed while reconnecting.')
@@ -456,17 +490,21 @@ export class WorkspaceSyncService {
     for (const runtime of this.runtimes.values()) {
       const generation = runtime.generation
       if (!this.networkAllowed(runtime, generation) || !runtime.metadata.controlPort) continue
+      const refreshGeneration = runtime.refreshGeneration
+      // Interactive revocation must not join a delayed restoration read.
       const snapshot = await runtime.store.read()
-      if (!this.networkAllowed(runtime, generation)) continue
+      if (!this.networkAllowed(runtime, generation) || refreshGeneration !== runtime.refreshGeneration) continue
+      this.applySnapshot(runtime, snapshot)
       if (snapshot.resolution.blocked) { this.error(runtime, new Error('Cannot restore invalid metadata grants.')); continue }
       for (const grant of Object.values(snapshot.resolution.invitations)) {
         if (grant.payload.action !== 'grant' || grant.payload.issuerId !== runtime.local.clientId) continue
         const pin = runtime.enrollment.pins[grant.payload.recipientId]
         if (!pin || pin.blocked) continue
-        const lifetime = { id: grant.payload.grantId, expiresAt: grant.payload.expiresAt }
-        runtime.control.allow(lifetime, grant.payload.recipientId, pin.clientPublicKey)
-        this.options.tunnels.authorize(lifetime, pin.clientPublicKey, runtime.metadata.controlPort, true)
-        runtime.grants.set(lifetime.id, grant.payload.recipientId)
+        const grantId = grant.payload.grantId
+        const current = () => this.currentGrant(runtime, grant.operationId, grant.payload.recipientId)
+        runtime.control.allow({ id: grantId }, grant.payload.recipientId, pin.clientPublicKey, current)
+        this.options.tunnels.authorizeTrust(grantId, pin.clientPublicKey, runtime.metadata.controlPort, current)
+        runtime.grants.set(grantId, grant.payload.recipientId)
       }
     }
   }
@@ -549,7 +587,6 @@ export class WorkspaceSyncService {
     const trust: RecordTrust = {
       workspaceId: enrollment.workspaceId,
       authorizationVersion: () => JSON.stringify(runtime.enrollment),
-      maximumInvitationLifetimeMs: 24 * 60 * 60 * 1000,
       trustedKey: (actor) => {
         const pin = runtime.enrollment.pins[actor.deviceId]
         return pin && sshFingerprint(pin.clientPublicKey) === actor.keyId ? pin.clientPublicKey : undefined
@@ -658,7 +695,7 @@ export class WorkspaceSyncService {
       disposeBackend: () => {}, status: { enabled: enrollment.enabled, workspaceId: enrollment.workspaceId, intervalMs: 15000, state: 'starting', pending: 0, provisionalTasks: [], conflicts: [], peers: [], revision: null, settingsFile: settings.file,
         localDevice: { deviceId: local.clientId, machineName: local.machineName }, machineAliases: {} },
       refreshGeneration: 0, recordWatchers: [],
-      ownRevision: '', grants: new Map(), grantedPairs: new Map(Object.entries(metadata.managedPairs)), importedGrants: new Map(), network: new Set(), peerAgain: false, peerConnections: new Map(), recoveredOwners: new Set(), closed: false, generation: 0, grantWork: new Set(), connectionAbort: new AbortController(),
+      ownRevision: '', grants: new Map(), grantedPairs: new Map(Object.entries(metadata.managedPairs)), revokingPairs: new Map(), network: new Set(), peerAgain: false, peerConnections: new Map(), recoveredOwners: new Set(), closed: false, generation: 0, grantWork: new Set(), connectionAbort: new AbortController(),
     }
     try {
       await mkdir(config.options.outboxRoot, { recursive: true })
@@ -719,6 +756,7 @@ export class WorkspaceSyncService {
     if (!runtime) return { enabled: false, intervalMs: 15000, state: 'disabled', pending: 0, provisionalTasks: [], conflicts: [], peers: [], revision: null }
     return structuredClone(runtime.status)
   }
+
   async syncNow(root: string): Promise<void> {
     const runtime = await this.ensure(root, false)
     if (!runtime?.enrollment.enabled) throw new Error('Enable automatic workspace links before synchronizing.')
@@ -839,14 +877,8 @@ export class WorkspaceSyncService {
           const liveGrant = Object.values(current.resolution.invitations).some((record) => record.payload.action === 'grant'
             && record.payload.issuerId === runtime.local.clientId && record.payload.recipientId === peerId)
           if (current.resolution.devices[peerId] && liveGrant && !runtime.enrollment.pins[peerId]?.blocked) continue
-          this.options.tunnels.revoke(pairId)
-          const pairs = await this.options.host.list()
+          await this.revokePairScope(runtime, peerId, pairId)
           if (!this.networkAllowed(runtime, generation)) return
-          if (pairs.some((pair) => pair.id === pairId)) await this.options.host.setWorkspace(pairId, runtime.root, null)
-          if (!this.networkAllowed(runtime, generation)) return
-          runtime.grantedPairs.delete(peerId)
-          delete runtime.metadata.managedPairs[peerId]
-          await writeJsonAtomic(join(runtime.directory, 'runtime.json'), runtime.metadata)
         }
         if (!this.networkAllowed(runtime, generation)) return
         const pairs = await this.options.host.list()
@@ -886,7 +918,7 @@ export class WorkspaceSyncService {
       const local = snapshot.resolution.devices[runtime.local.clientId]
       if (!pin || pin.blocked || pin.clientPublicKey !== peer.clientPublicKey || pin.hostPublicKey !== peer.hostPublicKey
         || identity?.operationId !== peer.identityRevision || local?.operationId !== grant.recipientIdentityRef) throw new Error('The selected owner identity changed while linking.')
-      if (Date.parse(grant.expiresAt) <= Date.now() || !Object.values(snapshot.resolution.invitations).some((item) => item.operationId === grant.operationId && item.payload.action === 'grant')) throw new Error('The selected owner grant expired or changed while linking.')
+      if (!Object.values(snapshot.resolution.invitations).some((item) => item.operationId === grant.operationId && item.payload.action === 'grant')) throw new Error('The selected owner trust changed while linking.')
     }
     const work = Promise.resolve().then(async (): Promise<PeerConnection> => {
       check()
@@ -894,7 +926,7 @@ export class WorkspaceSyncService {
       const options = {
         workspaceId: runtime.enrollment.workspaceId, local: { deviceId: runtime.local.clientId, keyPair: client },
         recipient: { deviceId: peer.deviceId, clientPublicKey: peer.clientPublicKey, hostPublicKey: peer.hostPublicKey },
-        grantId: grant.grantId, expiresAt: grant.expiresAt,
+        grantId: grant.grantId,
         route: { kind: 'dev-tunnel' as const, tunnelId: peer.route.tunnelId, sshPort: peer.route.sshPort, hostPublicKey: peer.hostPublicKey, clientPublicKey: client.publicKey },
         targetPort: peer.route.controlPort, transport: this.options.tunnels,
         timeoutMs: runtime.status.settings?.connectTimeoutMs ?? 45000,
@@ -907,15 +939,9 @@ export class WorkspaceSyncService {
         || JSON.stringify(invitation.participant) !== JSON.stringify(runtime.local)) throw new Error('The metadata endpoint returned a different device owner or recipient.')
       let imported = false
       try {
-        const known = (await this.options.devices.publicIdentities(runtime.root)).some((identity) => identity.deviceId === peer.deviceId)
-        check()
-        if (!known || runtime.importedGrants.get(peer.deviceId) !== grant.operationId) {
-          logAgentHostDiagnostic('device.identity', { ownerId: peer.deviceId, status: 'begin', step: 'configuration', reason: 'reimport' })
-          await this.options.devices.import(runtime.root, invitation, true)
-          imported = true
-          check()
-          runtime.importedGrants.set(peer.deviceId, grant.operationId)
-        }
+        logAgentHostDiagnostic('device.identity', { ownerId: peer.deviceId, status: 'begin', step: 'configuration', reason: 'reimport' })
+        await this.options.devices.import(runtime.root, invitation, true)
+        imported = true
         check()
         await this.options.devices.connectOwner(runtime.root, peer.deviceId)
         check()
@@ -924,7 +950,8 @@ export class WorkspaceSyncService {
         throw error
       }
       return {
-        connected: () => this.options.devices.ownerConnected(runtime.root, peer.deviceId),
+        connected: async () => (Date.parse(invitation.expiresAt) > Date.now() + PRIVATE_DEVICE_RENEWAL_MS)
+          && await this.options.devices.ownerConnected(runtime.root, peer.deviceId),
         notify: async (payload: unknown) => {
           const operationId = parseRecord(z.object({ operation: z.unknown() }).passthrough().parse(payload).operation).operationId
           const response = z.object({
@@ -954,21 +981,35 @@ export class WorkspaceSyncService {
     const generation = runtime.generation
     const enabled = () => this.networkAllowed(runtime, generation) && !runtime.enrollment.pins[peer.deviceId]?.blocked
     if (!enabled()) throw new Error('Peer admission is disabled.')
-    const snapshot = await runtime.store.read()
-    const prior = Object.values(snapshot.resolution.invitations).find((record) => record.payload.issuerId === runtime.local.clientId && record.payload.recipientId === peer.deviceId)
-    const valid = prior?.payload.action === 'grant' && prior.payload.issuerIdentityRef === runtime.ownRevision && prior.payload.recipientIdentityRef === peer.identityRevision && Date.parse(prior.payload.expiresAt) > Date.now() + 3600000
+    const snapshot = await this.refresh(runtime)
+    const entity = snapshot.resolution.entities[`invitation:${runtime.local.clientId}:${peer.deviceId}`]
+    // A tombstone is an explicit decision, never a request for automatic reenrollment.
+    if (entity && ['deleted', 'needs-resolution'].includes(entity.state)) return
+    if (entity?.state === 'blocked' && snapshot.resolution.diagnostics.some((issue) =>
+      issue.entityKey === entity.key && issue.code !== 'stale-identity')) return
+    const prior = entity?.value
+    const valid = prior?.kind === 'invitation' && prior.payload.action === 'grant'
+      && prior.payload.issuerIdentityRef === runtime.ownRevision && prior.payload.recipientIdentityRef === peer.identityRevision
     const issuedAt = Date.now()
     const grant = valid ? prior : await runtime.store.append('invitation', {
       action: 'grant', issuerId: runtime.local.clientId, recipientId: peer.deviceId, grantId: randomUUID(),
       issuerIdentityRef: runtime.ownRevision, recipientIdentityRef: peer.identityRevision,
-      capability: 'ah-link', issuedAt: new Date(issuedAt).toISOString(), expiresAt: new Date(issuedAt + 24 * 60 * 60 * 1000).toISOString(),
+      capability: 'ah-link', issuedAt: new Date(issuedAt).toISOString(), lifetime: 'until-revoked',
       routeRef: { identityRef: runtime.ownRevision, routeIndex: 0 },
     })
+    if (!valid) await this.refresh(runtime)
     if (runtime.generation !== generation || !enabled()) return
-    if (grant.payload.action !== 'grant' || !runtime.metadata.controlPort) throw new Error('The reciprocal metadata grant is not ready.')
-    runtime.control.allow({ id: grant.payload.grantId, expiresAt: grant.payload.expiresAt }, peer.deviceId, peer.clientPublicKey)
-    this.options.tunnels.authorize({ id: grant.payload.grantId, expiresAt: grant.payload.expiresAt }, peer.clientPublicKey, runtime.metadata.controlPort, true)
+    if (grant.kind !== 'invitation' || grant.payload.action !== 'grant' || !runtime.metadata.controlPort) throw new Error('The reciprocal metadata grant is not ready.')
+    const current = () => this.currentGrant(runtime, grant.operationId, peer.deviceId)
+    runtime.control.allow({ id: grant.payload.grantId }, peer.deviceId, peer.clientPublicKey, current)
+    this.options.tunnels.authorizeTrust(grant.payload.grantId, peer.clientPublicKey, runtime.metadata.controlPort, current)
     runtime.grants.set(grant.payload.grantId, peer.deviceId)
+  }
+
+  private currentGrant(runtime: Runtime, operationId: string, peerId: string): boolean {
+    return this.networkAllowed(runtime) && !runtime.enrollment.pins[peerId]?.blocked
+      && Object.values(runtime.snapshot?.resolution.invitations ?? {}).some((record) => record.operationId === operationId
+        && record.payload.action === 'grant')
   }
 
   private linkInvitation(runtime: Runtime, senderId: string, signal: AbortSignal): Promise<unknown> {
@@ -985,20 +1026,17 @@ export class WorkspaceSyncService {
       if (signal.aborted || !permitted()) throw new PeerControlError('aborted')
     }
     check()
+    await runtime.revokingPairs.get(senderId)
+    check()
     if (!runtime.enrollment.enabled || runtime.enrollment.pins[senderId]?.blocked) throw new Error('The peer is no longer enrolled.')
     const snapshot = await this.refresh(runtime)
     check()
     const identity = snapshot.resolution.devices[senderId]
     const peer = identity ? this.publicPeer(runtime, identity) : undefined
     if (!peer) throw new Error('The sender identity is not ready for linking.')
-    const old = (await this.options.host.list()).find((pair) => pair.participant.clientId === senderId)
-    check()
-    if (old && old.publicKey === peer.clientPublicKey && Date.parse(old.expiresAt) <= Date.now()) {
-      await this.options.host.revoke(old.id)
-      this.options.tunnels.revoke(old.id)
-      check()
-    }
-    const pair = await this.options.host.pair({ clientId: senderId, username: peer.username, machineName: peer.machineName }, peer.clientPublicKey)
+    if (!Object.values(snapshot.resolution.invitations).some((record) => record.payload.action === 'grant'
+      && record.payload.issuerId === runtime.local.clientId && record.payload.recipientId === senderId)) throw new Error('The sender no longer has device trust.')
+    const pair = await this.options.host.pair({ clientId: senderId, username: peer.username, machineName: peer.machineName }, peer.clientPublicKey, true)
     check()
     const existing = pair.workspaces.find((policy) => policy.root === runtime.root)
     let managed = runtime.grantedPairs.has(senderId)
@@ -1014,7 +1052,7 @@ export class WorkspaceSyncService {
       check()
       const port = await this.options.host.start()
       check()
-      const route = this.options.tunnels.authorize(pair, peer.clientPublicKey, port, true)
+      const route = this.options.tunnels.authorize(pair, peer.clientPublicKey, port)
       const ownerId = await this.options.host.ownerId()
       check()
       return deviceInvitationSchema.parse({
