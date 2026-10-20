@@ -19,6 +19,7 @@ import { sessionOwnerSchema } from './repositorySessionLinks'
 import { readJsonBounded } from './shared/storage'
 import { logAgentHostDiagnostic } from './agentHostDiagnostics'
 import type { AgentHostDiagnosticDetails } from './agentHostDiagnostics'
+import { agentHostSizeLimit } from './agentHostLimits'
 
 export class AgentHostCreationError extends Error {}
 export function isExplicitlyDeletedAgentHostSession(error: unknown, sessionId: string): boolean {
@@ -309,6 +310,7 @@ export class AgentHostRegistry {
   }
 
   private async resolveEndpoint(target: AgentHostTarget, endpoints: AgentHostEndpoint[], signal: AbortSignal): Promise<AgentHostEndpoint> {
+    const failures: unknown[] = []
     const candidates = await Promise.all(endpoints.map(async (endpoint) => {
       try {
         const probe = await this.creationClient(endpoint.instanceId, signal, endpoint)
@@ -320,10 +322,12 @@ export class AgentHostRegistry {
           const chat = await probe.client.request('subscribe', { channel: target.chatId })
           return chat.snapshot?.resource === target.chatId ? endpoint : undefined
         } finally { await probe.close() }
-      } catch { return undefined }
+      } catch (error) { failures.push(error); return undefined }
     }))
     signal.throwIfAborted()
     const matches = candidates.filter((endpoint) => endpoint !== undefined)
+    const limit = failures.map(agentHostSizeLimit).find((error) => error !== undefined)
+    if (limit) throw limit
     if (matches.length !== 1) throw new Error(matches.length ? 'The original chat is available on multiple local Agent Hosts. Close duplicate Hosts on the owner device before reconnecting.'
       : 'The original chat is unavailable on the current local Agent Hosts. No replacement session was selected.')
     return matches[0]

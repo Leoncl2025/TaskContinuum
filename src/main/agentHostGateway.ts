@@ -14,6 +14,7 @@ import type { AgentHostConnection } from './agentHostConnection'
 import { isAgentHostTurnBoundary } from './agentHostConnection'
 import { AgentHostGatewayScheduler, GATEWAY_LIMITS } from './agentHostGatewayScheduler'
 import { abortable } from './shared/abortable'
+import { AGENT_HOST_LIMIT_HEADER, AGENT_HOST_LIMIT_RPC_CODE, AGENT_HOST_LIMITS, AgentHostSizeLimitError, agentHostSizeLimit } from './agentHostLimits'
 
 export interface AgentHostAccess {
   canSend: boolean
@@ -34,10 +35,11 @@ const dispatchSchema = z.object({ channel: z.string().max(512), clientSeq: z.num
 class TerminalUnavailableError extends Error {}
 
 export function attachAgentHostGateway(server: Server, options: AgentHostGatewayOptions) {
-  const sockets = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024, perMessageDeflate: false })
+  const sockets = new WebSocketServer({ noServer: true, maxPayload: AGENT_HOST_LIMITS.requestBytes, perMessageDeflate: false })
   const checks = new Set<() => void>()
   const scheduler = new AgentHostGatewayScheduler()
   let bufferedEventBytes = 0
+  let bufferedResponseBytes = 0
   let terminalLeases = 0
   let pendingUpgrades = 0
   const upgrades = new Set<AbortController>()
@@ -46,6 +48,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
     const traceId = suppliedTrace.success ? suppliedTrace.data : randomUUID()
     const started = performance.now()
     let target: AgentHostTarget | undefined
+    let authorizedToken: string | undefined
     let step: NonNullable<AgentHostDiagnosticDetails['step']> = 'validation'
     let stepStarted = started
     const advance = (next: NonNullable<AgentHostDiagnosticDetails['step']>) => {
@@ -75,6 +78,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
         const token = request.headers.authorization?.replace(/^Bearer /, '') ?? ''
         advance('authorization')
         await abortable(withAgentHostDiagnosticTrace(traceId, () => options.authorize(token, selectedTarget, false)), abort.signal)
+        authorizedToken = token
         abort.signal.throwIfAborted()
         advance('native')
         const connection = await abortable(options.connection(selectedTarget), abort.signal)
@@ -90,6 +94,13 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
         advance('websocket')
         sockets.handleUpgrade(request, socket, head, (client) => serve(client, connection, token, selectedTarget, access, traceId))
         logAgentHostDiagnostic('gateway.upgrade', { target: selectedTarget, traceId, status: 'ok', step, elapsedMs: performance.now() - started })
+      } catch (error) {
+        const limit = agentHostSizeLimit(error)
+        if (!limit || authorizedToken === undefined || !target) throw error
+        logAgentHostDiagnostic('gateway.upgrade', { target, traceId, status: 'error', step, elapsedMs: performance.now() - started, error: limit })
+        await abortable(options.authorize(authorizedToken, target, false), abort.signal)
+        abort.signal.throwIfAborted()
+        if (!socket.destroyed) socket.end(`HTTP/1.1 413 Payload Too Large\r\n${AGENT_HOST_LIMIT_HEADER}: ${JSON.stringify(limit.toData())}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`)
       } finally {
         clearTimeout(timeout)
         socket.off('close', abandoned)
@@ -123,6 +134,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
     let flushing = false
     let urgent = false
     let pendingRequests = 0
+    let responseBytes = 0
     let closeReason: AgentHostDiagnosticDetails['reason']
     let access = initialAccess
     const authorize = async (send: boolean) => {
@@ -132,14 +144,39 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
       if (send && !access.canSend) throw new Error('Send access is not authorized.')
       return access
     }
-    const fail = (reason: NonNullable<AgentHostDiagnosticDetails['reason']>) => {
-      if (!closed) { closeReason = reason; scheduler.cancel(socket); socket.close(1008, 'Session access or connection changed. No execution replay.') }
+    const fail = (reason: NonNullable<AgentHostDiagnosticDetails['reason']>, limit?: AgentHostSizeLimitError) => {
+      if (!closed) {
+        closeReason = reason
+        scheduler.cancel(socket)
+        if (limit) logAgentHostDiagnostic('gateway.socket', { target, traceId, status: 'error', step: 'response', error: limit })
+        socket.close(limit ? 1009 : 1008, limit ? JSON.stringify(limit.toData()) : 'Session access or connection changed. No execution replay.')
+      }
     }
     const send = (message: unknown): boolean => {
       if (closed || socket.readyState !== WebSocket.OPEN) return false
       const text = JSON.stringify(message)
-      if (socket.bufferedAmount + Buffer.byteLength(text) > 16 * 1024 * 1024) { fail('backpressure'); return false }
-      socket.send(text)
+      const bytes = Buffer.byteLength(text)
+      if (bytes > AGENT_HOST_LIMITS.messageBytes) throw new AgentHostSizeLimitError('message', AGENT_HOST_LIMITS.messageBytes, bytes)
+      if (responseBytes + bytes > AGENT_HOST_LIMITS.responseBufferBytes) {
+        fail('backpressure', new AgentHostSizeLimitError('send-buffer', AGENT_HOST_LIMITS.responseBufferBytes, responseBytes + bytes))
+        return false
+      }
+      if (bufferedResponseBytes + bytes > AGENT_HOST_LIMITS.responseBufferGlobalBytes) {
+        fail('backpressure', new AgentHostSizeLimitError('send-buffer', AGENT_HOST_LIMITS.responseBufferGlobalBytes, bufferedResponseBytes + bytes))
+        return false
+      }
+      responseBytes += bytes
+      bufferedResponseBytes += bytes
+      let finished = false
+      const complete = (error?: Error) => {
+        if (finished) return
+        finished = true
+        responseBytes -= bytes
+        bufferedResponseBytes -= bytes
+        if (error) { logAgentHostDiagnostic('gateway.socket', { target, traceId, status: 'error', step: 'transport', error }); fail('transport-closed') }
+      }
+      try { socket.send(text, complete) }
+      catch (error) { complete(error instanceof Error ? error : new Error('Agent Host response failed.')); return false }
       return true
     }
     const discard = (events: ActionEnvelope[]): void => {
@@ -179,12 +216,13 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
         }
       } catch (error) {
         logAgentHostDiagnostic('gateway.socket', { target, traceId, status: 'error', step: 'authorization', error })
-        fail('access-changed')
+        const limit = agentHostSizeLimit(error)
+        fail(limit ? 'backpressure' : 'access-changed', limit)
       }
       finally { flushing = false; if (queue.length && !closed) flushTimer = setTimeout(() => { void flush() }, urgent ? 0 : 25) }
     }
     const unlisten = connection.listen((event) => {
-      if (event.type === 'state') { if (connection.state !== 'connected') fail('owner-offline'); return }
+      if (event.type === 'state') { if (connection.state !== 'connected') fail('owner-offline', connection.sizeLimitError); return }
       if (event.type !== 'action' || event.envelope.channel === target.sessionId) return
       const resource = event.envelope.channel
       const pending = pendingSubscriptions.get(resource)
@@ -446,7 +484,10 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
                 fail('access-changed')
                 return
               }
-              if (id !== undefined) send({ jsonrpc: '2.0', id, error: error instanceof TerminalUnavailableError
+              const limit = agentHostSizeLimit(error)
+              if (id !== undefined) send({ jsonrpc: '2.0', id, error: limit
+                ? { code: AGENT_HOST_LIMIT_RPC_CODE, message: limit.message, data: limit.toData() }
+                : error instanceof TerminalUnavailableError
                 ? { code: -32000, message: 'Terminal output is unavailable from the owner Host. Retry manually.' }
                 : error instanceof AgentHostProtocolError ? { code: AhpErrorCodes.UnsupportedProtocolVersion, message: error.message }
                 : { code: -32602, message: 'Command, channel, or session access is not authorized.' } })

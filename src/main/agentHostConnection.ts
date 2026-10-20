@@ -14,7 +14,8 @@ import { AgentHostChatState } from './agentHostState'
 import { agentHostDiagnosticChannel, logAgentHostDiagnostic } from './agentHostDiagnostics'
 import type { AgentHostDiagnosticDetails, AgentHostDiagnosticEvent } from './agentHostDiagnostics'
 import { agentHostKey, agentHostModelInfoSchema, agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminalIdSchema, requireAgentHostProtocolVersion } from './agentHostProtocol'
-import { readJsonBounded, writeJsonAtomic } from './shared/storage'
+import { JsonFileSizeError, readJsonBounded, writeJsonAtomic, writeTextAtomic } from './shared/storage'
+import { AGENT_HOST_LIMITS, AgentHostSizeLimitError, agentHostSizeLimit } from './agentHostLimits'
 
 export type AgentHostEvent = { type: 'action'; envelope: ActionEnvelope } | { type: 'snapshot'; snapshot: Snapshot } | { type: 'state' }
 export function isAgentHostTurnBoundary(event: AgentHostEvent): boolean {
@@ -32,6 +33,8 @@ export class AgentHostConnection {
   private closed = false
   private connected = false
   private error?: string
+  private cacheError?: string
+  private lastSizeFailure?: AgentHostSizeLimitError
   private chat: AgentHostChatState
   private readonly snapshots = new Map<string, Snapshot>()
   private readonly listeners = new Set<(event: AgentHostEvent) => void>()
@@ -70,6 +73,7 @@ export class AgentHostConnection {
   }
 
   get state(): AgentHostView['state'] { return this.connected ? 'connected' : this.opening ? 'connecting' : 'offline' }
+  get sizeLimitError(): AgentHostSizeLimitError | undefined { return this.lastSizeFailure }
   private get readOnly(): boolean { return this.initialized?._meta?.taskcontinuumCanSend === false || this.chat.sendState.readOnly }
 
   get view(): AgentHostView {
@@ -80,7 +84,7 @@ export class AgentHostConnection {
       terminals: Object.fromEntries([...this.snapshots].filter(([resource]) => this.referencedTerminals.has(resource)).map(([resource, snapshot]) => [resource, structuredClone(snapshot.state) as TerminalState])),
       terminalStatus: Object.fromEntries([...this.terminalStatus].filter(([resource]) => this.referencedTerminals.has(resource)).map(([resource, status]) => [resource, { ...status }])),
       canSend: this.connected && !readOnly && !pending && !this.sending && !chat?.activeTurn && !chat?.draft?.text && !chat?.draft?.attachments?.length && !chat?.queuedMessages?.length, readOnly,
-      error: this.error, ...(pending ? { pendingTurn: { id: pending.id, state: pending.state as 'pending' | 'uncertain' } } : {}) }
+      error: [this.error, this.cacheError].filter(Boolean).join(' ') || undefined, ...(pending ? { pendingTurn: { id: pending.id, state: pending.state as 'pending' | 'uncertain' } } : {}) }
   }
 
   get handshake(): InitializeResult {
@@ -168,10 +172,16 @@ export class AgentHostConnection {
         this.commands = saved.commands.map((command) => command.state === 'pending' ? { ...command, state: 'uncertain' } : command)
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Agent Host delivery records are unreadable. No message was sent.') }
       try {
-        const saved = z.object({ schemaVersion: z.literal(2), target: agentHostTargetSchema, chat: z.unknown() }).strict().parse(await readJsonBounded(`${this.file}.cache.json`, 16 * 1024 * 1024))
-        if (agentHostKey(saved.target) === agentHostKey(this.target)) this.chat.snapshot(saved.chat as Snapshot)
+        const saved = z.object({ schemaVersion: z.literal(2), target: agentHostTargetSchema, chat: z.unknown() }).strict().parse(await readJsonBounded(`${this.file}.cache.json`, AGENT_HOST_LIMITS.cacheBytes))
+        if (agentHostKey(saved.target) !== agentHostKey(this.target)) throw new Error('Cached chat identity changed.')
+        this.chat.snapshot(saved.chat as Snapshot)
         this.refreshTerminals()
-      } catch { this.error = 'No verified offline history is available yet.' }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+        const failure = error instanceof JsonFileSizeError ? new AgentHostSizeLimitError('cache', error.limitBytes, error.actualBytes) : error
+        this.cacheError = agentHostSizeLimit(failure)?.message ?? 'Offline chat history could not be read. Reconnect to the original Host to restore history.'
+        this.diagnose('connection.cache', { status: 'error', step: 'load', error: failure })
+      }
     })()
     return this.loaded
   }
@@ -189,6 +199,7 @@ export class AgentHostConnection {
     if (this.opening) return this.opening
     clearTimeout(this.retry)
     this.retry = undefined
+    this.lastSizeFailure = undefined
     const traceId = randomUUID()
     const started = performance.now()
     this.diagnose('connection.open', { traceId, status: 'begin', step: 'load' })
@@ -202,6 +213,7 @@ export class AgentHostConnection {
       if (this.closed) throw new Error('Agent Host view is closed.')
       const abort = new AbortController()
       let active: typeof this.current
+      const retainedChat = this.chat
       let step: NonNullable<AgentHostDiagnosticDetails['step']> = 'transport'
       let stepStarted = performance.now()
       const advance = (next: NonNullable<AgentHostDiagnosticDetails['step']>) => {
@@ -254,9 +266,11 @@ export class AgentHostConnection {
         this.diagnose('connection.open', { traceId, status: 'ok', step: 'response', elapsedMs: performance.now() - started })
       } catch (error) {
         this.diagnose('connection.open', { traceId, status: 'error', step, elapsedMs: performance.now() - stepStarted, error })
-        if (active) { this.offline(active, 'stream-error'); await active.client.shutdown() }
+        if (active) { this.offline(active, 'stream-error', error); await active.client.shutdown() }
         else abort.abort()
-        this.error = 'Agent Host is unavailable, unsupported, or no longer authorized. No session was created and no message was replayed.'
+        if (!this.chat.loaded) { this.chat = retainedChat; this.refreshTerminals() }
+        this.lastSizeFailure = agentHostSizeLimit(error) ?? this.lastSizeFailure
+        this.error = this.lastSizeFailure?.message ?? 'Agent Host is unavailable, unsupported, or no longer authorized. No session was created and no message was replayed.'
         this.emit({ type: 'state' })
         this.scheduleRecovery()
         throw error
@@ -615,9 +629,11 @@ export class AgentHostConnection {
     active.client.dispatch(this.target.chatId, { type: 'chat/turnCancelled' as ChatTurnCancelledAction['type'], turnId, duration: 0 })
   }
 
-  private offline(active: NonNullable<typeof this.current>, reason: NonNullable<AgentHostDiagnosticDetails['reason']>): void {
+  private offline(active: NonNullable<typeof this.current>, reason: NonNullable<AgentHostDiagnosticDetails['reason']>, error?: unknown): void {
     if (this.current !== active) return
-    this.diagnose('connection.offline', { traceId: active.traceId, status: 'closed', reason })
+    const state = active.client.connectionState
+    this.lastSizeFailure = agentHostSizeLimit(error ?? (state.status === 'closed' && state.reason.type === 'transport' ? state.reason.error : undefined))
+    this.diagnose('connection.offline', { traceId: active.traceId, status: 'closed', reason, ...(this.lastSizeFailure ? { error: this.lastSizeFailure } : {}) })
     this.current = undefined
     this.modelCatalog = undefined
     this.connected = false
@@ -629,13 +645,13 @@ export class AgentHostConnection {
     this.subscribing.clear()
     for (const command of this.commands) if (command.state === 'pending') command.state = 'uncertain'
     void this.save().catch(() => undefined)
-    this.error = 'Agent Host disconnected. Restoring state only; messages are never replayed.'
+    this.error = this.lastSizeFailure?.message ?? 'Agent Host disconnected. Restoring state only; messages are never replayed.'
     this.emit({ type: 'state' })
     this.scheduleRecovery()
   }
 
   private scheduleRecovery(): void {
-    if (this.closed || this.retry || !this.listeners.size) return
+    if (this.closed || this.retry || this.lastSizeFailure || !this.listeners.size) return
     const attempt = this.failures + 1
     const retryMs = Math.min(30000, 1000 * 2 ** Math.min(this.failures++, 5))
     this.diagnose('connection.retry', { status: 'scheduled', attempt, retryMs })
@@ -651,8 +667,20 @@ export class AgentHostConnection {
     await this.opening?.catch(() => undefined)
     await this.writing
     const chat = this.chat.toSnapshot()
-    if (chat && Buffer.byteLength(JSON.stringify(chat)) < 15 * 1024 * 1024) await writeJsonAtomic(`${this.file}.cache.json`, { schemaVersion: 2, target: this.target, chat })
-    this.listeners.clear()
-    this.diagnose('connection.close', { status: 'closed', reason: 'shutdown' })
+    try {
+      if (chat) {
+        const text = JSON.stringify({ schemaVersion: 2, target: this.target, chat }) + '\n'
+        const bytes = Buffer.byteLength(text)
+        if (bytes > AGENT_HOST_LIMITS.cacheBytes) throw new AgentHostSizeLimitError('cache', AGENT_HOST_LIMITS.cacheBytes, bytes)
+        await writeTextAtomic(`${this.file}.cache.json`, text)
+        this.diagnose('connection.cache', { status: 'ok', step: 'cache', bytes })
+      }
+    } catch (error) {
+      this.diagnose('connection.cache', { status: 'error', step: 'cache', error })
+      throw error
+    } finally {
+      this.listeners.clear()
+      this.diagnose('connection.close', { status: 'closed', reason: 'shutdown' })
+    }
   }
 }

@@ -8,6 +8,7 @@ import { z } from 'zod'
 import type { AgentHostTarget } from '../shared/agentHost'
 import { agentHostKey, agentHostTerminalIdSchema } from './agentHostProtocol'
 import { FileTransferError } from '../shared/fileTransfer'
+import { agentHostSizeLimit } from './agentHostLimits'
 
 const DIRECTORY = 'agent-host-diagnostics'
 const ACTIVE_FILE = 'agent-host.jsonl'
@@ -36,6 +37,7 @@ const captureRecordSchema = z.object({
     'connection.stream', 'connection.send', 'connection.send.phase', 'connection.offline', 'connection.retry', 'connection.close',
     'gateway.upgrade', 'gateway.request', 'gateway.models', 'gateway.socket', 'creation.prepare', 'creation.execute',
     'authorization.acquire', 'authorization.store', 'configuration.transaction', 'configuration.snapshot', 'device.disconnect',
+    'connection.cache',
   ]),
   targetHash: z.string().regex(/^[a-f0-9]{16}$/).optional(),
   ownerHash: z.string().regex(/^[a-f0-9]{16}$/).optional(),
@@ -54,6 +56,9 @@ const captureRecordSchema = z.object({
   elapsedMs: z.number().int().min(0).max(1e9).optional(),
   queueMs: z.number().int().min(0).max(1e9).optional(),
   authMs: z.number().int().min(0).max(1e9).optional(),
+  bytes: z.number().int().min(0).max(1e9).optional(),
+  limitBytes: z.number().int().min(0).max(1e9).optional(),
+  limitKind: z.enum(['message', 'receive-buffer', 'send-buffer', 'request', 'cache']).optional(),
   pending: z.number().int().min(0).max(1e9).optional(),
   count: z.number().int().min(0).max(1e9).optional(),
   attempt: z.number().int().min(0).max(1e9).optional(),
@@ -64,7 +69,7 @@ const captureRecordSchema = z.object({
   dispatched: z.boolean().optional(),
   errorKind: z.enum(['unknown', 'timeout', 'rpc-error', 'transport-closed', 'transport-io', 'transport-protocol',
     'transport-other', 'aborted', 'invalid-data', 'client-closed', 'ECONNRESET', 'ECONNREFUSED',
-    'ETIMEDOUT', 'EPIPE', 'EACCES', 'store-busy', 'authorization-changed', 'other']).optional(),
+    'ETIMEDOUT', 'EPIPE', 'EACCES', 'store-busy', 'authorization-changed', 'size-limit', 'other']).optional(),
   errorMethod: z.enum(['initialize', 'reconnect', 'ping', 'subscribe', 'unsubscribe', 'dispatchAction', 'other']).optional(),
 })
 
@@ -76,6 +81,7 @@ export type AgentHostDiagnosticEvent =
   | 'gateway.upgrade' | 'gateway.request' | 'gateway.models' | 'gateway.socket'
   | 'creation.prepare' | 'creation.execute'
   | 'authorization.acquire' | 'authorization.store' | 'configuration.transaction' | 'configuration.snapshot' | 'device.disconnect'
+  | 'connection.cache'
 type Status = 'begin' | 'ok' | 'error' | 'closed' | 'scheduled'
 type Step = 'load' | 'transport' | 'initialize' | 'identity' | 'session' | 'chat' | 'terminal' | 'root'
   | 'reconcile' | 'authorization' | 'workspace-recovery' | 'tunnel' | 'websocket'
@@ -103,6 +109,7 @@ export interface AgentHostDiagnosticDetails {
   elapsedMs?: number
   queueMs?: number
   authMs?: number
+  bytes?: number
   pending?: number
   count?: number
   attempt?: number
@@ -120,6 +127,7 @@ function safeUuid(value: string | undefined): string | undefined {
   return value && z.uuid().safeParse(value).success ? value : undefined
 }
 function errorKind(error: unknown): string {
+  if (agentHostSizeLimit(error)) return 'size-limit'
   if (!(error instanceof Error)) return 'unknown'
   if (error.name === 'RemoteConfigError') {
     const code = (error as Error & { code?: unknown }).code
@@ -157,6 +165,7 @@ function entry(event: AgentHostDiagnosticEvent, details: AgentHostDiagnosticDeta
   const traceId = safeUuid(details.traceId ?? diagnosticTrace.getStore())
   const parentTraceId = safeUuid(details.parentTraceId)
   const error = details.error
+  const limit = agentHostSizeLimit(error)
   const timeout = error instanceof Error && error.name === 'RpcTimeoutError' ? safeNumber((error as Error & { timeoutMs?: number }).timeoutMs) : undefined
   const rpcCode = error instanceof Error && error.name === 'RpcError' && Number.isInteger((error as Error & { code?: number }).code)
     ? (error as Error & { code: number }).code : undefined
@@ -175,6 +184,8 @@ function entry(event: AgentHostDiagnosticEvent, details: AgentHostDiagnosticDeta
     ...(safeNumber(details.elapsedMs) !== undefined ? { elapsedMs: safeNumber(details.elapsedMs) } : {}),
     ...(safeNumber(details.queueMs) !== undefined ? { queueMs: safeNumber(details.queueMs) } : {}),
     ...(safeNumber(details.authMs) !== undefined ? { authMs: safeNumber(details.authMs) } : {}),
+    ...(safeNumber(limit?.actualBytes ?? details.bytes) !== undefined ? { bytes: safeNumber(limit?.actualBytes ?? details.bytes) } : {}),
+    ...(limit ? { limitBytes: limit.limitBytes, limitKind: limit.kind } : {}),
     ...(safeNumber(details.pending) !== undefined ? { pending: safeNumber(details.pending) } : {}),
     ...(safeNumber(details.count) !== undefined ? { count: safeNumber(details.count) } : {}),
     ...(safeNumber(details.attempt) !== undefined ? { attempt: safeNumber(details.attempt) } : {}),

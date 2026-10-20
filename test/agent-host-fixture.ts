@@ -18,6 +18,7 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
   const session: SessionState = { provider: 'copilotcli', title: chat.title, status: 1, lifecycle: 'ready' as SessionState['lifecycle'], activeClients: [], chats: [{ resource: chatId, title: chat.title, status: 1, modifiedAt: chat.modifiedAt }, { resource: 'ahp-chat:/private-other', title: 'Unshared sibling title', status: 1, modifiedAt: chat.modifiedAt }], defaultChat: chatId }
   const subscriptions = new Map<import('ws').WebSocket, Set<string>>()
   const dispatches: unknown[] = []
+  const methods: string[] = []
   const initializations: string[][] = []
   let loseNextSend = false
   let stallRoot = false
@@ -68,6 +69,7 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
     socket.on('close', () => subscriptions.delete(socket))
     socket.on('message', (data) => {
       const message = JSON.parse(data.toString())
+      methods.push(message.method)
       let result: unknown = {}
       if (message.method === 'initialize') {
         initializations.push([...message.params.protocolVersions])
@@ -116,7 +118,22 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
     terminalDelays.set(resource, new Promise<void>((resolve) => { release = resolve }))
     return () => { terminalDelays.delete(resource); release() }
   }
-  return { endpoint, hostId, sessionId, chatId, dispatches, initializations, action, snapshot, addTerminal, historyTerminals, terminalAction,
+  return { endpoint, hostId, sessionId, chatId, dispatches, methods, initializations, action, snapshot, addTerminal, historyTerminals, terminalAction,
+    historyBytes: (bytes: number, responseId = 3, metadataPadding = false) => {
+      const metadata = { largeHistory: '' }
+      chat = { ...chat, _meta: metadataPadding ? metadata : undefined, turns: Array.from({ length: 32 }, (_, index) => ({
+        id: `large-history-${index}`, state: 'complete', message: { text: `Original question ${index}`, origin: { kind: MessageKind.User } },
+        responseParts: [{ kind: 'markdown', id: `large-answer-${index}`, content: `Original answer ${index}` }], usage: undefined,
+      } as ChatState['turns'][number])) }
+      const part = chat.turns[0].responseParts[0]
+      if (part.kind !== 'markdown') throw new Error('Invalid history fixture.')
+      const size = () => Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: responseId, result: { snapshot: snapshot(chatId) } }))
+      const padding = bytes - size()
+      if (padding < 0) throw new Error('Requested history size is too small.')
+      if (metadataPadding) metadata.largeHistory = 'x'.repeat(padding)
+      else part.content += 'x'.repeat(padding)
+      return size()
+    },
     historyText: (count: number, text: string) => {
       chat = { ...chat, turns: Array.from({ length: count }, (_, index) => ({
         id: `history-${index}`, state: 'complete', message: { text: `Question ${index}`, origin: { kind: MessageKind.User } },

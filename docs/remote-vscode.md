@@ -476,6 +476,23 @@ action. Failed historical subscriptions are not replayed on reconnect.
 The owner rechecks the terminal's chat reference and native session/chat claim
 before returning a snapshot; terminal failures do not take down the chat.
 
+History snapshots use a shared **64 MiB UTF-8 message limit** on both the native
+and remote receiving transports. Each transport additionally caps unread data at
+80 MiB and 1,024 messages. The gateway can return these large snapshots without
+raising its client request limit: incoming requests remain limited to 16 MiB.
+Outstanding response writes are bounded at 80 MiB per connection and 128 MiB
+across the gateway, and release their budget when their send callback completes.
+Ordinary incremental event queues keep their separate 16/32 MiB limits.
+
+Private offline history uses compact JSON and a matching 64 MiB plus 64 KiB
+metadata-envelope limit, measured on the exact bytes written. Large histories
+are not silently skipped or truncated. A size failure is reported separately
+from missing sessions, authorization failures or unsupported protocol versions;
+the remote gateway reveals it only after current access checks. Oversized live
+history stops automatic reconnect attempts until an explicit retry rather than
+repeatedly downloading the same oversized snapshot. No replacement chat or
+execution replay is used. Both desktops need this update for large remote history.
+
 The gateway uses separate per-connection async budgets: P0 has two slots for
 ping/unsubscribe, P1 has two for models, session/chat and running terminals
 (at most one running terminal may occupy P1 at a time), P3 has one for
@@ -571,13 +588,17 @@ To inspect just the timing and failure fields on either computer:
 $dir = Join-Path $env:APPDATA 'Task Continuum\agent-host-diagnostics'
 $files = Get-ChildItem -LiteralPath $dir -Filter 'agent-host*.jsonl' -File
 Get-Content -LiteralPath $files.FullName | ConvertFrom-Json |
-  Where-Object { $_.event -in 'ipc.models', 'device.identity', 'device.transport', 'device.disconnect', 'connection.open', 'connection.models', 'connection.subscribe', 'connection.send', 'connection.send.phase', 'connection.heartbeat', 'connection.offline', 'connection.retry', 'gateway.upgrade', 'gateway.models', 'gateway.request', 'gateway.socket', 'creation.prepare', 'creation.execute', 'authorization.acquire', 'authorization.store', 'configuration.transaction', 'configuration.snapshot' } |
+  Where-Object { $_.event -in 'ipc.models', 'device.identity', 'device.transport', 'device.disconnect', 'connection.open', 'connection.models', 'connection.subscribe', 'connection.send', 'connection.send.phase', 'connection.cache', 'connection.heartbeat', 'connection.offline', 'connection.retry', 'gateway.upgrade', 'gateway.models', 'gateway.request', 'gateway.socket', 'creation.prepare', 'creation.execute', 'authorization.acquire', 'authorization.store', 'configuration.transaction', 'configuration.snapshot' } |
   Sort-Object timeUtc |
-  Select-Object timeUtc, event, status, traceId, parentTraceId, targetHash, scopeHash, step, method, channel, elapsedMs, queueMs, authMs, count, pending, reason, attempt, retryMs, errorKind, rpcCode, errorMethod, timeoutMs
+  Select-Object timeUtc, event, status, traceId, parentTraceId, targetHash, scopeHash, step, method, channel, elapsedMs, queueMs, authMs, bytes, limitBytes, limitKind, count, pending, reason, attempt, retryMs, errorKind, rpcCode, errorMethod, timeoutMs
 ```
 
 Use the overridden data directory instead of `$env:APPDATA` if
 `TASKCONTINUUM_DATA_DIR` is set.
+
+`errorKind: size-limit` includes `limitKind`, `limitBytes` and, when available,
+the observed byte count. `connection.cache` reports offline-history writes and
+read/write failures. These diagnostics contain no transcript text or raw paths.
 
 Authorization misses now log `authorization.acquire` phases for binding authority,
 owner identity and private receipts. `authorization.store` separates waiting for

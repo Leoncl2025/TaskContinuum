@@ -13,6 +13,7 @@ import { AGENT_HOST_TRACE_HEADER } from '../src/main/agentHostDiagnostics'
 import { attachAgentHostGateway } from '../src/main/agentHostGateway'
 import { connectAgentHostWebSocket, connectLocalAgentHost } from '../src/main/agentHostTransport'
 import { startAgentHostFixture } from './agent-host-fixture'
+import { AGENT_HOST_LIMITS, AgentHostSizeLimitError } from '../src/main/agentHostLimits'
 import {
   agentHostDiagnosticChannel, agentHostDiagnosticMethod, flushAgentHostDiagnostics,
   logAgentHostDiagnostic, startAgentHostDiagnostics, stopAgentHostDiagnostics, captureAgentHostDiagnostics,
@@ -22,6 +23,28 @@ import {
 afterEach(async () => { await stopAgentHostDiagnostics() })
 
 describe('Agent Host diagnostic logs', () => {
+  it('exports size-limit metadata through nested transport errors without exposing history or paths', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-ahp-size-log-'))
+    try {
+      await startAgentHostDiagnostics(directory)
+      const cause = new AgentHostSizeLimitError('message', AGENT_HOST_LIMITS.messageBytes, AGENT_HOST_LIMITS.messageBytes + 1)
+      logAgentHostDiagnostic('connection.open', {
+        status: 'error', step: 'chat',
+        error: new Error('Private snapshot C:\\secret-history with bearer-token', { cause }),
+      })
+      logAgentHostDiagnostic('connection.cache', { status: 'ok', step: 'cache', bytes: 42_045_143 })
+      const capture = await captureAgentHostDiagnostics(directory, {}, new AbortController().signal)
+      const text = capture.jsonl.toString('utf8')
+      for (const secret of ['secret-history', 'bearer-token', 'Private snapshot']) expect(text).not.toContain(secret)
+      const records = text.trim().split('\n').map((line) => JSON.parse(line))
+      expect(records).toContainEqual(expect.objectContaining({
+        event: 'connection.open', errorKind: 'size-limit', limitKind: 'message',
+        limitBytes: AGENT_HOST_LIMITS.messageBytes, bytes: AGENT_HOST_LIMITS.messageBytes + 1,
+      }))
+      expect(records).toContainEqual(expect.objectContaining({ event: 'connection.cache', status: 'ok', bytes: 42_045_143 }))
+    } finally { await stopAgentHostDiagnostics(); await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('keeps parallel latency spans correlated and exports only hashed scopes and safe phase metadata', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-ahp-auth-phase-'))
     const parents = [randomUUID(), randomUUID()]
