@@ -301,6 +301,110 @@ describe('workspace switching in the desktop workbench', () => {
     expect(titles()).toEqual(['Clean up codes', 'Other open task'])
   })
 
+  it('cycles open task tabs in displayed order with Ctrl+PageUp/PageDown, wraps, and skips closed tabs', async () => {
+    const { first } = fixtures()
+    first.tasks.push({ ...first.tasks[0], id: 'T-0003', title: 'Second task' }, { ...first.tasks[0], id: 'T-0004', title: 'Third task' })
+    localStorage.setItem(`taskcontinuum:workbench-selection:v2:${first.id}`, JSON.stringify({
+      version: 2, taskId: 'T-0003', openTaskIds: ['T-0004', 'T-0002', 'T-0003'], sessions: {},
+    }))
+    const user = userEvent.setup()
+    const mounted = render(<App />)
+    await user.click(await screen.findByRole('button', { name: 'Open workspace folder' }))
+    await screen.findByRole('tab', { name: 'Second task' })
+    const tab = (name: string) => within(screen.getByRole('tablist', { name: 'Open tasks' })).getByRole('tab', { name })
+    await user.keyboard('{Control>}{PageDown}{/Control}')
+    expect(tab('Third task')).toHaveAttribute('aria-selected', 'true')
+    expect(tab('Third task')).toHaveFocus()
+    await user.keyboard('{Control>}{PageUp}{/Control}')
+    expect(tab('Second task')).toHaveAttribute('aria-selected', 'true')
+    await user.keyboard('{Control>}{PageUp}{/Control}')
+    expect(tab('Actual UI task')).toHaveAttribute('aria-selected', 'true')
+    await user.click(screen.getByRole('button', { name: 'Close Second task' }))
+    await user.keyboard('{Control>}{PageDown}{/Control}')
+    expect(tab('Third task')).toHaveAttribute('aria-selected', 'true')
+    expect(screen.queryByRole('tab', { name: 'Second task' })).not.toBeInTheDocument()
+    act(() => {
+      fireEvent.keyDown(window, { key: 'PageDown', ctrlKey: true })
+      fireEvent.keyDown(window, { key: 'PageDown', ctrlKey: true })
+    })
+    expect(tab('Third task')).toHaveAttribute('aria-selected', 'true')
+    mounted.unmount()
+    render(<App />)
+    await waitFor(() => expect(tab('Third task')).toHaveAttribute('aria-selected', 'true'))
+    expect(within(screen.getByRole('tablist', { name: 'Open tasks' })).getAllByRole('tab').map((element) => element.textContent))
+      .toEqual(['Third task', 'Actual UI task'])
+  })
+
+  it.each([
+    { ctrlKey: false }, { shiftKey: true }, { altKey: true }, { metaKey: true }, { isComposing: true },
+  ])('does not switch task tabs for an unrelated or composing PageDown shortcut: %j', async (modifiers) => {
+    const { first } = fixtures()
+    first.tasks.push({ ...first.tasks[0], id: 'T-0003', title: 'Second task' })
+    localStorage.setItem(`taskcontinuum:workbench-selection:v2:${first.id}`, JSON.stringify({
+      version: 2, taskId: 'T-0002', openTaskIds: ['T-0002', 'T-0003'], sessions: {},
+    }))
+    render(<App />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Open workspace folder' }))
+    await screen.findByRole('tab', { name: 'Second task' })
+    expect(fireEvent.keyDown(window, { key: 'PageDown', ctrlKey: true, ...modifiers })).toBe(true)
+    expect(screen.getByRole('tab', { name: 'Actual UI task' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('handles one or no open tabs without opening tasks, and leaves an open dialog in control', async () => {
+    fixtures()
+    const user = userEvent.setup()
+    render(<App />)
+    expect(fireEvent.keyDown(window, { key: 'PageUp', ctrlKey: true })).toBe(true)
+    await user.click(await screen.findByRole('button', { name: 'Open workspace folder' }))
+    await screen.findByRole('tab', { name: 'Actual UI task' })
+    expect(fireEvent.keyDown(window, { key: 'PageDown', ctrlKey: true })).toBe(false)
+    expect(screen.getByRole('tab', { name: 'Actual UI task' })).toHaveAttribute('aria-selected', 'true')
+    await user.click(screen.getByRole('button', { name: 'Preferences' }))
+    expect(screen.getByText('Previous task tab')).toBeInTheDocument()
+    expect(screen.getByText('Next task tab')).toBeInTheDocument()
+    expect(fireEvent.keyDown(window, { key: 'PageDown', ctrlKey: true })).toBe(true)
+    expect(screen.getByRole('dialog', { name: 'Preferences' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Close Preferences' }))
+    await user.click(screen.getByRole('button', { name: 'Close Actual UI task' }))
+    expect(fireEvent.keyDown(window, { key: 'PageDown', ctrlKey: true })).toBe(true)
+    expect(within(screen.getByRole('tablist', { name: 'Open tasks' })).queryAllByRole('tab')).toEqual([])
+  })
+
+  it('switches task tabs from the composer without losing drafts, changing bindings, or bypassing chat dialogs', async () => {
+    const { first, repository, target, agentHost, bridge } = creationFixture()
+    const other = { ...target, sessionId: 'ahp-session:/other-shortcut', chatId: 'ahp-chat:/other-shortcut/main' }
+    first.tasks.push({ ...first.tasks[0], id: 'T-0003', title: 'Second bound task' })
+    repository[first.id] = { document: { schemaVersion: '2.1', bindings: {
+      'T-0002': [{ provider: 'agent-host', ...target }], 'T-0003': [{ provider: 'agent-host', ...other }],
+    } }, revision: 'a'.repeat(64) }
+    localStorage.setItem(`taskcontinuum:workbench-selection:v2:${first.id}`, JSON.stringify({
+      version: 2, taskId: 'T-0002', openTaskIds: ['T-0002', 'T-0003'], sessions: {},
+    }))
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: 'Open workspace folder' }))
+    await user.type(await screen.findByRole('textbox', { name: 'Message Agent Host' }), 'First task draft')
+    await user.keyboard('{Control>}{PageDown}{/Control}')
+    expect(screen.getByRole('tab', { name: 'Second bound task' })).toHaveAttribute('aria-selected', 'true')
+    await user.type(await screen.findByRole('textbox', { name: 'Message Agent Host' }), 'Second task draft')
+    await user.keyboard('{Control>}{PageUp}{/Control}')
+    expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('First task draft')
+    await user.click(screen.getByRole('button', { name: 'Chat details' }))
+    await user.keyboard('{Control>}{PageDown}{/Control}')
+    expect(screen.getByRole('dialog', { name: 'Chat details' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Actual UI task' })).toHaveAttribute('aria-selected', 'true')
+    await user.click(screen.getByRole('button', { name: 'Close Chat details' }))
+    const consumed = new KeyboardEvent('keydown', { key: 'PageDown', ctrlKey: true, cancelable: true })
+    consumed.preventDefault()
+    act(() => window.dispatchEvent(consumed))
+    expect(screen.getByRole('tab', { name: 'Actual UI task' })).toHaveAttribute('aria-selected', 'true')
+    await user.keyboard('{Control>}{PageDown}{/Control}')
+    expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Second task draft')
+    expect(agentHost.send).not.toHaveBeenCalled()
+    expect(agentHost.create).not.toHaveBeenCalled()
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+  })
+
   it('keeps all task tabs closed across restart and handles a removed remembered task', async () => {
     const { first } = fixtures()
     const user = userEvent.setup()

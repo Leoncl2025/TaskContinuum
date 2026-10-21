@@ -9,6 +9,8 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
 - Multiple conversations per task.
 - Device-local restoration of open task tabs, the active task and each task's selected chat.
 - Searchable task trees, task tabs, and read-only planning documents.
+- **Ctrl+PageUp / Ctrl+PageDown** switches to the previous/next open task tab,
+  wrapping at either end without clearing chat drafts.
 - Task creation through the UI, a local agent, or CLI.
 - Streaming Markdown, model options, image attachments, and terminal output.
 - Collapsible tool activity keeps answers readable without losing execution details.

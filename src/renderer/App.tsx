@@ -1,4 +1,4 @@
-import { Activity, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { Activity, useCallback, useEffect, useEffectEvent, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties } from 'react'
 import type { DesktopInfo } from '../shared/desktop'
 import { filterTasks } from '../shared/tasks'
@@ -146,11 +146,24 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
     else setLayout((value) => ({ ...value, details: !value.details, chat: value.details || value.chat }))
   }, [compact, setCompactPanel, setLayout])
 
+  const switchTaskFromShortcut = useEffectEvent((event: KeyboardEvent) => {
+    if (event.defaultPrevented || workspaces.busy || !openTasks.length || document.querySelector('dialog[open]')) return
+    event.preventDefault()
+    if (openTasks.length === 1) return
+    const index = openTasks.indexOf(currentTaskId.current ?? '')
+    const next = index < 0 ? event.key === 'PageDown' ? 0 : openTasks.length - 1
+      : (index + (event.key === 'PageDown' ? 1 : openTasks.length - 1)) % openTasks.length
+    selectTask(openTasks[next])
+    document.querySelectorAll<HTMLButtonElement>('.editor-tabs [role="tab"]')[next]?.focus()
+  })
+
   useEffect(() => {
     const handle = (event: KeyboardEvent) => {
       if (dialog || taskCreationMode || repositorySetupOpen || event.isComposing) return
       const key = event.key.toLowerCase()
-      if ((event.ctrlKey || event.metaKey) && key === 'b' && !event.shiftKey) {
+      if (event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && (event.key === 'PageUp' || event.key === 'PageDown')) {
+        switchTaskFromShortcut(event)
+      } else if ((event.ctrlKey || event.metaKey) && key === 'b' && !event.shiftKey) {
         event.preventDefault()
         if (event.altKey) toggleChat()
         else toggleSidebar()
@@ -331,7 +344,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
       {!compact && sidebarVisible && <PanelSash panel="sidebar" {...sizes.sidebar} onResize={(width) => changePanelWidth('sidebar', width)} onReset={() => changePanelWidth('sidebar', defaultLayout.sidebarWidth)} />}
 
       <Activity mode={compact && sidebarVisible ? 'hidden' : 'visible'}><main className="main-panel" aria-label="Task workspace">
-        <div className="editor-tabs" role="tablist" aria-label="Open tasks">
+        <div className="editor-tabs" role="tablist" aria-label="Open tasks" aria-keyshortcuts="Control+PageUp Control+PageDown">
           {openTasks.map((id, index) => {
             const item = tasks.find((value) => value.id === id)!
             return <div key={id} className={`editor-tab ${id === selectedId ? 'selected' : ''}`}>
@@ -389,7 +402,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
     {taskCreationMode && workspace && <TaskCreationDialog workspace={workspace} workspaces={workspaces} initialMode={taskCreationMode} onCreated={taskCreated} onAgent={() => { setTaskCreationMode(null); setTaskAgentOpen(true); showChat() }} onClose={() => setTaskCreationMode(null)} />}
     {dialog === 'quick-open' && <Dialog title="Quick open" className="quick-open" onClose={() => setDialog(null)}><input className="quick-input" aria-label="Find a task" placeholder="Type a task name or ID…" value={quickQuery} onChange={(event) => setQuickQuery(event.target.value)} autoFocus /><div className="quick-results">{filterTasks(tasks, quickQuery, 'all').map((item) => <button type="button" key={item.id} onClick={() => { selectTask(item.id); setDialog(null) }}><Icon name="file-text" /><strong>{item.title}</strong><span>{item.id}</span></button>)}{!filterTasks(tasks, quickQuery, 'all').length && <p>No matching tasks.</p>}</div><p className="dialog-hint">Tab to a result · Enter to open · Esc to close</p></Dialog>}
 
-    {dialog === 'settings' && <Dialog title="Preferences" onClose={() => setDialog(null)}><section className="settings-section"><h3>Appearance</h3><div className="theme-options">{(['dark', 'light'] as const).map((theme) => <label key={theme}><input type="radio" name="theme" checked={layout.theme === theme} onChange={() => setLayout((value) => ({ ...value, theme }))} /><span>{theme === 'dark' ? 'Dark' : 'Light'}</span></label>)}</div><button type="button" className="secondary-button" onClick={() => { setLayout((value) => ({ ...defaultLayout, theme: value.theme })); setCompactPanel(primaryPanel) }}>Reset panel layout</button></section><section className="settings-section"><h3>Integrations</h3><div className="integration-row"><span>Native Agent Host (AHP)</span><span className="integration-state">{window.agentHost ? 'Desktop API available' : 'Desktop API unavailable'}</span></div><div className="integration-row"><span>Remote devices and automatic workspace links</span><span className="integration-state">{window.remoteVSCode ? 'Desktop API available' : 'Desktop API unavailable'}</span></div></section><section className="settings-section"><h3>Keyboard shortcuts</h3><div className="shortcut-row"><span>New task</span><kbd>Ctrl / ⌘ N</kbd></div><div className="shortcut-row"><span>Quick open</span><kbd>Ctrl / ⌘ P</kbd></div><div className="shortcut-row"><span>Toggle task sidebar</span><kbd>Ctrl / ⌘ B</kbd></div><div className="shortcut-row"><span>Toggle chat</span><kbd>Ctrl / ⌘ Alt B</kbd></div><div className="shortcut-row"><span>Toggle task details</span><kbd>Ctrl / ⌘ Alt D</kbd></div></section><p className="dialog-hint">{workspace ? `Workspace: ${workspace.root}. Create new tasks in the Explorer; existing task views remain read-only. Session links: immutable Agent Host metadata.` : 'No workspace is selected. Create or open a task repository to get started; nothing is published automatically.'} Icons: Microsoft Codicons · CC BY 4.0.</p></Dialog>}
+    {dialog === 'settings' && <Dialog title="Preferences" onClose={() => setDialog(null)}><section className="settings-section"><h3>Appearance</h3><div className="theme-options">{(['dark', 'light'] as const).map((theme) => <label key={theme}><input type="radio" name="theme" checked={layout.theme === theme} onChange={() => setLayout((value) => ({ ...value, theme }))} /><span>{theme === 'dark' ? 'Dark' : 'Light'}</span></label>)}</div><button type="button" className="secondary-button" onClick={() => { setLayout((value) => ({ ...defaultLayout, theme: value.theme })); setCompactPanel(primaryPanel) }}>Reset panel layout</button></section><section className="settings-section"><h3>Integrations</h3><div className="integration-row"><span>Native Agent Host (AHP)</span><span className="integration-state">{window.agentHost ? 'Desktop API available' : 'Desktop API unavailable'}</span></div><div className="integration-row"><span>Remote devices and automatic workspace links</span><span className="integration-state">{window.remoteVSCode ? 'Desktop API available' : 'Desktop API unavailable'}</span></div></section><section className="settings-section"><h3>Keyboard shortcuts</h3><div className="shortcut-row"><span>New task</span><kbd>Ctrl / ⌘ N</kbd></div><div className="shortcut-row"><span>Quick open</span><kbd>Ctrl / ⌘ P</kbd></div><div className="shortcut-row"><span>Previous task tab</span><kbd>Ctrl PgUp</kbd></div><div className="shortcut-row"><span>Next task tab</span><kbd>Ctrl PgDown</kbd></div><div className="shortcut-row"><span>Toggle task sidebar</span><kbd>Ctrl / ⌘ B</kbd></div><div className="shortcut-row"><span>Toggle chat</span><kbd>Ctrl / ⌘ Alt B</kbd></div><div className="shortcut-row"><span>Toggle task details</span><kbd>Ctrl / ⌘ Alt D</kbd></div></section><p className="dialog-hint">{workspace ? `Workspace: ${workspace.root}. Create new tasks in the Explorer; existing task views remain read-only. Session links: immutable Agent Host metadata.` : 'No workspace is selected. Create or open a task repository to get started; nothing is published automatically.'} Icons: Microsoft Codicons · CC BY 4.0.</p></Dialog>}
 
     {dialog === 'remote-devices' && workspace && <RemoteDevicesDialog onClose={() => setDialog(null)} />}
 
