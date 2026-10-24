@@ -35,16 +35,16 @@ import { LocalSettingsFile } from './settingsFile'
 import type { RemoteSettingChanges, RemoteSettings } from './settingsFile'
 import { RemoteConfigStore } from './store'
 import {
-  appendRecord, bindingTargets, canonicalJson, parseRecord, readCheckedFile, readRecords, recordClosure, recordPath, RemoteConfigError, resolveRecords, serializeRecord, unionRecords, verifyRecordSignature,
+  appendRecord, bindingTargets, canonicalJson, parseRecord, readRecords, recordClosure, recordPath, RemoteConfigError, resolveRecords, serializeRecord, unionRecords, verifyRecordSignature,
 } from './records'
 import type { RecordTrust } from './records'
+import {
+  assertMigrationReady, baselineAllowsRecord, baselineDescriptor, baselineFile, baselineGrant, migrationGateFile,
+  planHash, readWorkspaceDescriptor, type BaselinePin,
+} from './trustBaseline'
 
-const descriptorSchema = z.object({
-  schemaVersion: z.literal(1), kind: z.literal('taskcontinuum-workspace'), workspaceId: z.uuid(),
-  remoteConfigFormat: z.literal('immutable-operations-v1'),
-}).strict()
 const runtimeSchema = z.object({
-  schemaVersion: z.literal(2), workspaceId: z.uuid(), recordsRoot: z.string().min(1),
+  schemaVersion: z.union([z.literal(2), z.literal(3)]), workspaceId: z.uuid(), recordsRoot: z.string().min(1),
   controlPort: z.number().int().min(1024).max(65535).optional(),
   managedPairs: z.record(z.uuid(), z.uuid()).default({}),
 }).strict()
@@ -85,6 +85,8 @@ interface Runtime {
   grantWork: Set<Promise<unknown>>
   disconnecting?: Promise<void>
   connectionAbort: AbortController
+  baseline?: BaselinePin
+  baselineInvalid: boolean
 }
 type Replica = Pick<GitReplica, 'root' | 'workspaceRelativePath' | 'remote' | 'branch' | 'upstreamUrl' | 'sync' | 'close' | 'assertUpstream'>
 export interface WorkspaceSyncOptions {
@@ -128,7 +130,8 @@ export class WorkspaceSyncService {
 
   private networkAllowed(runtime: Runtime, generation = runtime.generation): boolean {
     const localIdentity = runtime.snapshot?.resolution.entities[`device:${runtime.local.clientId}`]
-    return !this.closed && !runtime.closed && runtime.enrollment.enabled && runtime.generation === generation
+    return !this.closed && !runtime.closed && !runtime.baselineInvalid && runtime.enrollment.enabled && runtime.generation === generation
+      && (!runtime.baseline || runtime.baseline.plan.devices.some((d) => d.deviceId === runtime.local.clientId && d.disposition === 'participating'))
       && runtime.status.settings?.autoLink === true && runtime.status.settings?.tunnelEnabled === true
       && runtime.snapshot?.resolution.blocked !== true
       && (!localIdentity || localIdentity.state === 'active')
@@ -138,8 +141,7 @@ export class WorkspaceSyncService {
     return join(this.options.directory, 'workspace-sync', createHash('sha256').update(root).digest('hex'))
   }
   private async descriptor(root: string) {
-    try { return descriptorSchema.parse(JSON.parse((await readCheckedFile(root, join(root, '.taskcontinuum', 'workspace.json'), 4096)).toString('utf8'))) }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
+    return readWorkspaceDescriptor(root)
   }
   private async saved(directory: string): Promise<RuntimeMetadata | undefined> {
     try {
@@ -299,6 +301,22 @@ export class WorkspaceSyncService {
       watcher.on('error', (error) => this.error(runtime, error))
       runtime.recordWatchers.push(watcher)
     }
+    if (runtime.baseline) {
+      for (const [directory, relevant] of [
+        [join(runtime.root, '.taskcontinuum'), ['workspace.json']],
+        [runtime.directory, [baselineFile, migrationGateFile]],
+      ] as const) {
+        const watcher = watch(directory, { persistent: false }, (_event, name) => {
+          if (name !== null && !relevant.some((file) => file === String(name))) return
+          runtime.baselineInvalid = true
+          this.connectionsChanged(runtime.root)
+          this.error(runtime, new RemoteConfigError('migration-baseline', 'The approved migration checkpoint changed. Access is stopped; preserve the files and review the baseline.'))
+          this.track(runtime, this.disconnect(runtime))
+        })
+        watcher.on('error', (error) => { runtime.baselineInvalid = true; this.error(runtime, error); this.track(runtime, this.disconnect(runtime)) })
+        runtime.recordWatchers.push(watcher)
+      }
+    }
   }
 
   private async admitRecords(runtime: Runtime, records: RemoteRecord[]): Promise<void> {
@@ -307,6 +325,7 @@ export class WorkspaceSyncService {
     for (const record of records) {
       if (record.kind !== 'device' || record.payload.action !== 'publish' || record.workspaceId !== runtime.enrollment.workspaceId) continue
       const payload = record.payload
+      if (!baselineAllowsRecord(runtime.baseline, record)) throw new RemoteConfigError('migration-policy', 'This device publication is outside the approved migration participants.')
       verifyRecordSignature(record, payload.identity.clientPublicKey)
       if (record.actor.deviceId !== payload.deviceId) throw new Error('A public device record is not signed by its owner.')
       const pin = runtime.enrollment.pins[payload.deviceId]
@@ -552,8 +571,11 @@ export class WorkspaceSyncService {
     let enrollment = await this.enrollments.get(root)
     if (!enrollment && !enable) return undefined
     const directory = this.directory(root)
+    const baseline = await assertMigrationReady(root, directory)
+    const baselineRevision = baseline ? planHash(baseline.plan) : null
     await mkdir(directory, { recursive: true })
     const saved = await this.saved(directory)
+    if (baseline ? saved?.schemaVersion !== 3 : saved?.schemaVersion === 3) throw new RemoteConfigError('migration-baseline', 'The runtime format does not match its approved migration checkpoint.')
     let metadata: RuntimeMetadata
     let replica: Replica | undefined
     if (!saved) {
@@ -586,14 +608,15 @@ export class WorkspaceSyncService {
     }
     const trust: RecordTrust = {
       workspaceId: enrollment.workspaceId,
-      authorizationVersion: () => JSON.stringify(runtime.enrollment),
+      authorizationVersion: () => JSON.stringify([runtime.enrollment, baselineRevision, runtime.baselineInvalid]),
       trustedKey: (actor) => {
         const pin = runtime.enrollment.pins[actor.deviceId]
         return pin && sshFingerprint(pin.clientPublicKey) === actor.keyId ? pin.clientPublicKey : undefined
       },
       authorize: (record) => {
         const pin = runtime.enrollment.pins[record.actor.deviceId]
-        return !!pin && (!pin.blocked || !!pin.acceptedOperations?.includes(record.operationId))
+        return !runtime.baselineInvalid && baselineAllowsRecord(runtime.baseline, record)
+          && !!pin && (!pin.blocked || !!pin.acceptedOperations?.includes(record.operationId))
       },
     }
     const scheduler = new RemoteSyncScheduler({
@@ -696,6 +719,7 @@ export class WorkspaceSyncService {
         localDevice: { deviceId: local.clientId, machineName: local.machineName }, machineAliases: {} },
       refreshGeneration: 0, recordWatchers: [],
       ownRevision: '', grants: new Map(), grantedPairs: new Map(Object.entries(metadata.managedPairs)), revokingPairs: new Map(), network: new Set(), peerAgain: false, peerConnections: new Map(), recoveredOwners: new Set(), closed: false, generation: 0, grantWork: new Set(), connectionAbort: new AbortController(),
+      baseline, baselineInvalid: false,
     }
     try {
       await mkdir(config.options.outboxRoot, { recursive: true })
@@ -809,7 +833,9 @@ export class WorkspaceSyncService {
     // Other peers must receive the signing identity in the same batch as its first operations.
     const publishable = ownIdentity && !snapshot.resolution.blocked ? pending : []
     const publication = unionRecords(canonical, publishable).map((record) => ({ path: recordPath(record).split(sep).join('/'), content: serializeRecord(record) }))
-    publication.unshift({ path: '.taskcontinuum/workspace.json', content: `${JSON.stringify(descriptorSchema.parse({ schemaVersion: 1, kind: 'taskcontinuum-workspace', workspaceId: runtime.enrollment.workspaceId, remoteConfigFormat: 'immutable-operations-v1' }), null, 2)}\n` })
+    const descriptor = runtime.baseline ? baselineDescriptor(runtime.baseline.plan)
+      : { schemaVersion: 1, kind: 'taskcontinuum-workspace', workspaceId: runtime.enrollment.workspaceId, remoteConfigFormat: 'immutable-operations-v1' }
+    publication.unshift({ path: '.taskcontinuum/workspace.json', content: `${JSON.stringify(descriptor, null, 2)}\n` })
     let publishedRecords: RemoteRecord[] | undefined
     await runtime.replica.sync(publication, {
       signal,
@@ -889,7 +915,8 @@ export class WorkspaceSyncService {
           const liveGrant = Object.values(current.resolution.invitations).some((record) => record.payload.action === 'grant'
             && record.payload.issuerId === runtime.local.clientId && record.payload.recipientId === peer.deviceId)
           if (!pair || !liveGrant) continue
-          if (pair.workspaces.some((policy) => policy.root === runtime.root && policy.canSend)
+          const canSend = runtime.baseline ? baselineGrant(runtime.baseline, runtime.local.clientId, peer.deviceId)?.canSend : true
+          if (pair.workspaces.some((policy) => policy.root === runtime.root && policy.canSend === canSend)
             && runtime.grantedPairs.get(peer.deviceId) === pair.id) continue
           // Upgrade saved read-only grants through the same revocation-safe path as new links.
           await this.linkInvitation(runtime, peer.deviceId, runtime.connectionAbort.signal)
@@ -972,12 +999,15 @@ export class WorkspaceSyncService {
 
   private publicPeer(runtime: Runtime, record: DeviceRecord): PublicPeer | undefined {
     if (record.payload.action !== 'publish' || record.payload.deviceId === runtime.local.clientId || runtime.enrollment.pins[record.payload.deviceId]?.blocked) return undefined
+    if (runtime.baseline && !baselineGrant(runtime.baseline, runtime.local.clientId, record.payload.deviceId)
+      && !baselineGrant(runtime.baseline, record.payload.deviceId, runtime.local.clientId)) return undefined
     const { identity } = record.payload
     const route = record.payload.routes[0]
     if (!identity.username || !route?.controlPort) return undefined
     return { deviceId: record.payload.deviceId, username: identity.username, machineName: identity.machineName, clientPublicKey: identity.clientPublicKey, hostPublicKey: identity.hostPublicKey, identityRevision: record.operationId, route: { tunnelId: route.tunnelId, sshPort: route.sshPort, controlPort: route.controlPort } }
   }
   private async issue(runtime: Runtime, peer: PublicPeer): Promise<void> {
+    if (runtime.baseline && !baselineGrant(runtime.baseline, runtime.local.clientId, peer.deviceId)) return
     const generation = runtime.generation
     const enabled = () => this.networkAllowed(runtime, generation) && !runtime.enrollment.pins[peer.deviceId]?.blocked
     if (!enabled()) throw new Error('Peer admission is disabled.')
@@ -1030,6 +1060,9 @@ export class WorkspaceSyncService {
     check()
     if (!runtime.enrollment.enabled || runtime.enrollment.pins[senderId]?.blocked) throw new Error('The peer is no longer enrolled.')
     const snapshot = await this.refresh(runtime)
+    const grantPolicy = runtime.baseline ? baselineGrant(runtime.baseline, runtime.local.clientId, senderId) : undefined
+    if (runtime.baseline && !grantPolicy) throw new RemoteConfigError('migration-policy', 'The peer has no approved workspace grant.')
+    const canSend = grantPolicy?.canSend ?? true
     check()
     const identity = snapshot.resolution.devices[senderId]
     const peer = identity ? this.publicPeer(runtime, identity) : undefined
@@ -1041,11 +1074,11 @@ export class WorkspaceSyncService {
     const existing = pair.workspaces.find((policy) => policy.root === runtime.root)
     let managed = runtime.grantedPairs.has(senderId)
     try {
-      if (!existing?.canSend || runtime.grantedPairs.get(senderId) !== pair.id) {
+      if (!existing || existing.canSend !== canSend || runtime.grantedPairs.get(senderId) !== pair.id) {
         managed = true
         runtime.grantedPairs.set(senderId, pair.id)
         runtime.metadata.managedPairs[senderId] = pair.id
-        await this.options.host.setWorkspace(pair.id, runtime.root, true)
+        await this.options.host.setWorkspace(pair.id, runtime.root, canSend)
         check()
         await writeJsonAtomic(join(runtime.directory, 'runtime.json'), runtime.metadata)
       }

@@ -30,6 +30,7 @@ const pairingSchema = z.object({ id: z.uuid(), participant: remoteClientSchema, 
   workspaces: z.array(workspacePolicySchema).max(DEVICE_TRUST_LIMITS.workspaces).default([]),
 }).strict()
 const stateSchema = z.object({ ownerId: z.uuid(), port: z.number().int().min(1024).max(65535).optional(), pairs: z.array(pairingSchema).max(DEVICE_TRUST_LIMITS.devices) }).strict()
+export { stateSchema as deviceHostStateSchema }
 type Pairing = z.infer<typeof pairingSchema>
 export interface DeviceProtector { available(): boolean; encrypt(value: string): Buffer; decrypt(value: Buffer): string }
 

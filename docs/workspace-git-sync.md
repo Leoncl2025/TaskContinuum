@@ -85,9 +85,11 @@ requests and private tokens are not stored in the public records.
 
 Public `invitation/grant` records require `lifetime: "until-revoked"` and do not
 have an `expiresAt` field. Timestamp expiry and `expiresAt: null` are both
-rejected, including correctly signed old records. There is no compatibility
-reader, migration button, enrollment flag, downgrade mode or daily renewal
-branch. Enabling automatic links uses this format directly.
+rejected, including correctly signed old records. The desktop has no compatibility
+reader, migration button, downgrade mode or daily renewal branch. Enabling
+automatic links uses this format directly. An explicitly approved
+[standalone one-time migration tool](trust-migration.md) can verify and retire
+old history while retaining the existing profile and workspace identities.
 
 A grant is bound to the exact issuer/recipient identity publications, signing
 key and route identity. An unchanged relationship reuses its signed operation
@@ -129,7 +131,7 @@ cannot consume the control channel budget either.
 
 ### Coordinated cutover, not deletion in an accepted history
 
-All participants must use the new build and a clean configuration baseline.
+All participants must use the same approved build and configuration baseline.
 Opening old invitation history fails closed with an unsupported-format error;
 the program does not rewrite it, silently omit it, or convert old grants.
 
@@ -137,27 +139,28 @@ the program does not rewrite it, silently omit it, or convert old grants.
 IDs, causal parents, locally retained publications and Git ancestry protect
 against removal and rollback. Clearing one cache is not a supported reset.
 
-For an intentional fresh start:
+Use the [one-time migration procedure](trust-migration.md), not a fresh profile:
 
-1. Pause and stop every participant, including temporarily offline publishers.
-   Back up the old workspace and each private profile; keep that old environment
-   separate from the new one.
-2. Create a new, empty public-configuration baseline with a new workspace identity:
-   use a new repository, or a new task-workspace relative path in the repository.
-   Copy task documents, not the old `.taskcontinuum` configuration, accepted-state
-   caches or outboxes. Use fresh private profiles for this coordinated cutover.
-   A fresh clone of the same old workspace or a branch switch alone is not a new
-   trust baseline.
-3. Enroll only the intended devices on the new build. Reconfirm session bindings
-   on their actual owners; do not copy private tokens or owner receipts to
-   manufacture access. Previously revoked devices must not be reenrolled.
-4. Verify exact participants, read/send boundaries and revocation, then sync and
-   restart twice. Unchanged grants and the Git head must remain stable. Do not
-   allow old clients or old outboxes to publish into this new baseline.
+1. Gather signed read-only inspections, explicitly identify the sole coordinator,
+   and review every retained relationship, permission change and fenced device.
+2. Approve one fixed code SHA, migration ID and plan hash. Stop all participating
+   old publishers; an offline device is not automatically safe.
+3. Each host prepares its protected local backups and signs only its own new
+   grants. The coordinator alone publishes the baseline commit and the separate
+   device-signed authorization commit, without rewriting Git history.
+4. Hosts adopt the same baseline through the journaled local tool. Existing
+   workspace/device IDs, keys, bindings, aliases, owner receipts and policy files
+   are retained. Old caches/outboxes and their accepted frontier are archived,
+   not unconditionally cleared.
+5. Resume a pilot only after offline verification, then verify real restart and
+   reconnect authorization before resuming other participants.
 
-This is an operator-approved new trust domain, not an in-place migration or
-compaction. The implementation does not perform this cleanup on live data.
-There is no supported in-place history reset in this change.
+Migrated workspaces pin a schema-v2 public descriptor and schema-v3 private
+runtime metadata. An old client cannot reopen that migrated state. Normal
+operation still rejects legacy invitations, and no desktop path performs an
+automatic migration or accepted-history reset. The approved participant and
+directed-grant policy also preserves read-only scopes instead of automatically
+upgrading them to read/send.
 
 ### History cost
 

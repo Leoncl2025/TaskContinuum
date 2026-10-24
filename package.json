@@ -22,6 +22,7 @@
     "icon:generate": "node scripts/generate-icon.mjs",
     "task-documents": "node scripts/task-documents.mjs",
     "build:cli": "vite build --config vite.cli.config.ts",
+    "migrate:trust": "node scripts/trust-migration.mjs",
     "build": "npm run typecheck && electron-vite build && npm run build:cli",
     "dist:win": "npm run build && electron-builder --win --x64 --publish never",
     "test:e2e": "npm run build && playwright test",

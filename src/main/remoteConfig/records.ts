@@ -104,6 +104,8 @@ const signature = z.object({
   algorithm: z.literal('ed25519'),
   value: z.string().length(88).refine((value) => Buffer.from(value, 'base64').length === 64 && Buffer.from(value, 'base64').toString('base64') === value, 'Invalid Ed25519 signature encoding.'),
 }).strict()
+export const remoteRecordHeaderSchema = z.object(header).strict()
+export const remoteRecordSignatureSchema = signature
 const bodySchema = z.discriminatedUnion('kind', [
   z.object({ ...header, kind: z.literal('device'), payload: devicePayloadSchema }).strict(),
   z.object({ ...header, kind: z.literal('alias'), payload: deviceAliasPayloadSchema }).strict(),

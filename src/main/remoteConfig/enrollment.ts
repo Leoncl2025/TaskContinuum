@@ -20,6 +20,7 @@ const enrollmentSchema = z.object({
   pins: z.record(z.uuid(), pinSchema),
 }).strict()
 const enrollmentsSchema = z.object({ schemaVersion: z.literal(1), workspaces: z.array(enrollmentSchema).max(DEVICE_TRUST_LIMITS.workspaces) }).strict()
+export { enrollmentsSchema }
 export type WorkspaceEnrollment = z.infer<typeof enrollmentSchema>
 
 export function initialWorkspaceId(remote: string, workspaceRelativePath = ''): string {

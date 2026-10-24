@@ -5,6 +5,7 @@ import type { FileHandle } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { matchesGitText } from '../shared/gitText'
+import { assertMigrationReady, planHash, validateBaselineFiles, type BaselinePin } from './trustBaseline'
 
 export interface GitPublication {
   path: string
@@ -175,6 +176,16 @@ function environment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   }
 }
 
+export { environment as gitEnvironment, remoteUrl as normalizeGitRemoteUrl }
+export function checkoutOwnerIdentity(workspaceRoot: string, repositoryRoot: string, owner: Pick<Upstream, 'remote' | 'branch' | 'fetchUrl' | 'pushUrl'>): string {
+  const workspaceRelativePath = relative(repositoryRoot, workspaceRoot).split(sep).join('/')
+  return JSON.stringify({
+    version: 2, mode: 'selected-checkout', workspaceRoot,
+    ...(workspaceRelativePath ? { repositoryRoot, workspaceRelativePath } : {}),
+    remote: owner.remote, branch: owner.branch, fetchUrl: owner.fetchUrl, pushUrl: owner.pushUrl,
+  })
+}
+
 function failure(result: GitResult, operation: string): GitSyncError {
   const text = Buffer.concat([result.stdout, result.stderr]).toString('utf8')
   if (/authentication failed|could not read (?:username|password)|terminal prompts disabled|permission denied \(publickey\)|invalid username or token/i.test(text)) {
@@ -222,11 +233,12 @@ export class GitReplica {
   private cycle?: Upstream
   private gitDirectory = ''
   private retainedPublications: GitPublication[] = []
+  private baseline?: BaselinePin
 
   private constructor(
     private readonly workspaceRoot: string,
     readonly repositoryRoot: string,
-    stateDirectory: string,
+    private readonly stateDirectory: string,
     private readonly owner: Upstream,
     options: GitReplicaOptions,
   ) {
@@ -380,6 +392,7 @@ export class GitReplica {
     await mkdir(destination, { recursive: true })
     const stateDirectory = await realpath(destination)
     if (isWithin(repositoryRoot, stateDirectory)) throw new GitSyncError('git', 'The synchronization state directory must be outside the user checkout.')
+    const baseline = await assertMigrationReady(workspaceRoot, stateDirectory)
     const stateEntries = await readdir(stateDirectory)
     if (stateEntries.some((entry) => /^(?:git|checkout)-[a-f0-9]{64}$/.test(entry))) unsupportedFormat()
     const probe = new GitReplica(workspaceRoot, repositoryRoot, stateDirectory, {} as Upstream, options)
@@ -417,6 +430,7 @@ export class GitReplica {
     // A regular file cannot contain a hook executable.
     await regularFile(hooks)
     const replica = new GitReplica(workspaceRoot, repositoryRoot, stateDirectory, upstream, options)
+    replica.baseline = baseline
     replica.gitDirectory = await realpath(await replica.text(repositoryRoot, ['rev-parse', '--absolute-git-dir']))
     await replica.lock(async () => {
       await replica.initialize()
@@ -494,11 +508,7 @@ export class GitReplica {
   }
 
   private ownerIdentity(): string {
-    return JSON.stringify({
-      version: 2, mode: 'selected-checkout', workspaceRoot: this.workspaceRoot,
-      ...(this.workspaceRelativePath ? { repositoryRoot: this.repositoryRoot, workspaceRelativePath: this.workspaceRelativePath } : {}),
-      remote: this.owner.remote, branch: this.owner.branch, fetchUrl: this.owner.fetchUrl, pushUrl: this.owner.pushUrl,
-    })
+    return checkoutOwnerIdentity(this.workspaceRoot, this.repositoryRoot, this.owner)
   }
 
   private async checkOwner(required: boolean): Promise<boolean> {
@@ -582,6 +592,10 @@ export class GitReplica {
   /** Local availability and repository pinning; only an active cycle pins the branch mapping. */
   async assertUpstream(signal?: AbortSignal): Promise<void> {
     if (this.closed || signal?.aborted) throw cancelled()
+    const baseline = await assertMigrationReady(this.root, this.stateDirectory)
+    if (baseline?.baselineCommit !== this.baseline?.baselineCommit || (baseline && this.baseline && planHash(baseline.plan) !== planHash(this.baseline.plan))) {
+      integrity('The approved migration checkpoint changed while synchronization was running.')
+    }
     const message = 'The workspace branch or upstream changed during synchronization. Retry to follow the current branch; pending configuration is retained.'
     let current: Upstream
     try { current = await this.readUpstream(signal) } catch (error) {
@@ -596,6 +610,7 @@ export class GitReplica {
   private async restoreLocal(signal?: AbortSignal): Promise<Map<string, Blob>> {
     const head = await this.ref('HEAD', signal)
     if (!head) throw new GitSyncError('upstream', 'The selected checkout needs an existing commit and tracked upstream.')
+    if (this.baseline && !await this.ancestor(this.baseline.baselineCommit, head, signal)) integrity('The selected checkout is older than its approved migration baseline.')
     const records = await this.tree(head, signal)
     await this.checkManagedPaths(records.keys())
     return records
@@ -663,6 +678,7 @@ export class GitReplica {
       offset = end + entry.size + 2
     }
     if (offset !== data.length) integrity('The upstream configuration batch contains unexpected bytes.')
+    if (this.baseline) validateBaselineFiles(result, this.baseline)
     return result
   }
 
@@ -685,9 +701,14 @@ export class GitReplica {
     }
     const remoteHead = await this.ref('FETCH_HEAD', signal)
     if (!remoteHead) throw new GitSyncError('upstream', 'The selected upstream branch no longer exists.')
+    if (this.baseline && !await this.ancestor(this.baseline.baselineCommit, remoteHead, signal)) integrity('The upstream does not descend from the approved migration baseline. Old branches cannot restore retired history.')
     if (targetAccepted && !await this.ancestor(targetAccepted, remoteHead, signal)) integrity('The upstream history was rewritten or rolled back. The accepted configuration frontier for this target was retained.')
     // A new target starts from its current snapshot, not its entire pre-enrollment history.
-    if (targetAccepted) await this.history(`${targetAccepted}..${remoteHead}`, true, signal)
+    if (targetAccepted) {
+      const frontier = this.baseline && !await this.ancestor(this.baseline.baselineCommit, targetAccepted, signal)
+        ? this.baseline.baselineCommit : targetAccepted
+      await this.history(`${frontier}..${remoteHead}`, true, signal)
+    }
     // Never publish user commits merely because their tree is metadata-only.
     // Only the exact commit durably journaled by this engine may be replayed.
     if (previous && !await this.ancestor(previous, remoteHead, signal)) {
@@ -707,6 +728,7 @@ export class GitReplica {
     // Keep already accepted records across a switch to another upstream branch.
     const knownRefs = (await this.text(this.repositoryRoot, ['for-each-ref', '--format=%(objectname)', `${this.refPrefix}/targets`], signal)).split('\n').filter(Boolean)
     for (const oid of knownRefs) {
+      if (this.baseline && !await this.ancestor(this.baseline.baselineCommit, oid, signal)) continue
       for (const [path, blob] of await this.tree(oid, signal)) {
         if (pending.has(path) && pending.get(path) !== blob.content) integrity('Accepted histories contain conflicting immutable records.')
         pending.set(path, blob.content)

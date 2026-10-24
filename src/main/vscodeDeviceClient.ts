@@ -26,6 +26,7 @@ const peerSchema = z.object({ id: z.uuid(), root: z.string().min(1), invitation:
   known: z.array(z.unknown()).max(128).optional(),
 }).strict()
 type Peer = z.infer<typeof peerSchema>
+export { peerSchema as devicePeerSchema }
 type Connection = { port: number; close(): void }
 type Active = { tunnel: Connection; abort: AbortController; refreshed: number }
 
