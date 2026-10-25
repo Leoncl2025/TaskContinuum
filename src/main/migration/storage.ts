@@ -1,8 +1,6 @@
-import { execFile } from 'node:child_process'
 import { createReadStream, createWriteStream } from 'node:fs'
 import { chmod, lstat, mkdir, readFile, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { promisify } from 'node:util'
 import { pipeline } from 'node:stream/promises'
 import { RemoteConfigError } from '../remoteConfig/records'
 import { bytesHash, contentHash } from '../remoteConfig/trustBaseline'
@@ -10,7 +8,6 @@ import { writeJsonAtomic, writeTextAtomic } from '../shared/storage'
 import { existing, fileHash, treeStamps, type FileStamp } from './local'
 import { windowsProbe } from './git'
 
-const execute = promisify(execFile)
 export async function assertPrivateDestination(directory: string): Promise<void> {
   let parent = resolve(directory)
   while (true) {
@@ -35,9 +32,20 @@ export async function protectedDirectory(directory: string): Promise<void> {
   if (process.platform === 'win32') {
     const sid = await windowsProbe('[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value')
     if (!/^S-1-\d+(?:-\d+)+$/.test(sid)) throw new RemoteConfigError('migration-backup', 'The current Windows identity could not be verified.')
-    if (!present) await execute('icacls.exe', [directory, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`, '*S-1-5-18:(OI)(CI)F'], { windowsHide: true, timeout: 15000 })
     const encoded = Buffer.from(directory).toString('base64')
-    const script = `$ErrorActionPreference='Stop'; $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')); $a=[IO.Directory]::GetAccessControl($p); if(-not $a.AreAccessRulesProtected){throw 'Unprotected backup inheritance'}; foreach($r in $a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){if($r.AccessControlType -eq 'Allow' -and $r.IdentityReference.Value -notin @('${sid}','S-1-5-18')){throw 'Backup has unrelated access'}}`
+    // Node can add explicit Administrators access; disabling inheritance alone retains it.
+    const initialize = present ? '' : `
+$a=New-Object Security.AccessControl.DirectorySecurity
+$a.SetOwner((New-Object Security.Principal.SecurityIdentifier('${sid}')))
+$a.SetAccessRuleProtection($true,$false)
+foreach($s in @('${sid}','S-1-5-18')){
+  $identity=New-Object Security.Principal.SecurityIdentifier($s)
+  $a.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($identity,'FullControl','ContainerInherit,ObjectInherit','None','Allow')))
+}
+[IO.Directory]::SetAccessControl($p,$a)
+`
+    const script = `$ErrorActionPreference='Stop'; $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')); ${initialize}
+$a=[IO.Directory]::GetAccessControl($p); if(-not $a.AreAccessRulesProtected){throw 'Unprotected backup inheritance'}; foreach($r in $a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){if($r.AccessControlType -eq 'Allow' -and $r.IdentityReference.Value -notin @('${sid}','S-1-5-18')){throw 'Backup has unrelated access'}}`
     await windowsProbe(script)
   } else {
     if (present && ((await lstat(directory)).mode & 0o077) !== 0) throw new RemoteConfigError('migration-backup', 'An existing migration directory is not private to its owner.')

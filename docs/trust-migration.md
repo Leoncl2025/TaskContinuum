@@ -38,6 +38,12 @@ loading the migration bundle, including help and module-load failures, and
 removes its own temporary launch directory after exit. Do not invoke the raw
 bundle or substitute the installed desktop EXE for this script.
 
+Keep the worktree's lockfile-installed dependencies alongside the build. The
+migration bundle loads `ssh2` at runtime, just as the desktop does, rather than
+bundling its optional native modules as JavaScript. Copying only the bundle is
+not a supported deployment. Do not delete native modules or disable installation
+scripts to work around a build failure.
+
 The migration helper requires its own absolute `--helper-data` directory. It must
 not be the real TC profile or a directory inside the task workspace. The helper
 does not create windows, discover or create sessions, send prompts, approve tools,
@@ -78,6 +84,11 @@ The checkpoint must also be outside the profile, on the **same volume as the
 profile**. Its parent must already exist.
 It contains sensitive local backups; do not place it in Git, upload it, or use
 another machine's checkpoint.
+
+On Windows, the helper initializes newly created private directories with a
+protected ACL granting access only to the current user and SYSTEM, including
+when launched by an administrator. Existing directories are validated without
+rewriting their ACLs; unrelated access or unprotected inheritance stops the tool.
 
 ## 1. Signed, read-only inspection on each device
 

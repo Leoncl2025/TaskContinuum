@@ -34,7 +34,7 @@ export default defineConfig({
             entry: fileURLToPath(new URL('./src/main/migration/entry.ts', import.meta.url)),
             formats: ['cjs'], fileName: () => 'taskcontinuum-migrate.cjs',
           },
-          rollupOptions: { external: [...external, 'electron'] },
+          rollupOptions: { external: [...external, 'electron', 'ssh2'] },
         },
       })
     },
