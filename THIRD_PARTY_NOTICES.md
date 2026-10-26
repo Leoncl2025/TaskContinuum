@@ -60,6 +60,12 @@ product affiliation or grant permission to use hosted Copilot services.
 - `remark-parse` 11.0.0, `remark-gfm` 4.0.1, and `remark-frontmatter` 5.0.0:
   https://github.com/remarkjs (MIT).
 - `mdast-util-to-string` 4.0.0: https://github.com/syntax-tree/mdast-util-to-string (MIT).
+- `remark-math` 6.0.0 and `rehype-katex` 7.0.1:
+  https://github.com/remarkjs/remark-math (MIT).
+- `katex` 0.19.0: https://github.com/KaTeX/KaTeX (MIT).
+  Copyright (c) 2013-2020 Khan Academy and other contributors.
+  KaTeX styles and fonts are bundled locally; its license is retained in the package.
+  The override keeps remark/rehype's older dependency ranges on this patched renderer.
 - `zod` 4.3.6: https://github.com/colinhacks/zod (MIT).
 - Transitive dependencies retain their upstream notices in the dependency installation.
   Markdown parser modules are included in the main-process bundle for ESM compatibility.

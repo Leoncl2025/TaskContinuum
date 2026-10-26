@@ -13,6 +13,7 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
   wrapping at either end without clearing chat drafts.
 - Task creation through the UI, a local agent, or CLI.
 - Streaming Markdown, model options, image attachments, and terminal output.
+- Inline and block math in chats and task documents, rendered offline with KaTeX.
 - Collapsible tool activity keeps answers readable without losing execution details.
 - Compact layouts, resizable panels, dark/light themes, and cached chat titles.
 - Native full screen: press **F11** or **Shift+Alt+Enter**, or use the titlebar's
@@ -79,6 +80,11 @@ and a live running summary. Expand it to inspect the original calls and their
 outputs; terminal output still loads on demand. Failures, cancellations, approval
 or authentication requests, and input prompts stay outside these groups. Text
 answers keep their original position, and reasoning remains separately collapsible.
+
+Math supports `\( ... \)` / `\[ ... \]`, `$...$` / `$$ ... $$`, and fenced `math`
+blocks. Formulas inside tables keep their cell boundaries, including `|D|`.
+Ordinary code samples stay literal. Invalid or unfinished formulas remain readable;
+long display formulas scroll within the message. See [math rendering](docs/remote-vscode.md#math-in-messages-and-task-documents).
 
 ## Automatic workspace links
 

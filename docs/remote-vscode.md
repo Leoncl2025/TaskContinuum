@@ -82,6 +82,26 @@ To link an existing session:
   VS Code journal saves. Stop targets the exact active turn, with read/send access.
   Provider sign-in, tool confirmations and agent questions still use the owner UI.
 
+### Math in messages and task documents
+
+Both Markdown views support inline `\( ... \)` and `$...$` formulas, display
+`\[ ... \]` and `$$ ... $$` formulas, and fenced `math` blocks. Ordinary code
+spans, `latex`/other code fences, link destinations and front matter are not
+rewritten. Math is recognized before GFM table splitting, so bars inside a
+formula such as `\(|D|\)` do not create extra table cells.
+
+Rendering is local: KaTeX styles and fonts ship with the app and require no CDN
+or additional network access. Raw HTML and untrusted TeX URL/HTML commands remain
+disabled. Macro expansion and size are bounded; formulas above 32,768 characters
+remain plain text with an error status. Syntax errors retain the original TeX
+with a visible error and tooltip. Incomplete backslash-delimited formulas stay
+literal until the closing delimiter arrives in the streamed response.
+
+Wide display formulas can be scrolled horizontally, including from the keyboard,
+without widening the chat or task panel. Existing messages are rendered with
+this support when reopened; no task files, saved conversations or session
+bindings are migrated or edited.
+
 ### Last task and session selection
 
 The desktop remembers open task tabs in their original order, the active task,

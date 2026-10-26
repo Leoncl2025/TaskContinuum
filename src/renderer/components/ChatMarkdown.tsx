@@ -1,9 +1,10 @@
-import { memo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import type { ExtraProps } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { IconButton } from './Primitives'
+import { mathRehypePlugins, prepareMarkdownMath } from '../markdownMath'
 import '../sessions.css'
 
 function ChatCodeBlock({ children, node }: ExtraProps & { children?: ReactNode }) {
@@ -34,10 +35,11 @@ function ChatCodeBlock({ children, node }: ExtraProps & { children?: ReactNode }
 }
 
 export const ChatMarkdown = memo(function ChatMarkdown({ source }: { source: string }) {
-  return <div className="message-text message-markdown"><Markdown remarkPlugins={[remarkGfm]} skipHtml urlTransform={() => ''} components={{
+  const math = useMemo(() => prepareMarkdownMath(source), [source])
+  return <div className="message-text message-markdown"><Markdown remarkPlugins={[remarkGfm, math.plugin]} rehypePlugins={mathRehypePlugins} skipHtml urlTransform={() => ''} components={{
     a: ({ children }) => <span className="message-link">{children}</span>,
     img: ({ alt }) => <span className="muted">{alt || 'Image'}</span>,
     pre: ChatCodeBlock,
     table: ({ children }) => <div className="message-table" role="region" aria-label="Message table" tabIndex={0}><table>{children}</table></div>,
-  }}>{source}</Markdown></div>
+  }}>{math.source}</Markdown></div>
 })

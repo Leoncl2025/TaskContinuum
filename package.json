@@ -37,12 +37,15 @@
     "@microsoft/dev-tunnels-ssh": "3.12.42",
     "@microsoft/dev-tunnels-ssh-tcp": "3.12.42",
     "@vscode/codicons": "0.0.45",
+    "katex": "0.19.0",
     "mdast-util-to-string": "4.0.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-markdown": "10.1.0",
+    "rehype-katex": "7.0.1",
     "remark-frontmatter": "5.0.0",
     "remark-gfm": "4.0.1",
+    "remark-math": "6.0.0",
     "remark-parse": "11.0.0",
     "ssh2": "1.17.0",
     "strip-ansi": "7.2.0",
@@ -53,6 +56,7 @@
     "zod-to-json-schema": "3.25.2"
   },
   "overrides": {
+    "katex": "$katex",
     "@microsoft/dev-tunnels-connections": {
       "uuid": "11.1.1"
     }

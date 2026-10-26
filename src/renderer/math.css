@@ -1,0 +1,5 @@
+.message-markdown .katex, .workspace-markdown .katex { font-size: 1.12em; text-align: initial; }
+.message-markdown .katex-display, .workspace-markdown .katex-display { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: 8px 2px; margin: 12px 0; }
+.message-markdown .katex-display > .katex, .workspace-markdown .katex-display > .katex { display: block; width: max-content; min-width: 100%; text-align: center; }
+.message-markdown .katex-error, .workspace-markdown .katex-error,
+.message-markdown .math-size-error, .workspace-markdown .math-size-error { white-space: pre-wrap; overflow-wrap: anywhere; color: #c44747; }
