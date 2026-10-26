@@ -111,7 +111,6 @@ Use `npm run check` for validation, `npm run test:e2e` for desktop tests, and
 
 - [Task documents and CLI](docs/task-documents.md)
 - [File transfer MCP](docs/file-transfer-mcp.md)
-- [Operator-approved one-time trust migration](docs/trust-migration.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 An independent project, not affiliated with VS Code or GitHub Copilot.

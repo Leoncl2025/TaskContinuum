@@ -87,9 +87,8 @@ Public `invitation/grant` records require `lifetime: "until-revoked"` and do not
 have an `expiresAt` field. Timestamp expiry and `expiresAt: null` are both
 rejected, including correctly signed old records. The desktop has no compatibility
 reader, migration button, downgrade mode or daily renewal branch. Enabling
-automatic links uses this format directly. An explicitly approved
-[standalone one-time migration tool](trust-migration.md) can verify and retire
-old history while retaining the existing profile and workspace identities.
+automatic links uses this format directly. This repository no longer includes
+the standalone one-time trust migration CLI or a legacy-history conversion tool.
 
 A grant is bound to the exact issuer/recipient identity publications, signing
 key and route identity. An unchanged relationship reuses its signed operation
@@ -129,7 +128,7 @@ a promise of unlimited simultaneous connections. Forwarding has separate
 64-device-channel and 32-metadata-channel budgets; saturated session forwards
 cannot consume the control channel budget either.
 
-### Coordinated cutover, not deletion in an accepted history
+### Rebuilding configuration and retaining baseline protection
 
 All participants must use the same approved build and configuration baseline.
 Opening old invitation history fails closed with an unsupported-format error;
@@ -139,28 +138,31 @@ the program does not rewrite it, silently omit it, or convert old grants.
 IDs, causal parents, locally retained publications and Git ancestry protect
 against removal and rollback. Clearing one cache is not a supported reset.
 
-Use the [one-time migration procedure](trust-migration.md), not a fresh profile:
+An intentional rebuild is a separate configuration, not an in-place import of
+old authorization. Retain the original workspace and profile, use a separate
+workspace directory without the old `.taskcontinuum` metadata, and start each
+device with its own new profile. A new repository is not required: a different
+workspace-relative path in the same repository has a separate initial workspace
+identity. Changing only the branch or local checkout location is not enough.
+Task documents can be copied after review, but nested repositories and native
+session working directories require their own handling. Do not copy old keys,
+enrollment pins, caches, outboxes or owner receipts into the new profile.
 
-1. Gather signed read-only inspections, explicitly identify the sole coordinator,
-   and review every retained relationship, permission change and fenced device.
-2. Approve one fixed code SHA, migration ID and plan hash. Stop all participating
-   old publishers; an offline device is not automatically safe.
-3. Each host prepares its protected local backups and signs only its own new
-   grants. The coordinator alone publishes the baseline commit and the separate
-   device-signed authorization commit, without rewriting Git history.
-4. Hosts adopt the same baseline through the journaled local tool. Existing
-   workspace/device IDs, keys, bindings, aliases, owner receipts and policy files
-   are retained. Old caches/outboxes and their accepted frontier are archived,
-   not unconditionally cleared.
-5. Resume a pilot only after offline verification, then verify real restart and
-   reconnect authorization before resuming other participants.
+Rebuilding creates new identities and requires explicit authorization and
+owner-confirmed links to existing sessions. It does not preserve old grants,
+aliases or bindings. The normal automatic-links consent includes read/send;
+do not enroll a device that must remain read-only or use a new identity to bypass
+a revocation. Keep old installations out of the new workspace. Sharing a Git
+repository does not isolate repository write permissions.
 
-Migrated workspaces pin a schema-v2 public descriptor and schema-v3 private
-runtime metadata. An old client cannot reopen that migrated state. Normal
-operation still rejects legacy invitations, and no desktop path performs an
-automatic migration or accepted-history reset. The approved participant and
-directed-grant policy also preserves read-only scopes instead of automatically
-upgrading them to read/send.
+Already migrated workspaces still use their schema-v2 public descriptor and
+schema-v3 private runtime metadata. Runtime checks retain signed approvals,
+exact preserved-record hashes, accepted history, the pinned baseline and the
+approved participant/directed-grant policy, including read-only scopes. Removing
+the CLI does not remove these protections or enable automatic old-format import.
+Prepared or interrupted migrations remain blocked; this build cannot complete
+them. Keep their data and checkpoints intact for an explicitly reviewed recovery,
+rather than deleting markers or resetting the profile.
 
 ### History cost
 

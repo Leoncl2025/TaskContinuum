@@ -121,13 +121,13 @@ export async function readBaselinePin(directory: string): Promise<BaselinePin | 
 export function assertBaselineDescriptor(descriptor: unknown, pin: BaselinePin | undefined): void {
   const parsed = descriptor === undefined ? undefined : workspaceDescriptorSchema.parse(descriptor)
   if (pin ? canonicalJson(parsed ?? null) !== canonicalJson(baselineDescriptor(pin.plan)) : parsed?.schemaVersion === 2) {
-    throw new RemoteConfigError('migration-baseline', 'The workspace trust baseline does not match the approved local checkpoint. Run the approved migration tool; do not reset the profile.')
+    throw new RemoteConfigError('migration-baseline', 'The workspace trust baseline does not match the approved local checkpoint. Preserve the workspace and profile for reviewed recovery; do not reset them.')
   }
 }
 export async function assertMigrationReady(root: string, directory: string): Promise<BaselinePin | undefined> {
   try {
     await readJsonBounded(join(directory, migrationGateFile), 8192)
-    throw new RemoteConfigError('migration-incomplete', 'A trust migration is prepared or interrupted. Keep Task Continuum stopped and resume the same approved migration tool.')
+    throw new RemoteConfigError('migration-incomplete', 'A trust migration is prepared or interrupted. This build cannot complete it. Keep Task Continuum stopped and preserve the checkpoint for reviewed recovery.')
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   const pin = await readBaselinePin(directory)
   if (pin) {
