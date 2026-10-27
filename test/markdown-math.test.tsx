@@ -61,7 +61,8 @@ $$
     expect(view.container.querySelector('pre code')).toHaveTextContent(String.raw`const text = "\\[\\frac{a}{b}\\] and $x$";`)
     expect(view.container).toHaveTextContent('Cost $5 and $10.')
     expect(view.container).toHaveTextContent(String.raw`\(x\)`)
-    expect(view.container.querySelectorAll('a')).toHaveLength(0)
+    expect(view.container.querySelectorAll('a')).toHaveLength(1)
+    expect(screen.getByRole('link', { name: 'Math docs' })).toHaveAttribute('href', 'https://example.com/path?value=$x$')
   })
 
   it('updates an incomplete streaming formula without throwing or corrupting following Markdown', () => {

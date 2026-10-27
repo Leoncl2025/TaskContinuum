@@ -314,6 +314,20 @@ export class VSCodeDeviceClient {
     return peer.invitation.ownerClientId
   }
 
+  async fileDeviceForOwner(root: string, value: AgentHostTarget['owner']): Promise<string> {
+    const owner = agentHostTargetSchema.shape.owner.parse(value)
+    await this.load()
+    if (this.closed) throw new FileTransferError('UNAVAILABLE', 'The device connection service is closed.')
+    const canonical = await this.root(root)
+    let peer: Peer | undefined
+    try { peer = this.ownerPeer(canonical, owner) }
+    catch { throw new FileTransferError('ACCESS_DENIED', 'The original file owner has an ambiguous, disabled or expired connection.') }
+    if (!peer) throw new FileTransferError('UNAVAILABLE', 'The file owner is not paired in this workspace. Connect the original device first.')
+    await this.validateRecipient(peer.invitation)
+    if (this.ownerPeer(peer.root, owner) !== peer) throw new FileTransferError('ACCESS_DENIED', 'The original file device changed.')
+    return peer.id
+  }
+
   private ownerPeer(root: string, owner: AgentHostTarget['owner']): Peer | undefined {
     if (this.closed) throw new Error('Device client is closed.')
     const peers = this.peers.filter((item) => item.root === root && item.invitation.ownerClientId === owner.clientId)

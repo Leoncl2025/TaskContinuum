@@ -22,6 +22,32 @@ afterEach(() => {
 })
 
 describe('native-only preload boundary', () => {
+  it('forwards explicit link actions through scoped desktop IPC without exposing filesystem paths or shell commands', async () => {
+    const links = window.desktop?.links
+    if (!links) throw new Error('Link preload API missing.')
+    const target = agentHostTargetFixture('linked-file')
+    const open = { target, href: 'file:///C:/Work/report.txt', requestId: crypto.randomUUID() }
+    const reference = { target, transferId: crypto.randomUUID() }
+    const preview = { ...reference, fileId: crypto.randomUUID(), offset: 20 }
+    await links.open(open)
+    await links.status(reference)
+    await links.preview(preview)
+    await links.save(preview)
+    await links.cancel(reference)
+    await links.save({ ...preview, openAfterSave: true })
+    await links.contextMenu?.('https://example.com/pull/42')
+    expect(ipc.invoke.mock.calls).toEqual([
+      ['desktop:chat-link-open', open],
+      ['desktop:chat-link-status', reference],
+      ['desktop:chat-link-preview', preview],
+      ['desktop:chat-link-save', preview],
+      ['desktop:chat-link-cancel', reference],
+      ['desktop:chat-link-save', { ...preview, openAfterSave: true }],
+      ['desktop:chat-link-menu', 'https://example.com/pull/42'],
+    ])
+    expect(links).not.toHaveProperty('openPath')
+    expect(links).not.toHaveProperty('execute')
+  })
   it('exposes scoped native full-screen state, toggle, and removable state notifications', async () => {
     const bridge = window.desktop
     if (!bridge) throw new Error('Desktop preload API missing.')

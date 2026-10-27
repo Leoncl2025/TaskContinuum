@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto'
 import { hostname } from 'node:os'
 import { lstat, mkdir, open, readdir, realpath, rename, rm, rmdir } from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
 import {
   exportManifestSchema, fetchRequestSchema, FILE_TRANSFER_LIMITS, FileTransferError,
   readFileRequestSchema, transferFailure, transferStatusSchema,
 } from '../shared/fileTransfer'
-import type { ExportManifest, FetchRequest, FilePage, FileTransferApi, ReadFileRequest, TransferStatus } from '../shared/fileTransfer'
+import type { ExportManifest, FetchRequest, FilePage, FileTransferApi, ReadFileRequest, TransferFile, TransferStatus } from '../shared/fileTransfer'
 import type { FileTransferSource } from './fileTransferSource'
 import type { VSCodeDeviceClient } from './vscodeDeviceClient'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
@@ -25,6 +26,7 @@ export class FileTransferService {
   private readonly records = new Map<string, Saved>()
   private readonly active = new Map<string, Active>()
   private readonly writes = new Map<string, Promise<void>>()
+  private readonly readers = new Set<Promise<unknown>>()
   private readonly busy = new Set<string>()
   private readonly slots = new Map<string, () => void>()
   private loading?: Promise<void>
@@ -57,6 +59,36 @@ export class FileTransferService {
       cancel: async (id) => this.cancel(await canonical(), z.uuid().parse(id)),
       read: async (request) => this.read(await canonical(), readFileRequestSchema.parse(request)),
     }
+  }
+
+  withDeliveredFile<T>(root: string, transferId: string, fileId: string,
+    action: (file: TransferFile, handle: FileHandle, checkpoint: () => Promise<void>) => Promise<T>): Promise<T> {
+    const operation = this.consumeDeliveredFile(root, transferId, fileId, action)
+    this.readers.add(operation)
+    return operation.finally(() => { this.readers.delete(operation) })
+  }
+
+  private async consumeDeliveredFile<T>(root: string, transferId: string, fileId: string,
+    action: (file: TransferFile, handle: FileHandle, checkpoint: () => Promise<void>) => Promise<T>): Promise<T> {
+    const canonical = await realpath(root)
+    await this.initialize()
+    const record = this.record(process.platform === 'win32' ? canonical.toLowerCase() : canonical, z.uuid().parse(transferId))
+    await this.check(record)
+    if (record.status.state !== 'delivered') throw new FileTransferError('INVALID_REQUEST', 'The complete file has not been delivered.')
+    const file = record.status.files.find((item) => item.fileId === z.uuid().parse(fileId))
+    if (!file) throw new FileTransferError('NOT_FOUND', 'File not found in this transfer.')
+    const path = join(this.directory, transferId, `${fileId}.blob`)
+    await this.privateFile(path, file.sizeBytes)
+    const before = await lstat(path)
+    const handle = await open(path, 'r')
+    try {
+      const info = await handle.stat()
+      if (!info.isFile() || info.nlink !== 1 || info.size !== file.sizeBytes || info.dev !== before.dev || info.ino !== before.ino) throw new FileTransferError('INTEGRITY_FAILED', 'The received file size or identity changed.')
+      await this.privateFile(path, file.sizeBytes)
+      const result = await action(file, handle, () => this.check(record))
+      await this.check(record)
+      return result
+    } finally { await handle.close() }
   }
 
   private async initialize(): Promise<void> {
@@ -392,6 +424,7 @@ export class FileTransferService {
     await this.admission
     await this.expiring
     await Promise.all([...this.active.values()].map((active) => active.done))
+    await Promise.allSettled(this.readers)
     await Promise.all(this.writes.values())
   }
 }

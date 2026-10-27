@@ -14,6 +14,8 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
 - Task creation through the UI, a local agent, or CLI.
 - Streaming Markdown, model options, image attachments, and terminal output.
 - Inline and block math in chats and task documents, rendered offline with KaTeX.
+- Clickable web links and source-owned file links, with authenticated remote
+  transfer, client-side previews, local document opening and copyable link addresses.
 - Collapsible tool activity keeps answers readable without losing execution details.
 - Compact layouts, resizable panels, dark/light themes, and cached chat titles.
 - Native full screen: press **F11** or **Shift+Alt+Enter**, or use the titlebar's
@@ -74,6 +76,26 @@ selection; other tabs can be remembered once opened in this version.
 Only tab and selection identifiers are saved, not drafts, messages, credentials or
 permissions. Storage failures are reported while current navigation remains
 usable.
+
+### Clickable links
+
+HTTP(S) links in chats and task documents open in your default browser only when
+clicked. File links in a chat use that chat's original execution owner: remote
+files are fetched through the existing paired-device file-transfer service, not
+looked up on the receiving machine. Absolute paths and `file:` URLs are supported;
+relative links use the original chat's single verified working directory.
+
+Received text and supported images open in a read-only preview with progress,
+cancel and **Save local copy**. **Save and open locally** writes a verified copy
+to a client-selected destination, then opens supported documents/images in that
+client's default application. Executables and scripts stay preview/save-only.
+Private application files remain blocked, and pairing and current chat access
+are revalidated. See [file-link behavior](docs/remote-vscode.md#clickable-chat-links).
+
+Copying selected chat text preserves hyperlinks as Markdown URLs in plain text
+and as links in rich text. Right-click a link for **Copy link address**. Both copy
+the original URL, not the client's temporary file-transfer path. Code-only copying
+and formula rendering keep their existing behavior.
 
 Consecutive routine tool calls appear in one collapsed activity row with a count
 and a live running summary. Expand it to inspect the original calls and their

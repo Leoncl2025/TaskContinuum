@@ -1,10 +1,12 @@
 import { memo, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import Markdown from 'react-markdown'
-import type { ExtraProps } from 'react-markdown'
+import type { Components, ExtraProps } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { IconButton } from './Primitives'
 import { mathRehypePlugins, prepareMarkdownMath } from '../markdownMath'
+import { parseChatLink } from '../../shared/chatLinks'
+import { MarkdownLink, MarkdownLinks } from './MarkdownLinks'
 import '../sessions.css'
 
 function ChatCodeBlock({ children, node }: ExtraProps & { children?: ReactNode }) {
@@ -34,12 +36,17 @@ function ChatCodeBlock({ children, node }: ExtraProps & { children?: ReactNode }
   </div>
 }
 
+const markdownComponents: Components = {
+  a: MarkdownLink,
+  img: ({ alt, src }) => <MarkdownLink href={src}>{alt || 'Image'}</MarkdownLink>,
+  pre: ChatCodeBlock,
+  table: ({ children }) => <div className="message-table" role="region" aria-label="Message table" tabIndex={0}><table>{children}</table></div>,
+}
+
 export const ChatMarkdown = memo(function ChatMarkdown({ source }: { source: string }) {
   const math = useMemo(() => prepareMarkdownMath(source), [source])
-  return <div className="message-text message-markdown"><Markdown remarkPlugins={[remarkGfm, math.plugin]} rehypePlugins={mathRehypePlugins} skipHtml urlTransform={() => ''} components={{
-    a: ({ children }) => <span className="message-link">{children}</span>,
-    img: ({ alt }) => <span className="muted">{alt || 'Image'}</span>,
-    pre: ChatCodeBlock,
-    table: ({ children }) => <div className="message-table" role="region" aria-label="Message table" tabIndex={0}><table>{children}</table></div>,
-  }}>{math.source}</Markdown></div>
+  return <MarkdownLinks>
+    <div className="message-text message-markdown"><Markdown remarkPlugins={[remarkGfm, math.plugin]} rehypePlugins={mathRehypePlugins} skipHtml
+      urlTransform={(url) => parseChatLink(url) ? url : ''} components={markdownComponents}>{math.source}</Markdown></div>
+  </MarkdownLinks>
 })

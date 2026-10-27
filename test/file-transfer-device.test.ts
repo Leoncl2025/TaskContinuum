@@ -25,6 +25,8 @@ import { startAgentHostDiagnostics, logAgentHostDiagnostic, stopAgentHostDiagnos
 import { startFileTransferMcpBridge } from '../src/main/fileTransferMcpBridge'
 import { createFileTransferMcpServer } from '../src/main/fileTransferMcp/server'
 import { createBridgeApi } from '../src/main/fileTransferMcp/client'
+import { ChatLinkService } from '../src/main/chatLinkService'
+import { pathToFileURL } from 'node:url'
 
 const protector = { available: () => true, encrypt: (value: string) => Buffer.from(value), decrypt: (value: Buffer) => value.toString() }
 const cleanups: (() => Promise<void>)[] = []
@@ -77,10 +79,41 @@ async function fixture() {
   const device = (await client.list(workspace))[0]
   const service = new FileTransferService(receiverProfile, local, client)
   cleanups.push(() => service.close())
-  return { root, workspace, sourceProfile, receiverProfile, source, host, pair, port, device, client, service, target, native, api: service.forWorkspace(workspace) }
+  return { root, workspace, sourceProfile, receiverProfile, source, host, pair, port, device, client, service, target, native, participant, api: service.forWorkspace(workspace) }
 }
 
 describe('trusted-device file transfers', () => {
+  it('opens a source-owned Markdown file through real paired SSH without sending or creating a native turn', async () => {
+    const setup = await fixture()
+    const path = join(setup.root, 'source-linked-report.txt')
+    await writeFile(path, 'Original paired source document\n')
+    setup.native.setWorkingDirectories([pathToFileURL(setup.root).href])
+    const remote = new AgentHostConnection(setup.target, setup.receiverProfile, (signal) => setup.client.agentHostTransport(setup.workspace, setup.target, signal))
+    cleanups.push(() => remote.close())
+    const links = new ChatLinkService({
+      files: setup.service, owner: async () => setup.participant,
+      device: (root, owner) => setup.client.fileDeviceForOwner(root, owner),
+      authorize: async (root, target) => { expect(root).toBe(setup.workspace); expect(target).toEqual(setup.target) },
+      directories: async () => {
+        await remote.open()
+        return z.object({ workingDirectories: z.array(z.string()).optional() }).parse(remote.snapshot(setup.target.sessionId).state).workingDirectories ?? []
+      },
+      openExternal: async () => { throw new Error('A file link must not open a web URL.') },
+    })
+    const checkpoint = async () => {}
+    const opened = await links.open(setup.workspace, { target: setup.target, href: './source-linked-report.txt', requestId: randomUUID() }, checkpoint)
+    if (opened.kind !== 'file') throw new Error('Expected a file.')
+    expect(opened.status.deviceId).toBe(setup.device.id)
+    const reference = { target: setup.target, transferId: opened.status.transferId }
+    await expect.poll(async () => (await links.status(setup.workspace, reference, checkpoint)).state, { timeout: 10000 }).toBe('delivered')
+    const status = await links.status(setup.workspace, reference, checkpoint)
+    expect(await links.preview(setup.workspace, { ...reference, fileId: status.files[0].fileId }, checkpoint))
+      .toMatchObject({ kind: 'text', page: { text: 'Original paired source document\n', eof: true } })
+    expect(setup.native.dispatches).toEqual([])
+    await expect(setup.client.fileDeviceForOwner(setup.workspace, { ...setup.target.owner, clientId: randomUUID() })).rejects.toMatchObject({ code: 'UNAVAILABLE' })
+    await setup.client.disconnectOwner(setup.workspace, setup.target.owner.clientId)
+    await expect(links.preview(setup.workspace, { ...reference, fileId: status.files[0].fileId }, checkpoint)).rejects.toMatchObject({ code: 'ACCESS_DENIED' })
+  }, 20000)
   it('lets an MCP agent collect a paired source log through the local bridge and private SSH', async () => {
     const setup = await fixture()
     await startAgentHostDiagnostics(setup.sourceProfile)

@@ -119,6 +119,7 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
     return () => { terminalDelays.delete(resource); release() }
   }
   return { endpoint, hostId, sessionId, chatId, dispatches, methods, initializations, action, snapshot, addTerminal, historyTerminals, terminalAction,
+    setWorkingDirectories: (directories: string[]) => { session.workingDirectories = [...directories] },
     historyBytes: (bytes: number, responseId = 3, metadataPadding = false) => {
       const metadata = { largeHistory: '' }
       chat = { ...chat, _meta: metadataPadding ? metadata : undefined, turns: Array.from({ length: 32 }, (_, index) => ({

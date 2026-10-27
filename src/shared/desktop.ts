@@ -1,3 +1,5 @@
+import type { ChatLinkBridge } from './chatLinks'
+
 export interface DesktopInfo {
   name: string
   version: string
@@ -6,6 +8,7 @@ export interface DesktopInfo {
 }
 
 export interface DesktopBridge {
+  links?: ChatLinkBridge
   getInfo(): Promise<DesktopInfo>
   minimize(): Promise<void>
   toggleMaximize(): Promise<void>

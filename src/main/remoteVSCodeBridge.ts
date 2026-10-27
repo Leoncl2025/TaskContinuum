@@ -17,6 +17,7 @@ import { FileTransferSource } from './fileTransferSource'
 import { FileTransferService } from './fileTransferService'
 import { startFileTransferMcpBridge } from './fileTransferMcpBridge'
 import { FileTransferBudget } from './fileTransferBudget'
+import { ChatLinkService } from './chatLinkService'
 
 export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>,
   onStatusChanged: () => void = () => {}, onBindingsChanged: () => void = () => {}) {
@@ -51,6 +52,19 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     const { clientId, machineName } = await clientIdentity()
     return { clientId, machineName }
   }, localTaskWorker)
+  const chatLinks = new ChatLinkService({
+    files, owner: clientIdentity,
+    device: (root, owner) => devices.fileDeviceForOwner(root, owner),
+    authorize: (root, target) => agentHosts.authorize(root, target),
+    directories: async (root, target) => {
+      const connection = await agentHosts.connection(root, target)
+      await connection.open()
+      const state = connection.snapshot(target.sessionId).state
+      const parsed = z.object({ workingDirectories: z.array(z.string().max(8192)).max(8).optional() }).parse(state)
+      return parsed.workingDirectories ?? []
+    },
+    openExternal: (url) => shell.openExternal(url),
+  })
   host.setAgentHostAccess(registry, async (root) => { await gitSync.requireReadyRoot(root); return locallyLinkedAgentHostSessions(app.getPath('userData'), root, await clientIdentity()) },
     (ownerId, workspaceId) => localTaskWorker.authorize(ownerId, workspaceId), async (root) => {
       if (!gitSync.sessionAccessReady(root)) throw new Error('The workspace is not ready for Agent Host access.')
@@ -111,7 +125,7 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     if (confirmation.response === 1) { await unchanged(root); await tunnels.stop() }
   })
   let closing: Promise<void> | undefined
-  return { agentHosts, gitSync, filesReady, close: () => closing ??= (async () => {
+  return { agentHosts, gitSync, filesReady, chatLinks, close: () => closing ??= (async () => {
     try { await (await filesReady).close() } catch { console.error('Closing after file transfer MCP bridge failure.') }
     await files.close()
     await fileSource.close()
