@@ -26,6 +26,7 @@ import { startFileTransferMcpBridge } from '../src/main/fileTransferMcpBridge'
 import { createFileTransferMcpServer } from '../src/main/fileTransferMcp/server'
 import { createBridgeApi } from '../src/main/fileTransferMcp/client'
 import { ChatLinkService } from '../src/main/chatLinkService'
+import { messageImages } from '../src/renderer/chat/messageImages'
 import { pathToFileURL } from 'node:url'
 
 const protector = { available: () => true, encrypt: (value: string) => Buffer.from(value), decrypt: (value: Buffer) => value.toString() }
@@ -83,6 +84,41 @@ async function fixture() {
 }
 
 describe('trusted-device file transfers', () => {
+  it('previews a file-backed sent screenshot from its original Host through paired SSH', async () => {
+    const setup = await fixture()
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jMpoAAAAASUVORK5CYII='
+    const image = join(setup.root, 'sent-screenshot.png')
+    await writeFile(image, Buffer.from(png, 'base64'))
+    setup.native.action({ type: 'chat/turnStarted', turnId: 'screenshot-turn', startedAt: new Date().toISOString(),
+      message: { text: 'Sent screenshot', origin: { kind: 'user' },
+        attachments: [{ type: 'resource', uri: pathToFileURL(image).href, label: 'image.png', displayKind: 'image' }],
+        _meta: { taskcontinuumActor: setup.participant } } })
+    setup.native.action({ type: 'chat/turnComplete', turnId: 'screenshot-turn', duration: 1 })
+    const remote = new AgentHostConnection(setup.target, setup.receiverProfile, (signal) => setup.client.agentHostTransport(setup.workspace, setup.target, signal))
+    cleanups.push(() => remote.close())
+    await remote.open()
+    const images = messageImages(remote.view.chat!.turns[0])
+    expect(images).toHaveLength(1)
+    if (!('uri' in images[0])) throw new Error('Expected the original resource image.')
+    const links = new ChatLinkService({
+      files: setup.service, owner: async () => setup.participant,
+      device: (root, owner) => setup.client.fileDeviceForOwner(root, owner),
+      authorize: async (root, target) => { expect(root).toBe(setup.workspace); expect(target).toEqual(setup.target) },
+      directories: async () => [],
+      openExternal: async () => { throw new Error('Screenshots must not be opened as remote web URLs.') },
+    })
+    const checkpoint = async () => {}
+    const opened = await links.open(setup.workspace, { target: setup.target, href: images[0].uri, requestId: randomUUID() }, checkpoint)
+    if (opened.kind !== 'file') throw new Error('Expected image file transfer.')
+    const reference = { target: setup.target, transferId: opened.status.transferId }
+    await expect.poll(async () => (await links.status(setup.workspace, reference, checkpoint)).state, { timeout: 10000 }).toBe('delivered')
+    const status = await links.status(setup.workspace, reference, checkpoint)
+    expect(status.deviceId).toBe(setup.device.id)
+    expect(await links.preview(setup.workspace, { ...reference, fileId: status.files[0].fileId }, checkpoint))
+      .toMatchObject({ kind: 'image', image: { data: png, mimeType: 'image/png' } })
+    expect(setup.native.dispatches).toEqual([])
+  }, 20000)
+
   it('opens a source-owned Markdown file through real paired SSH without sending or creating a native turn', async () => {
     const setup = await fixture()
     const path = join(setup.root, 'source-linked-report.txt')

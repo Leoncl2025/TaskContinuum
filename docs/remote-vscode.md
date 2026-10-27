@@ -184,6 +184,27 @@ menu also offers **Copy link address** without opening it or transferring a file
 Source URLs, including file paths and line suffixes, are never replaced by private
 inbox paths on the clipboard.
 
+### Sent screenshot previews
+
+Native Hosts can store a sent screenshot as `type: "resource"` with a `file:`
+URI instead of echoing its original `embeddedResource` base64 payload. Both
+representations are supported in active turns and historical messages. A file
+reference keeps a visible **Preview <filename>** card; clicking it uses the
+existing authenticated file-link transfer and image preview. No image is
+downloaded just by rendering a file-backed card.
+
+The source is the original execution owner that saved the attachment, not the
+sender's display name or another client with the same path. Pairing, current
+chat access, protected-path checks, file integrity and the 5 MiB raster preview
+limit still apply. A deleted or unreachable source image produces an explicit
+error and leaves the card available for retry.
+
+Embedded PNG/JPEG/GIF/WebP data is validated before rendering its thumbnail and
+click-to-enlarge dialog. Unsupported image addresses or malformed embedded
+payloads are shown with a reason rather than silently omitted. External image
+URLs are not automatically fetched, SVG is not injected, and viewing an image
+does not send a prompt, create a session, or alter the original screenshot.
+
 ### Last-known chat titles
 
 The Current tree and chat header retain titles learned from discovery and live

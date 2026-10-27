@@ -18,6 +18,20 @@ export interface ChatImageReference extends Omit<ChatImageAttachment, 'data'> {
   byteLength: number
 }
 
+export interface ChatImageResource {
+  id: string
+  name: string
+  uri: string
+}
+
+export interface ChatImageUnavailable {
+  id: string
+  name: string
+  error: string
+}
+
+export type DisplayedChatImage = ChatImageAttachment | ChatImageReference | ChatImageResource | ChatImageUnavailable
+
 export const chatImageReferenceSchema = z.object({
   id: z.string().uuid(), name: z.string().trim().min(1).max(200), mimeType: z.enum(CHAT_IMAGE_TYPES),
   sha256: z.string().regex(/^[a-f0-9]{64}$/), byteLength: z.number().int().min(1).max(MAX_CHAT_IMAGE_BYTES),
@@ -29,7 +43,7 @@ export function chatImageBytes(image: Pick<ChatImageAttachment, 'data'>): number
   return image.data.length / 4 * 3 - (image.data.endsWith('==') ? 2 : image.data.endsWith('=') ? 1 : 0)
 }
 
-function hasImageHeader(image: ChatImageAttachment): boolean {
+function hasImageHeader(image: Pick<ChatImageAttachment, 'mimeType' | 'data'>): boolean {
   if (!image.data.length || image.data.length % 4 || image.data.length > Math.ceil(MAX_CHAT_IMAGE_BYTES / 3) * 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(image.data)) return false
   const tail = image.data.slice(-4)
   if (btoa(atob(tail)) !== tail) return false
@@ -41,6 +55,11 @@ function hasImageHeader(image: ChatImageAttachment): boolean {
     case 'image/webp': return header.startsWith('RIFF') && header.slice(8, 12) === 'WEBP'
   }
 }
+
+export const chatImageContentSchema = z.object({
+  mimeType: z.enum(CHAT_IMAGE_TYPES),
+  data: z.string().max(Math.ceil(MAX_CHAT_IMAGE_BYTES / 3) * 4),
+}).strict().refine((image) => hasImageHeader(image) && chatImageBytes(image) <= MAX_CHAT_IMAGE_BYTES, 'The screenshot data is invalid or exceeds 5 MiB.')
 
 export const chatImageAttachmentSchema = z.object({
   id: z.string().uuid(),

@@ -1,17 +1,17 @@
 import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import stripAnsi from 'strip-ansi'
-import type { ResponsePart, TerminalState, Turn, ActiveTurn } from '@microsoft/agent-host-protocol'
+import type { ResponsePart, TerminalState } from '@microsoft/agent-host-protocol'
 import { agentHostKey } from '../../shared/agentHost'
 import type { AgentHostBridge, AgentHostTarget, AgentHostView } from '../../shared/agentHost'
 import type { TaskRecord } from '../../shared/tasks'
 import type { WorkspaceSnapshot } from '../../shared/workspace'
-import { CHAT_IMAGE_TYPES } from '../../shared/chatAttachments'
 import type { ChatImageAttachment } from '../../shared/chatAttachments'
 import { ChatMarkdown } from './ChatMarkdown'
 import { ChatLinkTargetContext } from '../chat/chatLinkContext'
 import { copyMarkdownSelection } from '../chat/copyMarkdownSelection'
 import { ChatImagePicker, ChatImages, ChatImageStatus } from './ChatImages'
+import { messageImages as imagesFor } from '../chat/messageImages'
 import { useChatImageInput } from '../chat/useChatImageInput'
 import { readModelPreference, saveModelPreference } from '../chat/modelPreferences'
 import { Dialog, Icon, IconButton } from './Primitives'
@@ -176,11 +176,6 @@ function Responses({ parts, ...context }: ResponseContext & { parts: ResponsePar
   return blocks.map((block) => 'tools' in block && block.tools.length > 1
     ? <ToolActivity key={block.key} parts={block.tools} {...context} />
     : <Response key={block.key} part={'tools' in block ? block.tools[0] : block.part} {...context} />)
-}
-
-function imagesFor(turn: Turn | ActiveTurn): ChatImageAttachment[] {
-  return (turn.message.attachments ?? []).flatMap((attachment, index) => attachment.type === 'embeddedResource' && CHAT_IMAGE_TYPES.includes(attachment.contentType as ChatImageAttachment['mimeType'])
-    ? [{ id: String(attachment._meta?.taskcontinuumImageId ?? `${turn.id}:${index}`), name: attachment.label, mimeType: attachment.contentType as ChatImageAttachment['mimeType'], data: attachment.data }] : [])
 }
 
 type AgentHostPanelProps = {

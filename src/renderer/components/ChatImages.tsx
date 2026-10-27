@@ -1,19 +1,23 @@
 import { useRef, useState } from 'react'
 import { CHAT_IMAGE_TYPES, chatImageDataUrl } from '../../shared/chatAttachments'
-import type { ChatImageAttachment, ChatImageReference } from '../../shared/chatAttachments'
+import type { DisplayedChatImage } from '../../shared/chatAttachments'
 import type { useChatImageInput } from '../chat/useChatImageInput'
 import { Dialog, Icon, IconButton } from './Primitives'
+import { MarkdownLink, MarkdownLinks } from './MarkdownLinks'
 
-export function ChatImages({ images = [], onRemove, disabled = false }: { images?: (ChatImageAttachment | ChatImageReference)[]; onRemove?(id: string): void; disabled?: boolean }) {
+export function ChatImages({ images = [], onRemove, disabled = false }: { images?: DisplayedChatImage[]; onRemove?(id: string): void; disabled?: boolean }) {
   const [selected, setSelected] = useState<string>()
   const preview = images.find((image) => image.id === selected)
   if (!images.length) return null
   return <>
     <div className="chat-images" aria-label={onRemove ? 'Attached images' : 'Message images'}>
       {images.map((image) => <figure className="chat-image" key={image.id}>
-        {'data' in image ? <button type="button" className="chat-image-preview" title={`Preview ${image.name}`} aria-label={`Preview ${image.name}`} onClick={() => setSelected(image.id)}><img src={chatImageDataUrl(image)} alt={image.name} /></button> : <span className="chat-image-placeholder" title="Image stored on the execution machine"><Icon name="file-media" /></span>}
+        {'data' in image ? <button type="button" className="chat-image-preview" title={`Preview ${image.name}`} aria-label={`Preview ${image.name}`} onClick={() => setSelected(image.id)}><img src={chatImageDataUrl(image)} alt={image.name} /></button>
+          : 'uri' in image ? <MarkdownLinks><MarkdownLink href={image.uri} className="chat-image-preview chat-image-reference"><Icon name="file-media" /><span>Preview {image.name}</span></MarkdownLink></MarkdownLinks>
+          : <span className="chat-image-placeholder" title={'error' in image ? image.error : 'Image stored on the execution machine'}><Icon name={'error' in image ? 'warning' : 'file-media'} /></span>}
         {onRemove && <IconButton icon="close" label={`Remove ${image.name}`} disabled={disabled} onClick={() => onRemove(image.id)} />}
         <figcaption title={image.name}>{image.name}</figcaption>
+        {'error' in image && <p className="chat-image-unavailable" role="status">{image.error}</p>}
       </figure>)}
     </div>
     {preview && 'data' in preview && <Dialog title={preview.name} className="chat-image-dialog" onClose={() => setSelected(undefined)}><img src={chatImageDataUrl(preview)} alt={preview.name} /></Dialog>}

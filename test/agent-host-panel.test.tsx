@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { Activity, useState } from 'react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ChatState, McpAuthRequiredReason, ResponsePart, ResponsePartKind, ToolCallCancellationReason, ToolCallCompletedState, ToolCallConfirmationReason, ToolCallContributorKind, ToolCallResponsePart, ToolCallStatus, ToolResultContentType, TurnState } from '@microsoft/agent-host-protocol'
+import type { ChatState, McpAuthRequiredReason, MessageResourceAttachment, ResponsePart, ResponsePartKind, ToolCallCancellationReason, ToolCallCompletedState, ToolCallConfirmationReason, ToolCallContributorKind, ToolCallResponsePart, ToolCallStatus, ToolResultContentType, TurnState } from '@microsoft/agent-host-protocol'
 import { MessageKind } from '@microsoft/agent-host-protocol'
 import type { AgentHostBridge, AgentHostView } from '../src/shared/agentHost'
 import { AgentHostPanel } from '../src/renderer/components/AgentHostPanel'
@@ -233,6 +233,26 @@ describe('Compact chat activity', () => {
 })
 
 describe('Agent Host chat UI', () => {
+  it('shows a resource-backed screenshot from the Host instead of silently dropping it', async () => {
+    const setup = fixture()
+    setup.view.chat!.turns = [{
+      id: 'sent-screenshot', state: 'complete' as TurnState.Complete,
+      message: { text: 'Can you see this screenshot?', origin: { kind: MessageKind.User }, attachments: [{
+        type: 'resource' as MessageResourceAttachment['type'], displayKind: 'image', label: 'Screenshot.png',
+        uri: 'file:///C:/Users/owner/AppData/Roaming/Code/agentSessionData/original/attachments/Screenshot.png',
+      }], _meta: { taskcontinuumActor: { clientId: 'sender', machineName: 'Sending-computer' } } },
+      responseParts: [], usage: undefined,
+    }]
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByText('Can you see this screenshot?')
+    const cards = within(screen.getByRole('log')).queryAllByRole('link', { name: 'Preview Screenshot.png' })
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toHaveAttribute('href', setup.view.chat!.turns[0].message.attachments![0].type === 'resource'
+      ? setup.view.chat!.turns[0].message.attachments![0].uri : '')
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+    expect(setup.bridge.create).not.toHaveBeenCalled()
+  })
+
   it.each(['0.9.0', '0.10.0', '1.0.0', undefined] as const)('shows the actual negotiated protocol in chat details (%s)', async (version) => {
     const setup = fixture()
     setup.view.protocolVersion = version

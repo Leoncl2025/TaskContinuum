@@ -46,6 +46,13 @@ test('opens links on the client and copies their original addresses without navi
       String.raw`Formula: \(\frac{1}{2}\).`,
     ].join('\n\n')
     fixture.historyText(1, source)
+    fixture.action({
+      type: 'chat/turnStarted', turnId: 'sent-screenshot', startedAt: new Date().toISOString(),
+      message: { text: 'Screenshot sent from a different client', origin: { kind: 'user' },
+        attachments: [{ type: 'resource', uri: pathToFileURL(image).href, label: 'Sent screenshot.png', displayKind: 'image' }],
+        _meta: { taskcontinuumActor: { clientId: 'other-client', machineName: 'Sending-client' } } },
+    })
+    fixture.action({ type: 'chat/turnComplete', turnId: 'sent-screenshot', duration: 1 })
     fixture.setWorkingDirectories([pathToFileURL(workspace).href])
     await writeFile(join(discovery, 'host.json'), JSON.stringify(fixture.endpoint))
     const repository = await prepareAutomaticLinksRepository(workspace, join(root, 'immutable-fixture'))
@@ -90,6 +97,7 @@ test('opens links on the client and copies their original addresses without navi
     expect(JSON.parse(await readFile(openedCopies, 'utf8'))).toEqual([])
     await expect(panel.getByRole('link', { name: 'Unsafe command', exact: true })).toHaveCount(0)
     await expect(page.locator('.chat-file-image')).toHaveCount(0)
+    await expect(panel.getByRole('link', { name: 'Preview Sent screenshot.png', exact: true })).toBeVisible()
     await expect(panel.locator('.katex')).toHaveCount(1)
     const copiedLinks = await panel.locator('.message-markdown').evaluate((element) => {
       const range = document.createRange()
@@ -132,6 +140,16 @@ test('opens links on the client and copies their original addresses without navi
     await page.keyboard.press('Escape')
     await panel.getByRole('link', { name: 'Chart', exact: true }).click()
     const picture = page.getByRole('dialog', { name: 'chart.png', exact: true })
+    await expect(picture.getByRole('img', { name: 'chart.png' })).toBeVisible()
+    await page.keyboard.press('Escape')
+    await panel.getByRole('link', { name: 'Preview Sent screenshot.png', exact: true }).click()
+    await expect(picture.getByRole('img', { name: 'chart.png' })).toBeVisible()
+    await expect.poll(() => picture.getByRole('img', { name: 'chart.png' }).evaluate((node) => (node as HTMLImageElement).naturalWidth)).toBe(1)
+    await page.keyboard.press('Escape')
+    await page.reload()
+    await expect(panel.getByRole('link', { name: 'Preview Sent screenshot.png', exact: true })).toBeVisible()
+    await panel.getByRole('textbox', { name: 'Message Agent Host' }).fill('Keep my question while opening files')
+    await panel.getByRole('link', { name: 'Preview Sent screenshot.png', exact: true }).click()
     await expect(picture.getByRole('img', { name: 'chart.png' })).toBeVisible()
     await page.keyboard.press('Escape')
     await app.evaluate(({ BrowserWindow }) => {

@@ -97,6 +97,12 @@ and as links in rich text. Right-click a link for **Copy link address**. Both co
 the original URL, not the client's temporary file-transfer path. Code-only copying
 and formula rendering keep their existing behavior.
 
+Sent screenshots are shown even when the Host replaces embedded image bytes
+with a `resource` file reference. Embedded images show thumbnails directly;
+file-backed screenshots show a **Preview** card that fetches the image from the
+original chat owner on click. Reopening old messages uses the same behavior.
+Invalid, missing or unsupported image data is reported instead of disappearing.
+
 Consecutive routine tool calls appear in one collapsed activity row with a count
 and a live running summary. Expand it to inspect the original calls and their
 outputs; terminal output still loads on demand. Failures, cancellations, approval
