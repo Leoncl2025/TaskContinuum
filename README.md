@@ -22,6 +22,10 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
   full-screen button, to fill the monitor and hide the Windows taskbar. Repeat to
   exit; window size and maximized state are restored. This does not change the
   system's taskbar settings. Escape keeps its normal dialog/chat behavior.
+  Off-screen history skips layout during resizing without removing messages or
+  resetting expanded tool/reasoning state. A chat following the latest reply stays
+  at the bottom across full-screen and panel-size changes; browsing earlier
+  messages does not jump back to the latest reply.
 
 ## Download
 

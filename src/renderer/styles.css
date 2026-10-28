@@ -229,6 +229,8 @@ kbd { font-family: inherit; font-size: 10px; color: var(--muted); border: 1px so
 .context-badge { margin-left: auto; flex-shrink: 0; font-size: 9px; background: var(--raised); border: 1px solid var(--border); padding: 3px 5px; border-radius: 3px; color: var(--muted); }
 .chat-log { flex: 1; min-height: 0; overflow: auto; }
 .chat-log > [data-turn-id], .chat-log > .message { max-width: 800px; margin-inline: auto; }
+/* Keep the newest turn laid out; off-screen history retains its DOM and measured height. */
+.chat-log > [data-turn-id]:not(:last-child) { content-visibility: auto; contain-intrinsic-block-size: auto 400px; }
 .chat-welcome { padding: 55px 25px 25px; }
 .chat-welcome-icon { display: inline-flex; justify-content: center; align-items: center; width: 40px; height: 40px; color: var(--accent); border: 1px solid #358ad83b; background: #358ad812; border-radius: 11px; }
 .chat-welcome-icon .codicon { font-size: 22px; }

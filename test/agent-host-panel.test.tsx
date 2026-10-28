@@ -39,6 +39,70 @@ function fixture() {
   return { target, bridge, view, emit: () => { for (const listener of listeners) listener({ id: watchId, view: structuredClone(view) }) } }
 }
 
+it('keeps following after resize-induced scrolling, but preserves deliberate history browsing and cancels pending resize work', async () => {
+  const setup = fixture()
+  const frames = new Map<number, FrameRequestCallback>()
+  let nextFrame = 0
+  const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    frames.set(++nextFrame, callback)
+    return nextFrame
+  })
+  const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => { frames.delete(id) })
+  const flush = () => act(() => {
+    const pending = [...frames.values()]
+    frames.clear()
+    for (const callback of pending) callback(0)
+  })
+  const rendered = render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+  await screen.findByRole('status', { name: 'Connected' })
+  const log = screen.getByRole('log')
+  let width = 600, height = 500, scrollHeight = 2000
+  Object.defineProperties(log, {
+    clientWidth: { configurable: true, get: () => width },
+    clientHeight: { configurable: true, get: () => height },
+    scrollHeight: { configurable: true, get: () => scrollHeight },
+  })
+  flush()
+  log.scrollTop = scrollHeight - height
+  fireEvent.scroll(log)
+  width = 800
+  height = 650
+  scrollHeight = 3000
+  fireEvent.scroll(log)
+  const requested = requestFrame.mock.calls.length
+  fireEvent(window, new Event('resize'))
+  fireEvent(window, new Event('resize'))
+  expect(requestFrame).toHaveBeenCalledTimes(requested + 1)
+  flush()
+  expect(log.scrollTop).toBe(scrollHeight)
+  log.scrollTop = 400
+  fireEvent.scroll(log)
+  width = 500
+  height = 400
+  scrollHeight = 4000
+  fireEvent(window, new Event('resize'))
+  fireEvent.scroll(log)
+  flush()
+  expect(log.scrollTop).toBe(400)
+  act(() => setup.emit())
+  expect(log.scrollTop).toBe(400)
+  log.scrollTop = scrollHeight - height
+  fireEvent.scroll(log)
+  scrollHeight = 4200
+  act(() => setup.emit())
+  expect(log.scrollTop).toBe(scrollHeight)
+  fireEvent(window, new Event('resize'))
+  const pendingFrame = nextFrame
+  rendered.unmount()
+  expect(cancelFrame).toHaveBeenCalledWith(pendingFrame)
+  expect(frames.size).toBe(0)
+  const calls = requestFrame.mock.calls.length
+  fireEvent(window, new Event('resize'))
+  expect(requestFrame).toHaveBeenCalledTimes(calls)
+  expect(setup.bridge.watch).toHaveBeenCalledOnce()
+  expect(setup.bridge.send).not.toHaveBeenCalled()
+})
+
 function historicalOutput(view: AgentHostView, resource: string, duplicate = false): void {
   const content = { type: 'terminal', resource, title: 'Historical output', result: { preview: 'Preview before loading' } }
   view.chat!.turns = [{

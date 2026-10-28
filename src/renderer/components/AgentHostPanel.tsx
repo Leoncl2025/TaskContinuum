@@ -227,6 +227,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const mounted = useRef(false)
   const following = useRef(true)
   const log = useRef<HTMLDivElement>(null)
+  const logSize = useRef({ width: 0, height: 0 })
   const attempted = useRef<{ id: string; text: string; draft: string; images: ChatImageAttachment[] } | undefined>(undefined)
   const firstMessageSent = useRef(false)
   const imageInput = useChatImageInput(`${contextId}:${key}`, images, setImages, busy)
@@ -290,6 +291,28 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const pending = Boolean(view?.pendingTurn)
   useEffect(() => { onBusy?.(busy || pending || responding); return () => onBusy?.(false) }, [busy, pending, responding, onBusy])
   useEffect(() => { if (following.current && log.current) log.current.scrollTop = log.current.scrollHeight }, [view])
+  useEffect(() => {
+    const element = log.current
+    if (!element) return
+    let frame: number | undefined
+    const resize = () => {
+      if (frame !== undefined) return
+      frame = requestAnimationFrame(() => {
+        frame = undefined
+        logSize.current = { width: element.clientWidth, height: element.clientHeight }
+        if (following.current) element.scrollTop = element.scrollHeight
+      })
+    }
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(resize) : undefined
+    observer?.observe(element)
+    window.addEventListener('resize', resize)
+    resize()
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', resize)
+      if (frame !== undefined) cancelAnimationFrame(frame)
+    }
+  }, [])
   function confirm(command: { id: string; text: string; draft: string; images: ChatImageAttachment[] }): void {
     if (attempted.current?.id !== command.id) return
     firstMessageSent.current = true
@@ -411,7 +434,12 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     <div className="chat-log" ref={log} role="log" aria-label={`Agent Host conversation for ${contextLabel}`} aria-live="polite" onCopy={(event) => {
       try { copyMarkdownSelection(event) }
       catch { event.preventDefault(); setError('The selected chat links could not be copied. Try a smaller selection or copy a link address.') }
-    }} onScroll={() => { if (log.current) following.current = log.current.scrollHeight - log.current.scrollTop - log.current.clientHeight < 60 }}>
+    }} onScroll={(event) => {
+      const element = event.currentTarget
+      // Reflow scroll events are not a user leaving the bottom of the chat.
+      if (element.clientWidth !== logSize.current.width || element.clientHeight !== logSize.current.height) return
+      following.current = element.scrollHeight - element.scrollTop - element.clientHeight < 60
+    }}>
       {!turns.length && <p className="muted">{view?.state === 'connected' ? 'No messages.' : 'Waiting for original history...'}</p>}
       {turns.map((turn) => {
         const actor = turn.message._meta?.taskcontinuumActor as { username?: string; machineName?: string; clientId?: string } | undefined
