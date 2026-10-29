@@ -183,7 +183,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
     rememberChat()
     currentTaskId.current = id
     selection.selectTask(id, openTasks)
-    setCompactPanel('chat')
+    showChat()
   }
 
   function openTaskCreation(mode: TaskCreationMode): void {
@@ -212,7 +212,13 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
   function showChat(): void {
     setCompactPanel('chat')
     if (!compact) setLayout((value) => ({ ...value, chat: true }))
-    requestAnimationFrame(() => document.getElementById('chat-composer')?.focus())
+    const previousFocus = document.activeElement
+    requestAnimationFrame(() => {
+      const composer = document.getElementById('chat-composer')
+      const focused = document.activeElement
+      if (document.querySelector('dialog[open]') || focused !== previousFocus && focused !== document.body && focused !== composer) return
+      composer?.focus({ preventScroll: true })
+    })
   }
 
   function showTaskChat(): void {

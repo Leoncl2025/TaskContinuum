@@ -226,6 +226,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const operating = useRef(false)
   const mounted = useRef(false)
   const following = useRef(true)
+  const composer = useRef<HTMLTextAreaElement>(null)
   const log = useRef<HTMLDivElement>(null)
   const logSize = useRef({ width: 0, height: 0 })
   const attempted = useRef<{ id: string; text: string; draft: string; images: ChatImageAttachment[] } | undefined>(undefined)
@@ -235,6 +236,9 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     mounted.current = true
     return () => { mounted.current = false }
   }, [])
+  useEffect(() => {
+    if (active && !document.querySelector('dialog[open]')) composer.current?.focus({ preventScroll: true })
+  }, [active, contextId, key])
   useEffect(() => {
     let active = true
     let watchId: string | undefined
@@ -468,7 +472,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       {configErrors.map((message) => <p key={message} className="copilot-error message-notice" role="alert">{message}</p>)}
       <div className="composer">
         <ChatImages images={images} onRemove={imageInput.remove} disabled={busy} />
-        <textarea id={active ? 'chat-composer' : undefined} aria-label="Message Agent Host" placeholder="Message original Agent" rows={3} maxLength={4000} value={draft} onChange={(event) => setDraft(event.target.value)} onPaste={imageInput.paste} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} />
+        <textarea ref={composer} id={active ? 'chat-composer' : undefined} aria-label="Message Agent Host" placeholder="Message original Agent" rows={3} maxLength={4000} value={draft} onChange={(event) => setDraft(event.target.value)} onPaste={imageInput.paste} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} />
         <div className="composer-toolbar">
           <ChatImagePicker onFiles={imageInput.add} disabled={busy || imageInput.reading} />
           <div className="ahp-model-controls">

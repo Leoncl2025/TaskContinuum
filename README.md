@@ -11,6 +11,9 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
 - Searchable task trees, task tabs, and read-only planning documents.
 - **Ctrl+PageUp / Ctrl+PageDown** switches to the previous/next open task tab,
   wrapping at either end without clearing chat drafts.
+- Selecting a task or session opens its chat pane and automatically focuses the
+  message input, preserving drafts and the caret. Background updates do not steal
+  focus, and open dialogs keep control; selecting an unlinked task creates no chat.
 - Task creation through the UI, a local agent, or CLI.
 - Streaming Markdown, model options, image attachments, and terminal output.
 - Inline and block math in chats and task documents, rendered offline with KaTeX.

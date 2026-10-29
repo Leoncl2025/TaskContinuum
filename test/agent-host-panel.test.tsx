@@ -297,6 +297,51 @@ describe('Compact chat activity', () => {
 })
 
 describe('Agent Host chat UI', () => {
+  it('focuses only the activated composer, retaining its caret without stealing streaming or dialog focus', async () => {
+    const setup = fixture()
+    const user = userEvent.setup()
+    const props = { task: demoTasks[1], target: setup.target, onDetach: vi.fn(), onClose: vi.fn() }
+    const panel = (active: boolean, modal = false) => <>
+      <input aria-label="Outside search" />
+      {modal && <dialog open aria-label="Blocking dialog"><input aria-label="Dialog input" /></dialog>}
+      <AgentHostPanel {...props} active={active} />
+    </>
+    const mounted = render(panel(false))
+    const search = screen.getByRole('textbox', { name: 'Outside search' })
+    search.focus()
+    await screen.findByRole('status', { name: 'Connected' })
+    expect(search).toHaveFocus()
+    const composer = screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Message Agent Host' })
+    mounted.rerender(panel(true))
+    expect(composer).toHaveFocus()
+    await user.keyboard('Keep this draft')
+    composer.setSelectionRange(5, 5)
+    search.focus()
+    act(() => setup.emit())
+    expect(search).toHaveFocus()
+    mounted.rerender(panel(false))
+    mounted.rerender(panel(true))
+    expect(composer).toHaveFocus()
+    expect(composer).toHaveValue('Keep this draft')
+    expect(composer.selectionStart).toBe(5)
+    expect(composer.selectionEnd).toBe(5)
+
+    mounted.rerender(panel(false, true))
+    const dialogInput = screen.getByRole('textbox', { name: 'Dialog input' })
+    dialogInput.focus()
+    mounted.rerender(panel(true, true))
+    expect(dialogInput).toHaveFocus()
+    act(() => setup.emit())
+    expect(dialogInput).toHaveFocus()
+    mounted.rerender(panel(true))
+    search.focus()
+    act(() => setup.emit())
+    expect(search).toHaveFocus()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+    expect(setup.bridge.create).not.toHaveBeenCalled()
+    expect(setup.bridge.watch).toHaveBeenCalledOnce()
+  })
+
   it('shows a resource-backed screenshot from the Host instead of silently dropping it', async () => {
     const setup = fixture()
     setup.view.chat!.turns = [{

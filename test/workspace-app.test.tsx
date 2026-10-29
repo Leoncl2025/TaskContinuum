@@ -383,12 +383,15 @@ describe('workspace switching in the desktop workbench', () => {
     const user = userEvent.setup()
     render(<App />)
     await user.click(await screen.findByRole('button', { name: 'Open workspace folder' }))
-    await user.type(await screen.findByRole('textbox', { name: 'Message Agent Host' }), 'First task draft')
+    expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveFocus()
+    await user.keyboard('First task draft')
     await user.keyboard('{Control>}{PageDown}{/Control}')
     expect(screen.getByRole('tab', { name: 'Second bound task' })).toHaveAttribute('aria-selected', 'true')
-    await user.type(await screen.findByRole('textbox', { name: 'Message Agent Host' }), 'Second task draft')
+    expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveFocus()
+    await user.keyboard('Second task draft')
     await user.keyboard('{Control>}{PageUp}{/Control}')
     expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('First task draft')
+    expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveFocus()
     await user.click(screen.getByRole('button', { name: 'Chat details' }))
     await user.keyboard('{Control>}{PageDown}{/Control}')
     expect(screen.getByRole('dialog', { name: 'Chat details' })).toBeInTheDocument()
@@ -400,8 +403,43 @@ describe('workspace switching in the desktop workbench', () => {
     expect(screen.getByRole('tab', { name: 'Actual UI task' })).toHaveAttribute('aria-selected', 'true')
     await user.keyboard('{Control>}{PageDown}{/Control}')
     expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Second task draft')
+    expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveFocus()
     expect(agentHost.send).not.toHaveBeenCalled()
     expect(agentHost.create).not.toHaveBeenCalled()
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('automatically opens and focuses a selected task chat without creating missing sessions (compact=%s)', async (compact) => {
+    vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
+      matches: compact, media: query, onchange: null,
+      addEventListener: vi.fn(), removeEventListener: vi.fn(), addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: () => true,
+    }))
+    const { first, repository, target, agentHost, bridge } = creationFixture()
+    const other = { ...target, sessionId: 'ahp-session:/focus-other', chatId: 'ahp-chat:/focus-other/main' }
+    first.tasks.push({ ...first.tasks[0], id: 'T-0003', title: 'Second bound task' }, { ...first.tasks[0], id: 'T-0004', title: 'Unlinked task' })
+    repository[first.id] = { document: { schemaVersion: '2.1', bindings: {
+      'T-0002': [{ provider: 'agent-host', ...target }], 'T-0003': [{ provider: 'agent-host', ...other }],
+    } }, revision: 'a'.repeat(64) }
+    const user = userEvent.setup()
+    await bridge.openFolder()
+    render(<App />)
+    expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveFocus()
+    await user.keyboard('First task draft')
+    await user.click(screen.getByRole('button', { name: 'Hide chat panel' }))
+    expect(screen.queryByRole('textbox', { name: 'Message Agent Host' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Tasks' }))
+    await user.click(screen.getByRole('button', { name: 'T-0003 Second bound task' }))
+    expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveFocus()
+    await user.keyboard('Second task draft')
+    await user.click(screen.getByRole('tab', { name: 'Actual UI task' }))
+    expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('First task draft')
+    expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveFocus()
+    await user.click(screen.getByRole('button', { name: 'Tasks' }))
+    await user.click(screen.getByRole('button', { name: 'T-0004 Unlinked task' }))
+    expect(screen.queryByRole('textbox', { name: 'Message Agent Host' })).not.toBeInTheDocument()
+    expect(screen.getByText(/No Agent Host chat is linked to T-0004/)).toBeInTheDocument()
+    expect(agentHost.create).not.toHaveBeenCalled()
+    expect(agentHost.send).not.toHaveBeenCalled()
     expect(bridge.updateSessionLink).not.toHaveBeenCalled()
   })
 
@@ -789,7 +827,8 @@ describe('workspace switching in the desktop workbench', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
     const firstDraft = await screen.findByRole('textbox', { name: 'Message Agent Host' })
-    await user.type(firstDraft, 'Draft for session A')
+    expect(firstDraft).toHaveFocus()
+    await user.keyboard('Draft for session A')
     await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
     const sidebar = screen.getByRole('complementary', { name: 'Agent Host sessions' })
     const tree = within(sidebar).getByRole('tree', { name: 'Sessions for T-0002' })
@@ -798,7 +837,8 @@ describe('workspace switching in the desktop workbench', () => {
     expect(screen.queryByRole('dialog', { name: 'Agent Host sessions' })).not.toBeInTheDocument()
 
     await user.click(within(tree).getByRole('button', { name: 'Open Session B' }))
-    await user.type(await screen.findByRole('textbox', { name: 'Message Agent Host' }), 'Draft for session B')
+    expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveFocus()
+    await user.keyboard('Draft for session B')
     const watches = vi.mocked(agentHost.watch).mock.calls.length
     const unwatches = vi.mocked(agentHost.unwatch).mock.calls.length
     git.setStatus({ ...git.getStatus(), machineAliases: { [sessionA.owner.clientId]: 'Renamed desk', [sessionB.owner.clientId]: 'Renamed desk' } })
@@ -813,6 +853,7 @@ describe('workspace switching in the desktop workbench', () => {
     await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
     await user.click(screen.getByRole('button', { name: 'Open Session A' }))
     expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Draft for session A')
+    expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveFocus()
     expect(screen.getByText(`Agent Host @ Renamed desk (${sessionA.owner.machineName})`)).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
@@ -867,13 +908,15 @@ describe('workspace switching in the desktop workbench', () => {
     await user.click(within(tree).getByRole('button', { name: 'Open Compact B' }))
     const panel = await screen.findByRole('complementary', { name: 'Agent Host task chat' })
     expect(screen.getByRole('button', { name: 'Toggle chat panel' })).toHaveAttribute('aria-pressed', 'true')
-    await user.type(within(panel).getByRole('textbox', { name: 'Message Agent Host' }), 'Compact session B draft')
+    expect(within(panel).getByRole('textbox', { name: 'Message Agent Host' })).toHaveFocus()
+    await user.keyboard('Compact session B draft')
 
     await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
     const reopenedTree = await screen.findByRole('tree', { name: 'Sessions for T-0002' })
     expect(within(reopenedTree).getByRole('treeitem', { name: 'Compact B' })).toHaveAttribute('aria-selected', 'true')
     await user.click(within(reopenedTree).getByRole('button', { name: 'Open Compact B' }))
     expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Compact session B draft')
+    expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveFocus()
     expect(agentHost.create).not.toHaveBeenCalled()
     expect(agentHost.send).not.toHaveBeenCalled()
     expect(agentHost.cancel).not.toHaveBeenCalled()
