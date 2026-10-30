@@ -102,7 +102,7 @@ if (parameters.has('workbench')) {
     minimize: unsupported, toggleMaximize: unsupported, close: unsupported, copyText: unsupported,
     getFullScreen: async () => false, toggleFullScreen: unsupported, onFullScreenChanged: () => () => {},
   }
-  saveLayout({ ...defaultLayout, sidebar: false, details: false, theme: parameters.get('theme') === 'dark' ? 'dark' : 'light' })
+  saveLayout({ ...defaultLayout, sidebar: parameters.has('panes'), details: parameters.has('panes'), theme: parameters.get('theme') === 'dark' ? 'dark' : 'light' })
   root.render(<App />)
 } else root.render(
   <div className="workbench" data-theme={parameters.get('theme') ?? 'light'}>

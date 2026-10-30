@@ -1,8 +1,8 @@
 .workspace-picker { padding: 12px 13px 14px; }
 .workspace-picker-row { display: flex; align-items: center; gap: 9px; min-width: 0; }
-.workspace-picker .workspace-mark { flex-shrink: 0; width: 30px; height: 30px; border-radius: 5px; }
+.workspace-picker .workspace-mark { flex-shrink: 0; width: 30px; height: 30px; border-radius: var(--radius-sm); }
 .workspace-choice { display: flex; flex: 1; flex-direction: column; min-width: 0; gap: 6px; }
-.workspace-choice select { width: 100%; min-width: 0; background: var(--input); border: 1px solid var(--border); border-radius: 3px; padding: 4px; font-size: 12px; }
+.workspace-choice select { width: 100%; min-width: 0; background: var(--input); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 4px; font-size: 12px; }
 .workspace-choice > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; }
 .workspace-picker-actions { display: flex; align-items: center; gap: 5px; margin-top: 9px; }
 .workspace-picker-actions > span { flex: 1; font-size: 10px; color: var(--muted); }
@@ -18,7 +18,7 @@
 .workspace-markdown p { margin: 12px 0; }
 .workspace-markdown ul, .workspace-markdown ol { padding-left: 23px; }
 .workspace-markdown li { padding: 3px 0; }
-.workspace-markdown pre { max-width: 100%; overflow: auto; background: var(--input); border: 1px solid var(--border); padding: 12px; border-radius: 4px; }
+.workspace-markdown pre { max-width: 100%; overflow: auto; background: var(--raised); border: 1px solid var(--border); padding: 12px; border-radius: var(--radius-md); }
 .workspace-markdown code { font-family: Consolas, 'Cascadia Code', monospace; font-size: 11px; }
 .workspace-markdown blockquote { border-left: 2px solid var(--border); padding-left: 14px; margin-left: 0; color: var(--muted); }
 .workspace-markdown .document-table { overflow-x: auto; margin: 16px 0; }
@@ -40,21 +40,21 @@
 .repository-fields { border: 0; margin: 0; padding: 0; min-width: 0; }
 .repository-fields label[for] { margin-bottom: 8px; }
 .repository-path-row { display: flex; gap: 8px; }
-.repository-path-row input { flex: 1; width: 100%; background: var(--input); border: 1px solid #7776; padding: 9px 10px; border-radius: 4px; }
+.repository-path-row input { flex: 1; width: 100%; background: var(--input); border: 1px solid var(--border); padding: 9px 10px; border-radius: var(--radius-sm); }
 .repository-path { overflow-wrap: anywhere; font-size: 12px; }
-.repository-created { display: flex; align-items: flex-start; gap: 12px; padding: 14px; background: var(--note); border: 1px solid var(--border); border-radius: 5px; }
+.repository-created { display: flex; align-items: flex-start; gap: 12px; padding: 14px; background: var(--note); border: 1px solid var(--border); border-radius: var(--radius-md); }
 .repository-created > .codicon { color: var(--accent); font-size: 24px; }
 .repository-created > div { display: flex; flex-direction: column; min-width: 0; gap: 6px; }
 .repository-created code { overflow-wrap: anywhere; font-size: 12px; }
 .repository-created span:not(.codicon) { color: var(--muted); font-size: 11px; }
 .repository-github { margin: 18px 0; font-size: 12px; }
-.repository-web-step, .repository-terminal { margin: 18px 0; padding: 14px; border: 1px solid var(--border); border-radius: 5px; }
+.repository-web-step, .repository-terminal { margin: 18px 0; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-md); }
 .repository-web-step h3, .repository-terminal h3 { margin-top: 0; font-size: 14px; }
 .repository-web-step p, .repository-terminal p { font-size: 12px; line-height: 1.6; }
-.repository-terminal pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; background: var(--raised); border: 1px solid var(--border); border-radius: 4px; font-size: 12px; user-select: text; }
+.repository-terminal pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; background: var(--raised); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 12px; user-select: text; }
 .repository-push-form { margin: 18px 0; }
 .repository-warning { border-left: 2px solid #c99b3d; padding-left: 12px; }
-.repository-error { color: var(--text); border: 1px solid #c95151; border-radius: 4px; background: #c9515115; padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.repository-error { color: var(--text); border: 1px solid var(--error); border-radius: var(--radius-md); background: color-mix(in srgb, var(--error) 8%, var(--bg)); padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .repository-published { margin-top: 20px; }
 .repository-published > .codicon { color: var(--green); font-size: 28px; }
 .repository-setup .dialog-actions { flex-wrap: wrap; }

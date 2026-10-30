@@ -2,7 +2,16 @@ import { describe, expect, it, vi } from 'vitest'
 import { defaultLayout, panelLimits, panelSizes, readLayout, resizePanel, saveLayout } from '../src/renderer/layout'
 
 describe('layout preferences', () => {
-  it('starts with Explorer, central chat, task details, and the dark theme', () => expect(readLayout()).toEqual(defaultLayout))
+  it('starts with Explorer, central chat, task details, and the light theme', () => {
+    expect(defaultLayout.theme).toBe('light')
+    expect(readLayout()).toEqual(defaultLayout)
+  })
+  it.each(['light', 'dark'] as const)('preserves the saved %s theme across current and legacy preferences', (theme) => {
+    for (const key of ['taskcontinuum:layout:v1', 'taskcontinuum:layout:v2']) {
+      localStorage.setItem(key, JSON.stringify({ theme }))
+      expect(readLayout().theme).toBe(theme)
+    }
+  })
   it('round trips display preferences only', () => {
     const preferences = { ...defaultLayout, sidebar: false, details: false, theme: 'light' as const, sidebarWidth: 320, detailsWidth: 480 }
     saveLayout(preferences)

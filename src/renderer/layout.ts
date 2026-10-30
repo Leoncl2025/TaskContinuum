@@ -11,7 +11,7 @@ export type LayoutPanel = 'sidebar' | 'details'
 export const panelLimits = { sidebar: { min: 220, max: 600 }, details: { min: 320, max: 960 } }
 const key = 'taskcontinuum:layout:v2'
 const legacyKey = 'taskcontinuum:layout:v1'
-export const defaultLayout: LayoutPreferences = { sidebar: true, chat: true, details: true, theme: 'dark', sidebarWidth: 258, detailsWidth: 380 }
+export const defaultLayout: LayoutPreferences = { sidebar: true, chat: true, details: true, theme: 'light', sidebarWidth: 258, detailsWidth: 380 }
 
 function panelWidth(value: unknown, panel: LayoutPanel): number {
   const { min, max } = panelLimits[panel]
@@ -63,7 +63,7 @@ export function readLayout(): LayoutPreferences {
       sidebar: typeof saved.sidebar === 'boolean' ? saved.sidebar : true,
       chat: !details || typeof saved.chat !== 'boolean' || saved.chat,
       details,
-      theme: saved.theme === 'light' ? 'light' : 'dark',
+      theme: saved.theme === 'dark' || saved.theme === 'light' ? saved.theme : defaultLayout.theme,
       sidebarWidth: panelWidth(saved.sidebarWidth, 'sidebar'),
       detailsWidth: panelWidth(stored === null ? saved.chatWidth : saved.detailsWidth, 'details'),
     }

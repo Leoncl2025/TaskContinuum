@@ -19,6 +19,80 @@ test.beforeAll(async () => {
 })
 test.afterAll(async () => { await server?.close() })
 
+for (const theme of ['light', 'dark'] as const) {
+  test(`uses soft neutral surfaces and readable rounded controls in ${theme} mode`, async ({ page }, testInfo) => {
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    await page.setViewportSize({ width: 1560, height: 1000 })
+    await page.goto(`${url}?workbench&panes&theme=${theme}`)
+    await expect(page.getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible()
+    const panel = page.getByRole('complementary', { name: 'Agent Host task chat' })
+    await panel.getByRole('combobox', { name: 'Agent Host model' }).selectOption('gpt-6')
+    const appearance = await page.locator('.workbench').evaluate((element) => {
+      const style = (selector: string) => {
+        const found = element.querySelector(selector)
+        if (!found) throw new Error(`Missing appearance test element: ${selector}`)
+        return getComputedStyle(found)
+      }
+      const probe = document.createElement('span')
+      element.append(probe)
+      const color = (name: string) => { probe.style.color = `var(${name})`; return getComputedStyle(probe).color }
+      const colors = Object.fromEntries(['--text', '--muted', '--subtle', '--accent', '--button-text', '--button-bg'].map((name) => [name, color(name)]))
+      probe.remove()
+      const luminance = (value: string) => {
+        const channels = value.match(/[\d.]+/g)?.slice(0, 3).map((part) => {
+          const channel = Number(part) / 255
+          return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+        })
+        if (!channels || channels.length !== 3) throw new Error(`Invalid rendered color: ${value}`)
+        return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722
+      }
+      const contrast = (foreground: string, background: string) => {
+        const a = luminance(foreground), b = luminance(background)
+        return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)
+      }
+      const background = getComputedStyle(element).backgroundColor
+      const selected = style('.tree-row.is-selected').backgroundColor
+      return {
+        background, selected, sidebar: style('.sidebar').backgroundColor, chat: style('.chat-panel').backgroundColor,
+        bubble: style('.message-user').backgroundColor, composer: style('.composer').backgroundColor,
+        radii: {
+          selected: style('.tree-row.is-selected').borderRadius, composer: style('.composer').borderRadius,
+          bubble: style('.message-user').borderRadius, button: style('.icon-button').borderRadius,
+        },
+        textContrast: ['--text', '--muted', '--subtle'].flatMap((name) =>
+          [background, selected].map((surface) => contrast(colors[name], surface))),
+        buttonContrast: contrast(colors['--button-text'], colors['--button-bg']),
+        focusContrast: contrast(colors['--accent'], background),
+        overflow: document.documentElement.scrollWidth > innerWidth,
+      }
+    })
+    expect(appearance.background).toBe(theme === 'light' ? 'rgb(255, 255, 255)' : 'rgb(28, 28, 28)')
+    expect(appearance.sidebar).toBe(theme === 'light' ? 'rgb(255, 255, 255)' : 'rgb(32, 32, 32)')
+    expect(appearance.chat).toBe(appearance.background)
+    expect(appearance.selected).toBe(theme === 'light' ? 'rgb(235, 235, 235)' : 'rgb(52, 52, 52)')
+    expect(appearance.bubble).toBe(theme === 'light' ? 'rgb(245, 245, 245)' : 'rgb(42, 42, 42)')
+    expect(appearance.composer).toBe(theme === 'light' ? 'rgb(255, 255, 255)' : 'rgb(36, 36, 36)')
+    expect(appearance.radii).toEqual({ selected: '12px', composer: '24px', bubble: '16px', button: '8px' })
+    for (const ratio of appearance.textContrast) expect(ratio).toBeGreaterThanOrEqual(4.5)
+    expect(appearance.buttonContrast).toBeGreaterThanOrEqual(4.5)
+    expect(appearance.focusContrast).toBeGreaterThanOrEqual(3)
+    expect(appearance.overflow).toBe(false)
+    await page.screenshot({ path: testInfo.outputPath(`neutral-${theme}.png`) })
+    await page.getByRole('button', { name: 'Preferences', exact: true }).click()
+    const preferences = page.getByRole('dialog', { name: 'Preferences' })
+    await expect(preferences).toHaveCSS('border-radius', '16px')
+    await expect(preferences.getByRole('radio', { name: theme === 'light' ? 'Light' : 'Dark', exact: true })).toBeChecked()
+    await page.keyboard.press('Escape')
+    await page.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
+    const row = page.locator('.session-tree-row.is-selected')
+    await expect(row).toHaveCSS('border-radius', '12px')
+    await expect(row).toHaveCSS('background-color', appearance.selected)
+    await page.screenshot({ path: testInfo.outputPath(`neutral-${theme}-sessions.png`) })
+    expect(errors).toEqual([])
+  })
+}
+
 for (const scenario of [
   { name: 'wide-light', width: 1440, height: 900, theme: 'light', long: false, zoom: 1 },
   { name: 'narrow-light', width: 360, height: 740, theme: 'light', long: true, zoom: 1 },
