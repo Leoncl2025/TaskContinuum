@@ -214,7 +214,6 @@ export class AgentHostConnection {
       if (this.closed) throw new Error('Agent Host view is closed.')
       const abort = new AbortController()
       let active: typeof this.current
-      const retainedChat = this.chat
       let step: NonNullable<AgentHostDiagnosticDetails['step']> = 'transport'
       let stepStarted = performance.now()
       const advance = (next: NonNullable<AgentHostDiagnosticDetails['step']>) => {
@@ -240,10 +239,9 @@ export class AgentHostConnection {
         this.terminalStatus.clear()
         this.referencedTerminals.clear()
         this.activeTerminals.clear()
-        this.chat = new AgentHostChatState(this.target.chatId)
         await this.subscribe(this.target.sessionId, active)
         advance('chat')
-        await this.subscribe(this.target.chatId, active)
+        await this.subscribe(this.target.chatId, active, true)
         advance('reconcile')
         if (this.current !== active || abort.signal.aborted) throw new Error('Agent Host connection changed.')
         this.connected = true
@@ -269,7 +267,6 @@ export class AgentHostConnection {
         this.diagnose('connection.open', { traceId, status: 'error', step, elapsedMs: performance.now() - stepStarted, error })
         if (active) { this.offline(active, 'stream-error', error); await active.client.shutdown() }
         else abort.abort()
-        if (!this.chat.loaded) { this.chat = retainedChat; this.refreshTerminals() }
         this.lastSizeFailure = agentHostSizeLimit(error) ?? this.lastSizeFailure
         this.error = this.lastSizeFailure?.message ?? 'Agent Host is unavailable, unsupported, or no longer authorized. No session was created and no message was replayed.'
         this.emit({ type: 'state' })
@@ -281,7 +278,7 @@ export class AgentHostConnection {
     try { await operation } finally { this.opening = undefined; this.emit({ type: 'state' }) }
   }
 
-  private async subscribe(resource: string, active: NonNullable<typeof this.current>): Promise<void> {
+  private async subscribe(resource: string, active: NonNullable<typeof this.current>, freshChat = false): Promise<void> {
     if (this.subscribing.has(resource)) return
     const channel = agentHostDiagnosticChannel(resource, this.target)
     const started = performance.now()
@@ -300,7 +297,7 @@ export class AgentHostConnection {
           return
         }
         if (!result.snapshot || result.snapshot.resource !== resource) throw new Error('Agent Host did not return the requested snapshot.')
-        this.acceptSnapshot(result.snapshot)
+        this.acceptSnapshot(result.snapshot, freshChat)
         if (agentHostTerminalIdSchema.safeParse(resource).success) this.terminalSubscriptions.set(resource, subscription)
         this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'ok', channel, elapsedMs: performance.now() - started })
         void this.pump(subscription, active, resource)
@@ -320,16 +317,21 @@ export class AgentHostConnection {
     }
   }
 
-  private acceptSnapshot(snapshot: Snapshot): void {
+  private acceptSnapshot(snapshot: Snapshot, freshChat = false): void {
     if (!Number.isSafeInteger(snapshot.fromSeq) || snapshot.fromSeq < 0 || !this.allowedChannel(snapshot.resource)) throw new Error('Invalid Agent Host snapshot identity.')
-    if ((snapshot.resource === this.target.chatId ? this.chat.lastSequence : this.snapshots.get(snapshot.resource)?.fromSeq ?? -1) > snapshot.fromSeq) return
+    const replaceChat = freshChat && snapshot.resource === this.target.chatId
+    if (!replaceChat && (snapshot.resource === this.target.chatId ? this.chat.lastSequence : this.snapshots.get(snapshot.resource)?.fromSeq ?? -1) > snapshot.fromSeq) return
     if (snapshot.resource === this.target.sessionId && !(snapshot.state as SessionState).chats?.some((chat) => chat.resource === this.target.chatId && chat.interactivity !== 'hidden')) throw new Error('The chat is not a visible member of this original session.')
     if (agentHostTerminalIdSchema.safeParse(snapshot.resource).success) {
       const state = snapshot.state as TerminalState
       if (!Array.isArray(state.content) || state.claim?.kind !== 'session' || state.claim.session !== this.target.sessionId || state.claim.chat !== this.target.chatId) throw new Error('The terminal does not belong to the linked chat.')
     }
-    if (snapshot.resource === this.target.chatId) this.chat.snapshot(snapshot)
-    else this.snapshots.set(snapshot.resource, structuredClone(snapshot))
+    if (snapshot.resource === this.target.chatId) {
+      // A reconnect may restart serverSeq; keep displayed history until validation succeeds.
+      const chat = replaceChat ? new AgentHostChatState(this.target.chatId) : this.chat
+      chat.snapshot(snapshot)
+      this.chat = chat
+    } else this.snapshots.set(snapshot.resource, structuredClone(snapshot))
     if (snapshot.resource === this.target.chatId) this.refreshTerminals()
     this.emit({ type: 'snapshot', snapshot })
   }

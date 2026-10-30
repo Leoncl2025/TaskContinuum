@@ -74,12 +74,26 @@ test('restores all open task tabs, their order and the exact selected chat acros
           && item.owner.clientId === target.owner.clientId)
         if (!selected) throw new Error('Unknown chat identity.')
         record('watch', target)
-        const id = `${target.sessionId}:${target.chatId}`
+        const id = process.getBuiltinModule('crypto').randomUUID()
         const view: AgentHostView = {
           target, state: 'connected', canSend: false, readOnly: true, terminals: {}, protocolVersion: '0.10.0',
-          chat: { resource: target.chatId, title: selected.title, status: 1, modifiedAt: '', turns: [] },
+          chat: { resource: target.chatId, title: selected.title, status: 1, modifiedAt: '', turns: [{
+            id: 'fixture-history', state: 'complete', message: { text: `${selected.title} original question`, origin: { kind: 'user' } },
+            responseParts: [{ kind: 'markdown', id: 'original-answer', content: `${selected.title} original history` }],
+          }] as NonNullable<AgentHostView['chat']>['turns'] },
         }
-        setTimeout(() => { if (!event.sender.isDestroyed()) event.sender.send('agent-host:view', { id, view }) }, 0)
+        const publish = (view: AgentHostView) => { if (!event.sender.isDestroyed()) event.sender.send('agent-host:view', { id, view }) }
+        if (Reflect.get(globalThis, 'pauseSelectionFixtureChat') === target.chatId) {
+          Reflect.deleteProperty(globalThis, 'pauseSelectionFixtureChat')
+          setTimeout(() => publish({ ...view, state: 'connecting', chat: undefined }), 0)
+          Reflect.set(globalThis, 'resumeSelectionFixtureChat', () => {
+            view.chat!.turns = [...view.chat!.turns, {
+              id: 'fixture-later-turn', state: 'complete', message: { text: 'Original request while away', origin: { kind: 'user' } },
+              responseParts: [{ kind: 'markdown', id: 'later-answer', content: 'New answer synchronized after returning' }],
+            }] as NonNullable<AgentHostView['chat']>['turns']
+            publish(view)
+          })
+        } else setTimeout(() => publish(view), 0)
         return id
       })
       for (const channel of ['agent-host:create', 'agent-host:create-local', 'agent-host:send', 'workspace:update-session-link']) {
@@ -109,14 +123,27 @@ test('restores all open task tabs, their order and the exact selected chat acros
     await expect(page!.getByLabel('Chat header').getByText('First remembered chat', { exact: true })).toBeVisible()
     await expect(composer).toBeFocused()
     await composer.fill('Draft in the first chat')
+    const firstHistory = await page!.getByText('First remembered chat original history', { exact: true }).elementHandle()
     await page!.keyboard.press('Control+Shift+PageUp')
     await expect(page!.getByLabel('Chat header').getByText('Selected remembered chat', { exact: true })).toBeVisible()
     await expect(composer).toBeFocused()
     await composer.fill('Draft in the selected chat')
+    await app!.evaluate((_, chatId) => { Reflect.set(globalThis, 'pauseSelectionFixtureChat', chatId) }, firstChat.chatId)
     await page!.keyboard.press('Control+Shift+PageDown')
     await expect(page!.getByLabel('Chat header').getByText('First remembered chat', { exact: true })).toBeVisible()
+    await expect(page!.getByLabel('Chat header').getByText('Connecting...', { exact: true })).toBeVisible()
+    await expect(page!.getByText('First remembered chat original history', { exact: true })).toBeVisible()
+    await expect(page!.getByText('Waiting for original history...', { exact: true })).toHaveCount(0)
     await expect(composer).toHaveValue('Draft in the first chat')
     await expect(composer).toBeFocused()
+    await app!.evaluate(() => {
+      const resume = Reflect.get(globalThis, 'resumeSelectionFixtureChat')
+      if (typeof resume !== 'function') throw new Error('Expected the original chat refresh to be pending.')
+      resume()
+    })
+    await expect(page!.getByText('New answer synchronized after returning', { exact: true })).toBeVisible()
+    expect(await firstHistory!.evaluate((node) => node.isConnected)).toBe(true)
+    await expect(page!.getByRole('complementary', { name: 'Agent Host task chat', exact: true }).locator('[data-turn-id]')).toHaveCount(2)
     await page!.keyboard.press('Control+Shift+PageDown')
     await expect(page!.getByLabel('Chat header').getByText('Selected remembered chat', { exact: true })).toBeVisible()
     await expect(composer).toHaveValue('Draft in the selected chat')

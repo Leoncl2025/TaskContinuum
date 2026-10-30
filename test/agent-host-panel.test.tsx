@@ -527,6 +527,113 @@ describe('Agent Host chat UI', () => {
     expect(bridge.cancel).not.toHaveBeenCalled()
   })
 
+  it('keeps loaded history when a hidden chat resumes with a connecting view, then accepts fresh updates and an empty reset', async () => {
+    const setup = fixture()
+    responseHistory(setup.view, [{ kind: 'markdown' as ResponsePartKind.Markdown, id: 'retained-answer', content: 'Previously loaded conversation' }])
+    const history = setup.view.chat!
+    const props = { task: demoTasks[1], target: setup.target, onClose: vi.fn(), onDetach: vi.fn() }
+    const panel = (visible: boolean) => <Activity mode={visible ? 'visible' : 'hidden'}><AgentHostPanel {...props} active={visible} /></Activity>
+    const mounted = render(panel(true))
+    expect(await screen.findByText('Previously loaded conversation')).toBeVisible()
+    const originalTurn = mounted.container.querySelector('[data-turn-id="activity-turn"]')
+    const user = userEvent.setup()
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Agent Host model' }), await screen.findByRole('option', { name: 'GPT-6' }))
+    await user.type(screen.getByRole('textbox', { name: 'Message Agent Host' }), 'Keep my draft')
+    mounted.rerender(panel(false))
+    setup.view.state = 'connecting'
+    setup.view.canSend = false
+    setup.view.chat = undefined
+    mounted.rerender(panel(true))
+    await waitFor(() => expect(setup.bridge.watch).toHaveBeenCalledTimes(2))
+    expect(screen.getByRole('status', { name: 'Connecting...' })).toBeVisible()
+    expect(screen.getByText('Previously loaded conversation')).toBeVisible()
+    expect(mounted.container.querySelector('[data-turn-id="activity-turn"]')).toBe(originalTurn)
+    expect(screen.queryByText('Waiting for original history...')).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Keep my draft')
+    expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
+    setup.view.state = 'connected'
+    setup.view.canSend = true
+    setup.view.chat = { ...history, turns: [...history.turns, { ...history.turns[0], id: 'new-turn',
+      responseParts: [{ kind: 'markdown' as ResponsePartKind.Markdown, id: 'new-answer', content: 'Newly synchronized answer' }] }] }
+    act(() => setup.emit())
+    expect(screen.getByText('Newly synchronized answer')).toBeVisible()
+    expect(mounted.container.querySelector('[data-turn-id="activity-turn"]')).toBe(originalTurn)
+    expect(mounted.container.querySelectorAll('[data-turn-id]')).toHaveLength(2)
+    setup.view.chat = { ...history, turns: [] }
+    act(() => setup.emit())
+    expect(screen.queryByText('Previously loaded conversation')).not.toBeInTheDocument()
+    expect(screen.queryByText('Newly synchronized answer')).not.toBeInTheDocument()
+    expect(screen.getByText('No messages.')).toBeVisible()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+    expect(setup.bridge.create).not.toHaveBeenCalled()
+  })
+
+  it('does not show retained history from another owner, chat or task while its watch is loading', async () => {
+    const setup = fixture()
+    responseHistory(setup.view, [{ kind: 'markdown' as ResponsePartKind.Markdown, id: 'private-answer', content: 'Only the original chat history' }])
+    const props = { task: demoTasks[1], target: setup.target, onClose: vi.fn(), onDetach: vi.fn() }
+    const mounted = render(<AgentHostPanel {...props} />)
+    await screen.findByText('Only the original chat history')
+    vi.mocked(setup.bridge.watch).mockImplementation(() => new Promise(() => {}))
+    mounted.rerender(<AgentHostPanel {...props} target={{ ...setup.target, owner: { clientId: crypto.randomUUID(), machineName: 'Other owner' } }} />)
+    expect(screen.queryByText('Only the original chat history')).not.toBeInTheDocument()
+    mounted.rerender(<AgentHostPanel {...props} target={{ ...setup.target, chatId: 'ahp-chat:/other' }} />)
+    expect(screen.queryByText('Only the original chat history')).not.toBeInTheDocument()
+    mounted.rerender(<AgentHostPanel {...props} task={{ ...props.task, id: 'T-0999' }} />)
+    expect(screen.queryByText('Only the original chat history')).not.toBeInTheDocument()
+  })
+
+  it('only accepts buffered history from its confirmed watch and ignores late events from a previous watch', async () => {
+    const setup = fixture()
+    responseHistory(setup.view, [{ kind: 'markdown' as ResponsePartKind.Markdown, id: 'old-answer', content: 'Loaded before reconnect' }])
+    let receive: Parameters<AgentHostBridge['onView']>[0] | undefined
+    const listen = setup.bridge.onView
+    vi.spyOn(setup.bridge, 'onView').mockImplementation((listener) => { receive = listener; return listen(listener) })
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onClose={vi.fn()} onDetach={vi.fn()} />)
+    await screen.findByText('Loaded before reconnect')
+    const oldId = await vi.mocked(setup.bridge.watch).mock.results[0].value
+    let finish!: (id: string) => void
+    vi.mocked(setup.bridge.watch).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Reconnect Agent Host' }))
+    await waitFor(() => expect(setup.bridge.watch).toHaveBeenCalledTimes(2))
+    if (!receive) throw new Error('Expected the new watch listener.')
+    const listener = receive
+    const newer = structuredClone(setup.view)
+    newer.chat!.turns[0].responseParts = [{ kind: 'markdown' as ResponsePartKind.Markdown, id: 'new-answer', content: 'New verified history' }]
+    act(() => {
+      listener({ id: oldId, view: { ...setup.view, state: 'connecting', chat: undefined, canSend: false } })
+      listener({ id: 'confirmed-watch', view: newer })
+      listener({ id: 'confirmed-watch', view: { ...newer, state: 'connecting', chat: undefined, canSend: false } })
+    })
+    expect(screen.getByText('Loaded before reconnect')).toBeVisible()
+    expect(screen.queryByText('New verified history')).not.toBeInTheDocument()
+    await act(async () => finish('confirmed-watch'))
+    expect(screen.getByText('New verified history')).toBeVisible()
+    expect(screen.getByRole('status', { name: 'Connecting...' })).toBeVisible()
+    act(() => listener({ id: oldId, view: setup.view }))
+    expect(screen.getByText('New verified history')).toBeVisible()
+    expect(screen.queryByText('Loaded before reconnect')).not.toBeInTheDocument()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+  })
+
+  it('keeps loaded history readable after reconnect authorization fails but disables sending', async () => {
+    const setup = fixture()
+    responseHistory(setup.view, [{ kind: 'markdown' as ResponsePartKind.Markdown, id: 'answer', content: 'Loaded authorized history' }])
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onClose={vi.fn()} onDetach={vi.fn()} />)
+    await screen.findByText('Loaded authorized history')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Agent Host model' }), await screen.findByRole('option', { name: 'GPT-6' }))
+    await user.type(screen.getByRole('textbox', { name: 'Message Agent Host' }), 'Unsent question')
+    vi.mocked(setup.bridge.watch).mockRejectedValueOnce(new Error('Owner authorization was revoked.'))
+    await user.click(screen.getByRole('button', { name: 'Reconnect Agent Host' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Owner authorization was revoked.')
+    expect(screen.getByText('Loaded authorized history')).toBeVisible()
+    expect(screen.getByRole('status', { name: 'Offline history' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
+    expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Unsent question')
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+  })
+
   it('updates aliases during streaming without restarting watches or changing drafts, models, or protocol targets', async () => {
     const setup = fixture()
     const git = gitSyncUiFixture()
@@ -1028,7 +1135,7 @@ describe('Agent Host chat UI', () => {
     setup.view.state = 'offline'
     const user = userEvent.setup()
     render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
-    const check = screen.getByRole('button', { name: 'Check original chat for this turn' })
+    const check = await screen.findByRole('button', { name: 'Check original chat for this turn' })
     expect(check).toBeDisabled()
     expect(setup.bridge.resolveDelivery).not.toHaveBeenCalled()
     act(() => { setup.view.state = 'connected'; setup.emit() })
@@ -1047,7 +1154,7 @@ describe('Agent Host chat UI', () => {
     vi.mocked(setup.bridge.resolveDelivery).mockResolvedValueOnce('confirmed')
     const user = userEvent.setup()
     render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
-    await user.click(screen.getByRole('button', { name: 'Check original chat for this turn' }))
+    await user.click(await screen.findByRole('button', { name: 'Check original chat for this turn' }))
     await waitFor(() => expect(setup.bridge.resolveDelivery).toHaveBeenCalledOnce())
     expect(screen.queryByRole('checkbox', { name: /I checked the original chat/ })).not.toBeInTheDocument()
     act(() => { setup.view.pendingTurn = undefined; setup.view.canSend = true; setup.emit() })

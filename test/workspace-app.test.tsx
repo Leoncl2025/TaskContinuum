@@ -499,6 +499,7 @@ describe('workspace switching in the desktop workbench', () => {
     await bridge.openFolder()
     render(<App />)
     await screen.findByRole('textbox', { name: 'Message Agent Host' })
+    await waitFor(() => expect(selected()).toBe(sessionBindingKey({ agentHost: sessions[0] })))
     expect(fireEvent.keyDown(window, { key: 'PageDown', ctrlKey: true, shiftKey: true, ...modifiers })).toBe(true)
     expect(selected()).toBe(sessionBindingKey({ agentHost: sessions[0] }))
     expect(agentHost.watch).toHaveBeenCalledExactlyOnceWith(sessions[0])

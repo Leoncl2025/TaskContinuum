@@ -27,6 +27,10 @@ function terminalText(state: TerminalState | undefined): string {
   return state ? stripAnsi(state.content.map((part) => part.type === 'command' ? part.output : part.value).join('')) : ''
 }
 
+function retainChatHistory(previous: AgentHostView | undefined, value: AgentHostView): AgentHostView {
+  return value.chat === undefined && previous?.chat ? { ...value, chat: previous.chat } : value
+}
+
 type TerminalStatus = NonNullable<AgentHostView['terminalStatus']>
 type ToolPart = Extract<ResponsePart, { kind: 'toolCall' }>
 type ResponseContext = {
@@ -203,7 +207,9 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const key = agentHostKey(target)
   const contextId = task ? task.id : workspace.id
   const contextLabel = task ? task.id : workspace.name
-  const [view, setView] = useState<AgentHostView>()
+  const viewKey = `${contextId}:${key}`
+  const [savedView, setView] = useState<{ key: string; value: AgentHostView }>()
+  const view = savedView?.key === viewKey ? savedView.value : undefined
   const [watch, setWatch] = useState<{ key: string; id: string }>()
   const [error, setError] = useState<string>()
   const [deliveryReview, setDeliveryReview] = useState<{ id: string; status: 'checking' | 'not-found' | 'abandoning' | 'failed'; acknowledged: boolean; error?: string }>()
@@ -213,10 +219,11 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const [detailsKey, setDetailsKey] = useState<string>()
   const [revision, setRevision] = useState(0)
   const catalogKey = `${key}:${revision}:${connectionRevision}`
+  const watchKey = `${contextId}:${catalogKey}`
   const [catalog, setCatalog] = useState<{ key: string; models: Awaited<ReturnType<AgentHostBridge['models']>>; error?: string }>()
   const [selection, setSelection] = useState<{ key: string; provider: string; id: string; config?: ModelConfig; preferenceError?: string }>()
   const currentCatalog = catalog?.key === catalogKey ? catalog : undefined
-  const watchId = watch?.key === catalogKey ? watch.id : undefined
+  const watchId = watch?.key === watchKey ? watch.id : undefined
   const models = currentCatalog?.models ?? []
   const modelId = selection?.key === key ? selection.id : ''
   const selectedModel = models.find((model) => model.id === modelId && model.provider === selection?.provider)
@@ -247,6 +254,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     let connectionGeneration = 0
     let loadingModels = false
     let loadedModels = false
+    const pendingViews = new Map<string, AgentHostView>()
     const selected = { sessionId, chatId, owner: { clientId, machineName } }
     if (!bridge) return
     const loadModels = () => {
@@ -275,22 +283,43 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
         if (connected && connectionGeneration !== generation && (failed || generation > 0)) loadModels()
       })
     }
-    const unlisten = bridge.onView((event) => {
-      if (active && (!watchId || event.id === watchId) && agentHostKey(event.view.target) === agentHostKey(selected)) {
-        const recovered = event.view.state === 'connected' && !connected
-        connected = event.view.state === 'connected'
-        setView(event.view)
-        if (connected && event.view.chat?.resource === chatId) onTitles?.([{ ...selected, title: event.view.chat.title, updatedAt: event.view.chat.modifiedAt }])
-        if (recovered) {
-          connectionGeneration++
-          if (!loadedModels || connectionGeneration > 1) loadModels()
-        }
+    const applyView = (value: AgentHostView) => {
+      const recovered = value.state === 'connected' && !connected
+      connected = value.state === 'connected'
+      setView((previous) => ({
+        key: viewKey,
+        value: retainChatHistory(previous?.key === viewKey ? previous.value : undefined, value),
+      }))
+      if (connected && value.chat?.resource === chatId) onTitles?.([{ ...selected, title: value.chat.title, updatedAt: value.chat.modifiedAt }])
+      if (recovered) {
+        connectionGeneration++
+        if (!loadedModels || connectionGeneration > 1) loadModels()
       }
+    }
+    const unlisten = bridge.onView((event) => {
+      if (!active || agentHostKey(event.view.target) !== agentHostKey(selected)) return
+      if (!watchId) { pendingViews.set(event.id, retainChatHistory(pendingViews.get(event.id), event.view)); return }
+      if (event.id === watchId) applyView(event.view)
     })
     loadModels()
-    void bridge.watch(selected).then((id) => { if (active) { watchId = id; setWatch({ key: catalogKey, id }); setError(undefined) } else void bridge.unwatch(id).catch(() => undefined) }).catch((failure: unknown) => { if (active) setError(failure instanceof Error ? failure.message : 'Agent Host access is unavailable.') })
-    return () => { active = false; unlisten(); if (watchId) void bridge.unwatch(watchId).catch(() => undefined) }
-  }, [bridge, sessionId, chatId, clientId, machineName, catalogKey, key, onTitles])
+    void bridge.watch(selected).then((id) => {
+      if (!active) { void bridge.unwatch(id).catch(() => undefined); return }
+      watchId = id
+      setWatch({ key: watchKey, id })
+      setError(undefined)
+      const value = pendingViews.get(id)
+      pendingViews.clear()
+      if (value) applyView(value)
+    }).catch((failure: unknown) => {
+      pendingViews.clear()
+      if (active) {
+        setWatch(undefined)
+        setView((previous) => previous?.key === viewKey ? { key: viewKey, value: { ...previous.value, state: 'offline', canSend: false } } : previous)
+        setError(failure instanceof Error ? failure.message : 'Agent Host access is unavailable.')
+      }
+    })
+    return () => { active = false; pendingViews.clear(); unlisten(); if (watchId) void bridge.unwatch(watchId).catch(() => undefined) }
+  }, [bridge, sessionId, chatId, clientId, machineName, catalogKey, watchKey, viewKey, key, onTitles])
   const activeTurn = view?.chat?.activeTurn
   const responding = Boolean(activeTurn)
   const pending = Boolean(view?.pendingTurn)
@@ -331,7 +360,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     const command = attempted.current
     if (command && (view?.chat?.activeTurn?.id === command.id || view?.chat?.turns.some((turn) => turn.id === command.id))) confirmed()
   }, [view])
-  const canSend = Boolean(bridge && modelReady && !configErrors.length && !busy && !pending && !activeTurn && !view?.readOnly && (view?.canSend || view?.state === 'offline'))
+  const canSend = Boolean(bridge && watchId && modelReady && !configErrors.length && !busy && !pending && !activeTurn && !view?.readOnly && (view?.canSend || view?.state === 'offline'))
   function chooseModel(id: string, config?: ModelConfig): void {
     const provider = models[0]?.provider
     if (!provider) {

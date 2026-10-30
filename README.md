@@ -82,6 +82,14 @@ Reconnection preserves the original session and never automatically replays
 messages. Unlinking does not delete history. Unsent drafts are not guaranteed
 across restarts.
 
+Returning to a loaded chat keeps its history visible while its subscription or
+connection refreshes. Connection-status updates do not clear previously loaded
+messages, and fresh snapshots and streamed replies update the same conversation.
+The history is scoped to the current workspace, context, owner, session and chat;
+a Host-confirmed empty snapshot still clears it. Reconnection validates a new
+Host snapshot before replacing cached history, then continues incremental events.
+This does not add server-side history pagination or replay any messages.
+
 Restarting Task Continuum or reopening a workspace restores all task tabs that
 were still open, in the same order, along with the active task and its exact
 linked chat, including the owner, session and chat identities. Closed tabs are
