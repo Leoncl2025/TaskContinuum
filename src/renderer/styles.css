@@ -37,7 +37,7 @@ textarea { resize: vertical; }
   --link: #79b8ff;
   --button-bg: #e8e8e8;
   --button-text: #242424;
-  --composer-focus-border: #737373;
+  --composer-focus-border: #8d8d8d;
   --green: #9bc7a7;
   --error: #f1aba4;
   --note: #272727;
@@ -65,7 +65,7 @@ textarea { resize: vertical; }
   --link: #0969b8;
   --button-bg: #242424;
   --button-text: #fff;
-  --composer-focus-border: #b3b3b3;
+  --composer-focus-border: #cecece;
   --primary-action: #0067c0;
   --user-message: #e6f4ff;
   --feature-bg: #efe7ff;
