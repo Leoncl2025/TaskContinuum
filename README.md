@@ -16,6 +16,10 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
   focus, and open dialogs keep control; selecting an unlinked task creates no chat.
 - Task creation through the UI, a local agent, or CLI.
 - Streaming Markdown, model options, image attachments, and terminal output.
+- Message text supports up to **12,000 characters** (UTF-16 code units), with the
+  same limit for local and remote chats. Task-creation chats include generated
+  guidance in their first-message budget. Update both desktops to use the higher
+  limit in remote chats.
 - Inline and block math in chats and task documents, rendered offline with KaTeX.
 - Clickable web links and source-owned file links, with authenticated remote
   transfer, client-side previews, local document opening and copyable link addresses.

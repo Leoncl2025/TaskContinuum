@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AgentHostCreationHost } from '../../shared/agentHostCreation'
 import { agentHostProtocolDescription } from '../../shared/agentHost'
+import { MAX_CHAT_TEXT_LENGTH } from '../../shared/chatAttachments'
 import type { LocalAgentHostCreation, LocalAgentHostCreateRequest } from '../../shared/localAgentHostCreation'
 import type { WorkspaceSnapshot } from '../../shared/workspace'
 import type { useWorkspaces } from '../useWorkspaces'
@@ -152,7 +153,7 @@ export function LocalTaskAgent({ workspace, workspaces, onCreated, onReviewDraft
         const instructions = await window.workspace.getTaskAgentInstructions({
           workspaceId: workspace.id, goal: text || 'Create tasks from the attached requirements.', parentId: null,
         })
-        if (instructions.length > 4000) throw new Error('Task creation guidance and your first message exceed the chat limit. Shorten the first request, then provide details in follow-up messages.')
+        if (instructions.length > MAX_CHAT_TEXT_LENGTH) throw new Error(`Task creation guidance and your first message exceed the chat limit (${MAX_CHAT_TEXT_LENGTH} characters). Shorten the first request, then provide details in follow-up messages.`)
         return instructions
       }}
     /> : <section className="local-task-agent" aria-label="Local Agent Host session">

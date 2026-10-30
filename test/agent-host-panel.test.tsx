@@ -297,6 +297,22 @@ describe('Compact chat activity', () => {
 })
 
 describe('Agent Host chat UI', () => {
+  it('pastes and sends exactly 12,000 characters without truncation', async () => {
+    const setup = fixture()
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Agent Host model' }), await screen.findByRole('option', { name: 'GPT-6' }))
+    const input = screen.getByRole('textbox', { name: 'Message Agent Host' })
+    expect(input).toHaveAttribute('maxlength', '12000')
+    const text = '\u4e2d'.repeat(12000)
+    await user.click(input)
+    await user.paste(text)
+    expect(input).toHaveValue(text)
+    await user.click(screen.getByRole('button', { name: 'Send to Agent Host' }))
+    expect(setup.bridge.send).toHaveBeenCalledExactlyOnceWith(setup.target, expect.any(String), text, undefined, { id: 'gpt-6' })
+    expect(setup.bridge.create).not.toHaveBeenCalled()
+  })
+
   it('focuses only the activated composer, retaining its caret without stealing streaming or dialog focus', async () => {
     const setup = fixture()
     const user = userEvent.setup()

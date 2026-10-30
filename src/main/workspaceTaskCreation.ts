@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import { z } from 'zod/v3'
 import { TaskId } from '../shared/taskDocuments/common'
 import { taskCreationDraftSchema } from '../shared/taskCreation'
+import { MAX_CHAT_TEXT_LENGTH } from '../shared/chatAttachments'
 import type { TaskAgentInstructionsRequest, TaskCreationContext } from '../shared/taskCreation'
 
 const workspaceId = z.string().regex(/^[a-f\d]{64}$/)
@@ -13,7 +14,7 @@ export const createWorkspaceTaskRequestSchema = z.object({
 
 export const taskAgentInstructionsRequestSchema = z.object({
   workspaceId,
-  goal: z.string().trim().min(1, 'Describe the task you want the agent to create.').max(8000),
+  goal: z.string().trim().min(1, 'Describe the task you want the agent to create.').max(MAX_CHAT_TEXT_LENGTH),
   parentId: TaskId.nullable().optional(),
 }).strict()
 

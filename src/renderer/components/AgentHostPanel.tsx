@@ -6,6 +6,7 @@ import { agentHostKey } from '../../shared/agentHost'
 import type { AgentHostBridge, AgentHostTarget, AgentHostView } from '../../shared/agentHost'
 import type { TaskRecord } from '../../shared/tasks'
 import type { WorkspaceSnapshot } from '../../shared/workspace'
+import { MAX_CHAT_TEXT_LENGTH } from '../../shared/chatAttachments'
 import type { ChatImageAttachment } from '../../shared/chatAttachments'
 import { ChatMarkdown } from './ChatMarkdown'
 import { ChatLinkTargetContext } from '../chat/chatLinkContext'
@@ -472,7 +473,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       {configErrors.map((message) => <p key={message} className="copilot-error message-notice" role="alert">{message}</p>)}
       <div className="composer">
         <ChatImages images={images} onRemove={imageInput.remove} disabled={busy} />
-        <textarea ref={composer} id={active ? 'chat-composer' : undefined} aria-label="Message Agent Host" placeholder="Message original Agent" rows={3} maxLength={4000} value={draft} onChange={(event) => setDraft(event.target.value)} onPaste={imageInput.paste} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} />
+        <textarea ref={composer} id={active ? 'chat-composer' : undefined} aria-label="Message Agent Host" placeholder="Message original Agent" rows={3} maxLength={MAX_CHAT_TEXT_LENGTH} value={draft} onChange={(event) => setDraft(event.target.value)} onPaste={imageInput.paste} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} />
         <div className="composer-toolbar">
           <ChatImagePicker onFiles={imageInput.add} disabled={busy || imageInput.reading} />
           <div className="ahp-model-controls">

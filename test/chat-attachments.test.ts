@@ -2,11 +2,29 @@ import { randomUUID } from 'node:crypto'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import type { ClipboardEvent } from 'react'
 import { describe, expect, it, vi } from 'vitest'
-import { chatImageAttachmentsSchema, chatImageBytes, chatImageDataUrl, MAX_CHAT_IMAGE_BYTES } from '../src/shared/chatAttachments'
+import { chatContentSchema, chatSubmissionSchema, chatImageAttachmentsSchema, chatImageBytes, chatImageDataUrl, MAX_CHAT_IMAGE_BYTES, MAX_CHAT_TEXT_LENGTH } from '../src/shared/chatAttachments'
 import { useChatImageInput } from '../src/renderer/chat/useChatImageInput'
 
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='
 const image = () => ({ id: randomUUID(), name: 'Screenshot.png', mimeType: 'image/png' as const, data: png })
+
+describe('chat message text limit', () => {
+  it.each([4001, 12000])('accepts all %i UTF-16 code units without truncating the message', (length) => {
+    expect(MAX_CHAT_TEXT_LENGTH).toBe(12000)
+    const text = '\u4e2d'.repeat(length)
+    const id = randomUUID()
+    expect(chatContentSchema.parse({ text }).text).toBe(text)
+    expect(chatSubmissionSchema.parse({ id, text })).toEqual({ id, text })
+  })
+
+  it('rejects 12,001 code units while preserving empty-message and NUL validation', () => {
+    const result = chatSubmissionSchema.safeParse({ id: randomUUID(), text: 'x'.repeat(12001) })
+    expect(result.success).toBe(false)
+    expect(result.error?.issues).toContainEqual(expect.objectContaining({ code: 'too_big', path: ['text'], maximum: 12000 }))
+    for (const text of ['', ' \n\t ', 'before\0after']) expect(chatContentSchema.safeParse({ text }).success).toBe(false)
+    expect(chatContentSchema.safeParse({ text: '', images: [image()] }).success).toBe(true)
+  })
+})
 
 describe('chat image attachments', () => {
   it('accepts clipboard PNG bytes without exposing a filesystem path', () => {

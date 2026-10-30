@@ -5,7 +5,7 @@ import { z } from 'zod'
 import type { ActionEnvelope, SessionState, Snapshot } from '@microsoft/agent-host-protocol'
 import { AhpErrorCodes } from '@microsoft/agent-host-protocol'
 import type { AgentHostTarget } from '../shared/agentHost'
-import { chatSubmissionSchema } from '../shared/chatAttachments'
+import { chatSubmissionSchema, MAX_CHAT_TEXT_LENGTH } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
 import { AgentHostProtocolError, agentHostAdvertisedVersionSchema, agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminalIdSchema, requireAgentHostProtocolVersion } from './agentHostProtocol'
 import { AGENT_HOST_TRACE_HEADER, agentHostDiagnosticChannel, agentHostDiagnosticMethod, logAgentHostDiagnostic, withAgentHostDiagnosticTrace } from './agentHostDiagnostics'
@@ -435,7 +435,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
               const params = dispatchSchema.parse(request.params)
               if (params.channel !== target.chatId) throw new Error('Only the selected chat can receive input.')
               if (params.action.type === 'chat/turnStarted') {
-                const action = z.object({ type: z.literal('chat/turnStarted'), turnId: z.uuid(), startedAt: z.iso.datetime(), message: z.object({ text: z.string().max(4000), origin: z.object({ kind: z.literal('user') }).strict(), attachments: z.array(z.object({ type: z.literal('embeddedResource'), label: z.string().max(200), displayKind: z.literal('image'), contentType: z.string(), data: z.string(), _meta: z.object({ taskcontinuumImageId: z.uuid() }).strict() }).strict()).max(4).optional(), agent: z.unknown().optional(), model: z.unknown().optional(), _meta: z.unknown().optional() }).strict() }).strict().parse(params.action)
+                const action = z.object({ type: z.literal('chat/turnStarted'), turnId: z.uuid(), startedAt: z.iso.datetime(), message: z.object({ text: z.string().max(MAX_CHAT_TEXT_LENGTH), origin: z.object({ kind: z.literal('user') }).strict(), attachments: z.array(z.object({ type: z.literal('embeddedResource'), label: z.string().max(200), displayKind: z.literal('image'), contentType: z.string(), data: z.string(), _meta: z.object({ taskcontinuumImageId: z.uuid() }).strict() }).strict()).max(4).optional(), agent: z.unknown().optional(), model: z.unknown().optional(), _meta: z.unknown().optional() }).strict() }).strict().parse(params.action)
                 const images = action.message.attachments?.map((image) => ({ id: image._meta.taskcontinuumImageId, name: image.label, mimeType: image.contentType, data: image.data })) as ChatImageAttachment[] | undefined
                 const command = chatSubmissionSchema.parse({ id: action.turnId, text: action.message.text, ...(images?.length ? { images } : {}) })
                 const model = agentHostModelSelectionSchema.optional().parse(action.message.model)

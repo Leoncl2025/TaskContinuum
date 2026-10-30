@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { resolve } from 'node:path'
 import { createWorkspaceTaskRequestSchema, taskAgentInstructions, taskAgentInstructionsRequestSchema } from '../src/main/workspaceTaskCreation'
 import type { TaskCreationContext } from '../src/shared/taskCreation'
+import { MAX_CHAT_TEXT_LENGTH } from '../src/shared/chatAttachments'
 
 const context: TaskCreationContext = {
   root: 'Q:\\Tasks\\my-workspace',
@@ -39,7 +40,16 @@ describe('workspace task creation boundary', () => {
   it('rejects a stale parent selection and empty or oversized agent requests', () => {
     expect(() => taskAgentInstructions(context, { workspaceId: 'a'.repeat(64), goal: 'Task', parentId: 'T-0099' })).toThrow('parent task no longer exists')
     expect(() => taskAgentInstructionsRequestSchema.parse({ workspaceId: 'a'.repeat(64), goal: '' })).toThrow()
-    expect(() => taskAgentInstructionsRequestSchema.parse({ workspaceId: 'a'.repeat(64), goal: 'x'.repeat(8001) })).toThrow()
+    expect(() => taskAgentInstructionsRequestSchema.parse({ workspaceId: 'a'.repeat(64), goal: 'x'.repeat(12001) })).toThrow()
+  })
+
+  it('accepts expanded chat requests without retaining the former 8,000-character goal limit', () => {
+    const goal = 'x'.repeat(9000)
+    const request = taskAgentInstructionsRequestSchema.parse({ workspaceId: 'a'.repeat(64), goal, parentId: null })
+    const prompt = taskAgentInstructions(context, request, resolve('scripts', 'task-documents.mjs'))
+    expect(prompt).toContain(goal)
+    expect(prompt.length).toBeLessThanOrEqual(MAX_CHAT_TEXT_LENGTH)
+    expect(taskAgentInstructionsRequestSchema.parse({ ...request, goal: 'x'.repeat(12000) }).goal).toHaveLength(12000)
   })
 
   it('includes local CLI context for direct chat within the native first-message limit', () => {
@@ -47,6 +57,6 @@ describe('workspace task creation boundary', () => {
     expect(prompt).toContain('local task-creation agent')
     expect(prompt).toContain('task-documents.mjs')
     expect(prompt).toContain('Create a task for sign-in documentation.')
-    expect(prompt.length).toBeLessThanOrEqual(4000)
+    expect(prompt.length).toBeLessThanOrEqual(MAX_CHAT_TEXT_LENGTH)
   })
 })

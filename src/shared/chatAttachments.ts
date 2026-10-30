@@ -1,5 +1,6 @@
 import { z } from 'zod'
 
+export const MAX_CHAT_TEXT_LENGTH = 12000
 export const MAX_CHAT_IMAGES = 4
 export const MAX_CHAT_IMAGE_BYTES = 5 * 1024 * 1024
 export const MAX_CHAT_IMAGE_TOTAL_BYTES = 10 * 1024 * 1024
@@ -74,7 +75,7 @@ export const chatImageAttachmentsSchema = z.array(chatImageAttachmentSchema).max
 ).refine((images) => new Set(images.map((image) => image.id)).size === images.length, 'Image IDs must be unique.')
 
 export const chatContentSchema = z.object({
-  text: z.string().trim().max(4000).refine((text) => !text.includes('\0'), 'Invalid message.'), images: chatImageAttachmentsSchema.optional(),
+  text: z.string().trim().max(MAX_CHAT_TEXT_LENGTH).refine((text) => !text.includes('\0'), 'Invalid message.'), images: chatImageAttachmentsSchema.optional(),
 }).strict().refine((request) => Boolean(request.text || request.images?.length), 'Enter a message or attach an image.')
 
 export const chatSubmissionSchema = chatContentSchema.safeExtend({ id: z.uuid() })

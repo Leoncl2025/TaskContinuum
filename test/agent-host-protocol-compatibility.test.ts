@@ -10,6 +10,7 @@ import { AhpErrorCodes, MessageKind } from '@microsoft/agent-host-protocol'
 import type { ChatTurnStartedAction } from '@microsoft/agent-host-protocol'
 import { describe, expect, it } from 'vitest'
 import { agentHostProtocolVersions } from '../src/shared/agentHost'
+import { AgentHostConnection } from '../src/main/agentHostConnection'
 import { AgentHostRegistry } from '../src/main/agentHostRegistry'
 import { attachAgentHostGateway } from '../src/main/agentHostGateway'
 import { agentHostEndpointSchema, requireAgentHostProtocolVersion } from '../src/main/agentHostProtocol'
@@ -31,6 +32,58 @@ async function fixture(protocolVersion: string, advertisedVersion = protocolVers
 }
 
 describe('Agent Host protocol compatibility', () => {
+  it('delivers 12,000 code units through the authorized gateway and rejects 12,001 before native dispatch', async () => {
+    const f = await fixture('1.0.0')
+    const server = createServer()
+    let port = 0
+    const gateway = attachAgentHostGateway(server, {
+      port: () => port,
+      authorize: async (_token, target) => {
+        expect(target).toEqual(f.target)
+        return { canSend: true, actor: f.owner }
+      },
+      connection: (target) => f.registry.connection(target),
+    })
+    let client: AhpClient | undefined
+    let remote: AgentHostConnection | undefined
+    try {
+      server.listen(0, '127.0.0.1')
+      await once(server, 'listening')
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('No fixture gateway port.')
+      port = address.port
+      const url = `ws://127.0.0.1:${port}/device/agent-host?target=${Buffer.from(JSON.stringify(f.target)).toString('base64url')}`
+      client = new AhpClient(await connectAgentHostWebSocket(url, {}, new AbortController().signal))
+      client.connect()
+      await client.initialize({ clientId: randomUUID(), protocolVersions: [...agentHostProtocolVersions] })
+      const rejectedClient = client
+      const closed = (async () => {
+        for await (const state of rejectedClient.stateChanges()) if (state.status === 'closed') return true
+        return false
+      })()
+      rejectedClient.dispatch(f.target.chatId, {
+        type: 'chat/turnStarted' as ChatTurnStartedAction['type'], turnId: randomUUID(), startedAt: new Date().toISOString(),
+        message: { text: 'x'.repeat(12001), origin: { kind: MessageKind.User }, model: { id: 'gpt-6' } },
+      })
+      expect(await closed).toBe(true)
+      expect(f.host.dispatches).toEqual([])
+      remote = new AgentHostConnection(f.target, join(f.root, 'remote'), (signal) => connectAgentHostWebSocket(url, {}, signal))
+      const text = '\u4e2d'.repeat(12000)
+      const turnId = randomUUID()
+      await remote.send(turnId, text, undefined, async () => {}, undefined, { id: 'gpt-6' })
+      expect(f.host.dispatches).toEqual([expect.objectContaining({
+        type: 'chat/turnStarted', turnId, message: expect.objectContaining({ text }),
+      })])
+      expect(f.host.methods).not.toContain('createSession')
+    } finally {
+      await remote?.close()
+      await client?.shutdown()
+      gateway.close()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      await f.close()
+    }
+  })
+
   it.each(agentHostProtocolVersions)('discovers, lists, streams and sends on AHP %s without replacing the session', async (version) => {
     const f = await fixture(version)
     const [terminal] = f.host.historyTerminals(1)
