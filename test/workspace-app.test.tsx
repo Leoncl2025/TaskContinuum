@@ -95,6 +95,27 @@ function creationFixture() {
   return { ...workspace, agentHost, target, saved }
 }
 
+function sessionShortcutFixture() {
+  const setup = creationFixture()
+  const sessions = [
+    setup.target,
+    { ...setup.target, chatId: 'ahp-chat:/second-chat' },
+    agentHostTargetFixture('third-session', { clientId: crypto.randomUUID(), machineName: 'Another owner' }),
+  ]
+  const other = agentHostTargetFixture('other-task-session')
+  setup.first.tasks.push({ ...setup.first.tasks[0], id: 'T-0003', title: 'Other task' })
+  setup.repository[setup.first.id] = { document: { schemaVersion: '2.1', bindings: {
+    'T-0002': sessions.map((target) => ({ provider: 'agent-host', ...target })),
+    'T-0003': [{ provider: 'agent-host', ...other }],
+  } }, revision: 'a'.repeat(64) }
+  const key = `taskcontinuum:workbench-selection:v2:${setup.first.id}`
+  localStorage.setItem(key, JSON.stringify({
+    version: 2, taskId: 'T-0002', openTaskIds: ['T-0002', 'T-0003'], sessions: {},
+  }))
+  const selected = () => JSON.parse(localStorage.getItem(key)!).sessions['T-0002']
+  return { ...setup, sessions, other, selected }
+}
+
 async function selectCreationTarget(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
   expect(screen.getByRole('complementary', { name: 'Agent Host sessions' })).toBeInTheDocument()
@@ -407,6 +428,148 @@ describe('workspace switching in the desktop workbench', () => {
     expect(agentHost.send).not.toHaveBeenCalled()
     expect(agentHost.create).not.toHaveBeenCalled()
     expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+  })
+
+  it('cycles the current task sessions with Ctrl+Shift+PageUp/PageDown and preserves drafts and input focus', async () => {
+    const { bridge, agentHost, sessions, other, selected } = sessionShortcutFixture()
+    const user = userEvent.setup()
+    await bridge.openFolder()
+    render(<App />)
+    const firstDraft = await screen.findByRole('textbox', { name: 'Message Agent Host' })
+    if (!(firstDraft instanceof HTMLTextAreaElement)) throw new Error('The chat composer must be a textarea.')
+    await user.type(firstDraft, 'Draft for the first session')
+    firstDraft.setSelectionRange(6, 6)
+    await user.keyboard('{Control>}{Shift>}{PageUp}{/Shift}{/Control}')
+    await waitFor(() => expect(selected()).toBe(sessionBindingKey({ agentHost: sessions[2] })))
+    expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveFocus()
+    await user.keyboard('Draft for the third session')
+    await user.keyboard('{Control>}{Shift>}{PageDown}{/Shift}{/Control}')
+    const restored = await screen.findByRole('textbox', { name: 'Message Agent Host' })
+    expect(restored).toBe(firstDraft)
+    expect(restored).toHaveValue('Draft for the first session')
+    expect(restored).toHaveFocus()
+    expect(firstDraft.selectionStart).toBe(6)
+    await user.keyboard('{Control>}{Shift>}{PageDown}{/Shift}{/Control}')
+    await waitFor(() => expect(agentHost.watch).toHaveBeenLastCalledWith(sessions[1]))
+    expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('')
+    await user.keyboard('Draft for the second chat')
+    await user.keyboard('{Control>}{Shift>}{PageDown}{/Shift}{/Control}')
+    expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Draft for the third session')
+    expect(screen.getByRole('tab', { name: 'Actual UI task' })).toHaveAttribute('aria-selected', 'true')
+    act(() => {
+      fireEvent.keyDown(window, { key: 'PageDown', ctrlKey: true, shiftKey: true })
+      fireEvent.keyDown(window, { key: 'PageDown', ctrlKey: true, shiftKey: true })
+    })
+    expect(selected()).toBe(sessionBindingKey({ agentHost: sessions[1] }))
+    expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Draft for the second chat')
+    expect(agentHost.watch).not.toHaveBeenCalledWith(other)
+    await user.keyboard('{Control>}{PageDown}{/Control}')
+    expect(screen.getByRole('tab', { name: 'Other task' })).toHaveAttribute('aria-selected', 'true')
+    await user.keyboard('{Control>}{PageUp}{/Control}')
+    expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Draft for the second chat')
+    expect(agentHost.create).not.toHaveBeenCalled()
+    expect(agentHost.send).not.toHaveBeenCalled()
+    expect(agentHost.cancel).not.toHaveBeenCalled()
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('opens the current task chat when cycling sessions from a hidden pane (compact=%s)', async (compact) => {
+    vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
+      matches: compact, media: query, onchange: null,
+      addEventListener: vi.fn(), removeEventListener: vi.fn(), addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: () => true,
+    }))
+    const { bridge, agentHost, sessions } = sessionShortcutFixture()
+    const user = userEvent.setup()
+    await bridge.openFolder()
+    render(<App />)
+    await screen.findByRole('textbox', { name: 'Message Agent Host' })
+    await user.click(screen.getByRole('button', { name: 'Hide chat panel' }))
+    expect(screen.queryByRole('textbox', { name: 'Message Agent Host' })).not.toBeInTheDocument()
+    expect(fireEvent.keyDown(window, { key: 'PageDown', ctrlKey: true, shiftKey: true })).toBe(false)
+    const composer = await screen.findByRole('textbox', { name: 'Message Agent Host' })
+    await waitFor(() => expect(composer).toHaveFocus())
+    expect(agentHost.watch).toHaveBeenLastCalledWith(sessions[1])
+    expect(screen.getByRole('tab', { name: 'Actual UI task' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it.each([
+    { ctrlKey: false }, { altKey: true }, { metaKey: true }, { isComposing: true },
+  ])('does not switch sessions for unrelated or composing modifiers: %j', async (modifiers) => {
+    const { bridge, agentHost, sessions, selected } = sessionShortcutFixture()
+    await bridge.openFolder()
+    render(<App />)
+    await screen.findByRole('textbox', { name: 'Message Agent Host' })
+    expect(fireEvent.keyDown(window, { key: 'PageDown', ctrlKey: true, shiftKey: true, ...modifiers })).toBe(true)
+    expect(selected()).toBe(sessionBindingKey({ agentHost: sessions[0] }))
+    expect(agentHost.watch).toHaveBeenCalledExactlyOnceWith(sessions[0])
+    expect(screen.getByRole('tab', { name: 'Actual UI task' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('leaves modal dialogs and previously handled events in control of session shortcuts', async () => {
+    const { bridge, sessions, selected } = sessionShortcutFixture()
+    const user = userEvent.setup()
+    await bridge.openFolder()
+    render(<App />)
+    await screen.findByRole('textbox', { name: 'Message Agent Host' })
+    const consumed = new KeyboardEvent('keydown', { key: 'PageDown', ctrlKey: true, shiftKey: true, cancelable: true })
+    consumed.preventDefault()
+    act(() => window.dispatchEvent(consumed))
+    expect(selected()).toBe(sessionBindingKey({ agentHost: sessions[0] }))
+    await user.click(screen.getByRole('button', { name: 'Preferences' }))
+    expect(screen.getByText('Previous session in current task')).toBeInTheDocument()
+    expect(screen.getByText('Next session in current task')).toBeInTheDocument()
+    expect(fireEvent.keyDown(window, { key: 'PageDown', ctrlKey: true, shiftKey: true })).toBe(true)
+    await user.click(screen.getByRole('button', { name: 'Close Preferences' }))
+    await user.click(screen.getByRole('button', { name: 'Chat details' }))
+    expect(fireEvent.keyDown(window, { key: 'PageUp', ctrlKey: true, shiftKey: true })).toBe(true)
+    expect(screen.getByRole('dialog', { name: 'Chat details' })).toBeInTheDocument()
+    expect(selected()).toBe(sessionBindingKey({ agentHost: sessions[0] }))
+  })
+
+  it.each([0, 1])('does not create or select another task when the current task has %s sessions', async (count) => {
+    const { bridge, first, repository, agentHost, sessions } = sessionShortcutFixture()
+    repository[first.id].document.bindings['T-0002'] = sessions.slice(0, count).map((target) => ({ provider: 'agent-host', ...target }))
+    await bridge.openFolder()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Workspace' })).toBeEnabled())
+    await waitFor(() => expect(agentHost.watch).toHaveBeenCalledTimes(count))
+    expect(fireEvent.keyDown(window, { key: 'PageDown', ctrlKey: true, shiftKey: true })).toBe(count === 0)
+    expect(screen.getByRole('tab', { name: 'Actual UI task' })).toHaveAttribute('aria-selected', 'true')
+    expect(agentHost.watch).toHaveBeenCalledTimes(count)
+    expect(agentHost.create).not.toHaveBeenCalled()
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+  })
+
+  it('waits for current task bindings before allowing session shortcuts', async () => {
+    const { bridge, first, repository, agentHost, sessions } = sessionShortcutFixture()
+    let finish!: (value: SessionLinksSnapshot) => void
+    vi.mocked(bridge.getSessionLinks).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    await bridge.openFolder()
+    render(<App />)
+    await waitFor(() => expect(bridge.getSessionLinks).toHaveBeenCalled())
+    expect(fireEvent.keyDown(window, { key: 'PageDown', ctrlKey: true, shiftKey: true })).toBe(true)
+    expect(agentHost.watch).not.toHaveBeenCalled()
+    await act(async () => finish(repository[first.id]))
+    await screen.findByRole('textbox', { name: 'Message Agent Host' })
+    expect(fireEvent.keyDown(window, { key: 'PageDown', ctrlKey: true, shiftKey: true })).toBe(false)
+    await waitFor(() => expect(agentHost.watch).toHaveBeenLastCalledWith(sessions[1]))
+  })
+
+  it.each(['PageUp', 'PageDown'])('uses explicit %s navigation to recover a missing remembered session within the current task', async (key) => {
+    const { bridge, first, sessions, selected, agentHost } = sessionShortcutFixture()
+    localStorage.setItem(`taskcontinuum:workbench-selection:v2:${first.id}`, JSON.stringify({
+      version: 2, taskId: 'T-0002', openTaskIds: ['T-0002', 'T-0003'],
+      sessions: { 'T-0002': sessionBindingKey({ agentHost: agentHostTargetFixture('no-longer-linked') }) },
+    }))
+    await bridge.openFolder()
+    render(<App />)
+    await screen.findByText(/The last selected session is no longer linked/)
+    expect(fireEvent.keyDown(window, { key, ctrlKey: true, shiftKey: true })).toBe(false)
+    const target = key === 'PageUp' ? sessions[2] : sessions[0]
+    await waitFor(() => expect(selected()).toBe(sessionBindingKey({ agentHost: target })))
+    expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveFocus()
+    expect(agentHost.watch).toHaveBeenCalledExactlyOnceWith(target)
+    expect(screen.getByRole('tab', { name: 'Actual UI task' })).toHaveAttribute('aria-selected', 'true')
   })
 
   it.each([false, true])('automatically opens and focuses a selected task chat without creating missing sessions (compact=%s)', async (compact) => {

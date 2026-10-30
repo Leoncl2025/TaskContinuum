@@ -11,6 +11,10 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
 - Searchable task trees, task tabs, and read-only planning documents.
 - **Ctrl+PageUp / Ctrl+PageDown** switches to the previous/next open task tab,
   wrapping at either end without clearing chat drafts.
+- **Ctrl+Shift+PageUp / Ctrl+Shift+PageDown** switches to the previous/next
+  linked session within the current task, in **Current** list order with
+  wraparound. Drafts are preserved and the selected chat input is focused.
+  Session shortcuts wait for bindings to load and leave open dialogs in control.
 - Selecting a task or session opens its chat pane and automatically focuses the
   message input, preserving drafts and the caret. Background updates do not steal
   focus, and open dialogs keep control; selecting an unlinked task creates no chat.
