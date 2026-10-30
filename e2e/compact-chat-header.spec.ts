@@ -37,7 +37,7 @@ for (const theme of ['light', 'dark'] as const) {
       const probe = document.createElement('span')
       element.append(probe)
       const color = (name: string) => { probe.style.color = `var(${name})`; return getComputedStyle(probe).color }
-      const colors = Object.fromEntries(['--text', '--muted', '--subtle', '--accent', '--link', '--selected', '--selection'].map((name) => [name, color(name)]))
+      const colors = Object.fromEntries(['--text', '--muted', '--subtle', '--accent', '--link', '--selected', '--selection', '--raised'].map((name) => [name, color(name)]))
       probe.remove()
       const primary = document.createElement('button')
       primary.className = 'primary-button'
@@ -70,6 +70,16 @@ for (const theme of ['light', 'dark'] as const) {
           [background, selected].map((surface) => contrast(colors[name], surface))),
         primary: primaryAppearance,
         neutralSelected: colors['--selected'],
+        controlFill: colors['--raised'],
+        feature: { background: style('.workspace-mark').backgroundColor, color: style('.workspace-mark').color },
+        status: { background: style('.status-select.status-in-progress').backgroundColor, color: style('.status-select.status-in-progress').color },
+        note: style('.next-action').backgroundColor,
+        surfaceContrast: [
+          contrast(colors['--text'], style('.message-user').backgroundColor),
+          contrast(colors['--text'], style('.next-action').backgroundColor),
+          contrast(style('.workspace-mark').color, style('.workspace-mark').backgroundColor),
+          contrast(style('.status-select.status-in-progress').color, style('.status-select.status-in-progress').backgroundColor),
+        ],
         buttonContrast: contrast(primaryAppearance.color, primaryAppearance.background),
         focusContrast: contrast(colors['--accent'], background),
         linkColor: colors['--link'],
@@ -81,14 +91,24 @@ for (const theme of ['light', 'dark'] as const) {
     expect(appearance.background).toBe(theme === 'light' ? 'rgb(255, 255, 255)' : 'rgb(28, 28, 28)')
     expect(appearance.sidebar).toBe(theme === 'light' ? 'rgb(255, 255, 255)' : 'rgb(32, 32, 32)')
     expect(appearance.chat).toBe(appearance.background)
-    expect(appearance.selected).toBe(theme === 'light' ? 'rgb(226, 238, 249)' : 'rgb(4, 57, 94)')
+    expect(appearance.selected).toBe(theme === 'light' ? 'rgb(255, 243, 186)' : 'rgb(4, 57, 94)')
     expect(appearance.neutralSelected).toBe(theme === 'light' ? 'rgb(235, 235, 235)' : 'rgb(52, 52, 52)')
-    expect(appearance.primary).toEqual({ background: 'rgb(0, 120, 212)', color: 'rgb(255, 255, 255)', radius: '12px' })
-    await expect(page.locator('.editor-tab.selected')).toHaveCSS('background-color', appearance.neutralSelected)
-    expect(appearance.bubble).toBe(theme === 'light' ? 'rgb(245, 245, 245)' : 'rgb(42, 42, 42)')
+    expect(appearance.primary).toEqual({ background: theme === 'light' ? 'rgb(0, 103, 192)' : 'rgb(0, 120, 212)', color: 'rgb(255, 255, 255)', radius: '12px' })
+    expect(appearance.feature).toEqual(theme === 'light'
+      ? { background: 'rgb(239, 231, 255)', color: 'rgb(101, 65, 165)' }
+      : { background: 'rgb(42, 42, 42)', color: 'rgb(179, 179, 179)' })
+    expect(appearance.status).toEqual(theme === 'light'
+      ? { background: 'rgb(255, 232, 214)', color: 'rgb(138, 74, 25)' }
+      : { background: 'rgb(42, 42, 42)', color: 'rgb(212, 212, 212)' })
+    expect(appearance.note).toBe(theme === 'light' ? 'rgb(255, 234, 220)' : 'rgb(39, 39, 39)')
+    await expect(page.locator('.editor-tab.selected')).toHaveCSS('background-color', theme === 'light' ? appearance.feature.background : appearance.neutralSelected)
+    await expect(page.locator('.filter-bar button[aria-pressed="true"]')).toHaveCSS('background-color', theme === 'light' ? appearance.selected : appearance.neutralSelected)
+    await expect(page.locator('.task-eyebrow > span').first()).toHaveCSS('background-color', appearance.feature.background)
+    expect(appearance.bubble).toBe(theme === 'light' ? 'rgb(230, 244, 255)' : 'rgb(42, 42, 42)')
     expect(appearance.composer).toBe(theme === 'light' ? 'rgb(255, 255, 255)' : 'rgb(36, 36, 36)')
     expect(appearance.radii).toEqual({ selected: '12px', composer: '24px', bubble: '16px', button: '8px' })
     for (const ratio of appearance.textContrast) expect(ratio).toBeGreaterThanOrEqual(4.5)
+    for (const ratio of appearance.surfaceContrast) expect(ratio).toBeGreaterThanOrEqual(4.5)
     expect(appearance.buttonContrast).toBeGreaterThanOrEqual(4.5)
     expect(appearance.focusContrast).toBeGreaterThanOrEqual(3)
     expect(appearance.linkColor).toBe(theme === 'light' ? 'rgb(9, 105, 184)' : 'rgb(121, 184, 255)')
@@ -117,7 +137,7 @@ for (const theme of ['light', 'dark'] as const) {
     const input = panel.getByRole('textbox', { name: 'Message Agent Host' })
     const send = panel.getByRole('button', { name: 'Send to Agent Host', exact: true })
     await expect(send).toBeDisabled()
-    await expect(send).toHaveCSS('background-color', appearance.bubble)
+    await expect(send).toHaveCSS('background-color', appearance.controlFill)
     await page.getByRole('tab', { name: 'Fix Connection issues', exact: true }).focus()
     const resting = await composer.evaluate((element) => {
       const style = getComputedStyle(element)
@@ -138,7 +158,7 @@ for (const theme of ['light', 'dark'] as const) {
     await panel.locator('.composer-area').screenshot({ path: testInfo.outputPath(`composer-${theme}-focused.png`) })
     await input.fill('Keep the composer simple, quiet and neutral.')
     await expect(send).toBeEnabled()
-    await expect(send).toHaveCSS('background-color', 'rgb(0, 120, 212)')
+    await expect(send).toHaveCSS('background-color', appearance.primary.background)
     await expect(send).toHaveCSS('color', 'rgb(255, 255, 255)')
     await expect(send).toHaveCSS('border-radius', '50%')
     await input.press('ControlOrMeta+a')
