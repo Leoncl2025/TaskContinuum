@@ -25,12 +25,13 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
   transfer, client-side previews, local document opening and copyable link addresses.
 - Collapsible tool activity keeps answers readable without losing execution details.
 - Compact layouts, resizable panels, dark/light themes, and cached chat titles.
-- Copilot-inspired neutral surfaces, subtle gray selection, rounded controls and
-  message cards, and a softly elevated composer with a thin gray focus border.
-  Text selection and action colors stay neutral; green is reserved for success
-  states. Web and file links use a separate blue palette, including linked bold
-  and inline-code labels. New profiles start in light mode; an explicitly saved
-  light or dark preference is preserved.
+- Copilot-inspired neutral surfaces, rounded controls and message cards, and a
+  softly elevated composer with a thin gray focus border. Primary actions and
+  Task-list selection retain their original blue palette; secondary controls,
+  other selection states and text selection stay neutral. Green is reserved for
+  success states. Web and file links use a separate blue palette, including linked
+  bold and inline-code labels. New profiles start in light mode; an explicitly
+  saved light or dark preference is preserved.
 - Native full screen: press **F11** or **Shift+Alt+Enter**, or use the titlebar's
   full-screen button, to fill the monitor and hide the Windows taskbar. Repeat to
   exit; window size and maximized state are restored. This does not change the

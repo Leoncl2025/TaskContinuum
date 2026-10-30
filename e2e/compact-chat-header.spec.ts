@@ -37,8 +37,14 @@ for (const theme of ['light', 'dark'] as const) {
       const probe = document.createElement('span')
       element.append(probe)
       const color = (name: string) => { probe.style.color = `var(${name})`; return getComputedStyle(probe).color }
-      const colors = Object.fromEntries(['--text', '--muted', '--subtle', '--accent', '--link', '--button-text', '--button-bg', '--selection'].map((name) => [name, color(name)]))
+      const colors = Object.fromEntries(['--text', '--muted', '--subtle', '--accent', '--link', '--selected', '--selection'].map((name) => [name, color(name)]))
       probe.remove()
+      const primary = document.createElement('button')
+      primary.className = 'primary-button'
+      element.append(primary)
+      const primaryStyle = getComputedStyle(primary)
+      const primaryAppearance = { background: primaryStyle.backgroundColor, color: primaryStyle.color, radius: primaryStyle.borderRadius }
+      primary.remove()
       const luminance = (value: string) => {
         const channels = value.match(/[\d.]+/g)?.slice(0, 3).map((part) => {
           const channel = Number(part) / 255
@@ -62,18 +68,23 @@ for (const theme of ['light', 'dark'] as const) {
         },
         textContrast: ['--text', '--muted', '--subtle'].flatMap((name) =>
           [background, selected].map((surface) => contrast(colors[name], surface))),
-        buttonContrast: contrast(colors['--button-text'], colors['--button-bg']),
+        primary: primaryAppearance,
+        neutralSelected: colors['--selected'],
+        buttonContrast: contrast(primaryAppearance.color, primaryAppearance.background),
         focusContrast: contrast(colors['--accent'], background),
         linkColor: colors['--link'],
         linkContrast: [background, selected, style('.message-user').backgroundColor].map((surface) => contrast(colors['--link'], surface)),
-        neutralColors: [colors['--accent'], colors['--button-bg'], colors['--button-text'], colors['--selection']],
+        neutralColors: [colors['--accent'], colors['--selected'], colors['--selection']],
         overflow: document.documentElement.scrollWidth > innerWidth,
       }
     })
     expect(appearance.background).toBe(theme === 'light' ? 'rgb(255, 255, 255)' : 'rgb(28, 28, 28)')
     expect(appearance.sidebar).toBe(theme === 'light' ? 'rgb(255, 255, 255)' : 'rgb(32, 32, 32)')
     expect(appearance.chat).toBe(appearance.background)
-    expect(appearance.selected).toBe(theme === 'light' ? 'rgb(235, 235, 235)' : 'rgb(52, 52, 52)')
+    expect(appearance.selected).toBe(theme === 'light' ? 'rgb(226, 238, 249)' : 'rgb(4, 57, 94)')
+    expect(appearance.neutralSelected).toBe(theme === 'light' ? 'rgb(235, 235, 235)' : 'rgb(52, 52, 52)')
+    expect(appearance.primary).toEqual({ background: 'rgb(0, 120, 212)', color: 'rgb(255, 255, 255)', radius: '12px' })
+    await expect(page.locator('.editor-tab.selected')).toHaveCSS('background-color', appearance.neutralSelected)
     expect(appearance.bubble).toBe(theme === 'light' ? 'rgb(245, 245, 245)' : 'rgb(42, 42, 42)')
     expect(appearance.composer).toBe(theme === 'light' ? 'rgb(255, 255, 255)' : 'rgb(36, 36, 36)')
     expect(appearance.radii).toEqual({ selected: '12px', composer: '24px', bubble: '16px', button: '8px' })
@@ -104,6 +115,9 @@ for (const theme of ['light', 'dark'] as const) {
     await taskDetails.getByRole('tab', { name: 'Overview', exact: true }).click()
     const composer = panel.locator('.composer')
     const input = panel.getByRole('textbox', { name: 'Message Agent Host' })
+    const send = panel.getByRole('button', { name: 'Send to Agent Host', exact: true })
+    await expect(send).toBeDisabled()
+    await expect(send).toHaveCSS('background-color', appearance.bubble)
     await page.getByRole('tab', { name: 'Fix Connection issues', exact: true }).focus()
     const resting = await composer.evaluate((element) => {
       const style = getComputedStyle(element)
@@ -123,6 +137,10 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(input).toHaveCSS('outline-width', '0px')
     await panel.locator('.composer-area').screenshot({ path: testInfo.outputPath(`composer-${theme}-focused.png`) })
     await input.fill('Keep the composer simple, quiet and neutral.')
+    await expect(send).toBeEnabled()
+    await expect(send).toHaveCSS('background-color', 'rgb(0, 120, 212)')
+    await expect(send).toHaveCSS('color', 'rgb(255, 255, 255)')
+    await expect(send).toHaveCSS('border-radius', '50%')
     await input.press('ControlOrMeta+a')
     expect(await input.evaluate((element) => getComputedStyle(element, '::selection').backgroundColor))
       .toBe(theme === 'light' ? 'rgb(227, 227, 227)' : 'rgb(73, 73, 73)')
@@ -137,7 +155,7 @@ for (const theme of ['light', 'dark'] as const) {
     await page.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
     const row = page.locator('.session-tree-row.is-selected')
     await expect(row).toHaveCSS('border-radius', '12px')
-    await expect(row).toHaveCSS('background-color', appearance.selected)
+    await expect(row).toHaveCSS('background-color', appearance.neutralSelected)
     await page.screenshot({ path: testInfo.outputPath(`neutral-${theme}-sessions.png`) })
     expect(errors).toEqual([])
   })
