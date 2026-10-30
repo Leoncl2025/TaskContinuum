@@ -203,6 +203,32 @@ for (const scenario of [
     const panel = page.getByRole('complementary', { name: 'Agent Host task chat' })
     await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
     await panel.getByRole('combobox', { name: 'Agent Host model' }).selectOption('gpt-6')
+    const composer = panel.getByRole('textbox', { name: 'Message Agent Host' })
+    const send = panel.getByRole('button', { name: 'Send to Agent Host', exact: true })
+    for (const draft of ['', 'Keep the send arrow centered.']) {
+      await composer.fill(draft)
+      if (draft) await expect(send).toBeEnabled()
+      else await expect(send).toBeDisabled()
+      const alignment = await send.evaluate((element) => {
+        const button = element.getBoundingClientRect()
+        const icon = element.querySelector('.codicon')!.getBoundingClientRect()
+        const attach = element.parentElement!.querySelector('[aria-label="Attach images"]')!.getBoundingClientRect()
+        return {
+          horizontalOffset: icon.x + icon.width / 2 - button.x - button.width / 2,
+          verticalOffset: icon.y + icon.height / 2 - button.y - button.height / 2,
+          toolbarOffset: button.y + button.height / 2 - attach.y - attach.height / 2,
+          width: button.width, height: button.height,
+        }
+      })
+      console.log(JSON.stringify({ scenario: scenario.name, enabled: Boolean(draft), alignment }))
+      expect(Math.abs(alignment.horizontalOffset)).toBeLessThanOrEqual(0.25 * scenario.zoom)
+      expect(Math.abs(alignment.verticalOffset)).toBeLessThanOrEqual(0.25 * scenario.zoom)
+      expect(Math.abs(alignment.toolbarOffset)).toBeLessThanOrEqual(0.25 * scenario.zoom)
+      expect(alignment.width).toBe(26 * scenario.zoom)
+      expect(alignment.height).toBe(26 * scenario.zoom)
+    }
+    await panel.locator('.composer-area').screenshot({ path: testInfo.outputPath(`send-alignment-${scenario.name}.png`) })
+    await composer.fill('')
     const geometry = await panel.evaluate((element) => {
       const log = element.querySelector<HTMLElement>('.chat-log')!
       return {

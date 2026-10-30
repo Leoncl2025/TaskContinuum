@@ -327,7 +327,7 @@ kbd { font-family: inherit; font-size: 10px; color: var(--muted); border: 1px so
 .composer-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 5px 9px 9px 11px; }
 .composer-toolbar > span { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--muted); }
 .composer-toolbar > span .codicon { font-size: 12px; }
-.send-button { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--button-bg); color: var(--button-text); }
+.send-button { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border-radius: 50%; background: var(--button-bg); color: var(--button-text); }
 .send-button:disabled { background: var(--raised); color: var(--muted); opacity: 1; }
 .composer-hint { display: flex; justify-content: space-between; gap: 7px; font-size: 9px; color: var(--subtle); margin: 8px 1px 0; line-height: 1.5; }
 .empty-chat { color: var(--muted); }
