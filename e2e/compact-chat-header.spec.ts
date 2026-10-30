@@ -37,7 +37,7 @@ for (const theme of ['light', 'dark'] as const) {
       const probe = document.createElement('span')
       element.append(probe)
       const color = (name: string) => { probe.style.color = `var(${name})`; return getComputedStyle(probe).color }
-      const colors = Object.fromEntries(['--text', '--muted', '--subtle', '--accent', '--button-text', '--button-bg'].map((name) => [name, color(name)]))
+      const colors = Object.fromEntries(['--text', '--muted', '--subtle', '--accent', '--button-text', '--button-bg', '--selection'].map((name) => [name, color(name)]))
       probe.remove()
       const luminance = (value: string) => {
         const channels = value.match(/[\d.]+/g)?.slice(0, 3).map((part) => {
@@ -64,6 +64,7 @@ for (const theme of ['light', 'dark'] as const) {
           [background, selected].map((surface) => contrast(colors[name], surface))),
         buttonContrast: contrast(colors['--button-text'], colors['--button-bg']),
         focusContrast: contrast(colors['--accent'], background),
+        neutralColors: [colors['--accent'], colors['--button-bg'], colors['--button-text'], colors['--selection']],
         overflow: document.documentElement.scrollWidth > innerWidth,
       }
     })
@@ -77,7 +78,38 @@ for (const theme of ['light', 'dark'] as const) {
     for (const ratio of appearance.textContrast) expect(ratio).toBeGreaterThanOrEqual(4.5)
     expect(appearance.buttonContrast).toBeGreaterThanOrEqual(4.5)
     expect(appearance.focusContrast).toBeGreaterThanOrEqual(3)
+    for (const color of appearance.neutralColors) {
+      const channels = color.match(/\d+/g)
+      expect(channels).toHaveLength(3)
+      expect(new Set(channels).size).toBe(1)
+    }
     expect(appearance.overflow).toBe(false)
+    const composer = panel.locator('.composer')
+    const input = panel.getByRole('textbox', { name: 'Message Agent Host' })
+    await page.getByRole('tab', { name: 'Fix Connection issues', exact: true }).focus()
+    const resting = await composer.evaluate((element) => {
+      const style = getComputedStyle(element)
+      return { border: style.borderColor, width: style.borderWidth, shadow: style.boxShadow }
+    })
+    await expect(input).not.toBeFocused()
+    await input.focus()
+    await expect(input).toBeFocused()
+    const focused = await composer.evaluate((element) => {
+      const style = getComputedStyle(element)
+      return { border: style.borderColor, width: style.borderWidth, shadow: style.boxShadow }
+    })
+    expect(resting.width).toBe('1px')
+    expect(focused.width).toBe('1px')
+    expect(focused.border).toBe(theme === 'light' ? 'rgb(179, 179, 179)' : 'rgb(115, 115, 115)')
+    expect(focused.shadow).toBe(resting.shadow)
+    await expect(input).toHaveCSS('outline-width', '0px')
+    await panel.locator('.composer-area').screenshot({ path: testInfo.outputPath(`composer-${theme}-focused.png`) })
+    await input.fill('Keep the composer simple, quiet and neutral.')
+    await input.press('ControlOrMeta+a')
+    expect(await input.evaluate((element) => getComputedStyle(element, '::selection').backgroundColor))
+      .toBe(theme === 'light' ? 'rgb(227, 227, 227)' : 'rgb(73, 73, 73)')
+    await panel.locator('.composer-area').screenshot({ path: testInfo.outputPath(`composer-${theme}-selection.png`) })
+    await input.fill('')
     await page.screenshot({ path: testInfo.outputPath(`neutral-${theme}.png`) })
     await page.getByRole('button', { name: 'Preferences', exact: true }).click()
     const preferences = page.getByRole('dialog', { name: 'Preferences' })

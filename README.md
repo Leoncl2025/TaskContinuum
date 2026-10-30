@@ -26,8 +26,10 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
 - Collapsible tool activity keeps answers readable without losing execution details.
 - Compact layouts, resizable panels, dark/light themes, and cached chat titles.
 - Copilot-inspired neutral surfaces, subtle gray selection, rounded controls and
-  message cards, and a softly elevated composer. New profiles start in light
-  mode; an explicitly saved light or dark preference is preserved.
+  message cards, and a softly elevated composer with a thin gray focus border.
+  Text selection and action colors stay neutral; green is reserved for success
+  states. New profiles start in light mode; an explicitly saved light or dark
+  preference is preserved.
 - Native full screen: press **F11** or **Shift+Alt+Enter**, or use the titlebar's
   full-screen button, to fill the monitor and hide the Windows taskbar. Repeat to
   exit; window size and maximized state are restored. This does not change the
