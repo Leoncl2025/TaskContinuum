@@ -27,7 +27,7 @@ const view: AgentHostView = {
     turns: Array.from({ length: 6 }, (_, index) => ({
       id: `turn-${index}`, state: 'complete' as Turn['state'],
       message: { text: 'Keep the conversation in focus and make room for the next idea.', origin: { kind: MessageKind.User } },
-      responseParts: [{ kind: 'markdown' as ResponsePartKind.Markdown, id: `response-${index}`, content: '## A simpler workspace\n\nKeep essential context close to the conversation. Connection details remain available without taking space away from your work.\n\n- Clear hierarchy\n- Predictable actions\n- More room to read' }],
+      responseParts: [{ kind: 'markdown' as ResponsePartKind.Markdown, id: `response-${index}`, content: '## A simpler workspace\n\nKeep essential context close to the conversation. Connection details remain available without taking space away from your work.\n\n[**Release notes**](https://example.com/release-notes) / [`plan.md`](file:///C:/layout-fixture/plan.md)\n\n- Clear hierarchy\n- Predictable actions\n- More room to read' }],
       usage: undefined,
     })),
   },
@@ -73,7 +73,8 @@ if (parameters.has('workbench')) {
     id: 'fixture', name: 'Layout fixture', title: 'Layout fixture', root: 'C:\\layout-fixture',
     loadedAt: '', warnings: [],
     tasks: [
-      { ...fixtureTasks[1], id: 'T-0002', title: 'Fix Connection issues', parentId: undefined },
+      { ...fixtureTasks[1], id: 'T-0002', title: 'Fix Connection issues', parentId: undefined,
+        documents: { requirements: '## Release requirements\n\n[**Documentation**](https://example.com/docs) / [`plan.md`](file:///C:/layout-fixture/plan.md)', plan: null, checklist: null } },
       { ...fixtureTasks[1], id: 'T-0003', title: 'Sept-2026 planning and release coordination', parentId: undefined },
     ],
   }

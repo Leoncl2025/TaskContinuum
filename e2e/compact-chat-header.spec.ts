@@ -37,7 +37,7 @@ for (const theme of ['light', 'dark'] as const) {
       const probe = document.createElement('span')
       element.append(probe)
       const color = (name: string) => { probe.style.color = `var(${name})`; return getComputedStyle(probe).color }
-      const colors = Object.fromEntries(['--text', '--muted', '--subtle', '--accent', '--button-text', '--button-bg', '--selection'].map((name) => [name, color(name)]))
+      const colors = Object.fromEntries(['--text', '--muted', '--subtle', '--accent', '--link', '--button-text', '--button-bg', '--selection'].map((name) => [name, color(name)]))
       probe.remove()
       const luminance = (value: string) => {
         const channels = value.match(/[\d.]+/g)?.slice(0, 3).map((part) => {
@@ -64,6 +64,8 @@ for (const theme of ['light', 'dark'] as const) {
           [background, selected].map((surface) => contrast(colors[name], surface))),
         buttonContrast: contrast(colors['--button-text'], colors['--button-bg']),
         focusContrast: contrast(colors['--accent'], background),
+        linkColor: colors['--link'],
+        linkContrast: [background, selected, style('.message-user').backgroundColor].map((surface) => contrast(colors['--link'], surface)),
         neutralColors: [colors['--accent'], colors['--button-bg'], colors['--button-text'], colors['--selection']],
         overflow: document.documentElement.scrollWidth > innerWidth,
       }
@@ -78,12 +80,28 @@ for (const theme of ['light', 'dark'] as const) {
     for (const ratio of appearance.textContrast) expect(ratio).toBeGreaterThanOrEqual(4.5)
     expect(appearance.buttonContrast).toBeGreaterThanOrEqual(4.5)
     expect(appearance.focusContrast).toBeGreaterThanOrEqual(3)
+    expect(appearance.linkColor).toBe(theme === 'light' ? 'rgb(9, 105, 184)' : 'rgb(121, 184, 255)')
+    for (const ratio of appearance.linkContrast) expect(ratio).toBeGreaterThanOrEqual(4.5)
     for (const color of appearance.neutralColors) {
       const channels = color.match(/\d+/g)
       expect(channels).toHaveLength(3)
       expect(new Set(channels).size).toBe(1)
     }
     expect(appearance.overflow).toBe(false)
+    const webLink = panel.getByRole('link', { name: 'Release notes', exact: true }).last()
+    const fileLink = panel.getByRole('link', { name: 'plan.md', exact: true }).last()
+    await expect(webLink).toHaveCSS('color', appearance.linkColor)
+    await expect(webLink.locator('strong')).toHaveCSS('color', appearance.linkColor)
+    await expect(fileLink).toHaveCSS('color', appearance.linkColor)
+    await expect(fileLink.locator('code')).toHaveCSS('color', appearance.linkColor)
+    await webLink.hover()
+    await expect(webLink).toHaveCSS('text-decoration-line', 'underline')
+    await panel.locator('.message-assistant').last().screenshot({ path: testInfo.outputPath(`links-${theme}.png`) })
+    const taskDetails = page.getByRole('complementary', { name: 'Task details' })
+    await taskDetails.getByRole('tab', { name: 'Requirements', exact: true }).click()
+    await expect(taskDetails.getByRole('link', { name: 'Documentation', exact: true }).locator('strong')).toHaveCSS('color', appearance.linkColor)
+    await expect(taskDetails.getByRole('link', { name: 'plan.md', exact: true }).locator('code')).toHaveCSS('color', appearance.linkColor)
+    await taskDetails.getByRole('tab', { name: 'Overview', exact: true }).click()
     const composer = panel.locator('.composer')
     const input = panel.getByRole('textbox', { name: 'Message Agent Host' })
     await page.getByRole('tab', { name: 'Fix Connection issues', exact: true }).focus()

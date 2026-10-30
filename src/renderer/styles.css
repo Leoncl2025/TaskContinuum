@@ -33,6 +33,7 @@ textarea { resize: vertical; }
   --muted: #b3b3b3;
   --subtle: #aaa;
   --accent: #d4d4d4;
+  --link: #79b8ff;
   --button-bg: #e8e8e8;
   --button-text: #242424;
   --composer-focus-border: #737373;
@@ -59,6 +60,7 @@ textarea { resize: vertical; }
   --muted: #616161;
   --subtle: #666;
   --accent: #424242;
+  --link: #0969b8;
   --button-bg: #242424;
   --button-text: #fff;
   --composer-focus-border: #b3b3b3;
