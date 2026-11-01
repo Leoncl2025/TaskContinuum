@@ -3,6 +3,8 @@ import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { FileTransferError } from '../shared/fileTransfer'
 import type { FileTransferApi } from '../shared/fileTransfer'
+import type { DesktopOperations } from './desktopOperations'
+import { DesktopOperationUnavailableError } from './desktopOperations'
 import { removeEndpoint, writeEndpoint } from './fileTransferMcp/descriptor'
 import {
   MAX_BRIDGE_REQUEST_BYTES, MAX_BRIDGE_REQUESTS, MAX_BRIDGE_RESPONSE_BYTES,
@@ -47,7 +49,7 @@ function body(request: IncomingMessage): Promise<unknown> {
 }
 
 export async function startFileTransferMcpBridge(
-  directory: string, apiForWorkspace: (root: string) => FileTransferApi,
+  directory: string, apiForWorkspace: (root: string) => FileTransferApi, operations?: DesktopOperations,
 ): Promise<{ close(): Promise<void> }> {
   const token = randomBytes(32).toString('base64url')
   const expectedAuth = Buffer.from(`Bearer ${token}`)
@@ -76,13 +78,17 @@ export async function startFileTransferMcpBridge(
     active++
     void (async () => {
       try {
-        const requestBody = bridgeRequestSchema.parse(await body(request))
-        const result = validateResult(requestBody, await invokeApi(apiForWorkspace(requestBody.workspace), requestBody))
-        const payload = { result }
-        if (Buffer.byteLength(JSON.stringify(payload)) > MAX_BRIDGE_RESPONSE_BYTES) throw new FileTransferError('UNAVAILABLE', '')
-        respond(response, 200, payload)
+        const operation = async () => {
+          const requestBody = bridgeRequestSchema.parse(await body(request))
+          const result = validateResult(requestBody, await invokeApi(apiForWorkspace(requestBody.workspace), requestBody))
+          const payload = { result }
+          if (Buffer.byteLength(JSON.stringify(payload)) > MAX_BRIDGE_RESPONSE_BYTES) throw new FileTransferError('UNAVAILABLE', '')
+          respond(response, 200, payload)
+        }
+        if (operations) await operations.runAsync(operation)
+        else await operation()
       } catch (error) {
-        const failure = safeFailure(error)
+        const failure = safeFailure(error instanceof DesktopOperationUnavailableError ? new FileTransferError('BUSY', error.message) : error)
         respond(response, failure.code === 'INVALID_REQUEST' ? 400 : 200, { error: failure })
       } finally { active-- }
     })()

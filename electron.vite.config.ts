@@ -20,6 +20,9 @@ export default defineConfig({
   renderer: {
     plugins: [react()],
     server: { host: '127.0.0.1', port: 5177, strictPort: true },
-    build: { minify: true, reportCompressedSize: true },
+    build: {
+      minify: true, reportCompressedSize: true,
+      assetsInlineLimit: (file) => /\.(woff2?|ttf|otf)$/i.test(file) ? false : undefined,
+    },
   },
 })

@@ -15,6 +15,8 @@ import { isAgentHostTurnBoundary } from './agentHostConnection'
 import { AgentHostGatewayScheduler, GATEWAY_LIMITS } from './agentHostGatewayScheduler'
 import { abortable } from './shared/abortable'
 import { AGENT_HOST_LIMIT_HEADER, AGENT_HOST_LIMIT_RPC_CODE, AGENT_HOST_LIMITS, AgentHostSizeLimitError, agentHostSizeLimit } from './agentHostLimits'
+import type { DesktopOperations } from './desktopOperations'
+import { DesktopOperationUnavailableError } from './desktopOperations'
 
 export interface AgentHostAccess {
   canSend: boolean
@@ -25,6 +27,7 @@ export interface AgentHostGatewayOptions {
   port(): number | undefined
   authorize(token: string, target: AgentHostTarget, send: boolean): Promise<AgentHostAccess>
   connection(target: AgentHostTarget): Promise<AgentHostConnection>
+  operations?: DesktopOperations
 }
 const rpcSchema = z.object({ jsonrpc: z.literal('2.0'), id: z.union([z.number().int().nonnegative(), z.string().max(128)]).optional(), method: z.string().max(100), params: z.record(z.string(), z.unknown()) }).strict()
 const subscribeSchema = z.object({ channel: z.string().max(512), delivery: z.unknown().optional(), view: z.unknown().optional() }).strict()
@@ -42,7 +45,9 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
   let bufferedResponseBytes = 0
   let terminalLeases = 0
   let pendingUpgrades = 0
+  let activeRequests = 0
   const upgrades = new Set<AbortController>()
+  const runOperation = <T>(action: () => Promise<T>): Promise<T> => options.operations ? options.operations.runAsync(action) : action()
   server.on('upgrade', (request, socket, head) => {
     const suppliedTrace = z.uuid().safeParse(request.headers[AGENT_HOST_TRACE_HEADER])
     const traceId = suppliedTrace.success ? suppliedTrace.data : randomUUID()
@@ -57,7 +62,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
       stepStarted = performance.now()
     }
     logAgentHostDiagnostic('gateway.upgrade', { traceId, status: 'begin', step })
-    void (async () => {
+    void runOperation(async () => {
       if (request.headers.origin || request.headers.host !== `127.0.0.1:${options.port()}` || (request.url?.length ?? 0) > 4096 || sockets.clients.size + pendingUpgrades >= 32) throw new Error('Denied.')
       pendingUpgrades++
       const abort = new AbortController()
@@ -109,9 +114,11 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
         upgrades.delete(abort)
         pendingUpgrades--
       }
-    })().catch((error: unknown) => {
+    }).catch((error: unknown) => {
       logAgentHostDiagnostic('gateway.upgrade', { target, traceId, status: 'error', step, elapsedMs: performance.now() - started, error })
-      if (!socket.destroyed) socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+      if (!socket.destroyed) socket.end(error instanceof DesktopOperationUnavailableError
+        ? 'HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'
+        : 'HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
     })
   })
 
@@ -316,11 +323,13 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
         if (resource && unsubscribeBarrier && unsubscribeBarriers.get(resource) === unsubscribeBarrier) unsubscribeBarriers.delete(resource)
       }
       pendingRequests++
+      activeRequests++
       logAgentHostDiagnostic('gateway.request', { target, traceId, status: 'begin', step: 'queue', method, channel, pending: pendingRequests })
       const queued = scheduler.enqueue({
         owner: socket, lane, activeTerminal, bytes: Buffer.byteLength(raw),
         drop: (expired) => {
           pendingRequests--
+          activeRequests--
           finishUnsubscribe()
           if (initializer) rejectInitialization?.(new Error('Agent Host initialization was interrupted.'))
           if (expired) {
@@ -332,7 +341,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
           logAgentHostDiagnostic('gateway.socket', { target, traceId, status: 'error', step: 'response', error })
           fail('transport-closed')
         },
-        run: async (queueMs) => {
+        run: async (queueMs) => runOperation(async () => {
           let step: NonNullable<AgentHostDiagnosticDetails['step']> = 'authorization'
           let authMs = 0
           let authorized = false
@@ -493,17 +502,19 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
                 : { code: -32602, message: 'Command, channel, or session access is not authorized.' } })
               else fail('invalid-frame')
             } else if (!closed) fail('access-changed')
-          } finally {
-            finishUnsubscribe()
-            pendingRequests--
           }
-        },
+        }).finally(() => {
+          finishUnsubscribe()
+          pendingRequests--
+          activeRequests--
+        }),
       })
-      if (!queued) { pendingRequests--; finishUnsubscribe(); if (initializer) rejectInitialization?.(new Error('Agent Host gateway is busy.')); fail('queue-limit') }
+      if (!queued) { pendingRequests--; activeRequests--; finishUnsubscribe(); if (initializer) rejectInitialization?.(new Error('Agent Host gateway is busy.')); fail('queue-limit') }
     })
   }
 
   return {
+    hasActiveWork: () => pendingUpgrades > 0 || activeRequests > 0,
     revalidate: () => { for (const check of checks) check() },
     close: () => {
       for (const abort of upgrades) abort.abort(new DOMException('The session gateway closed.', 'AbortError'))

@@ -28,21 +28,30 @@ import { agentHostKey } from '../shared/agentHost'
 import { useSessionTitles } from './chat/useSessionTitles'
 import { machineLabel, useMachineAliases, useWorkspaceGitSync } from './machineAliases'
 import { MachineAliasesProvider } from './MachineAliasesProvider'
+import { UpdateNotice, UpdateSettings, UpdateStatus, useUpdates } from './components/UpdateSettings'
+import { registerInstallSafety } from './installSafety'
 import appIcon from '../../build/icon.png'
 
-type DialogName = 'quick-open' | 'settings' | 'remote-devices' | null
+type DialogName = 'quick-open' | 'settings' | 'remote-devices' | 'updates' | null
 
 export default function App() {
   const workspaces = useWorkspaces()
   const [repositorySetup, setRepositorySetup] = useState<'new' | WorkspaceSnapshot | null>(null)
+  const updates = useUpdates()
+  const [updateSafetyError, setUpdateSafetyError] = useState<string>()
+  useEffect(() => {
+    if (window.updates) return registerInstallSafety(window.updates, document, setUpdateSafetyError)
+  }, [])
   return <>
-    <MachineAliasesProvider workspaceId={workspaces.state.current?.id ?? null}><Workbench key={workspaces.state.current?.id ?? 'empty'} workspaces={workspaces} repositorySetupOpen={repositorySetup !== null} onCreateRepository={() => setRepositorySetup('new')} onPublishRepository={setRepositorySetup} /></MachineAliasesProvider>
-    {repositorySetup && <div className="repository-dialog-theme" data-theme={readLayout().theme}><RepositorySetup workspace={repositorySetup === 'new' ? null : repositorySetup} workspaces={workspaces} onClose={() => setRepositorySetup(null)} /></div>}
+    <MachineAliasesProvider workspaceId={workspaces.state.current?.id ?? null}><Workbench key={workspaces.state.current?.id ?? 'empty'} workspaces={workspaces} updates={updates} updateSafetyError={updateSafetyError} repositorySetupOpen={repositorySetup !== null} onCreateRepository={() => setRepositorySetup('new')} onPublishRepository={setRepositorySetup} /></MachineAliasesProvider>
+    {repositorySetup && <div className="repository-dialog-theme" data-theme={readLayout().theme} data-update-blocker="Finish or close repository creation before updating."><RepositorySetup workspace={repositorySetup === 'new' ? null : repositorySetup} workspaces={workspaces} onClose={() => setRepositorySetup(null)} /></div>}
   </>
 }
 
-function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPublishRepository }: {
+function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen, onCreateRepository, onPublishRepository }: {
   workspaces: ReturnType<typeof useWorkspaces>
+  updates: ReturnType<typeof useUpdates>
+  updateSafetyError?: string
   repositorySetupOpen: boolean
   onCreateRepository(): void
   onPublishRepository(workspace: WorkspaceSnapshot): void
@@ -337,7 +346,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
       <div className="app-brand"><span className="brand-mark"><img src={appIcon} alt="" width={24} height={24} /></span><span>Task Continuum</span></div>
       <div className="titlebar-chat" ref={setChatHeaderTarget} hidden={!unifiedChatHeader} />
       <button type="button" className="command-center" aria-label="Search tasks and jump back in" title="Search tasks (Ctrl+P)" onClick={() => { setQuickQuery(''); setDialog('quick-open') }}><Icon name="search" /><span>Search tasks and jump back in</span><kbd>Ctrl P</kbd></button>
-      <div className="titlebar-actions">{workspaces.available && <IconButton icon="folder-opened" label="Switch workspace folder" disabled={workspaceLocked || workspaces.busy} onClick={openWorkspace} />}{!compact && <><IconButton icon="layout-sidebar-left" label="Toggle task sidebar" title="Toggle task sidebar (Ctrl+B)" aria-pressed={sidebarVisible} onClick={toggleSidebar} /><IconButton icon="comment-discussion" label="Toggle chat panel" title="Toggle chat panel (Ctrl+Alt+B)" aria-pressed={chatVisible} onClick={toggleChat} /><IconButton icon="layout-sidebar-right" label="Toggle task details" title="Toggle task details (Ctrl+Alt+D)" aria-pressed={detailsVisible} onClick={toggleDetails} /></>}</div>
+      <div className="titlebar-actions"><UpdateStatus updates={updates} onOpen={() => setDialog('updates')} />{workspaces.available && <IconButton icon="folder-opened" label="Switch workspace folder" disabled={workspaceLocked || workspaces.busy} onClick={openWorkspace} />}{!compact && <><IconButton icon="layout-sidebar-left" label="Toggle task sidebar" title="Toggle task sidebar (Ctrl+B)" aria-pressed={sidebarVisible} onClick={toggleSidebar} /><IconButton icon="comment-discussion" label="Toggle chat panel" title="Toggle chat panel (Ctrl+Alt+B)" aria-pressed={chatVisible} onClick={toggleChat} /><IconButton icon="layout-sidebar-right" label="Toggle task details" title="Toggle task details (Ctrl+Alt+D)" aria-pressed={detailsVisible} onClick={toggleDetails} /></>}</div>
       {window.desktop && <div className="window-controls"><IconButton icon={fullScreen ? 'screen-normal' : 'screen-full'} label={fullScreen ? 'Exit full screen' : 'Enter full screen'} title={`${fullScreen ? 'Exit' : 'Enter'} full screen (F11 / Shift+Alt+Enter)`} aria-pressed={fullScreen} onClick={() => windowAction('toggleFullScreen')} /><IconButton icon="chrome-minimize" label="Minimize window" onClick={() => windowAction('minimize')} /><IconButton icon="chrome-maximize" label="Maximize or restore window" disabled={fullScreen} onClick={() => windowAction('toggleMaximize')} /><IconButton icon="chrome-close" label="Close window" onClick={() => windowAction('close')} /></div>}
     </header>
 
@@ -347,6 +356,7 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
       <button type="button" aria-label="Toggle task details" aria-pressed={detailsVisible} onClick={toggleDetails}><Icon name="file-text" />Details</button>
     </nav>}
 
+    {updateSafetyError && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{updateSafetyError}</span></div>}
     {workspaces.error && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{workspaces.error}</span><IconButton icon="close" label="Dismiss workspace error" onClick={() => workspaces.setError(null)} /></div>}
     {selection.error && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{selection.error}</span><IconButton icon="close" label="Dismiss selection memory error" onClick={selection.dismissError} /></div>}
     {machineAliasesError && dialog !== 'remote-devices' && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{machineAliasesError}</span><IconButton icon="refresh" label="Reload workspace machine aliases" onClick={() => { void refreshMachineAliases() }} /></div>}
@@ -421,7 +431,9 @@ function Workbench({ workspaces, repositorySetupOpen, onCreateRepository, onPubl
 
     <footer className="statusbar" aria-label="Workbench status"><span className="local-status"><Icon name={taskAgentOpen || agentHostBinding ? 'server-environment' : workspace ? 'folder' : 'repo'} />{taskAgentOpen ? 'TASK CREATION' : agentHostBinding ? 'AGENT HOST' : workspace ? 'LOCAL WORKSPACE' : 'NO WORKSPACE'}</span><span><Icon name="checklist" />{tasks.length} tasks</span><span>{selectedId ?? 'No task selected'}</span><span className="statusbar-spacer" /><span className="response-status" role="status" title={taskAgentOpen ? undefined : agentHostBinding?.owner.machineName}>{workspaces.busy ? 'Loading workspace...' : links.busy ? 'Saving or loading session links...' : sessionBusy ? 'Agent Host active' : taskAgentOpen ? 'Local task creation chat' : agentHostBinding ? `Agent Host @ ${machineLabel(agentHostBinding.owner, aliases)}` : workspace ? 'Select an Agent Host chat' : 'Create or open a task repository'}</span><button type="button" onClick={taskAgentOpen ? showChat : openAgentHostSessions}><Icon name={taskAgentOpen ? 'comment-discussion' : agentHostBinding ? 'link' : 'plug'} />{taskAgentOpen ? 'Task creation chat' : agentHostBinding ? 'Agent Host linked' : 'No Agent Host linked'}</button><span className="platform-status">{desktopError ? 'Desktop bridge error' : desktop ? `Desktop · ${desktop.version}` : 'Browser preview'}</span></footer>
 
-    {taskCreationMode && workspace && <TaskCreationDialog workspace={workspace} workspaces={workspaces} initialMode={taskCreationMode} onCreated={taskCreated} onAgent={() => { setTaskCreationMode(null); setTaskAgentOpen(true); showChat() }} onClose={() => setTaskCreationMode(null)} />}
+    <UpdateNotice updates={updates} />
+    {dialog === 'updates' && <Dialog title="About and updates" onClose={() => setDialog(null)}><UpdateSettings updates={updates} /></Dialog>}
+    {taskCreationMode && workspace && <div data-update-blocker="Finish or close task creation before updating."><TaskCreationDialog workspace={workspace} workspaces={workspaces} initialMode={taskCreationMode} onCreated={taskCreated} onAgent={() => { setTaskCreationMode(null); setTaskAgentOpen(true); showChat() }} onClose={() => setTaskCreationMode(null)} /></div>}
     {dialog === 'quick-open' && <Dialog title="Quick open" className="quick-open" onClose={() => setDialog(null)}><input className="quick-input" aria-label="Find a task" placeholder="Type a task name or ID…" value={quickQuery} onChange={(event) => setQuickQuery(event.target.value)} autoFocus /><div className="quick-results">{filterTasks(tasks, quickQuery, 'all').map((item) => <button type="button" key={item.id} onClick={() => { selectTask(item.id); setDialog(null) }}><Icon name="file-text" /><strong>{item.title}</strong><span>{item.id}</span></button>)}{!filterTasks(tasks, quickQuery, 'all').length && <p>No matching tasks.</p>}</div><p className="dialog-hint">Tab to a result · Enter to open · Esc to close</p></Dialog>}
 
     {dialog === 'settings' && <Dialog title="Preferences" onClose={() => setDialog(null)}><section className="settings-section"><h3>Appearance</h3><div className="theme-options">{(['dark', 'light'] as const).map((theme) => <label key={theme}><input type="radio" name="theme" checked={layout.theme === theme} onChange={() => setLayout((value) => ({ ...value, theme }))} /><span>{theme === 'dark' ? 'Dark' : 'Light'}</span></label>)}</div><button type="button" className="secondary-button" onClick={() => { setLayout((value) => ({ ...defaultLayout, theme: value.theme })); setCompactPanel(primaryPanel) }}>Reset panel layout</button></section><section className="settings-section"><h3>Integrations</h3><div className="integration-row"><span>Native Agent Host (AHP)</span><span className="integration-state">{window.agentHost ? 'Desktop API available' : 'Desktop API unavailable'}</span></div><div className="integration-row"><span>Remote devices and automatic workspace links</span><span className="integration-state">{window.remoteVSCode ? 'Desktop API available' : 'Desktop API unavailable'}</span></div></section><section className="settings-section"><h3>Keyboard shortcuts</h3><div className="shortcut-row"><span>New task</span><kbd>Ctrl / ⌘ N</kbd></div><div className="shortcut-row"><span>Quick open</span><kbd>Ctrl / ⌘ P</kbd></div><div className="shortcut-row"><span>Previous task tab</span><kbd>Ctrl PgUp</kbd></div><div className="shortcut-row"><span>Next task tab</span><kbd>Ctrl PgDown</kbd></div><div className="shortcut-row"><span>Previous session in current task</span><kbd>Ctrl Shift PgUp</kbd></div><div className="shortcut-row"><span>Next session in current task</span><kbd>Ctrl Shift PgDown</kbd></div><div className="shortcut-row"><span>Toggle task sidebar</span><kbd>Ctrl / ⌘ B</kbd></div><div className="shortcut-row"><span>Toggle chat</span><kbd>Ctrl / ⌘ Alt B</kbd></div><div className="shortcut-row"><span>Toggle task details</span><kbd>Ctrl / ⌘ Alt D</kbd></div></section><p className="dialog-hint">{workspace ? `Workspace: ${workspace.root}. Create new tasks in the Explorer; existing task views remain read-only. Session links: immutable Agent Host metadata.` : 'No workspace is selected. Create or open a task repository to get started; nothing is published automatically.'} Icons: Microsoft Codicons · CC BY 4.0.</p></Dialog>}

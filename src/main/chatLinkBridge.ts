@@ -6,6 +6,7 @@ import { canOpenChatDocument, parseChatLink } from '../shared/chatLinks'
 import { FILE_TRANSFER_LIMITS, FileTransferError, transferFailure } from '../shared/fileTransfer'
 import { agentHostTargetSchema } from './agentHostProtocol'
 import type { ChatLinkService } from './chatLinkService'
+import { handleDesktopOperation } from './desktopOperations'
 
 const openSchema = z.object({ href: z.string().min(1).max(8192), requestId: z.uuid(), target: agentHostTargetSchema.optional() }).strict()
 const referenceSchema = z.object({ transferId: z.uuid(), target: agentHostTargetSchema }).strict()
@@ -23,7 +24,7 @@ function suggestedName(value: string): string {
 export function registerChatLinkBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow,
   currentRoot: () => Promise<string>, service: Pick<ChatLinkService, 'open' | 'status' | 'preview' | 'file' | 'save' | 'cancel'>): void {
   function handle(channel: string, action: (value: unknown, window: BrowserWindow, check: (root?: string) => Promise<void>) => Promise<unknown>) {
-    ipcMain.handle(`desktop:chat-link-${channel}`, async (event, value: unknown) => {
+    handleDesktopOperation(ipcMain, `desktop:chat-link-${channel}`, async (event, value: unknown) => {
       const window = requireWindow(event)
       const check = async (root?: string) => {
         if (window.isDestroyed() || window.webContents.isDestroyed() || requireWindow(event) !== window

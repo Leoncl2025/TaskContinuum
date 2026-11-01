@@ -76,6 +76,12 @@ export class AgentHostConnection {
   get sizeLimitError(): AgentHostSizeLimitError | undefined { return this.lastSizeFailure }
   private get readOnly(): boolean { return this.initialized?._meta?.taskcontinuumCanSend === false || this.chat.sendState.readOnly }
 
+  get hasActiveWork(): boolean {
+    const chat = this.chat.value
+    return this.sending || this.reviewing || this.commands.some(command => command.state === 'pending' || command.state === 'uncertain')
+      || !!chat?.activeTurn || !!chat?.draft?.text || !!chat?.draft?.attachments?.length || !!chat?.queuedMessages?.length
+  }
+
   get view(): AgentHostView {
     const chat = this.chat.value
     const pending = this.commands.find((command) => command.state === 'pending' || command.state === 'uncertain')

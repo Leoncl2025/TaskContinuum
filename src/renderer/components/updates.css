@@ -1,0 +1,15 @@
+.update-settings { display: grid; gap: 10px; }
+.update-settings h3, .update-settings p { margin: 0; }
+.update-version { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+.update-auto-check { display: flex; align-items: center; gap: 8px; }
+.update-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.update-progress { display: flex; align-items: center; gap: 10px; }
+.update-progress progress { flex: 1; min-width: 0; }
+.update-release-notes summary { cursor: pointer; }
+.update-release-notes pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; max-height: 240px; overflow-y: auto; }
+.update-status { display: inline-flex; min-width: 0; }
+.update-status button { display: inline-flex; align-items: center; gap: 5px; }
+.titlebar-update { border: 0; background: transparent; color: inherit; border-radius: 4px; padding: 5px 7px; font: inherit; font-size: 12px; white-space: nowrap; cursor: pointer; }
+.titlebar-update:hover { background: var(--hover); }
+.update-notice { position: fixed; z-index: 30; right: 16px; bottom: 36px; display: flex; align-items: center; flex-wrap: wrap; gap: 12px; max-width: min(680px, calc(100vw - 32px)); padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--text); box-shadow: 0 5px 24px #0003; }
+.update-notice p { margin: 4px 0 0; font-size: 12px; }

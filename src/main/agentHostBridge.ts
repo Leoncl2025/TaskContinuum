@@ -13,6 +13,7 @@ import type { AgentHostEvent } from './agentHostConnection'
 import { readClientIdentity } from './clientIdentity'
 import { agentHostCreateRequestSchema, creationLocationSchema, creationTaskIdSchema } from './agentHostCreationProtocol'
 import { localAgentHostCreateRequestSchema } from './localAgentHostCreationService'
+import { handleDesktopOperation } from './desktopOperations'
 
 export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>, manager: AgentHostManager) {
   const watches = new Map<string, { window: BrowserWindow; root: string; target: AgentHostTarget; connection: AgentHostConnection; leases: Map<string, Set<string>>; close(): void }>()
@@ -22,7 +23,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     if (target) await manager.authorize(root, target)
     if (window.isDestroyed() || requireWindow(event) !== window || await currentRoot() !== root) throw new Error('The workspace changed while verifying the session.')
   }
-  ipcMain.handle('agent-host:list', async (event) => {
+  handleDesktopOperation(ipcMain, 'agent-host:list', async (event) => {
     const window = requireWindow(event)
     const root = await currentRoot()
     if (!await manager.hasConsent(root)) {
@@ -37,7 +38,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     await current(event, window, root)
     return result
   })
-  ipcMain.handle('agent-host:creation-workers', async (event, value: unknown, locationValue?: unknown) => {
+  handleDesktopOperation(ipcMain, 'agent-host:creation-workers', async (event, value: unknown, locationValue?: unknown) => {
     const window = requireWindow(event)
     const root = await currentRoot()
     const taskId = creationTaskIdSchema.parse(value)
@@ -48,7 +49,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     return result
   })
   for (const [channel, method] of [['local-creation-hosts', 'hosts'], ['local-creations', 'list']] as const) {
-    ipcMain.handle(`agent-host:${channel}`, async (event) => {
+    handleDesktopOperation(ipcMain, `agent-host:${channel}`, async (event) => {
       const window = requireWindow(event)
       const root = await currentRoot()
       await current(event, window, root)
@@ -57,7 +58,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
       return result
     })
   }
-  ipcMain.handle('agent-host:create-local', async (event, value: unknown) => {
+  handleDesktopOperation(ipcMain, 'agent-host:create-local', async (event, value: unknown) => {
     const window = requireWindow(event)
     const root = await currentRoot()
     const request = localAgentHostCreateRequestSchema.parse(value)
@@ -66,7 +67,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     await current(event, window, root)
     return result
   })
-  ipcMain.handle('agent-host:local-creation-status', async (event, value: unknown) => {
+  handleDesktopOperation(ipcMain, 'agent-host:local-creation-status', async (event, value: unknown) => {
     const window = requireWindow(event)
     const root = await currentRoot()
     const operationId = z.uuid().parse(value)
@@ -75,7 +76,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     await current(event, window, root)
     return result
   })
-  ipcMain.handle('agent-host:creations', async (event, value: unknown) => {
+  handleDesktopOperation(ipcMain, 'agent-host:creations', async (event, value: unknown) => {
     const window = requireWindow(event)
     const root = await currentRoot()
     const taskId = creationTaskIdSchema.parse(value)
@@ -83,7 +84,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     await current(event, window, root)
     return result
   })
-  ipcMain.handle('agent-host:create', async (event, value: unknown) => {
+  handleDesktopOperation(ipcMain, 'agent-host:create', async (event, value: unknown) => {
     const window = requireWindow(event)
     const root = await currentRoot()
     const request = agentHostCreateRequestSchema.parse(value)
@@ -93,7 +94,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     return result
   })
   for (const [channel, method] of [['creation-status', 'status'], ['bind-creation', 'bind'], ['abandon-creation', 'abandon']] as const) {
-    ipcMain.handle(`agent-host:${channel}`, async (event, value: unknown) => {
+    handleDesktopOperation(ipcMain, `agent-host:${channel}`, async (event, value: unknown) => {
       const window = requireWindow(event)
       const root = await currentRoot()
       const id = z.uuid().parse(value)
@@ -103,7 +104,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
       return result
     })
   }
-  ipcMain.handle('agent-host:watch', async (event, value: unknown) => {
+  handleDesktopOperation(ipcMain, 'agent-host:watch', async (event, value: unknown) => {
     const window = requireWindow(event)
     const root = await currentRoot()
     const target = agentHostTargetSchema.parse(value)
@@ -152,13 +153,13 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     void connection.open().catch(() => schedule())
     return id
   })
-  ipcMain.handle('agent-host:unwatch', (event, value: unknown) => {
+  handleDesktopOperation(ipcMain, 'agent-host:unwatch', (event, value: unknown) => {
     const window = requireWindow(event)
     const watch = watches.get(z.uuid().parse(value))
     if (watch && watch.window !== window) throw new Error('This view belongs to another window.')
     watch?.close()
   })
-  ipcMain.handle('agent-host:terminal', async (event, watchValue: unknown, resourceValue: unknown, leaseValue: unknown, retryValue?: unknown) => {
+  handleDesktopOperation(ipcMain, 'agent-host:terminal', async (event, watchValue: unknown, resourceValue: unknown, leaseValue: unknown, retryValue?: unknown) => {
     const window = requireWindow(event)
     const id = z.uuid().parse(watchValue)
     const resource = agentHostTerminalIdSchema.parse(resourceValue)
@@ -189,7 +190,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     if (watches.get(id) !== watch) throw new Error('This Agent Host view is no longer active.')
     if (failure) throw new Error('The owner Host could not load this terminal output. Retry manually.')
   })
-  ipcMain.handle('agent-host:release-terminal', (event, watchValue: unknown, resourceValue: unknown, leaseValue: unknown) => {
+  handleDesktopOperation(ipcMain, 'agent-host:release-terminal', (event, watchValue: unknown, resourceValue: unknown, leaseValue: unknown) => {
     const window = requireWindow(event)
     const watch = watches.get(z.uuid().parse(watchValue))
     const resource = agentHostTerminalIdSchema.parse(resourceValue)
@@ -201,7 +202,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
       if (!owners.size) watch.leases.delete(resource)
     }
   })
-  ipcMain.handle('agent-host:models', async (event, value: unknown) => {
+  handleDesktopOperation(ipcMain, 'agent-host:models', async (event, value: unknown) => {
     const window = requireWindow(event)
     const root = await currentRoot()
     const target = agentHostTargetSchema.parse(value)
@@ -222,7 +223,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
       throw error
     }
   })
-  ipcMain.handle('agent-host:send', async (event, value: unknown, id: unknown, text: unknown, images: unknown, model: unknown) => {
+  handleDesktopOperation(ipcMain, 'agent-host:send', async (event, value: unknown, id: unknown, text: unknown, images: unknown, model: unknown) => {
     const window = requireWindow(event)
     const root = await currentRoot()
     const target = agentHostTargetSchema.parse(value)
@@ -232,7 +233,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     await current(event, window, root, target)
     return connection.send(command.id, command.text, command.images, () => current(event, window, root, target), await readClientIdentity(app.getPath('userData')), selection)
   })
-  ipcMain.handle('agent-host:resolve-delivery', async (event, value: unknown, turnValue: unknown, actionValue: unknown, acknowledged: unknown) => {
+  handleDesktopOperation(ipcMain, 'agent-host:resolve-delivery', async (event, value: unknown, turnValue: unknown, actionValue: unknown, acknowledged: unknown) => {
     const window = requireWindow(event)
     const root = await currentRoot()
     const target = agentHostTargetSchema.parse(value)
@@ -246,7 +247,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     await current(event, window, root, target)
     return result
   })
-  ipcMain.handle('agent-host:cancel', async (event, value: unknown, id: unknown) => {
+  handleDesktopOperation(ipcMain, 'agent-host:cancel', async (event, value: unknown, id: unknown) => {
     const window = requireWindow(event)
     const root = await currentRoot()
     const target = agentHostTargetSchema.parse(value)

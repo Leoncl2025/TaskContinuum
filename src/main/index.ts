@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { app, BrowserWindow, clipboard, ipcMain, Menu, net, protocol } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, net, protocol, shell } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
 import { APP_URL, PRODUCTION_CSP, isTrustedRendererUrl, rendererSecurityPreferences, resolveRendererAsset, validateDevUrl } from './security'
 import { registerWorkspaceBridge } from './workspaceBridge'
@@ -11,6 +11,10 @@ import { registerWindowFullscreen, toggleWindowFullscreen } from './windowFullsc
 import { registerAgentHostBridge } from './agentHostBridge'
 import { registerChatLinkBridge } from './chatLinkBridge'
 import { startAgentHostDiagnostics, stopAgentHostDiagnostics } from './agentHostDiagnostics'
+import { UpdateRestartGuard } from './updateRestartGuard'
+import { desktopOperations } from './desktopOperations'
+import { createDesktopUpdateService } from './updates'
+import { registerUpdateBridge } from './updateBridge'
 
 app.setName('Task Continuum')
 if (process.platform === 'win32') app.setAppUserModelId('com.leoncl2025.taskcontinuum')
@@ -31,6 +35,9 @@ let remoteVSCode: ReturnType<typeof registerRemoteVSCodeBridge> | undefined
 let windowZoom: WindowZoomPreferences | undefined
 let quitting = false
 let cleanupComplete = false
+let cleanupPromise: Promise<void> | undefined
+let updateRestart: UpdateRestartGuard | undefined
+let updates: Awaited<ReturnType<typeof createDesktopUpdateService>> | undefined
 const primaryInstance = app.requestSingleInstanceLock()
 
 if (!primaryInstance) app.quit()
@@ -40,6 +47,32 @@ else app.on('second-instance', () => {
   mainWindow.show()
   mainWindow.focus()
 })
+
+function cleanupDesktop(): Promise<void> {
+  return cleanupPromise ??= (async () => {
+    const results = await Promise.allSettled([
+      Promise.resolve().then(() => agentHost?.close()),
+      Promise.resolve().then(() => remoteVSCode?.close()),
+      Promise.resolve().then(() => windowZoom?.flush()),
+      Promise.resolve().then(() => updates?.flushPreferences()),
+    ])
+    const diagnostics = await Promise.allSettled([stopAgentHostDiagnostics()])
+    const failures = [...results, ...diagnostics].filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (failures.length) throw new AggregateError(failures.map(result => result.reason), 'Application services or local state could not finish closing.')
+    cleanupComplete = true
+  })().catch((error: unknown) => { cleanupPromise = undefined; throw error })
+}
+
+async function recoverAfterUpdateFailure(): Promise<void> {
+  const result = await dialog.showMessageBox({
+    type: 'error', title: 'Restart required',
+    message: 'The update could not finish after application services were stopped.',
+    detail: 'Restart the current application before continuing. No session was deleted and no message will be replayed.',
+    buttons: ['Restart application', 'Close application'], defaultId: 0, cancelId: 1,
+  })
+  if (result.response === 0) app.relaunch()
+  app.quit()
+}
 
 function requireTrustedWindow(event: IpcMainInvokeEvent): BrowserWindow {
   if (!mainWindow || mainWindow.isDestroyed()
@@ -73,6 +106,7 @@ function registerDesktopBridge(): void {
 }
 
 async function createWindow(): Promise<void> {
+  if (quitting || cleanupComplete) return
   const zoom = windowZoom ??= new WindowZoomPreferences(app.getPath('userData'))
   await zoom.load()
   const window = new BrowserWindow({
@@ -102,6 +136,7 @@ async function createWindow(): Promise<void> {
   window.webContents.on('will-redirect', (event) => event.preventDefault())
   window.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { if (initialNavigation) { initialNavigation = false; return }; agentHost?.close() } })
   const closeConnections = () => {
+    updateRestart?.abort()
     agentHost?.close()
     void remoteVSCode?.close().catch((error: unknown) => console.error('Remote device shutdown failed:', error))
   }
@@ -118,13 +153,16 @@ async function createWindow(): Promise<void> {
       callback({ responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [policy] } })
     })
   }
+  window.on('close', (event) => {
+    if (updateRestart?.preparing && !cleanupComplete) event.preventDefault()
+  })
   window.on('closed', () => { mainWindow = undefined })
   await window.loadURL(devUrl ?? APP_URL)
   if (!window.isDestroyed()) window.show()
 }
 
 void app.whenReady().then(async () => {
-  if (!primaryInstance) return
+  if (!primaryInstance || quitting) return
   if (process.env.TASKCONTINUUM_AHP_DIAGNOSTICS && !['0', '1'].includes(process.env.TASKCONTINUUM_AHP_DIAGNOSTICS)) {
     throw new Error('TASKCONTINUUM_AHP_DIAGNOSTICS must be 1 or 0.')
   }
@@ -156,11 +194,45 @@ void app.whenReady().then(async () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('remote-vscode:git-bindings-changed')
   })
   await remoteVSCode.filesReady
+  if (quitting || cleanupComplete) return
   registerChatLinkBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.chatLinks)
   agentHost = registerAgentHostBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.agentHosts)
+  updateRestart = new UpdateRestartGuard({
+    operations: desktopOperations,
+    rendererAvailable: () => Boolean(mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()),
+    hasActiveWork: () => remoteVSCode?.hasActiveWork() ?? false,
+    requestRenderer: (requestId) => {
+      if (!mainWindow || mainWindow.isDestroyed()) throw new Error('The application window is unavailable.')
+      mainWindow.webContents.send('updates:prepare-install', requestId)
+    },
+    resumeRenderer: (restartRequired) => {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send('updates:install-aborted')
+      if (restartRequired) void recoverAfterUpdateFailure().catch((error: unknown) => console.error('Update restart recovery failed:', error))
+    },
+    cleanup: cleanupDesktop,
+  })
+  let windowLoaded = false
+  const restart = updateRestart
+  const updatesReady = createDesktopUpdateService({
+    currentVersion: app.getVersion(), isPackaged: app.isPackaged,
+    userData: app.getPath('userData'), resourcesPath: process.resourcesPath,
+    openExternal: (url) => shell.openExternal(url),
+    install: (installer) => restart.install(installer),
+  })
+  registerUpdateBridge(requireTrustedWindow, updatesReady, restart)
+  void updatesReady.then((service) => {
+    updates = service
+    if (quitting || cleanupComplete) { service.close(); return }
+    service.listen((state) => {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send('updates:state', state)
+    })
+    if (windowLoaded) service.start()
+  }).catch((error: unknown) => console.error('Application updates could not initialize:', error))
   await createWindow()
+  windowLoaded = true
+  if (!quitting && !cleanupComplete) updates?.start()
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
+    if (!quitting && !cleanupComplete && BrowserWindow.getAllWindows().length === 0) {
       void createWindow().catch((error: unknown) => { console.error(error); app.exit(1) })
     }
   })
@@ -168,13 +240,25 @@ void app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
 app.on('before-quit', (event) => {
-  if (cleanupComplete) return
+  if (cleanupComplete) { updates?.close(); return }
   event.preventDefault()
+  if (updateRestart?.preparing) return
   if (quitting) return
   quitting = true
-  agentHost?.close()
-  void Promise.all([remoteVSCode?.close(), windowZoom?.flush()]).finally(() => stopAgentHostDiagnostics()).catch((error: unknown) => console.error(error)).finally(() => {
-    cleanupComplete = true
-    app.quit()
+  updates?.close()
+  void cleanupDesktop().then(() => app.quit()).catch(async (error: unknown) => {
+    console.error('Task Continuum shutdown cleanup failed:', error)
+    desktopOperations.requireRestart()
+    const result = await dialog.showMessageBox({
+      type: 'error', title: 'Task Continuum cleanup is incomplete',
+      message: 'Connections or local state could not finish closing. No update was installed.',
+      detail: 'Application services are stopping. Retry closing, then reopen Task Continuum before continuing.',
+      buttons: ['Retry exit', 'Keep window open'], defaultId: 0, cancelId: 1,
+    })
+    quitting = false
+    if (result.response === 0) app.quit()
+  }).catch((error: unknown) => {
+    quitting = false
+    console.error('Task Continuum could not show its shutdown failure:', error)
   })
 })

@@ -11,6 +11,7 @@ import { fixtureTasks as demoTasks } from './task-fixture'
 import { modelConfigFixture } from './agent-host-model-fixture'
 import { MachineAliasesProvider } from '../src/renderer/MachineAliasesProvider'
 import { gitSyncUiFixture } from './remote-config-ui-fixture'
+import { updateBlockers } from '../src/renderer/installSafety'
 
 afterEach(() => { delete window.agentHost; delete window.desktop; delete window.remoteVSCode })
 
@@ -38,6 +39,22 @@ function fixture() {
   window.agentHost = bridge
   return { target, bridge, view, emit: () => { for (const listener of listeners) listener({ id: watchId, view: structuredClone(view) }) } }
 }
+
+it('protects unsent input retained in a hidden Activity pane without sending or clearing it', async () => {
+  const setup = fixture()
+  const panel = <AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />
+  const rendered = render(<Activity mode="visible">{panel}</Activity>)
+  await screen.findByRole('status', { name: 'Connected' })
+  fireEvent.change(screen.getByRole('textbox', { name: 'Message Agent Host' }), { target: { value: 'Keep this unsent draft' } })
+  expect(updateBlockers(document).join(' ')).toContain('Send or clear unsent chat text and images')
+  rendered.rerender(<Activity mode="hidden">{panel}</Activity>)
+  expect(updateBlockers(document).join(' ')).toContain('Send or clear unsent chat text and images')
+  expect(setup.bridge.send).not.toHaveBeenCalled()
+  rendered.rerender(<Activity mode="visible">{panel}</Activity>)
+  expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Keep this unsent draft')
+  fireEvent.change(screen.getByRole('textbox', { name: 'Message Agent Host' }), { target: { value: '' } })
+  expect(updateBlockers(document)).toEqual([])
+})
 
 it('keeps following after resize-induced scrolling, but preserves deliberate history browsing and cancels pending resize work', async () => {
   const setup = fixture()

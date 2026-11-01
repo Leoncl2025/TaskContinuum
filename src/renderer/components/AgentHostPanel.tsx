@@ -432,6 +432,9 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const modelStatus = !bridge ? 'Desktop update required.' : !currentCatalog ? 'Loading models from the owner Host...' : currentCatalog.error ? undefined : !modelId ? 'Choose a model below to enable sending.' : !modelReady ? 'The selected model is unavailable. Choose another model or retry loading models.' : undefined
   const displayTitle = sessionTitle(target, view?.target && agentHostKey(view.target) === key ? view.chat?.title : undefined) || cachedTitle || 'Original Host chat'
   const detailsOpen = active && detailsKey === key
+  const updateBlocker = busy || activeTurn || pending || imageInput.reading
+    ? 'Wait for Agent Host work and image processing to finish before updating.'
+    : draft.length || images.length ? 'Send or clear unsent chat text and images before updating. Drafts are not discarded by an update.' : undefined
   const chatActions = <>
     {onDevices && <IconButton icon="remote" label="Manage devices" onClick={() => { setDetailsKey(undefined); onDevices() }} />}
     <IconButton icon="refresh" label="Reconnect Agent Host" disabled={busy} onClick={() => { setDetailsKey(undefined); void reconnect() }} />
@@ -450,7 +453,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       <div className="ahp-chat-secondary-actions">{chatActions}</div>
     </div>
   </HeaderTag>
-  return <ChatLinkTargetContext.Provider value={{ target, active }}><aside className="chat-panel ahp-panel" aria-label={workspace ? 'Agent Host task creation chat' : 'Agent Host task chat'}>
+  return <ChatLinkTargetContext.Provider value={{ target, active }}><aside className="chat-panel ahp-panel" aria-label={workspace ? 'Agent Host task creation chat' : 'Agent Host task chat'} data-update-blocker={updateBlocker}>
     {headerTarget ? active && createPortal(header, headerTarget) : header}
     {detailsOpen && <Dialog title="Chat details" className="ahp-chat-details" onClose={() => setDetailsKey(undefined)}>
       <dl>

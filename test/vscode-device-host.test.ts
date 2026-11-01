@@ -11,6 +11,8 @@ import { deviceIdentitySchema } from '../src/main/vscodeDeviceProtocol'
 import { agentHostCatalogSchema } from '../src/main/agentHostProtocol'
 import type { AgentHostRegistry } from '../src/main/agentHostRegistry'
 import type { AgentHostTarget } from '../src/shared/agentHost'
+import { DesktopOperations } from '../src/main/desktopOperations'
+import { WebSocket } from 'ws'
 
 const protector = { available: () => true, encrypt: (value: string) => Buffer.from(value), decrypt: (value: Buffer) => value.toString() }
 const cleanup: (() => Promise<void>)[] = []
@@ -63,9 +65,11 @@ describe('device-scoped native Agent Host gateway', () => {
     await mkdir(workspace)
     const target: AgentHostTarget = { sessionId: 'copilotcli:/original', chatId: 'ahp-chat:/original', owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
     const describeSession = vi.fn(async () => ({ ...target, title: 'Original native chat', provider: 'copilotcli', updatedAt: new Date().toISOString(), canSend: true }))
-    const registry = { describe: describeSession } as unknown as AgentHostRegistry
+    const nativeConnection = vi.fn(async () => { throw new Error('A paused gateway must not open a native connection.') })
+    const registry = { describe: describeSession, connection: nativeConnection } as unknown as AgentHostRegistry
+    const operations = new DesktopOperations()
     const createHost = () => {
-      const host = new VSCodeDeviceHost(join(root, 'profile'), protector)
+      const host = new VSCodeDeviceHost(join(root, 'profile'), protector, operations)
       host.setAgentHostAccess(registry, async () => [target])
       return host
     }
@@ -79,12 +83,35 @@ describe('device-scoped native Agent Host gateway', () => {
     const call = (path: string, body: unknown = {}) => deviceRequest(port, port, pair.token, path, body, AbortSignal.timeout(5000))
 
     expect(deviceIdentitySchema.parse(await call('/device/identity'))).toEqual({ ownerId, deviceId: pair.id })
+    operations.lock()
+    await expect(call('/device/identity')).rejects.toMatchObject({ status: 503 })
+    await expect(call('/device/agent-host/create')).rejects.toMatchObject({ status: 503 })
+    operations.unlock()
+    expect(deviceIdentitySchema.parse(await call('/device/identity'))).toEqual({ ownerId, deviceId: pair.id })
     expect(describeSession).not.toHaveBeenCalled()
     expect(agentHostCatalogSchema.parse(await call('/device/agent-host/sessions')).sessions).toEqual([])
     await host.setWorkspace(pair.id, workspace, false)
     expect(agentHostCatalogSchema.parse(await call('/device/agent-host/sessions')).sessions).toEqual([expect.objectContaining({ ...target, canSend: false })])
     await host.setWorkspace(pair.id, workspace, true)
     expect(agentHostCatalogSchema.parse(await call('/device/agent-host/sessions')).sessions).toEqual([expect.objectContaining({ ...target, canSend: true })])
+    operations.lock()
+    const upgradeStatus = new Promise<number | undefined>((resolve, reject) => {
+      const query = Buffer.from(JSON.stringify(target)).toString('base64url')
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/device/agent-host?target=${query}`, {
+        headers: { Authorization: `Bearer ${pair.token}` }, handshakeTimeout: 3000,
+      })
+      socket.once('error', reject)
+      socket.once('open', () => { socket.close(); reject(new Error('The gateway accepted work during update preparation.')) })
+      socket.once('unexpected-response', (_request, response) => {
+        response.resume()
+        resolve(response.statusCode)
+        socket.terminate()
+      })
+    })
+    await expect(upgradeStatus).resolves.toBe(503)
+    expect(nativeConnection).not.toHaveBeenCalled()
+    expect(host.hasActiveWork).toBe(false)
+    operations.unlock()
 
     await host.close()
     host = createHost()

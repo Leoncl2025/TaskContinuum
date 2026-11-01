@@ -43,6 +43,8 @@ export class FileTransferService {
     this.cleanupTimer.unref()
   }
 
+  get hasActiveWork(): boolean { return this.active.size > 0 || this.writes.size > 0 || this.readers.size > 0 || this.busy.size > 0 }
+
   forWorkspace(root: string): FileTransferApi {
     const canonical = async () => {
       const value = await realpath(root)

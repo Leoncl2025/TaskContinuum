@@ -4,6 +4,7 @@ import { z } from 'zod'
 import type { WorkspaceGitSyncStatus } from '../../shared/gitSync'
 import type { RemoteSettingChanges } from './settingsFile'
 import { machineAliasChangeSchema } from './machineAlias'
+import { handleDesktopOperation } from '../desktopOperations'
 
 export interface GitSyncActions {
   status(root: string): Promise<WorkspaceGitSyncStatus>
@@ -17,7 +18,7 @@ export interface GitSyncActions {
 
 export function registerGitSyncBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>, service: GitSyncActions): void {
   function handle(name: string, action: (window: BrowserWindow, value: unknown) => Promise<unknown>) {
-    ipcMain.handle(`remote-vscode:git-${name}`, (event, value: unknown) => action(requireWindow(event), value))
+    handleDesktopOperation(ipcMain, `remote-vscode:git-${name}`, (event, value: unknown) => action(requireWindow(event), value))
   }
   async function unchanged(root: string) {
     if (await currentRoot() !== root) throw new Error('The active workspace changed. Repeat this action in the intended workspace.')

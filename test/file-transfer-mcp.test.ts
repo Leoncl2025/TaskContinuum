@@ -19,6 +19,7 @@ import { defaultDataDirectory, readEndpoint } from '../src/main/fileTransferMcp/
 import type { LocalFileEndpoint } from '../src/main/fileTransferMcp/descriptor'
 import { MAX_BRIDGE_REQUEST_BYTES, MAX_BRIDGE_REQUESTS } from '../src/main/fileTransferMcp/protocol'
 import { createFileTransferMcpServer } from '../src/main/fileTransferMcp/server'
+import { DesktopOperations } from '../src/main/desktopOperations'
 
 const execute = promisify(execFile)
 const cleanups: (() => Promise<void>)[] = []
@@ -63,7 +64,7 @@ async function directory() {
   return root
 }
 
-async function fixture() {
+async function fixture(operations?: DesktopOperations) {
   const root = await directory()
   const data = join(root, 'profile')
   const workspace = join(root, 'workspace')
@@ -72,7 +73,7 @@ async function fixture() {
     if (selected !== workspace) throw new FileTransferError('ACCESS_DENIED', `private path ${root}`)
     return api
   })
-  const bridge = await startFileTransferMcpBridge(data, resolveApi)
+  const bridge = await startFileTransferMcpBridge(data, resolveApi, operations)
   cleanups.push(() => bridge.close())
   const endpoint = await readEndpoint(data)
   return { root, data, workspace, api, status, devices, text, bridge, endpoint, resolveApi }
@@ -115,6 +116,27 @@ function post(endpoint: LocalFileEndpoint, value: unknown, options: {
 }
 
 describe('authenticated local file transfer bridge', () => {
+  it('holds the update restart barrier until an admitted MCP file request finishes', async () => {
+    const operations = new DesktopOperations()
+    const { api, data, workspace, devices } = await fixture(operations)
+    let finish!: () => void
+    const pending = new Promise<void>((resolve) => { finish = resolve })
+    api.devices.mockImplementationOnce(async () => {
+      await pending
+      return devices
+    })
+    const request = createBridgeApi(data, workspace).devices()
+    try {
+      await vi.waitFor(() => expect(api.devices).toHaveBeenCalledOnce())
+      expect(() => operations.lock()).toThrow('current workspace')
+    } finally { finish() }
+    await expect(request).resolves.toEqual(devices)
+    operations.lock()
+    await expect(createBridgeApi(data, workspace).devices()).rejects.toMatchObject({ code: 'BUSY' })
+    expect(api.devices).toHaveBeenCalledOnce()
+    operations.unlock()
+  })
+
   it('publishes an owner-private descriptor, exposes only the loopback route and removes its descriptor on close', async () => {
     const { data, endpoint, workspace, bridge, api } = await fixture()
     expect(localFileEndpointSchema.parse(endpoint)).toEqual(endpoint)

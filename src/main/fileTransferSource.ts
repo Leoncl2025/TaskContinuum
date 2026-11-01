@@ -154,6 +154,8 @@ export class FileTransferSource {
     this.expiryTimer.unref()
   }
 
+  get hasActiveWork(): boolean { return this.reservations.size > 0 || this.busyIds.size > 0 || this.operations.size > 0 }
+
   private async checkpoint(authorize: () => Promise<void>, signal: AbortSignal): Promise<void> {
     if (signal.aborted) throw failure('CANCELLED')
     let abort!: () => void

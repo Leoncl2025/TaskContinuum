@@ -38,7 +38,20 @@ test('runs the packaged desktop and standalone task CLI without the source check
       await expect(page.locator('.workbench')).toHaveAttribute('aria-busy', 'false')
     }
     await launch()
+    await page!.evaluate(() => window.updates!.setAutoCheck(false))
     expect(await app!.evaluate(({ app }) => app.isPackaged)).toBe(true)
+    expect(await app!.evaluate(({ app }) => {
+      const module = process.getBuiltinModule('module')
+      const path = process.getBuiltinModule('path')
+      const load = module.createRequire(path.join(app.getAppPath(), 'package.json'))
+      const updater: typeof import('electron-updater') = load('electron-updater')
+      return typeof updater.NsisUpdater === 'function'
+    })).toBe(true)
+    expect(await page!.evaluate(() => window.updates!.getState())).toMatchObject({
+      currentVersion: manifest.version, distribution: 'archive', canInstall: false, autoCheck: false,
+    })
+    await execute(executablePath, [], { cwd: dirname(executablePath), env: environment, timeout: 15_000 })
+    expect(await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).toBe(1)
     expect(await app!.evaluate(({ nativeImage }) => {
       const path = process.getBuiltinModule('path')
       const image = nativeImage.createFromPath(path.join(process.resourcesPath, 'icon.png'))
@@ -68,6 +81,7 @@ test('runs the packaged desktop and standalone task CLI without the source check
     app = undefined
     delete environment.TASKCONTINUUM_WORKSPACE
     await launch()
+    expect(await page!.evaluate(() => window.updates!.getState())).toMatchObject({ autoCheck: false, canInstall: false })
     await expect(page!.getByRole('button', { name: 'T-0001 Packaged smoke task', exact: true })).toBeVisible()
     const checked = await execute(process.execPath, [cliPath, 'validate', '--root', workspace], { cwd: root, timeout: 30_000 })
     expect(checked.stdout).toContain('0 error(s)')

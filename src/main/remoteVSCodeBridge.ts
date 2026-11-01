@@ -18,6 +18,7 @@ import { FileTransferService } from './fileTransferService'
 import { startFileTransferMcpBridge } from './fileTransferMcpBridge'
 import { FileTransferBudget } from './fileTransferBudget'
 import { ChatLinkService } from './chatLinkService'
+import { desktopOperations, handleDesktopOperation } from './desktopOperations'
 
 export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>,
   onStatusChanged: () => void = () => {}, onBindingsChanged: () => void = () => {}) {
@@ -28,7 +29,7 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
   const keys = new DeviceSshKeys(app.getPath('userData'), protector)
   const tunnels = new ManagedDevTunnels(app.getPath('userData'), keys)
   const clientIdentity = () => readClientIdentity(app.getPath('userData'))
-  const host = new VSCodeDeviceHost(app.getPath('userData'), protector)
+  const host = new VSCodeDeviceHost(app.getPath('userData'), protector, desktopOperations)
   const fileBudget = new FileTransferBudget()
   const fileSource = new FileTransferSource(app.getPath('userData'), app.getVersion())
   host.setFileTransferSource(fileSource, fileBudget)
@@ -39,7 +40,7 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     },
     (root, owner, signal): Promise<void> => gitSync.whenOwnerConnected(root, owner, signal))
   const files = new FileTransferService(app.getPath('userData'), fileSource, devices, fileBudget)
-  const filesReady = startFileTransferMcpBridge(app.getPath('userData'), (root) => files.forWorkspace(root))
+  const filesReady = startFileTransferMcpBridge(app.getPath('userData'), (root) => files.forWorkspace(root), desktopOperations)
   void filesReady.catch(() => console.error('The local file transfer MCP bridge could not start.'))
   const discovery = !app.isPackaged && process.env.TASKCONTINUUM_AGENT_HOST_DISCOVERY ? [process.env.TASKCONTINUUM_AGENT_HOST_DISCOVERY]
     : ['Code', 'Code - Insiders'].map((name) => join(app.getPath('appData'), name, 'agent-host', 'local-endpoint', 'entries'))
@@ -88,7 +89,7 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
   void recovery.catch((error: unknown) => console.error('Automatic workspace recovery failed:', error instanceof Error ? error.message : 'Invalid saved state'))
   const id = (value: unknown) => z.uuid().parse(value)
   function handle(channel: string, action: (window: BrowserWindow, ...values: unknown[]) => unknown): void {
-    ipcMain.handle(`remote-vscode:${channel}`, (event, ...values: unknown[]) => action(requireWindow(event), ...values))
+    handleDesktopOperation(ipcMain, `remote-vscode:${channel}`, (event, ...values: unknown[]) => action(requireWindow(event), ...values))
   }
   async function unchanged(root: string): Promise<void> {
     if (await currentRoot() !== root) throw new Error('The task workspace changed. Reopen the remote connection action; no replacement workspace was used.')
@@ -125,7 +126,9 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     if (confirmation.response === 1) { await unchanged(root); await tunnels.stop() }
   })
   let closing: Promise<void> | undefined
-  return { agentHosts, gitSync, filesReady, chatLinks, close: () => closing ??= (async () => {
+  return { agentHosts, gitSync, filesReady, chatLinks,
+    hasActiveWork: () => agentHosts.hasActiveWork || host.hasActiveWork || files.hasActiveWork || fileSource.hasActiveWork,
+    close: () => closing ??= (async () => {
     try { await (await filesReady).close() } catch { console.error('Closing after file transfer MCP bridge failure.') }
     await files.close()
     await fileSource.close()
