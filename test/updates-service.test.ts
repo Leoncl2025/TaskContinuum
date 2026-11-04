@@ -27,7 +27,7 @@ async function fixture(overrides: Partial<UpdateServiceOptions> = {}, autoCheck 
 afterEach(() => { for (const service of services.splice(0)) service.close(); vi.useRealTimers() })
 
 describe('update service', () => {
-  it('downloads a newer signed update automatically without installing or prompting twice', async () => {
+  it('downloads a newer update automatically without installing or prompting twice', async () => {
     const { service, installer, fetchRelease } = await fixture({}, true)
     const phases: string[] = []
     service.listen(state => phases.push(state.phase))
@@ -68,7 +68,7 @@ describe('update service', () => {
     } finally { errorLog.mockRestore() }
   })
 
-  it('never downloads an unsigned or archive installation even with automatic updates enabled', async () => {
+  it('never downloads an archive installation even with automatic updates enabled', async () => {
     const { service, installer } = await fixture({ capability: { distribution: 'archive', canInstall: false, publisherNames: [], reason: 'Manual only' } }, true)
     expect((await service.check()).phase).toBe('available')
     expect(installer.download).not.toHaveBeenCalled()

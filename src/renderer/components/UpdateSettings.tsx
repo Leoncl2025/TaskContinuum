@@ -188,8 +188,11 @@ export function UpdateSettings({ updates }: { updates: UpdatesController }) {
         <p className="update-version">Current version: <strong>{state.currentVersion}</strong><span className="muted">{distribution}</span></p>
         {!canInstall && <p className="muted">Manual updates only. {state.reason ?? 'This distribution cannot install updates in the app. Download the appropriate build from the release page.'}</p>}
         {canInstall && state.reason && <p className="muted">{state.reason}</p>}
-        <label className="update-auto-check"><input type="checkbox" checked={state.autoCheck} disabled={disabled} onChange={(event) => { void updates.setAutoCheck(event.target.checked) }} />Automatically check and download updates</label>
-        <p className="muted">Signed installer builds download updates in the background. Restart only when you choose; ordinary quitting never installs an update.</p>
+        <label className="update-auto-check"><input type="checkbox" checked={state.autoCheck} disabled={disabled} onChange={(event) => { void updates.setAutoCheck(event.target.checked) }} />{canInstall ? 'Automatically check and download updates' : 'Automatically check for updates'}</label>
+        <p className="muted">{canInstall
+          ? 'Updates download in the background. Restart only when you choose; ordinary quitting never installs an update.'
+          : state.distribution === 'development' ? 'Development builds check for updates only when you request it.'
+            : 'Automatic checks notify you. Use the Windows installer to enable in-app downloads and installation.'}</p>
       </>}
       <p role="status" aria-live="polite">{loading ? 'Loading update settings...' : statusText(state)}</p>
       {state?.phase === 'downloading' && <div className="update-progress">

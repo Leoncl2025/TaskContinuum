@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -8,6 +8,15 @@ import type { ElectronApplication, Page } from '@playwright/test'
 import { makeConfig } from '../test/taskDocuments/fixtures'
 
 const execute = promisify(execFile)
+
+function isolatedEnvironment(profile: string): Record<string, string> {
+  const environment = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined))
+  for (const key of Object.keys(environment)) {
+    if (/^(?:ELECTRON_|TASKCONTINUUM_)/.test(key)) delete environment[key]
+  }
+  environment.TASKCONTINUUM_DATA_DIR = profile
+  return environment
+}
 
 test('runs the packaged desktop and standalone task CLI without the source checkout', async () => {
   test.setTimeout(90_000)
@@ -23,11 +32,7 @@ test('runs the packaged desktop and standalone task CLI without the source check
     await mkdir(join(workspace, '.agentdesk'), { recursive: true })
     await mkdir(join(workspace, 'tasks'))
     await writeFile(join(workspace, '.agentdesk', 'config.json'), JSON.stringify(makeConfig({ workspace: 'Packaged release workspace' })))
-    const environment = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined))
-    for (const key of Object.keys(environment)) {
-      if (/^(?:ELECTRON_|TASKCONTINUUM_)/.test(key)) delete environment[key]
-    }
-    environment.TASKCONTINUUM_DATA_DIR = join(root, 'profile')
+    const environment = isolatedEnvironment(join(root, 'profile'))
     environment.TASKCONTINUUM_WORKSPACE = workspace
     const launch = async () => {
       app = await electron.launch({ executablePath, cwd: dirname(executablePath), env: environment })
@@ -50,6 +55,7 @@ test('runs the packaged desktop and standalone task CLI without the source check
     expect(await page!.evaluate(() => window.updates!.getState())).toMatchObject({
       currentVersion: manifest.version, distribution: 'archive', canInstall: false, autoCheck: false,
     })
+
     await execute(executablePath, [], { cwd: dirname(executablePath), env: environment, timeout: 15_000 })
     expect(await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).toBe(1)
     expect(await app!.evaluate(({ nativeImage }) => {
@@ -90,5 +96,53 @@ test('runs the packaged desktop and standalone task CLI without the source check
   } finally {
     await app?.close()
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('enables installed NSIS updates without a Windows publisher policy', async () => {
+  test.setTimeout(120_000)
+  const source = resolve(process.env.TASKCONTINUUM_PACKAGED_EXECUTABLE ?? join('dist', 'win-unpacked', 'TaskContinuum.exe'))
+  const root = await mkdtemp(join(tmpdir(), 'taskcontinuum-unsigned-installed-'))
+  const application = join(root, 'application')
+  const errors: string[] = []
+  let app: ElectronApplication | undefined
+  try {
+    await cp(dirname(source), application, { recursive: true })
+    // Model installer metadata only in this disposable copy, not a real installation.
+    await writeFile(join(application, 'taskcontinuum-install.json'), JSON.stringify({
+      schemaVersion: 1, distribution: 'nsis', appId: 'com.leoncl2025.taskcontinuum',
+    }), { flag: 'wx' })
+    await rm(join(application, 'resources', 'update-policy.json'), { force: true })
+    const executablePath = join(application, 'TaskContinuum.exe')
+    const environment = isolatedEnvironment(join(root, 'profile'))
+    const launch = async () => {
+      app = await electron.launch({ executablePath, cwd: application, env: environment })
+      const page = await app.firstWindow()
+      page.on('pageerror', (error) => errors.push(error.message))
+      page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()) })
+      await expect(page.locator('.workbench')).toHaveAttribute('aria-busy', 'false')
+      return page
+    }
+    let page = await launch()
+    expect(await page.evaluate(() => window.updates!.getState())).toMatchObject({
+      distribution: 'nsis', canInstall: true, autoCheck: true,
+    })
+    await page.evaluate(() => window.updates!.setAutoCheck(false))
+    await page.getByRole('button', { name: 'About and updates', exact: true }).click()
+    await expect(page.getByText('Windows installer (NSIS)', { exact: true })).toBeVisible()
+    await expect(page.getByRole('checkbox', { name: 'Automatically check and download updates', exact: true })).toBeEnabled()
+    await expect(page.getByText(/Manual updates only/)).toHaveCount(0)
+    await expect(page.getByText(/Updates download in the background/)).toBeVisible()
+    await page.screenshot({ path: test.info().outputPath('certificate-free-installed-updates.png') })
+    await app!.close()
+    app = undefined
+    page = await launch()
+    expect(await page.evaluate(() => window.updates!.getState())).toMatchObject({
+      distribution: 'nsis', canInstall: true, autoCheck: false,
+    })
+    expect(errors).toEqual([])
+  } finally {
+    await app?.close()
+    await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
   }
 })

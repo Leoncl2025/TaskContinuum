@@ -21,7 +21,7 @@ function fixture(values: { marker?: string; policy?: string } = { marker, policy
 }
 
 describe('distribution capability', () => {
-  it('requires marker, valid nonempty policy, and verified installed executable', async () => {
+  it('enforces installed-executable signing when a publisher policy is configured', async () => {
     const options = fixture()
     expect(await detectDistribution(options)).toEqual({ distribution: 'nsis', canInstall: true, publisherNames: ['Task Continuum Publisher'] })
     expect(options.verifySignature).toHaveBeenCalledWith(options.execPath, ['Task Continuum Publisher'])
@@ -31,8 +31,19 @@ describe('distribution capability', () => {
     expect(await detectDistribution(options)).toMatchObject({ distribution: 'archive', canInstall: false })
     expect(options.verifySignature).not.toHaveBeenCalled()
   })
-  it('makes unsigned NSIS installations manual-only', async () => {
-    expect(await detectDistribution(fixture({ marker }))).toMatchObject({ distribution: 'nsis', canInstall: false, reason: expect.stringContaining('no signed update policy') })
+  it('enables unsigned NSIS installations without a Windows publisher policy', async () => {
+    const options = fixture({ marker })
+    expect(await detectDistribution(options)).toEqual({ distribution: 'nsis', canInstall: true, publisherNames: [] })
+    expect(options.verifySignature).not.toHaveBeenCalled()
+  })
+  it('does not treat an unreadable publisher policy as an absent policy', async () => {
+    const options = fixture()
+    options.readText.mockImplementation(async (path) => {
+      if (path.endsWith('taskcontinuum-install.json')) return marker
+      throw Object.assign(new Error('Permission denied'), { code: 'EACCES' })
+    })
+    expect(await detectDistribution(options)).toMatchObject({ canInstall: false, reason: expect.stringContaining('Invalid signed update policy') })
+    expect(options.verifySignature).not.toHaveBeenCalled()
   })
   it.each(['{}', '{', JSON.stringify({ schemaVersion: 2, distribution: 'nsis', appId: 'com.leoncl2025.taskcontinuum' }), JSON.stringify({ schemaVersion: 1, distribution: 'nsis', appId: 'other' })])('rejects invalid marker %s', async value => {
     expect(await detectDistribution(fixture({ marker: value, policy }))).toMatchObject({ canInstall: false, reason: expect.stringContaining('Invalid installation marker') })

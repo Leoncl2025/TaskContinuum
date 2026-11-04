@@ -43,7 +43,7 @@ async function verifyChecksum(path: string, expected: string): Promise<void> {
 }
 
 export function createElectronInstaller(publishers: readonly string[], verifySignature: SignatureVerifier = verifyWindowsSignature): UpdateInstaller {
-  if (!publishers.length || publishers.some(name => !name.trim())) throw new Error('Signed updates require a nonempty publisher list.')
+  if (publishers.some(name => !name.trim() || name !== name.trim())) throw new Error('Configured update publishers must be nonempty and have no surrounding whitespace.')
   const trustedPublishers = [...publishers]
   const updater = new NsisUpdater({
     provider: 'github', owner: 'Leoncl2025', repo: 'TaskContinuum', private: false,
@@ -55,7 +55,7 @@ export function createElectronInstaller(publishers: readonly string[], verifySig
   updater.disableWebInstaller = true
   updater.disableDifferentialDownload = true
   updater.verifyUpdateCodeSignature = async (_names, path) => {
-    await verifySignature(path, trustedPublishers)
+    if (trustedPublishers.length) await verifySignature(path, trustedPublishers)
     return null
   }
   let ready: { path: string; sha512: string } | undefined
@@ -85,10 +85,9 @@ export function createElectronInstaller(publishers: readonly string[], verifySig
       try {
         const paths = await updater.downloadUpdate(result.cancellationToken)
         if (paths.length !== 1) throw new Error('Expected exactly one downloaded installer.')
-        // Cached installers bypass the upstream signature hook, so verify every
-        // returned file ourselves before exposing an installable update.
+        // Cached files still need their checksum and any configured publisher checked.
         await verifyChecksum(paths[0], metadata.sha512)
-        await verifySignature(paths[0], trustedPublishers)
+        if (trustedPublishers.length) await verifySignature(paths[0], trustedPublishers)
         if (closed) throw new Error('Update service is closed.')
         if (failure !== initialFailure) throw new Error('Installer reported an error during download.')
         ready = { path: paths[0], sha512: metadata.sha512 }
@@ -102,7 +101,7 @@ export function createElectronInstaller(publishers: readonly string[], verifySig
       ready = undefined
       if (closed || !selected) throw new Error('No verified installer is ready.')
       await verifyChecksum(selected.path, selected.sha512)
-      await verifySignature(selected.path, trustedPublishers)
+      if (trustedPublishers.length) await verifySignature(selected.path, trustedPublishers)
       if (closed) throw new Error('Update service is closed.')
       // Upstream quitAndInstall schedules quit before its asynchronous spawn can
       // fail. Wait for a real launch so failed launches reach restart recovery.

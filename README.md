@@ -57,13 +57,14 @@ Extract the entire ZIP before launching and verify the published SHA-256
 checksums. Electron is bundled, so launching requires neither Node.js nor npm.
 Repository operations require Git.
 
-Signed Windows installer releases support automatic background checks and
+Windows installer releases support automatic background checks and
 downloads, followed by one-click **Restart and update**. Open **About and updates**
 from the titlebar to check manually or turn automatic updates off. Ordinary
-quitting never installs an update. ZIP/development copies and unsigned builds
-remain manual-only. The v0.2.1 download is unsigned and requires manual
-installation; automatic installation is not enabled by this release.
-Versions 0.1.1 and earlier also require a manual upgrade.
+quitting never installs an update. Windows code signing is optional; the fixed
+GitHub source, release metadata and installer checksums are still verified.
+ZIP/development copies remain manual-only. Already released v0.2.0/v0.2.1 clients
+need one manual upgrade to v0.2.2 or later; older clients without
+an updater also require that initial manual upgrade.
 See [desktop updates and release setup](docs/updates.md) for signing requirements,
 required GitHub assets and session/draft protection.
 

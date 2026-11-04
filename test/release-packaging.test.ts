@@ -13,7 +13,7 @@ const config = { forceCodeSigning: true, win: { signtoolOptions: { publisherName
 afterEach(() => vi.unstubAllEnvs())
 
 describe('intentional signed update capability', () => {
-  it('keeps all normal unsigned builds manual-only', () => {
+  it('does not impose a Windows publisher policy on normal unsigned builds', () => {
     expect(signedPolicy({}, {})).toBeNull()
     expect(signedPolicy({ TASKCONTINUUM_UPDATE_PUBLISHER: publisher }, config)).toBeNull()
     expect(signedPolicy({ TASKCONTINUUM_SIGNED_RELEASE: 'true' }, config)).toBeNull()

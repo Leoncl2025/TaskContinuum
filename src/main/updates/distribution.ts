@@ -44,7 +44,8 @@ export async function detectDistribution(options: DistributionOptions): Promise<
   try {
     policy = JSON.parse(await readText(join(options.resourcesPath, 'update-policy.json')))
   } catch (error) {
-    return result('nsis', missing(error) ? 'This installation has no signed update policy. Update manually.' : 'Invalid signed update policy. Update manually.')
+    if (missing(error)) return { distribution: 'nsis', canInstall: true, publisherNames: [] }
+    return result('nsis', 'Invalid signed update policy. Update manually.')
   }
   if (!policy || typeof policy !== 'object' || !('schemaVersion' in policy) || policy.schemaVersion !== 1 ||
       !('publisherNames' in policy) || !Array.isArray(policy.publisherNames) || !policy.publisherNames.length ||

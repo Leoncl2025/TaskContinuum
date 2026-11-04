@@ -1,10 +1,11 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash, randomUUID } from 'node:crypto'
-import { writeFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fetchLatestRelease, isNewer, LATEST_RELEASE_API, parseRelease, stableVersion } from '../src/main/updates/release'
 import { createElectronInstaller, validateInstallerMetadata } from '../src/main/updates/updater'
+import { createDesktopUpdateService } from '../src/main/updates'
 
 const mock = vi.hoisted(() => {
   const listeners = new Map<string, Set<(value: never) => void>>()
@@ -40,6 +41,7 @@ const payload = Buffer.from('installer bytes for validation')
 const sha512 = createHash('sha512').update(payload).digest('base64')
 const metadata = () => ({ version: '0.2.0', tag: 'v0.2.0', files: [{ url: release.installerName, sha512 }] })
 const paths: string[] = []
+const directories: string[] = []
 async function downloadedFile(bytes = payload) {
   const path = join(process.cwd(), `.updates-installer-test-${randomUUID()}.exe`)
   paths.push(path)
@@ -57,6 +59,7 @@ beforeEach(() => {
 afterEach(async () => {
   vi.unstubAllGlobals()
   await Promise.all(paths.splice(0).map(path => rm(path, { force: true })))
+  await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true })))
 })
 
 describe('stable GitHub releases', () => {
@@ -115,8 +118,48 @@ describe('real Electron installer adapter', () => {
     })
     expect(mock.updater.checkForUpdates).not.toHaveBeenCalled()
     expect(mock.updater.quitAndInstall).not.toHaveBeenCalled()
-    expect(() => createElectronInstaller([])).toThrow()
+    expect(() => createElectronInstaller([])).not.toThrow()
     expect(() => createElectronInstaller([''])).toThrow()
+  })
+  it('downloads and installs unsigned packages without invoking Windows signature verification', async () => {
+    const path = await downloadedFile()
+    mock.updater.downloadUpdate.mockResolvedValue([path])
+    const verify = vi.fn(async () => { throw new Error('Windows signing must not be required for this installation.') })
+    const installer = createElectronInstaller([], verify)
+    try {
+      await expect(mock.updater.verifyUpdateCodeSignature!([], path)).resolves.toBeNull()
+      await installer.download(release, () => {})
+      await installer.install()
+      expect(verify).not.toHaveBeenCalled()
+      expect(mock.launch).toHaveBeenCalledExactlyOnceWith(path)
+      expect(mock.quit).toHaveBeenCalledOnce()
+    } finally { installer.close() }
+  })
+  it('wires a real unsigned NSIS distribution through automatic download and explicit restart', async () => {
+    const directory = await mkdtemp(join(process.cwd(), '.updates-unsigned-nsis-'))
+    directories.push(directory)
+    await mkdir(join(directory, 'resources'))
+    await writeFile(join(directory, 'taskcontinuum-install.json'), JSON.stringify({
+      schemaVersion: 1, distribution: 'nsis', appId: 'com.leoncl2025.taskcontinuum',
+    }))
+    const path = await downloadedFile()
+    mock.updater.downloadUpdate.mockResolvedValue([path])
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => JSON.stringify(githubRelease()) })))
+    const prepareInstall = vi.fn(async (install: () => Promise<void>) => { await install() })
+    const service = await createDesktopUpdateService({
+      currentVersion: '0.1.1', isPackaged: true, platform: 'win32', arch: 'x64',
+      execPath: join(directory, 'TaskContinuum.exe'), resourcesPath: join(directory, 'resources'),
+      userData: join(directory, 'profile'), openExternal: async () => {}, install: prepareInstall,
+    })
+    try {
+      expect(service.state()).toMatchObject({ distribution: 'nsis', canInstall: true, autoCheck: true })
+      expect(await service.check()).toMatchObject({ phase: 'downloaded', canInstall: true, progress: 100 })
+      expect(mock.launch).not.toHaveBeenCalled()
+      await service.install()
+      expect(prepareInstall).toHaveBeenCalledOnce()
+      expect(mock.launch).toHaveBeenCalledExactlyOnceWith(path)
+      expect(mock.quit).toHaveBeenCalledOnce()
+    } finally { service.close() }
   })
   it.each([
     { version: '0.3.0' }, { version: '0.1.0' }, { version: '0.2.0-beta.1' }, { tag: '0.2.0' },
@@ -150,11 +193,11 @@ describe('real Electron installer adapter', () => {
     await expect(installer.install()).rejects.toThrow()
     installer.close()
   })
-  it('rejects checksum corruption before signature and retries successfully', async () => {
+  it.each([{ publishers: [] }, { publishers: ['Publisher'] }])('rejects checksum corruption and retries with publishers $publishers', async ({ publishers }) => {
     const path = await downloadedFile(Buffer.from('corrupted'))
     mock.updater.downloadUpdate.mockResolvedValue([path])
     const verify = vi.fn(async () => {})
-    const installer = createElectronInstaller(['Publisher'], verify)
+    const installer = createElectronInstaller(publishers, verify)
     await expect(installer.download(release, () => {})).rejects.toThrow('checksum')
     expect(verify).not.toHaveBeenCalled()
     await expect(installer.install()).rejects.toThrow()
@@ -206,10 +249,10 @@ describe('real Electron installer adapter', () => {
     expect(mock.quit).toHaveBeenCalledOnce()
     installer.close()
   })
-  it('rejects tampering between download and explicit installation', async () => {
+  it.each([{ publishers: [] }, { publishers: ['Publisher'] }])('rejects pre-install tampering with publishers $publishers', async ({ publishers }) => {
     const path = await downloadedFile()
     mock.updater.downloadUpdate.mockResolvedValue([path])
-    const installer = createElectronInstaller(['Publisher'], async () => {})
+    const installer = createElectronInstaller(publishers, async () => {})
     await installer.download(release, () => {})
     await writeFile(path, 'changed')
     await expect(installer.install()).rejects.toThrow('checksum')

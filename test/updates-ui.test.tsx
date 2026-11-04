@@ -108,6 +108,8 @@ it('shows manual-only distribution, fixed-source release action, and safe plain 
   expect(screen.getByText('0.1.1')).toBeInTheDocument()
   expect(screen.getByText(/Portable builds require a manual download/)).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: 'Download update' })).not.toBeInTheDocument()
+  expect(screen.getByRole('checkbox', { name: 'Automatically check for updates' })).toBeChecked()
+  expect(screen.queryByRole('checkbox', { name: 'Automatically check and download updates' })).not.toBeInTheDocument()
   expect(screen.getByText(/<script>unsafe\(\)<\/script>/)).toHaveTextContent('[link](javascript:unsafe())')
   expect(document.querySelector('script')).toBeNull()
   expect(screen.queryByRole('link')).not.toBeInTheDocument()
@@ -115,6 +117,16 @@ it('shows manual-only distribution, fixed-source release action, and safe plain 
   await waitFor(() => expect(f.api.openRelease).toHaveBeenCalledWith())
   expect(f.api.download).not.toHaveBeenCalled()
   expect(f.api.install).not.toHaveBeenCalled()
+})
+
+it('offers in-app downloads for eligible NSIS installs without requiring Windows signing', async () => {
+  const f = fixture({ phase: 'available', release })
+  render(<Harness api={f.api} />)
+  expect(await screen.findByRole('button', { name: 'Download update' })).toBeEnabled()
+  expect(screen.getByRole('checkbox', { name: 'Automatically check and download updates' })).toBeChecked()
+  expect(screen.queryByText(/Manual updates only/)).not.toBeInTheDocument()
+  expect(screen.queryByText(/Signed installer builds/)).not.toBeInTheDocument()
+  expect(screen.getByText(/Updates download in the background/)).toBeInTheDocument()
 })
 
 it.each(['development', 'unsupported', 'nsis'] as const)('does not offer installation for ineligible %s builds', async (distribution) => {
