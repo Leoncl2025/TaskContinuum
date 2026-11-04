@@ -45,6 +45,9 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
   resetting expanded tool/reasoning state. A chat following the latest reply stays
   at the bottom across full-screen and panel-size changes; browsing earlier
   messages does not jump back to the latest reply.
+  Window resizing and zoom update pane geometry independently of task/chat
+  content. Draft edits and viewport-only updates reuse the loaded transcript
+  instead of traversing history and revalidating its screenshots.
 
 ## Download
 

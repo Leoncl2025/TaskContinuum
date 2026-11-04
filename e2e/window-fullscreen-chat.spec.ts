@@ -5,7 +5,7 @@ import { _electron as electron, expect, test } from '@playwright/test'
 import type { ElectronApplication } from '@playwright/test'
 
 test('keeps a long conversation responsive through fullscreen and resize without losing the draft or connection', async () => {
-  test.setTimeout(120000)
+  test.setTimeout(180000)
   const root = await mkdtemp(join(tmpdir(), 'continuum-fullscreen-chat-'))
   const workspace = join(root, 'workspace')
   const discovery = join(root, 'discovery')
@@ -33,9 +33,14 @@ test('keeps a long conversation responsive through fullscreen and resize without
       const target = { owner, sessionId: 'copilotcli:/fullscreen', chatId: 'ahp-chat:/fullscreen' }
       const table = '| File | Result | Notes |\n| --- | --- | --- |\n'
         + Array.from({ length: 80 }, (_, index) => `| source-${index}.ts | Passed | The original result remains available when the window changes size. |`).join('\n')
+      const screenshot = Buffer.concat([
+        Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64'),
+        Buffer.alloc(1024 * 1024),
+      ]).toString('base64')
       const turns = Array.from({ length: count }, (_, index) => ({
         id: `turn-${index}`, state: 'complete',
-        message: { text: `Original question ${index}`, origin: { kind: 'user' } },
+        message: { text: `Original question ${index}`, origin: { kind: 'user' },
+          ...(index < 12 ? { attachments: [{ type: 'embeddedResource', displayKind: 'image', contentType: 'image/png', data: screenshot, label: `Screenshot ${index}.png` }] } : {}) },
         responseParts: [
           { kind: 'reasoning', id: `reasoning-${index}`, content: `Reasoning for original question ${index}` },
           { kind: 'markdown', id: `answer-${index}`, content: `## Answer ${index}\n\n${table}` },
@@ -102,6 +107,32 @@ test('keeps a long conversation responsive through fullscreen and resize without
       measurements.push({ fullScreen, elapsedMs: performance.now() - start,
         layoutMs: (after.LayoutDuration - before.LayoutDuration) * 1000, scriptMs: (after.ScriptDuration - before.ScriptDuration) * 1000 })
     }
+    const viewportMeasurements: { kind: 'resize' | 'zoom'; value: number; elapsedMs: number; layoutMs: number; scriptMs: number }[] = []
+    const measureViewport = async (kind: 'resize' | 'zoom', value: number) => {
+      const before = await metrics()
+      const started = performance.now()
+      await app!.evaluate(({ BrowserWindow }, { kind, value }) => {
+        const window = BrowserWindow.getAllWindows()[0]
+        if (kind === 'resize') window.setSize(value, 800)
+        else window.webContents.setZoomFactor(value)
+      }, { kind, value })
+      const expectedWidth = kind === 'resize' ? value : Math.round(1440 / value)
+      await page.waitForFunction((width) => Math.abs(innerWidth - width) <= 1, expectedWidth)
+      await page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))))
+      const after = await metrics()
+      viewportMeasurements.push({ kind, value, elapsedMs: performance.now() - started,
+        layoutMs: (after.LayoutDuration - before.LayoutDuration) * 1000, scriptMs: (after.ScriptDuration - before.ScriptDuration) * 1000 })
+    }
+    for (const width of [1441, 1442, 1443, 1444, 1500, 1300, 1250, 1450, 1440]) await measureViewport('resize', width)
+    for (const zoom of [1.1, 1.25, 1.5, 1.25, 1.1, 1]) await measureViewport('zoom', zoom)
+    console.log('Resize and zoom timings:', JSON.stringify(viewportMeasurements))
+    await writeFile(test.info().outputPath('resize-zoom-metrics.json'), JSON.stringify(viewportMeasurements, null, 2))
+    for (const measurement of viewportMeasurements) {
+      expect(measurement.scriptMs).toBeLessThan(measurement.kind === 'resize' ? 25 : 60)
+      expect(measurement.layoutMs).toBeLessThan(100)
+    }
+    await expect(draft).toHaveValue('Keep this draft through fullscreen and resize')
+    await expect(panel.locator('[data-turn-id="active-turn"]')).toBeInViewport()
     for (const width of [1100, 960, 1440]) {
       await app.evaluate(({ BrowserWindow }, width) => BrowserWindow.getAllWindows()[0].setSize(width, 800), width)
       await page.waitForFunction((width) => window.innerWidth === width, width)
@@ -116,6 +147,13 @@ test('keeps a long conversation responsive through fullscreen and resize without
     await log.locator('[data-turn-id="turn-90"]').scrollIntoViewIfNeeded()
     await previous.scrollIntoViewIfNeeded()
     await expect(previous.locator('details')).toHaveAttribute('open')
+    for (const zoom of [1.25, 1]) {
+      await app.evaluate(({ BrowserWindow }, zoom) => BrowserWindow.getAllWindows()[0].webContents.setZoomFactor(zoom), zoom)
+      await page.waitForFunction((width) => Math.abs(innerWidth - width) <= 1, Math.round(1440 / zoom))
+      await expect(previous).toBeInViewport()
+      await expect(previous.getByText('Reasoning for original question 0', { exact: true })).toBeVisible()
+      await expect(panel.locator('[data-turn-id="active-turn"]')).not.toBeInViewport()
+    }
     await toolbar.getByRole('button', { name: 'Enter full screen', exact: true }).click()
     await page.waitForFunction(() => document.querySelector('.window-controls button[aria-pressed]')?.getAttribute('aria-pressed') === 'true')
     await expect(previous).toBeInViewport()

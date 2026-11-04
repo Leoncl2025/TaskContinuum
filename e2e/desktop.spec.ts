@@ -1,4 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { _electron as electron, expect, test } from '@playwright/test'
 import type { ElectronApplication, Page } from '@playwright/test'
@@ -8,6 +10,7 @@ let app: ElectronApplication
 let page: Page
 let environment: Record<string, string>
 let fixtureFolder: string
+let runtime: string
 const errors: string[] = []
 const externalRequests: string[] = []
 const manifest: { version: string } = JSON.parse(readFileSync(resolve('package.json'), 'utf8'))
@@ -58,7 +61,7 @@ test.beforeAll(async () => {
   delete environment.ELECTRON_RUN_AS_NODE
   delete environment.ELECTRON_RENDERER_URL
   delete environment.TASKCONTINUUM_WORKSPACE
-  const runtime = resolve('.runtime', `e2e-${Date.now()}`)
+  runtime = await mkdtemp(join(tmpdir(), 'continuum-desktop-e2e-'))
   environment.TASKCONTINUUM_DATA_DIR = join(runtime, 'profile')
   fixtureFolder = join(runtime, 'planning-fixture')
   mkdirSync(join(fixtureFolder, '.agentdesk'), { recursive: true })
@@ -90,7 +93,10 @@ test.afterEach(() => {
   expect(externalRequests).toEqual([])
 })
 
-test.afterAll(async () => { await app?.close() })
+test.afterAll(async () => {
+  try { await app?.close() }
+  finally { if (runtime) await rm(runtime, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }) }
+})
 
 test('launches the production workbench with a sandboxed renderer', async () => {
   expect(page.url()).toBe('taskcontinuum://app/index.html')

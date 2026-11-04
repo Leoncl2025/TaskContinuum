@@ -12,6 +12,7 @@ import { modelConfigFixture } from './agent-host-model-fixture'
 import { MachineAliasesProvider } from '../src/renderer/MachineAliasesProvider'
 import { gitSyncUiFixture } from './remote-config-ui-fixture'
 import { updateBlockers } from '../src/renderer/installSafety'
+import * as messageImages from '../src/renderer/chat/messageImages'
 
 afterEach(() => { delete window.agentHost; delete window.desktop; delete window.remoteVSCode })
 
@@ -118,6 +119,31 @@ it('keeps following after resize-induced scrolling, but preserves deliberate his
   expect(requestFrame).toHaveBeenCalledTimes(calls)
   expect(setup.bridge.watch).toHaveBeenCalledOnce()
   expect(setup.bridge.send).not.toHaveBeenCalled()
+})
+
+it('does not reprocess the loaded transcript for draft edits or viewport-only parent renders', async () => {
+  const setup = fixture()
+  historicalOutput(setup.view, 'ahp-terminal:/completed-output')
+  const images = vi.spyOn(messageImages, 'messageImages')
+  const props = { task: demoTasks[1], target: setup.target, onDetach: vi.fn(), onClose: vi.fn() }
+  const rendered = render(<div style={{ width: 800 }}><AgentHostPanel {...props} /></div>)
+  await screen.findByRole('status', { name: 'Connected' })
+  expect(images).toHaveBeenCalled()
+  images.mockClear()
+  const draft = screen.getByRole('textbox', { name: 'Message Agent Host' })
+  fireEvent.change(draft, { target: { value: 'Keep my draft and caret' } })
+  for (const width of [780, 760, 740, 1000, 1200]) {
+    rendered.rerender(<div style={{ width }}><AgentHostPanel {...props} /></div>)
+  }
+  expect(images).not.toHaveBeenCalled()
+  expect(draft).toHaveValue('Keep my draft and caret')
+  setup.view.chat!.turns[0].message.text = 'Updated original history'
+  act(() => setup.emit())
+  expect(screen.getByText('Updated original history')).toBeInTheDocument()
+  expect(images).toHaveBeenCalledOnce()
+  expect(setup.bridge.watch).toHaveBeenCalledOnce()
+  expect(setup.bridge.send).not.toHaveBeenCalled()
+  expect(setup.bridge.create).not.toHaveBeenCalled()
 })
 
 function historicalOutput(view: AgentHostView, resource: string, duplicate = false): void {
