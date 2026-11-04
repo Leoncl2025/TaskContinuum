@@ -1016,7 +1016,7 @@ describe('workspace switching in the desktop workbench', () => {
     await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
     const sidebar = screen.getByRole('complementary', { name: 'Agent Host sessions' })
     const tree = within(sidebar).getByRole('tree', { name: 'Sessions for T-0002' })
-    expect(within(tree).getAllByRole('treeitem')).toHaveLength(3)
+    expect(within(tree).getAllByRole('treeitem')).toHaveLength(2)
     expect(within(tree).getByRole('treeitem', { name: 'Session A' })).toHaveAttribute('aria-selected', 'true')
     expect(screen.queryByRole('dialog', { name: 'Agent Host sessions' })).not.toBeInTheDocument()
 

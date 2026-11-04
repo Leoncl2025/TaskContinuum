@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { agentHostKey } from '../../shared/agentHost'
 import type { AgentHostSession } from '../../shared/agentHost'
@@ -31,16 +31,20 @@ interface Props {
   onTasks?(): void
 }
 
-function SessionTree({ taskId, title, bindings, activeKey, sessions, cachedTitles, disabled, onSelect, onUnlink }: {
-  taskId: string; title: string; bindings: SessionBinding[]; activeKey?: string; sessions: AgentHostSession[]; cachedTitles?: Readonly<Record<string, string>>; disabled: boolean; onSelect?(binding: SessionBinding): void; onUnlink?(binding: SessionBinding): void
+function SessionTree({ taskId, bindings, activeKey, sessions, cachedTitles, disabled, onSelect, onUnlink }: {
+  taskId: string; bindings: SessionBinding[]; activeKey?: string; sessions: AgentHostSession[]; cachedTitles?: Readonly<Record<string, string>>; disabled: boolean; onSelect?(binding: SessionBinding): void; onUnlink?(binding: SessionBinding): void
 }) {
   const aliases = useMachineAliases()
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState<string[]>([])
   const [focused, setFocused] = useState<string>()
+  const detailsPrefix = useId()
   const elements = useRef(new Map<string, HTMLLIElement>())
-  const keys = [taskId, ...expanded ? bindings.map(sessionBindingKey) : []]
-  const tabStop = focused && keys.includes(focused) ? focused : activeKey && expanded ? activeKey : taskId
+  const keys = bindings.map(sessionBindingKey)
+  const tabStop = focused && keys.includes(focused) ? focused : activeKey && keys.includes(activeKey) ? activeKey : keys[0]
   function focus(key: string): void { setFocused(key); elements.current.get(key)?.focus() }
+  function showDetails(key: string, open: boolean): void {
+    setExpanded((current) => open ? current.includes(key) ? current : [...current, key] : current.filter((item) => item !== key))
+  }
   function navigate(event: KeyboardEvent<HTMLLIElement>, key: string): void {
     if (event.target !== event.currentTarget || event.ctrlKey || event.metaKey || event.altKey) return
     const index = keys.indexOf(key)
@@ -48,12 +52,12 @@ function SessionTree({ taskId, title, bindings, activeKey, sessions, cachedTitle
     switch (event.key) {
       case 'ArrowDown': destination = keys[index + 1]; break
       case 'ArrowUp': destination = keys[index - 1]; break
-      case 'Home': destination = taskId; break
+      case 'Home': destination = keys[0]; break
       case 'End': destination = keys.at(-1); break
-      case 'ArrowRight': if (key === taskId) { if (!expanded) setExpanded(true); else destination = keys[1] }; break
-      case 'ArrowLeft': if (key === taskId) setExpanded(false); else destination = taskId; break
+      case 'ArrowRight': showDetails(key, true); break
+      case 'ArrowLeft': showDetails(key, false); break
       case 'Enter':
-      case ' ': if (key === taskId) setExpanded((value) => !value); else { const binding = bindings.find((item) => sessionBindingKey(item) === key); if (binding) onSelect?.(binding) }; break
+      case ' ': { const binding = bindings.find((item) => sessionBindingKey(item) === key); if (binding) onSelect?.(binding) }; break
       default: return
     }
     event.preventDefault()
@@ -61,27 +65,39 @@ function SessionTree({ taskId, title, bindings, activeKey, sessions, cachedTitle
     if (destination) focus(destination)
   }
   return <ul role="tree" aria-label={`Sessions for ${taskId}`} className="task-list task-tree session-tree">
-    <li role="treeitem" aria-label={`${taskId} ${title}`} aria-expanded={expanded} aria-level={1}
-      tabIndex={tabStop === taskId ? 0 : -1} ref={(element) => { if (element) elements.current.set(taskId, element); else elements.current.delete(taskId) }}
-      onFocus={(event) => { if (event.target === event.currentTarget) setFocused(taskId) }} onKeyDown={(event) => navigate(event, taskId)}>
-      <button type="button" className="session-tree-task" tabIndex={-1} title={`${title} (${taskId})`} aria-label={`${expanded ? 'Collapse' : 'Expand'} sessions for ${title}`}
-        onClick={() => { focus(taskId); setExpanded((value) => !value) }}><Icon name={expanded ? 'chevron-down' : 'chevron-right'} /><span className="session-tree-task-name">{title}</span><span>{bindings.length}</span></button>
-      {expanded && <ul role="group" className="task-tree-group">
-        {bindings.map((binding) => {
-          const key = sessionBindingKey(binding)
-          const discovered = sessions.find((session) => agentHostKey(session) === agentHostKey(binding.agentHost))
-          const cached = cachedTitles?.[agentHostKey(binding.agentHost)]
-          const label = cached || discovered?.title || (binding.title !== 'Agent Host' ? binding.title : binding.id)
-          return <li key={key} role="treeitem" aria-label={label} aria-description={binding.id} aria-selected={key === activeKey} aria-level={2}
-            tabIndex={tabStop === key ? 0 : -1} ref={(element) => { if (element) elements.current.set(key, element); else elements.current.delete(key) }}
-            onFocus={(event) => { if (event.target === event.currentTarget) setFocused(key) }} onKeyDown={(event) => navigate(event, key)}>
-            <div className={`session-tree-row ${key === activeKey ? 'is-selected' : ''}`}><button type="button" tabIndex={-1} className="session-row" aria-label={`Open ${label}`} onClick={() => { focus(key); onSelect?.(binding) }}>
-              <Icon name={key === activeKey ? 'comment-discussion' : 'comment'} /><span className="session-copy"><strong title={cached && !discovered ? 'Last known title saved on this device' : undefined}>{label}</strong><span className="session-directory" title={binding.id}>{binding.id}</span><span className="session-source" title={binding.owner.machineName}>{binding.ownerIsRemote ? 'Remote' : 'Local'} / {machineLabel(binding.owner, aliases)}</span><span className="session-source">{discovered ? discovered.canSend ? 'Read and send' : 'Read only' : 'Not in discovery list'}</span>{key === activeKey && <span className="session-task-link">Current session</span>}</span>
-            </button>{onUnlink && <IconButton icon="debug-disconnect" label={`Unlink ${label}`} disabled={disabled} onClick={() => onUnlink(binding)} />}</div>
-          </li>
-        })}
-      </ul>}
-    </li>
+    {bindings.map((binding, index) => {
+      const key = sessionBindingKey(binding)
+      const discovered = sessions.find((session) => agentHostKey(session) === agentHostKey(binding.agentHost))
+      const cached = cachedTitles?.[agentHostKey(binding.agentHost)]
+      const label = cached || discovered?.title || (binding.title !== 'Agent Host' ? binding.title : binding.id)
+      const open = expanded.includes(key)
+      const detailsId = `${detailsPrefix}-${index}`
+      return <li key={key} role="treeitem" aria-label={label} aria-description={binding.id} aria-selected={key === activeKey} aria-expanded={open} aria-level={1}
+        tabIndex={tabStop === key ? 0 : -1} ref={(element) => { if (element) elements.current.set(key, element); else elements.current.delete(key) }}
+        onFocus={(event) => { if (event.target === event.currentTarget) setFocused(key) }} onKeyDown={(event) => navigate(event, key)}>
+        <div className={`session-tree-row ${key === activeKey ? 'is-selected' : ''}`}>
+          <div className="session-summary">
+            <button type="button" tabIndex={-1} className="session-row" aria-label={`Open ${label}`} title={label} onClick={() => { focus(key); onSelect?.(binding) }}>
+              <strong title={cached && !discovered ? 'Last known title saved on this device' : undefined}>{label}</strong>
+            </button>
+            <button type="button" tabIndex={-1} className="session-machine" aria-label={`${open ? 'Hide' : 'Show'} details for ${label}`} aria-expanded={open} aria-controls={detailsId}
+              onClick={() => { focus(key); showDetails(key, !open) }}>
+              <span title={binding.owner.machineName}>{machineLabel(binding.owner, aliases)}</span><Icon name={open ? 'chevron-up' : 'chevron-down'} />
+            </button>
+          </div>
+          {onUnlink && <IconButton icon="debug-disconnect" label={`Unlink ${label}`} disabled={disabled} onClick={() => onUnlink(binding)} />}
+        </div>
+        {open && <div id={detailsId} className="session-details" role="group" aria-label={`Details for ${label}`}><dl>
+          <dt>Title</dt><dd>{label}</dd>
+          <dt>Session</dt><dd>{binding.id}</dd>
+          <dt>Chat</dt><dd>{binding.agentHost.chatId}</dd>
+          <dt>Machine</dt><dd>{binding.owner.machineName}</dd>
+          <dt>Location</dt><dd>{binding.ownerIsRemote ? 'Remote' : 'Local'}</dd>
+          <dt>Access</dt><dd>{discovered ? discovered.canSend ? 'Read and send' : 'Read only' : 'Not in discovery list'}</dd>
+          {key === activeKey && <><dt>Selection</dt><dd>Current session</dd></>}
+        </dl></div>}
+      </li>
+    })}
   </ul>
 }
 
@@ -143,7 +159,7 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
       {titleCacheError && <p className="muted" role="status">{titleCacheError}</p>}
       {!taskId && <p className="muted">Select a task to link or create a session.</p>}
       {view === 'current' && <>
-        {taskId && <SessionTree taskId={taskId} title={taskTitle ?? taskId} bindings={linked} activeKey={activeKey} sessions={sessions} cachedTitles={cachedTitles} disabled={!taskReady || busy || operating} onSelect={onSelect} onUnlink={onDetach ? (binding) => { setDetach(binding); setError(undefined) } : undefined} />}
+        {taskId && <SessionTree taskId={taskId} bindings={linked} activeKey={activeKey} sessions={sessions} cachedTitles={cachedTitles} disabled={!taskReady || busy || operating} onSelect={onSelect} onUnlink={onDetach ? (binding) => { setDetach(binding); setError(undefined) } : undefined} />}
         {!linked.length && <p className="muted">{busy ? 'Loading task sessions...' : 'No sessions linked to this task.'}</p>}
         <div className="session-sidebar-actions"><button type="button" className="secondary-button" disabled={!taskId} onClick={() => setView('link')}>Link existing</button><button type="button" className="secondary-button" disabled={!taskId} onClick={() => setView('create')}>Create new</button></div>
         {detach && <section className="session-inline-confirm" aria-label="Detach conversation"><p>Detach {detach.id} from {taskId}? Conversation history stays on its Host.</p>{detachmentChanged && <p role="alert">The task binding changed. Cancel and review the current sessions.</p>}<div className="session-sidebar-actions"><button type="button" className="secondary-button" disabled={operating} onClick={() => setDetach(undefined)}>Keep conversation</button><button type="button" className="primary-button" disabled={!taskReady || busy || operating || detachmentChanged} onClick={() => { void run(async () => { if (onDetach) await onDetach(detach); setDetach(undefined) }) }}>Detach session</button></div></section>}

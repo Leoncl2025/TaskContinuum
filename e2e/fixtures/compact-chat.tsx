@@ -1,7 +1,7 @@
 import { createRoot } from 'react-dom/client'
 import { MessageKind } from '@microsoft/agent-host-protocol'
 import type { ResponsePartKind, Turn } from '@microsoft/agent-host-protocol'
-import type { AgentHostBridge, AgentHostView } from '../../src/shared/agentHost'
+import type { AgentHostBridge, AgentHostSession, AgentHostView } from '../../src/shared/agentHost'
 import type { WorkspaceGitSyncStatus } from '../../src/shared/gitSync'
 import type { WorkspaceSnapshot } from '../../src/shared/workspace'
 import App from '../../src/renderer/App'
@@ -35,12 +35,20 @@ const view: AgentHostView = {
 const listeners = new Set<Parameters<AgentHostBridge['onView']>[0]>()
 const emit = () => { for (const listener of listeners) listener({ id: 'fixture-watch', view: structuredClone(view) }) }
 const unsupported = async (): Promise<never> => { throw new Error('This layout fixture does not perform native operations.') }
+const calls = { watch: 0, unwatch: 0, send: 0 }
+const sidebarSessions: AgentHostSession[] = [
+  { ...target, title: view.chat!.title, provider: 'copilotcli', updatedAt: '', canSend: true },
+  ...['Investigate session creation', 'A deliberately long conversation title that should remain on one compact line', 'Verify the next release'].map((title, index) => ({
+    ...target, sessionId: `copilotcli:/compact-${index}`, chatId: `ahp-chat:/compact-${index}`,
+    title, provider: 'copilotcli', updatedAt: '', canSend: true,
+  })),
+]
 window.agentHost = {
-  list: async () => ({ sessions: [], warnings: [] }),
+  list: async () => ({ sessions: parameters.has('sessions') ? sidebarSessions : [], warnings: [] }),
   models: async () => [{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }],
-  watch: async () => { emit(); return 'fixture-watch' },
-  unwatch: async () => {}, terminal: async () => {}, releaseTerminal: async () => {},
-  send: unsupported, cancel: unsupported, resolveDelivery: unsupported,
+  watch: async () => { calls.watch++; emit(); return 'fixture-watch' },
+  unwatch: async () => { calls.unwatch++ }, terminal: async () => {}, releaseTerminal: async () => {},
+  send: async () => { calls.send++; return unsupported() }, cancel: unsupported, resolveDelivery: unsupported,
   localCreationHosts: async () => [], localCreations: async () => [],
   creationWorkers: async () => [], creations: async () => [],
   createLocal: unsupported, localCreationStatus: unsupported, create: unsupported,
@@ -56,10 +64,12 @@ declare global {
   interface Window {
     compactChatFixture: {
       setState(state: AgentHostView['state'], readOnly?: boolean): void
+      calls: typeof calls
     }
   }
 }
 window.compactChatFixture = {
+  calls,
   setState(state, readOnly = false) {
     view.state = state
     view.readOnly = readOnly
@@ -86,8 +96,11 @@ if (parameters.has('workbench')) {
     getRepositoryStatus: unsupported, openRepositoryCreation: unsupported,
     getRepositoryPushPlan: unsupported, verifyRepositoryPublication: unsupported,
     getSessionLinks: async () => ({
-      document: { schemaVersion: '2.1', bindings: { 'T-0002': [{ provider: 'agent-host', ...target }] } },
-      revision: 'a'.repeat(64), localOwner: target.owner,
+      document: { schemaVersion: '2.1', bindings: { 'T-0002': parameters.has('sessions')
+        ? sidebarSessions.map(({ sessionId, chatId, owner }) => ({ provider: 'agent-host' as const, sessionId, chatId, owner }))
+        : [{ provider: 'agent-host', ...target }] } },
+      revision: 'a'.repeat(64), localOwner: parameters.has('sessions')
+        ? { clientId: '22222222-2222-4222-8222-222222222222', machineName: 'Local desktop' } : target.owner,
     }),
     updateSessionLink: unsupported,
   }

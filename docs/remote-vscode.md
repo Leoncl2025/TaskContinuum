@@ -65,9 +65,13 @@ To link an existing session:
 1. On B, open the task workspace and **Agent Host sessions > Link** in the left
   sidebar. Approve access once, choose an existing Host chat, and link it to the
   selected task. Linking adds to the task's session collection; **Current** shows
-  its session tree and supports opening or individually unlinking its members.
-  Unlink confirmation is inline and never deletes history. No Host or chat is
-  created automatically.
+  compact rows with the chat title, machine and individual unlink action, without
+  repeating the task heading. Select a title to open its chat, or select the
+  machine/disclosure arrow to expand session/chat IDs, the full machine name,
+  location and access status without opening or reconnecting the chat. In the
+  list, Up/Down and Home/End move focus, Right/Left show/hide details, and
+  Enter/Space open the focused chat. Unlink confirmation is inline and never
+  deletes history. No Host or chat is created automatically.
 2. Let **Automatic workspace links** connect the enrolled devices with read
   and send access; no separate session-link permission is needed.
   B's current validated binding **and** private local confirmation receipt

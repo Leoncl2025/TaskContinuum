@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { _electron as electron, expect, test } from '@playwright/test'
 import type { ElectronApplication, Locator, Page } from '@playwright/test'
@@ -105,7 +105,7 @@ async function installLocalCreationMock(app: ElectronApplication, ledgerFile: st
 }
 
 test('creates a task-local chat through the real preload without remote creation or the workspace assistant', async () => {
-  const root = resolve('.runtime', `local-task-agent-host-creation-${randomUUID()}`)
+  const root = await mkdtemp(join(tmpdir(), 'continuum-local-task-creation-'))
   const workspace = join(root, 'workspace')
   const profile = join(root, 'profile')
   const discovery = join(root, 'empty-discovery')
@@ -194,7 +194,7 @@ test('creates a task-local chat through the real preload without remote creation
     await expect(create).toBeEnabled()
     await create.click()
     await expect(picker.getByRole('tab', { name: 'Current' })).toHaveAttribute('aria-selected', 'true')
-    await expect(page.getByRole('tree', { name: 'Sessions for T-0001' }).getByRole('treeitem')).toHaveCount(3)
+    await expect(page.getByRole('tree', { name: 'Sessions for T-0001' }).getByRole('treeitem')).toHaveCount(2)
     await expect(page.getByRole('dialog', { name: 'Agent Host sessions' })).toHaveCount(0)
     await page.screenshot({ path: resolve('artifacts', 'multi-session-tree.png') })
     const secondOperation = (await ledger()).operations[1]
@@ -217,7 +217,7 @@ test('creates a task-local chat through the real preload without remote creation
     await expectChatIdentity(page, panel, secondTarget.sessionId)
     expect(await calls('agent-host:create')).toHaveLength(2)
     await page.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
-    await expect(page.getByRole('tree', { name: 'Sessions for T-0001' }).getByRole('treeitem')).toHaveCount(3)
+    await expect(page.getByRole('tree', { name: 'Sessions for T-0001' }).getByRole('treeitem')).toHaveCount(2)
     await expect(page.getByRole('dialog', { name: 'Agent Host sessions' })).toHaveCount(0)
     await page.getByRole('button', { name: 'Open Created local task chat 2' }).click()
     await expectChatIdentity(page, panel, secondTarget.sessionId)

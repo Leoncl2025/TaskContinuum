@@ -27,6 +27,47 @@ function binding(name: string, title = 'Agent Host') {
 }
 
 describe('AgentHostSessionsSidebar', () => {
+  it('shows compact rows without a duplicate task heading and expands details separately from activation and unlink', async () => {
+    const first = { ...binding('compact-first', 'First conversation'), ownerIsRemote: true }
+    const second = binding('compact-second', 'Second conversation')
+    window.agentHost = bridge([{ ...first.agentHost, title: first.title, provider: 'copilotcli', updatedAt: '', canSend: false }])
+    const onSelect = vi.fn(), onDetach = vi.fn(async () => {})
+    const user = userEvent.setup()
+    render(<AgentHostSessionsSidebar taskId="T-0002" taskTitle="Current task title" taskReady
+      bindings={{ 'T-0002': [first, second] }} activeKey={sessionBindingKey(first)} onSelect={onSelect} onDetach={onDetach}
+      onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} />)
+    const tree = screen.getByRole('tree', { name: 'Sessions for T-0002' })
+    expect(screen.getAllByText(/Current task title/)).toHaveLength(1)
+    expect(within(tree).queryByText(/Current task title/)).not.toBeInTheDocument()
+    expect(within(tree).getAllByRole('treeitem')).toHaveLength(2)
+    for (const hidden of [first.id, second.id, 'Current session', 'Read only', 'Not in discovery list']) {
+      expect(within(tree).queryByText(hidden, { exact: true })).not.toBeInTheDocument()
+    }
+    const row = within(tree).getByRole('treeitem', { name: first.title })
+    expect(within(row).getByText(first.owner.machineName)).toBeInTheDocument()
+    await user.click(within(row).getByRole('button', { name: `Show details for ${first.title}` }))
+    const details = within(row).getByRole('group', { name: `Details for ${first.title}` })
+    expect(within(details).getByText(first.id, { exact: true })).toBeInTheDocument()
+    expect(within(details).getByText(first.agentHost.chatId, { exact: true })).toBeInTheDocument()
+    expect(within(details).getByText('Read only')).toBeInTheDocument()
+    expect(within(details).getByText('Remote')).toBeInTheDocument()
+    expect(within(details).getByText('Current session')).toBeInTheDocument()
+    expect(onSelect).not.toHaveBeenCalled()
+    expect(window.agentHost.watch).not.toHaveBeenCalled()
+    await user.click(within(row).getByRole('button', { name: `Hide details for ${first.title}` }))
+    expect(within(row).queryByRole('group')).not.toBeInTheDocument()
+    await user.click(within(tree).getByRole('button', { name: `Unlink ${second.title}` }))
+    expect(onSelect).not.toHaveBeenCalled()
+    expect(onDetach).not.toHaveBeenCalled()
+    expect(within(tree).queryByRole('group')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Detach session' }))
+    expect(onDetach).toHaveBeenCalledExactlyOnceWith(second)
+    await user.click(within(row).getByRole('button', { name: `Open ${first.title}` }))
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith(first)
+    expect(window.agentHost.create).not.toHaveBeenCalled()
+    expect(window.agentHost.send).not.toHaveBeenCalled()
+  })
+
   it('keeps cached titles and alias search together without changing link targets', async () => {
     const target = agentHostTargetFixture('cached-alias')
     const session: AgentHostSession = { ...target, title: 'Discovery title', provider: 'copilotcli', updatedAt: '', canSend: true }
@@ -51,6 +92,31 @@ describe('AgentHostSessionsSidebar', () => {
     expect(onLink).toHaveBeenCalledExactlyOnceWith(session)
   })
 
+  it('keeps expansion attached to the exact binding when equal titles and IDs are reordered', async () => {
+    const first = binding('same-id', 'Same title')
+    const second = { ...binding('same-id', 'Same title'), owner: { clientId: '00000000-0000-4000-8000-000000000022', machineName: 'Another-machine' } }
+    second.agentHost = { ...second.agentHost, owner: second.owner }
+    window.agentHost = bridge([])
+    const onSelect = vi.fn()
+    const props = { taskId: 'T-0002', taskReady: true, activeKey: sessionBindingKey(first), onSelect, onLink: vi.fn(), onDevices: vi.fn(), onClose: vi.fn() }
+    const { rerender } = render(<AgentHostSessionsSidebar {...props} bindings={{ 'T-0002': [first, second] }} />)
+    const tree = screen.getByRole('tree', { name: 'Sessions for T-0002' })
+    const rows = within(tree).getAllByRole('treeitem')
+    const user = userEvent.setup()
+    await user.click(within(rows[0]).getByRole('button', { name: 'Show details for Same title' }))
+    expect(rows[0]).toHaveAttribute('aria-expanded', 'true')
+    expect(rows[1]).toHaveAttribute('aria-expanded', 'false')
+    rerender(<AgentHostSessionsSidebar {...props} bindings={{ 'T-0002': [second, first] }} />)
+    const reordered = within(tree).getAllByRole('treeitem')
+    expect(reordered[0]).toHaveAttribute('aria-expanded', 'false')
+    expect(reordered[1]).toHaveAttribute('aria-expanded', 'true')
+    expect(reordered[1]).toHaveAttribute('aria-selected', 'true')
+    expect(onSelect).not.toHaveBeenCalled()
+    await user.click(within(reordered[0]).getByRole('button', { name: 'Open Same title' }))
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith(second)
+    expect(window.agentHost.watch).not.toHaveBeenCalled()
+  })
+
   it('updates aliases for bound sessions without changing selection, ownership, or detach targets', async () => {
     const first = binding('alias-first', 'First conversation')
     const otherTarget = { ...agentHostTargetFixture('alias-second'), owner: { clientId: 'other-owner', machineName: first.owner.machineName } }
@@ -67,12 +133,12 @@ describe('AgentHostSessionsSidebar', () => {
       bindings={{ 'T-0002': [first, second] }} activeKey={sessionBindingKey(first)} onSelect={onSelect} onDetach={onDetach}
       onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} /></MachineAliasesProvider>)
 
-    expect(await screen.findByText(`Local / Office (${first.owner.machineName})`)).toHaveAttribute('title', first.owner.machineName)
-    expect(screen.getByText(`Remote / Laptop (${second.owner.machineName})`)).toBeInTheDocument()
+    expect(await screen.findByText(`Office (${first.owner.machineName})`)).toHaveAttribute('title', first.owner.machineName)
+    expect(screen.getByText(`Laptop (${second.owner.machineName})`)).toBeInTheDocument()
     expect(screen.getByRole('treeitem', { name: first.title })).toHaveAttribute('aria-selected', 'true')
     git.setStatus({ ...git.getStatus(), machineAliases: { [first.owner.clientId]: 'Build desk', [second.owner.clientId]: 'Laptop' } })
     await act(async () => git.notify())
-    expect(screen.getByText(`Local / Build desk (${first.owner.machineName})`)).toBeInTheDocument()
+    expect(screen.getByText(`Build desk (${first.owner.machineName})`)).toBeInTheDocument()
     expect(screen.getByRole('treeitem', { name: first.title })).toHaveAttribute('aria-selected', 'true')
     expect(onSelect).not.toHaveBeenCalled()
     expect(onDetach).not.toHaveBeenCalled()
@@ -83,14 +149,14 @@ describe('AgentHostSessionsSidebar', () => {
     expect(onDetach).toHaveBeenCalledExactlyOnceWith(first)
     git.setStatus({ ...git.getStatus(), machineAliases: {} })
     await act(async () => git.notify())
-    expect(screen.getByText(`Local / ${first.owner.machineName}`)).toBeInTheDocument()
-    expect(screen.getByText(`Remote / ${second.owner.machineName}`)).toBeInTheDocument()
+    expect(within(screen.getByRole('treeitem', { name: first.title })).getByText(first.owner.machineName)).toBeInTheDocument()
+    expect(within(screen.getByRole('treeitem', { name: second.title })).getByText(second.owner.machineName)).toBeInTheDocument()
     expect(catalogue.list).toHaveBeenCalledOnce()
     expect(catalogue.create).not.toHaveBeenCalled()
     expect(catalogue.send).not.toHaveBeenCalled()
   })
 
-  it('supports tree collapse, expansion, keyboard navigation, and session activation', async () => {
+  it('supports flat keyboard navigation and per-session detail expansion without activating a session', async () => {
     const first = binding('keyboard-first', 'Keyboard first')
     const second = binding('keyboard-second', 'Keyboard second')
     const onSelect = vi.fn()
@@ -100,27 +166,27 @@ describe('AgentHostSessionsSidebar', () => {
       bindings={{ 'T-0002': [first, second] }} onSelect={onSelect} onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} />)
 
     const tree = screen.getByRole('tree', { name: 'Sessions for T-0002' })
-    const root = within(tree).getByRole('treeitem', { name: 'T-0002 Keyboard task' })
-    const toggle = within(root).getByRole('button', { name: 'Collapse sessions for Keyboard task' })
-    expect(toggle).toHaveTextContent('Keyboard task')
-    expect(toggle).not.toHaveTextContent('T-0002')
-    expect(toggle).toHaveAttribute('title', 'Keyboard task (T-0002)')
-    root.focus()
-    expect(root).toHaveFocus()
+    const row = within(tree).getByRole('treeitem', { name: 'Keyboard first' })
+    expect(within(tree).queryByRole('treeitem', { name: 'T-0002 Keyboard task' })).not.toBeInTheDocument()
+    row.focus()
+    expect(row).toHaveFocus()
     await user.keyboard('{ArrowRight}')
-    expect(within(tree).getByRole('treeitem', { name: 'Keyboard first' })).toHaveFocus()
+    expect(row).toHaveAttribute('aria-expanded', 'true')
+    expect(within(row).getByText(first.id, { exact: true })).toBeInTheDocument()
+    expect(onSelect).not.toHaveBeenCalled()
     await user.keyboard('{End}')
     expect(within(tree).getByRole('treeitem', { name: 'Keyboard second' })).toHaveFocus()
     await user.keyboard('{ArrowUp}')
     expect(within(tree).getByRole('treeitem', { name: 'Keyboard first' })).toHaveFocus()
     await user.keyboard('{Home}')
-    expect(root).toHaveFocus()
+    expect(row).toHaveFocus()
     await user.keyboard('{ArrowLeft}')
-    expect(root).toHaveAttribute('aria-expanded', 'false')
-    expect(within(tree).getAllByRole('treeitem')).toHaveLength(1)
+    expect(row).toHaveAttribute('aria-expanded', 'false')
+    expect(within(row).queryByText(first.id, { exact: true })).not.toBeInTheDocument()
+    expect(within(tree).getAllByRole('treeitem')).toHaveLength(2)
     await user.keyboard('{ArrowRight}')
-    expect(root).toHaveAttribute('aria-expanded', 'true')
-    await user.keyboard('{ArrowRight}{ArrowDown}{Enter}')
+    expect(row).toHaveAttribute('aria-expanded', 'true')
+    await user.keyboard('{ArrowDown}{Enter}')
     expect(onSelect).toHaveBeenCalledExactlyOnceWith(second)
   })
 
@@ -135,8 +201,11 @@ describe('AgentHostSessionsSidebar', () => {
       activeKey={sessionBindingKey(first)} onSelect={onSelect} onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} />)
 
     const tree = screen.getByRole('tree', { name: 'Sessions for T-0002' })
-    expect(within(tree).getAllByRole('treeitem')).toHaveLength(3)
+    expect(within(tree).getAllByRole('treeitem')).toHaveLength(2)
     expect(within(tree).getByRole('treeitem', { name: 'First bound' })).toHaveAttribute('aria-selected', 'true')
+    expect(within(tree).queryByText('Not in discovery list')).not.toBeInTheDocument()
+    await userEvent.setup().click(within(tree).getByRole('button', { name: 'Show details for First bound' }))
+    await userEvent.setup().click(within(tree).getByRole('button', { name: 'Show details for Second bound' }))
     expect(within(tree).getAllByText('Not in discovery list')).toHaveLength(2)
     await userEvent.setup().click(screen.getByRole('tab', { name: 'Link' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('Discovery is offline.')

@@ -82,6 +82,8 @@ test('keeps exact chat titles across partial discovery and desktop restart witho
     await expect(page!.getByLabel('Chat header').getByText(view.chat!.title, { exact: true })).toBeVisible()
     await saveState([], { ...view, state: 'offline', chat: undefined })
     await sidebar().getByRole('button', { name: 'Refresh Agent Host sessions' }).click()
+    await expect(sidebar().getByRole('button', { name: 'Refresh Agent Host sessions' })).toBeEnabled()
+    await sidebar().getByRole('button', { name: `Show details for ${view.chat!.title}`, exact: true }).click()
     await expect(sidebar().getByRole('treeitem', { name: view.chat!.title, exact: true })).toContainText('Not in discovery list')
     await app!.close()
     app = undefined
@@ -91,6 +93,8 @@ test('keeps exact chat titles across partial discovery and desktop restart witho
     await expect(panel().getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
     await page!.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
     const restored = sidebar().getByRole('treeitem', { name: view.chat!.title, exact: true })
+    await expect(restored).not.toContainText('Not in discovery list')
+    await restored.getByRole('button', { name: `Show details for ${view.chat!.title}`, exact: true }).click()
     await expect(restored).toContainText('Not in discovery list')
     await expect(restored.getByText(target.sessionId, { exact: true })).toBeVisible()
     await mkdir(resolve('artifacts'), { recursive: true })
