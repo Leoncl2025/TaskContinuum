@@ -39,6 +39,13 @@ for (const theme of ['light', 'dark'] as const) {
       const bounds = await row.boundingBox()
       expect(bounds!.height).toBeLessThanOrEqual(52)
       expect(bounds!.height).toBeGreaterThanOrEqual(44)
+      const disclosure = row.getByRole('button', { name: /^Show details for / })
+      const disclosureBounds = await disclosure.boundingBox()
+      expect(disclosureBounds!.width).toBeGreaterThanOrEqual(24)
+      expect(disclosureBounds!.width).toBeLessThanOrEqual(28)
+      expect(disclosureBounds!.height).toBeGreaterThanOrEqual(24)
+      expect(disclosureBounds!.height).toBeLessThanOrEqual(28)
+      await expect(row.getByRole('button', { name: /^Open / }).locator('.session-machine')).toBeVisible()
       const unlink = row.getByRole('button', { name: /^Unlink / })
       await expect(unlink).toBeInViewport()
       const unlinkBounds = await unlink.boundingBox()
@@ -264,6 +271,7 @@ for (const scenario of [
     page.on('pageerror', (error) => errors.push(error.message))
     await page.setViewportSize({ width: scenario.width, height: scenario.height })
     await page.goto(`${url}?theme=${scenario.theme}${scenario.long ? '&long' : ''}`)
+    await expect(page.locator('.workbench')).toBeVisible()
     await page.evaluate((zoom) => {
       document.body.style.zoom = String(zoom)
       // CSS zoom leaves viewport units unchanged, unlike Electron's page zoom.

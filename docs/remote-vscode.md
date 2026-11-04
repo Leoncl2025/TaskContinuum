@@ -66,8 +66,8 @@ To link an existing session:
   sidebar. Approve access once, choose an existing Host chat, and link it to the
   selected task. Linking adds to the task's session collection; **Current** shows
   compact rows with the chat title, machine and individual unlink action, without
-  repeating the task heading. Select a title to open its chat, or select the
-  machine/disclosure arrow to expand session/chat IDs, the full machine name,
+  repeating the task heading. Select a title or machine to open its chat. Only
+  the separate arrow button expands session/chat IDs, the full machine name,
   location and access status without opening or reconnecting the chat. In the
   list, Up/Down and Home/End move focus, Right/Left show/hide details, and
   Enter/Space open the focused chat. Unlink confirmation is inline and never

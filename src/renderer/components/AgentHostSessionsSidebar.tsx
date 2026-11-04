@@ -76,15 +76,12 @@ function SessionTree({ taskId, bindings, activeKey, sessions, cachedTitles, disa
         tabIndex={tabStop === key ? 0 : -1} ref={(element) => { if (element) elements.current.set(key, element); else elements.current.delete(key) }}
         onFocus={(event) => { if (event.target === event.currentTarget) setFocused(key) }} onKeyDown={(event) => navigate(event, key)}>
         <div className={`session-tree-row ${key === activeKey ? 'is-selected' : ''}`}>
-          <div className="session-summary">
-            <button type="button" tabIndex={-1} className="session-row" aria-label={`Open ${label}`} title={label} onClick={() => { focus(key); onSelect?.(binding) }}>
-              <strong title={cached && !discovered ? 'Last known title saved on this device' : undefined}>{label}</strong>
-            </button>
-            <button type="button" tabIndex={-1} className="session-machine" aria-label={`${open ? 'Hide' : 'Show'} details for ${label}`} aria-expanded={open} aria-controls={detailsId}
-              onClick={() => { focus(key); showDetails(key, !open) }}>
-              <span title={binding.owner.machineName}>{machineLabel(binding.owner, aliases)}</span><Icon name={open ? 'chevron-up' : 'chevron-down'} />
-            </button>
-          </div>
+          <button type="button" tabIndex={-1} className="session-row" aria-label={`Open ${label}`} title={label} onClick={() => { focus(key); onSelect?.(binding) }}>
+            <strong title={cached && !discovered ? 'Last known title saved on this device' : undefined}>{label}</strong>
+            <span className="session-machine" title={binding.owner.machineName}>{machineLabel(binding.owner, aliases)}</span>
+          </button>
+          <IconButton icon={open ? 'chevron-up' : 'chevron-down'} label={`${open ? 'Hide' : 'Show'} details for ${label}`} tabIndex={-1} aria-expanded={open} aria-controls={detailsId}
+            onClick={() => { focus(key); showDetails(key, !open) }} />
           {onUnlink && <IconButton icon="debug-disconnect" label={`Unlink ${label}`} disabled={disabled} onClick={() => onUnlink(binding)} />}
         </div>
         {open && <div id={detailsId} className="session-details" role="group" aria-label={`Details for ${label}`}><dl>

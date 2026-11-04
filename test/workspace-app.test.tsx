@@ -1020,8 +1020,9 @@ describe('workspace switching in the desktop workbench', () => {
     expect(within(tree).getByRole('treeitem', { name: 'Session A' })).toHaveAttribute('aria-selected', 'true')
     expect(screen.queryByRole('dialog', { name: 'Agent Host sessions' })).not.toBeInTheDocument()
 
-    await user.click(within(tree).getByRole('button', { name: 'Open Session B' }))
+    await user.click(await within(within(tree).getByRole('button', { name: 'Open Session B' })).findByText(`Desk (${sessionB.owner.machineName})`))
     expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveFocus()
+    expect(within(tree).getByRole('treeitem', { name: 'Session B' })).toHaveAttribute('aria-expanded', 'false')
     await user.keyboard('Draft for session B')
     const watches = vi.mocked(agentHost.watch).mock.calls.length
     const unwatches = vi.mocked(agentHost.unwatch).mock.calls.length
