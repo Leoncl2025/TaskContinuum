@@ -145,6 +145,9 @@ and as links in rich text. Right-click a link for **Copy link address**. Both co
 the original URL, not the client's temporary file-transfer path. Code-only copying
 and formula rendering keep their existing behavior.
 
+Images can be pasted directly into the Agent Host message box; its compact
+toolbar has no attachment picker.
+
 Sent screenshots are shown even when the Host replaces embedded image bytes
 with a `resource` file reference. Embedded images show thumbnails directly;
 file-backed screenshots show a **Preview** card that fetches the image from the

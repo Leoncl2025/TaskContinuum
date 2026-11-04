@@ -1027,12 +1027,14 @@ describe('Agent Host chat UI', () => {
     await waitFor(() => expect(setup.bridge.unwatch).toHaveBeenCalledTimes(2))
   })
 
-  it('keeps images after interrupted delivery and never resends on reconnect or a late confirmation', async () => {
+  it('keeps pasted images without a picker after interrupted delivery and never resends on reconnect or a late confirmation', async () => {
     const setup = fixture()
     vi.mocked(setup.bridge.send).mockRejectedValue(new Error('Delivery outcome unknown.'))
     const user = userEvent.setup()
     render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
     await screen.findByText('Same original Host chat')
+    expect(screen.queryByRole('button', { name: 'Attach images' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Image files')).not.toBeInTheDocument()
     await user.selectOptions(screen.getByRole('combobox', { name: 'Agent Host model' }), await screen.findByRole('option', { name: 'GPT-6' }))
     const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='
     const file = new File([Uint8Array.from(atob(data), (character) => character.charCodeAt(0))], 'Screenshot.png', { type: 'image/png' })

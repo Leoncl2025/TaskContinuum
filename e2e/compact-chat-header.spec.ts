@@ -271,6 +271,7 @@ for (const scenario of [
     }, scenario.zoom)
     const panel = page.getByRole('complementary', { name: 'Agent Host task chat' })
     await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
+    await expect(panel.getByRole('button', { name: 'Attach images', exact: true })).toHaveCount(0)
     await panel.getByRole('combobox', { name: 'Agent Host model' }).selectOption('gpt-6')
     const composer = panel.getByRole('textbox', { name: 'Message Agent Host' })
     const send = panel.getByRole('button', { name: 'Send to Agent Host', exact: true })
@@ -281,11 +282,11 @@ for (const scenario of [
       const alignment = await send.evaluate((element) => {
         const button = element.getBoundingClientRect()
         const icon = element.querySelector('.codicon')!.getBoundingClientRect()
-        const attach = element.parentElement!.querySelector('[aria-label="Attach images"]')!.getBoundingClientRect()
+        const refresh = element.parentElement!.querySelector('[aria-label="Retry loading models"]')!.getBoundingClientRect()
         return {
           horizontalOffset: icon.x + icon.width / 2 - button.x - button.width / 2,
           verticalOffset: icon.y + icon.height / 2 - button.y - button.height / 2,
-          toolbarOffset: button.y + button.height / 2 - attach.y - attach.height / 2,
+          toolbarOffset: button.y + button.height / 2 - refresh.y - refresh.height / 2,
           width: button.width, height: button.height,
         }
       })

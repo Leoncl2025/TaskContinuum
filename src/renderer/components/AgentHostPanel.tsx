@@ -11,7 +11,7 @@ import type { ChatImageAttachment } from '../../shared/chatAttachments'
 import { ChatMarkdown } from './ChatMarkdown'
 import { ChatLinkTargetContext } from '../chat/chatLinkContext'
 import { copyMarkdownSelection } from '../chat/copyMarkdownSelection'
-import { ChatImagePicker, ChatImages, ChatImageStatus } from './ChatImages'
+import { ChatImages, ChatImageStatus } from './ChatImages'
 import { messageImages as imagesFor } from '../chat/messageImages'
 import { useChatImageInput } from '../chat/useChatImageInput'
 import { readModelPreference, saveModelPreference } from '../chat/modelPreferences'
@@ -519,7 +519,6 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
         <ChatImages images={images} onRemove={imageInput.remove} disabled={busy} />
         <textarea ref={composer} id={active ? 'chat-composer' : undefined} aria-label="Message Agent Host" placeholder="Message original Agent" rows={3} maxLength={MAX_CHAT_TEXT_LENGTH} value={draft} onChange={(event) => setDraft(event.target.value)} onPaste={imageInput.paste} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} />
         <div className="composer-toolbar">
-          <ChatImagePicker onFiles={imageInput.add} disabled={busy || imageInput.reading} />
           <div className="ahp-model-controls">
             <label title={selectedModel?.name ?? 'Your model and options are remembered on this device for this Agent Host provider.'}><Icon name="copilot" /><select aria-label="Agent Host model" value={modelId} disabled={busy || pending || responding || view?.readOnly || !models.length} onChange={(event) => chooseModel(event.target.value)}><option value="">{!currentCatalog ? 'Loading models...' : !models.length ? 'Models unavailable' : 'Choose a model'}</option>{modelId && !modelReady && <option value={modelId} disabled>{modelId} (unavailable)</option>}{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
           </div>
