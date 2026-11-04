@@ -125,6 +125,28 @@ it is retained for the standard release bundle, although the current client uses
 full installer downloads rather than differential downloads. Do not rename
 assets after generating metadata.
 
+### Manual-only v0.2.0 release
+
+The initial v0.2.0 release is explicitly unsigned, like v0.1.1, because production
+signing has not been configured. It must be installed manually. The update UI is
+included, but in-app installation remains disabled: no trusted update policy or
+publisher is manufactured, and no signature check is bypassed.
+
+An explicitly requested manual release is separate from the signed workflow
+below. Build locally with `--publish never`, verify the five-file bundle, confirm
+the application and installer are unsigned and the shared payload has neither
+an installation marker nor a trusted update policy, and run isolated packaged
+tests. Create a GitHub draft with the exact version tag and an unsigned/manual-only
+warning. Upload only the five validated assets, download them again and verify
+their sizes and SHA-256 values before publishing. Do not use the signed release
+script's default description or claim that a signed upgrade was tested.
+Never replace the assets of an already published version.
+
+Installing this release preserves the existing application identity and
+user-data location. Existing configuration formats must still satisfy the
+[device-trust upgrade requirements](workspace-git-sync.md#durable-device-trust-one-format-breaking-change);
+an installer upgrade does not migrate or authorize old signed history.
+
 ## One-time repository administrator setup
 
 The workflow file **does not create or enforce GitHub environment protection
