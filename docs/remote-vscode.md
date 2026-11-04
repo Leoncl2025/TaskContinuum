@@ -71,7 +71,10 @@ To link an existing session:
   location and access status without opening or reconnecting the chat. In the
   list, Up/Down and Home/End move focus, Right/Left show/hide details, and
   Enter/Space open the focused chat. Unlink confirmation is inline and never
-  deletes history. No Host or chat is created automatically.
+  deletes history. The header shows just the current task title and toolbar
+  controls. Use the **Link**/**Create** tabs for session actions and the **Tasks**
+  activity button to return to tasks; there are no duplicate footer buttons.
+  No Host or chat is created automatically.
 2. Let **Automatic workspace links** connect the enrolled devices with read
   and send access; no separate session-link permission is needed.
   B's current validated binding **and** private local confirmation receipt

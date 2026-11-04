@@ -31,6 +31,12 @@ for (const theme of ['light', 'dark'] as const) {
     const tree = sidebar.getByRole('tree', { name: 'Sessions for T-0002' })
     await expect(tree.getByRole('treeitem')).toHaveCount(4)
     await expect(sidebar.locator('.session-task-context strong')).toHaveText('T-0002 - Fix Connection issues')
+    for (const removed of ['AGENT HOST SESSIONS', 'Current task']) await expect(sidebar.getByText(removed, { exact: true })).toHaveCount(0)
+    for (const removed of ['Back to tasks', 'Link existing', 'Create new']) await expect(sidebar.getByRole('button', { name: removed, exact: true })).toHaveCount(0)
+    for (const tab of ['Current', 'Link', 'Create']) await expect(sidebar.getByRole('tab', { name: tab, exact: true })).toBeVisible()
+    await expect(sidebar.getByRole('button', { name: 'Refresh Agent Host sessions', exact: true })).toBeVisible()
+    await expect(sidebar.getByRole('button', { name: 'Hide session sidebar', exact: true })).toBeVisible()
+    expect((await sidebar.locator('.session-task-context').boundingBox())!.height).toBeLessThanOrEqual(44)
     await expect(tree.getByText('Fix Connection issues', { exact: true })).toHaveCount(0)
     await expect(tree.locator('.session-details')).toHaveCount(0)
     for (const row of await tree.getByRole('treeitem').all()) {
@@ -91,6 +97,66 @@ for (const theme of ['light', 'dark'] as const) {
     const zoomedBounds = await first.boundingBox()
     expect(zoomedBounds!.height).toBeLessThanOrEqual(104)
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    expect(errors).toEqual([])
+  })
+}
+
+for (const scenario of [
+  { name: 'wide-light', width: 1440, height: 900, theme: 'light', zoom: 1 },
+  { name: 'narrow-light', width: 360, height: 740, theme: 'light', zoom: 1 },
+  { name: 'zoomed-dark', width: 1440, height: 1100, theme: 'dark', zoom: 2 },
+]) {
+  test(`keeps Markdown lists compact and authored breaks intact in ${scenario.name}`, async ({ page }, testInfo) => {
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    const source = 'First line\nSecond line\n\n1. **First:** Keep the existing behavior.\n\n2. **Second:** Use the selected conversation.\n\n3. **Third:** Validate the visible output.\n\n4. **Fourth:** Retain the selected model.\n\n## Nested list\n\n- **Parent line**\n  Parent continuation\n  - Nested first\n  - Nested second\n\n## Checklist\n\n- [x] Complete\n- [ ] Pending\n\n```text\nalpha\n\nbeta\n```'
+    await page.setViewportSize({ width: scenario.width, height: scenario.height })
+    await page.goto(`${url}?theme=${scenario.theme}&markdown=${encodeURIComponent(source)}`)
+    await expect(page.locator('.workbench')).toBeVisible()
+    await page.evaluate((zoom) => {
+      document.body.style.zoom = String(zoom)
+      document.querySelector<HTMLElement>('.workbench')!.style.height = `${innerHeight / zoom}px`
+    }, scenario.zoom)
+    const markdown = page.getByRole('log').locator('.message-markdown')
+    await expect(markdown).toBeVisible()
+    await page.evaluate(async () => { await document.fonts.ready })
+    const ordered = markdown.locator('ol')
+    await expect(ordered.locator(':scope > li')).toHaveCount(4)
+    const metrics = await ordered.evaluate((element) => {
+      const items = Array.from(element.children).map((item) => {
+        const paragraph = item.querySelector('p')
+        if (!paragraph) throw new Error('Expected each loose list item to retain its paragraph.')
+        const bounds = item.getBoundingClientRect()
+        const paragraphBounds = paragraph.getBoundingClientRect()
+        return { height: bounds.height, paragraphHeight: paragraphBounds.height, paragraphOffset: paragraphBounds.top - bounds.top, whiteSpace: getComputedStyle(item).whiteSpace }
+      })
+      return { listHeight: element.getBoundingClientRect().height, items }
+    })
+    for (const item of metrics.items) {
+      expect(item.whiteSpace).toBe('normal')
+      expect(Math.abs(item.paragraphOffset)).toBeLessThanOrEqual(0.5 * scenario.zoom)
+      expect(item.height - item.paragraphHeight).toBeLessThanOrEqual(1 * scenario.zoom)
+    }
+    const paragraphHeight = metrics.items.reduce((height, item) => height + item.paragraphHeight, 0)
+    expect(metrics.listHeight - paragraphHeight).toBeLessThanOrEqual(24 * scenario.zoom)
+    const intro = markdown.locator(':scope > p').first()
+    await expect(intro.locator('br')).toHaveCount(1)
+    const introMetrics = await intro.evaluate((element) => ({ height: element.getBoundingClientRect().height, lineHeight: Number.parseFloat(getComputedStyle(element).lineHeight) }))
+    expect(introMetrics.height / (introMetrics.lineHeight * scenario.zoom)).toBeGreaterThanOrEqual(1.95)
+    expect(introMetrics.height / (introMetrics.lineHeight * scenario.zoom)).toBeLessThanOrEqual(2.05)
+    const nested = markdown.locator('ul').first().locator(':scope > li').first()
+    await expect(nested.locator('br')).toHaveCount(1)
+    await expect(nested.locator('ul > li')).toHaveCount(2)
+    const checkboxes = markdown.getByRole('checkbox')
+    await expect(checkboxes).toHaveCount(2)
+    await expect(checkboxes.nth(0)).toBeChecked()
+    await expect(checkboxes.nth(1)).not.toBeChecked()
+    for (const checkbox of await checkboxes.all()) await expect(checkbox).toBeDisabled()
+    expect(await markdown.getByLabel('Code block').textContent()).toBe('alpha\n\nbeta\n')
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await intro.scrollIntoViewIfNeeded()
+    await page.screenshot({ path: testInfo.outputPath(`markdown-lists-${scenario.name}.png`) })
+    console.log(JSON.stringify({ scenario: scenario.name, ...metrics, intro: introMetrics }))
     expect(errors).toEqual([])
   })
 }

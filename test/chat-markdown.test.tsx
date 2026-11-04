@@ -28,6 +28,53 @@ describe('native chat Markdown presentation', () => {
     expect(screen.getByLabelText('Code block')).toHaveTextContent('const partial = 1')
   })
 
+  it.each([
+    ['paragraph', 'First line\nSecond line', 'p'],
+    ['tight list', '1. First line\n   Second line', 'li'],
+    ['loose list', '1. First line\n   Second line\n\n2. Another item', 'li'],
+    ['inline list markup', '1. **First line**\n   *Second line*', 'li'],
+  ])('preserves authored soft line breaks in a %s', (_name, source, selector) => {
+    const view = render(<ChatMarkdown source={source} />)
+    const content = view.container.querySelector(selector)!
+    expect(content.querySelectorAll('br')).toHaveLength(1)
+    expect(content).toHaveTextContent('First line')
+    expect(content).toHaveTextContent('Second line')
+  })
+
+  it('does not turn structural loose-list whitespace into extra line breaks', () => {
+    render(<ChatMarkdown source={'1. **First:** Keep the existing behavior.\n\n2. **Second:** Verify the result.'} />)
+    const items = screen.getAllByRole('listitem')
+    expect(items).toHaveLength(2)
+    for (const item of items) {
+      expect(item.firstElementChild?.tagName).toBe('P')
+      expect(item.querySelector('br')).toBeNull()
+    }
+  })
+
+  it('preserves hard breaks without inserting duplicate breaks', () => {
+    const view = render(<ChatMarkdown source={'First  \nSecond\\\nThird'} />)
+    expect(view.container.querySelectorAll('p > br')).toHaveLength(2)
+  })
+
+  it('retains nested task lists and their authored line breaks', () => {
+    const view = render(<ChatMarkdown source={'1. Parent line\n   Parent continuation\n   - [x] Complete\n   - [ ] Pending\n\n2. Next parent'} />)
+    const list = view.container.querySelector('ol')!
+    expect(list.children).toHaveLength(2)
+    expect(list.children[0].querySelectorAll('ul > li')).toHaveLength(2)
+    expect(list.children[0].querySelectorAll('br')).toHaveLength(1)
+    const checkboxes = screen.getAllByRole('checkbox')
+    expect(checkboxes[0]).toBeChecked()
+    expect(checkboxes[1]).not.toBeChecked()
+    for (const checkbox of checkboxes) expect(checkbox).toBeDisabled()
+  })
+
+  it('keeps fenced-code newlines and blank lines verbatim', () => {
+    render(<ChatMarkdown source={'```text\nalpha\n\nbeta\n```'} />)
+    const block = screen.getByLabelText('Code block')
+    expect(block.textContent).toBe('alpha\n\nbeta\n')
+    expect(block.querySelector('br')).toBeNull()
+  })
+
   it('allows explicit safe link clicks without executing HTML or loading images automatically', () => {
     const source = '**Safe text**\n\n[Docs](https://example.com) [Run](command:workbench.action.closeWindow) [Script](javascript:alert%281%29) [File](file:///C:/secret)\n\n![Remote picture](https://example.com/track.png)\n\n<script>alert(1)</script>\n\n<iframe src="https://example.com"></iframe>\n\n<img src="https://example.com/pixel" onerror="alert(1)">\n\n```html\n<script>not executable</script>\n```'
     const view = render(<ChatMarkdown source={source} />)

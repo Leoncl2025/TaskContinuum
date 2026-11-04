@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import type { Components, ExtraProps } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkBreaks from 'remark-breaks'
 import { IconButton } from './Primitives'
 import { mathRehypePlugins, prepareMarkdownMath } from '../markdownMath'
 import { parseChatLink } from '../../shared/chatLinks'
@@ -46,7 +47,7 @@ const markdownComponents: Components = {
 export const ChatMarkdown = memo(function ChatMarkdown({ source }: { source: string }) {
   const math = useMemo(() => prepareMarkdownMath(source), [source])
   return <MarkdownLinks>
-    <div className="message-text message-markdown"><Markdown remarkPlugins={[remarkGfm, math.plugin]} rehypePlugins={mathRehypePlugins} skipHtml
+    <div className="message-text message-markdown"><Markdown remarkPlugins={[remarkGfm, math.plugin, remarkBreaks]} rehypePlugins={mathRehypePlugins} skipHtml
       urlTransform={(url) => parseChatLink(url) ? url : ''} components={markdownComponents}>{math.source}</Markdown></div>
   </MarkdownLinks>
 })

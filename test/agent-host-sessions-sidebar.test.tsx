@@ -38,6 +38,9 @@ describe('AgentHostSessionsSidebar', () => {
       onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} />)
     const tree = screen.getByRole('tree', { name: 'Sessions for T-0002' })
     expect(screen.getAllByText(/Current task title/)).toHaveLength(1)
+    for (const removed of ['AGENT HOST SESSIONS', 'Current task']) expect(screen.queryByText(removed, { exact: true })).not.toBeInTheDocument()
+    for (const removed of ['Back to tasks', 'Link existing', 'Create new']) expect(screen.queryByRole('button', { name: removed })).not.toBeInTheDocument()
+    for (const tab of ['Current', 'Link', 'Create']) expect(screen.getByRole('tab', { name: tab })).toBeInTheDocument()
     expect(within(tree).queryByText(/Current task title/)).not.toBeInTheDocument()
     expect(within(tree).getAllByRole('treeitem')).toHaveLength(2)
     for (const hidden of [first.id, second.id, 'Current session', 'Read only', 'Not in discovery list']) {
@@ -229,11 +232,10 @@ describe('AgentHostSessionsSidebar', () => {
     ]
     window.agentHost = bridge(sessions)
     const onClose = vi.fn()
-    const onTasks = vi.fn()
     const onLink = vi.fn()
     render(<AgentHostSessionsSidebar taskId="T-0002" taskTitle="Target task" taskReady localOwnerId={local.owner.clientId}
       bindings={{ 'T-0003': [{ id: remote.sessionId, title: 'Remote work', owner: remote.owner, agentHost: remote }] }}
-      onLink={onLink} onDevices={vi.fn()} onClose={onClose} onTasks={onTasks} />)
+      onLink={onLink} onDevices={vi.fn()} onClose={onClose} />)
 
     await userEvent.setup().click(screen.getByRole('tab', { name: 'Link' }))
     await screen.findByRole('region', { name: 'Host session Local work' })
@@ -245,9 +247,8 @@ describe('AgentHostSessionsSidebar', () => {
     expect(within(remoteRow).getByRole('button', { name: 'Link Remote work to T-0002' })).toBeDisabled()
     expect(onLink).not.toHaveBeenCalled()
 
-    await userEvent.setup().click(screen.getByRole('button', { name: 'Back to tasks' }))
+    expect(screen.queryByRole('button', { name: 'Back to tasks' })).not.toBeInTheDocument()
     await userEvent.setup().click(screen.getByRole('button', { name: 'Hide session sidebar' }))
-    expect(onTasks).toHaveBeenCalledOnce()
     expect(onClose).toHaveBeenCalledOnce()
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })

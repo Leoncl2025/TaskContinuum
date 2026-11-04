@@ -37,6 +37,17 @@ describe('copying displayed hyperlinks', () => {
     expect(data.get('text/plain')).not.toContain('file-transfer-inbox')
   })
 
+  it.each([
+    ['soft break', '[Docs](https://example.com)\nNext line'],
+    ['two-space hard break', '[Docs](https://example.com)  \nNext line'],
+    ['escaped hard break', '[Docs](https://example.com)\\\nNext line'],
+  ])('copies a %s exactly once beside a hyperlink', (_name, source) => {
+    const view = render(<ChatMarkdown source={source} />)
+    select(view.container.querySelector('.message-markdown')!)
+    const data = copy(screen.getByRole('link', { name: 'Docs' }))
+    expect(data.get('text/plain')).toBe('[Docs](<https://example.com>)\nNext line')
+  })
+
   it('preserves a link when only part of its caption is selected', () => {
     render(<ChatMarkdown source={'[Remote report](./docs/report.md#L12)'} />)
     const link = screen.getByRole('link', { name: 'Remote report' })

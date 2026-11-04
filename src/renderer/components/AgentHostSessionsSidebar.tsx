@@ -28,7 +28,6 @@ interface Props {
   onCreated?(taskId: string, session: AgentHostSession): Promise<void>
   onDevices(): void
   onClose(): void
-  onTasks?(): void
 }
 
 function SessionTree({ taskId, bindings, activeKey, sessions, cachedTitles, disabled, onSelect, onUnlink }: {
@@ -98,7 +97,7 @@ function SessionTree({ taskId, bindings, activeKey, sessions, cachedTitles, disa
   </ul>
 }
 
-export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, activeKey, localOwnerId, busy = false, initialView = 'current', cachedTitles, titleCacheError, onTitles, onSelect, onDetach, onLink, onCreated, onDevices, onClose, onTasks }: Props) {
+export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, activeKey, localOwnerId, busy = false, initialView = 'current', cachedTitles, titleCacheError, onTitles, onSelect, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
   const bridge = window.agentHost
   const aliases = useMachineAliases()
   const [view, setView] = useState<SessionView>(initialView)
@@ -140,8 +139,8 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
   const filtered = sessions.filter((session) => (location === 'all' || !localOwnerId || session.owner.clientId === localOwnerId)
     && `${cachedTitles?.[agentHostKey(session)] ?? session.title} ${session.sessionId} ${machineLabel(session.owner, aliases)}`.toLowerCase().includes(query.toLowerCase()))
   return <aside className="sidebar session-sidebar" aria-label="Agent Host sessions">
-    <header className="panel-header"><span>AGENT HOST SESSIONS</span><div className="header-actions"><IconButton icon="refresh" label="Refresh Agent Host sessions" disabled={loading || operating} onClick={() => { setLoading(true); setRevision((value) => value + 1) }} /><IconButton icon="layout-sidebar-left-off" label="Hide session sidebar" onClick={onClose} /></div></header>
-    <div className="session-task-context"><span className="muted">Current task</span><strong>{taskId ? `${taskId} - ${taskTitle ?? taskId}` : 'No task selected'}</strong>{onTasks && <button type="button" className="text-button" onClick={onTasks}>Back to tasks</button>}</div>
+    <header className="panel-header"><div className="header-actions"><IconButton icon="refresh" label="Refresh Agent Host sessions" disabled={loading || operating} onClick={() => { setLoading(true); setRevision((value) => value + 1) }} /><IconButton icon="layout-sidebar-left-off" label="Hide session sidebar" onClick={onClose} /></div></header>
+    <div className="session-task-context"><strong>{taskId ? `${taskId} - ${taskTitle ?? taskId}` : 'No task selected'}</strong></div>
     <div className="session-view-tabs" role="tablist" aria-label="Session management">
       {(['current', 'link', 'create'] as const).map((name, index) => <button type="button" key={name} role="tab" aria-selected={view === name} aria-controls="session-management-content" tabIndex={view === name ? 0 : -1} onClick={() => { setView(name); setError(undefined) }} onKeyDown={(event) => {
         if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
@@ -158,7 +157,6 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
       {view === 'current' && <>
         {taskId && <SessionTree taskId={taskId} bindings={linked} activeKey={activeKey} sessions={sessions} cachedTitles={cachedTitles} disabled={!taskReady || busy || operating} onSelect={onSelect} onUnlink={onDetach ? (binding) => { setDetach(binding); setError(undefined) } : undefined} />}
         {!linked.length && <p className="muted">{busy ? 'Loading task sessions...' : 'No sessions linked to this task.'}</p>}
-        <div className="session-sidebar-actions"><button type="button" className="secondary-button" disabled={!taskId} onClick={() => setView('link')}>Link existing</button><button type="button" className="secondary-button" disabled={!taskId} onClick={() => setView('create')}>Create new</button></div>
         {detach && <section className="session-inline-confirm" aria-label="Detach conversation"><p>Detach {detach.id} from {taskId}? Conversation history stays on its Host.</p>{detachmentChanged && <p role="alert">The task binding changed. Cancel and review the current sessions.</p>}<div className="session-sidebar-actions"><button type="button" className="secondary-button" disabled={operating} onClick={() => setDetach(undefined)}>Keep conversation</button><button type="button" className="primary-button" disabled={!taskReady || busy || operating || detachmentChanged} onClick={() => { void run(async () => { if (onDetach) await onDetach(detach); setDetach(undefined) }) }}>Detach session</button></div></section>}
       </>}
       {view === 'link' && <>

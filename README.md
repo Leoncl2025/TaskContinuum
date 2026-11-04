@@ -10,7 +10,9 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
 - Compact session rows show only the conversation title, machine and unlink
   action, without repeating the task heading. Select the title or machine to
   open its chat; only the separate arrow button expands identities and access
-  details.
+  details. The sidebar retains just the task title and toolbar controls above
+  the Current/Link/Create tabs; use Link or Create rather than duplicate footer
+  buttons, and the Tasks activity button to return to the task list.
 - Device-local restoration of open task tabs, the active task and each task's selected chat.
 - Searchable task trees, task tabs, and read-only planning documents.
 - **Ctrl+PageUp / Ctrl+PageDown** switches to the previous/next open task tab,
@@ -145,6 +147,9 @@ Copying selected chat text preserves hyperlinks as Markdown URLs in plain text
 and as links in rich text. Right-click a link for **Copy link address**. Both copy
 the original URL, not the client's temporary file-transfer path. Code-only copying
 and formula rendering keep their existing behavior.
+
+Chat Markdown preserves authored line breaks without adding blank lines around
+list content or separating a list marker from its first paragraph.
 
 Images can be pasted directly into the Agent Host message box; its compact
 toolbar has no attachment picker.

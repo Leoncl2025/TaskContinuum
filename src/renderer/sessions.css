@@ -1,8 +1,7 @@
 .local-sessions { min-width: 0; }
-.session-sidebar .panel-header { gap: 4px; padding-inline: 10px; font-size: 10px; }
-.session-task-context { display: grid; gap: 6px; padding: 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.session-sidebar .panel-header { justify-content: flex-end; gap: 4px; padding-inline: 10px; font-size: 10px; }
+.session-task-context { padding: 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
 .session-task-context strong { overflow-wrap: anywhere; line-height: 1.5; }
-.session-task-context .text-button { justify-self: start; }
 .session-view-tabs { display: flex; flex-shrink: 0; gap: 3px; margin: 10px 10px 0; padding: 3px; border-radius: var(--radius-md); background: var(--raised); }
 .session-view-tabs button { flex: 1; padding: 8px 6px; border-radius: var(--radius-sm); color: var(--muted); font-size: 12px; }
 .session-view-tabs button[aria-selected="true"] { color: var(--text); background: var(--bg); box-shadow: 0 1px 3px var(--shadow); }
@@ -170,9 +169,9 @@
 .message-markdown h2 { font-size: 16px; }
 .message-markdown h3 { font-size: 14px; }
 .message-markdown h4, .message-markdown h5, .message-markdown h6 { font-size: 12px; }
-.message-markdown p { margin: 10px 0; white-space: pre-line; }
+.message-markdown p { margin: 10px 0; white-space: normal; }
 .message-markdown ul, .message-markdown ol { padding-left: 22px; margin: 10px 0; }
-.message-markdown li { margin: 4px 0; white-space: pre-line; }
+.message-markdown li { margin: 4px 0; white-space: normal; }
 .message-markdown li > p { margin: 4px 0; }
 .message-markdown li > ul, .message-markdown li > ol { margin: 4px 0; }
 .message-markdown .contains-task-list { padding-left: 0; list-style: none; }

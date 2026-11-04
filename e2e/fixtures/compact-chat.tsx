@@ -24,10 +24,10 @@ const view: AgentHostView = {
   chat: {
     resource: target.chatId, title: long ? 'A detailed release plan with a very long title '.repeat(8) : 'A focused release plan',
     modifiedAt: '', status: 1,
-    turns: Array.from({ length: 6 }, (_, index) => ({
+    turns: Array.from({ length: parameters.has('markdown') ? 1 : 6 }, (_, index) => ({
       id: `turn-${index}`, state: 'complete' as Turn['state'],
       message: { text: 'Keep the conversation in focus and make room for the next idea.', origin: { kind: MessageKind.User } },
-      responseParts: [{ kind: 'markdown' as ResponsePartKind.Markdown, id: `response-${index}`, content: '## A simpler workspace\n\nKeep essential context close to the conversation. Connection details remain available without taking space away from your work.\n\n[**Release notes**](https://example.com/release-notes) / [`plan.md`](file:///C:/layout-fixture/plan.md)\n\n- Clear hierarchy\n- Predictable actions\n- More room to read' }],
+      responseParts: [{ kind: 'markdown' as ResponsePartKind.Markdown, id: `response-${index}`, content: parameters.get('markdown') ?? '## A simpler workspace\n\nKeep essential context close to the conversation. Connection details remain available without taking space away from your work.\n\n[**Release notes**](https://example.com/release-notes) / [`plan.md`](file:///C:/layout-fixture/plan.md)\n\n- Clear hierarchy\n- Predictable actions\n- More room to read' }],
       usage: undefined,
     })),
   },

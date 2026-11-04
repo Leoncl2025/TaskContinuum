@@ -6,7 +6,11 @@ const blocks = new Set(['P', 'DIV', 'SECTION', 'ARTICLE', 'HEADER', 'BLOCKQUOTE'
 const permittedTags = new Set(['A', 'P', 'DIV', 'SPAN', 'STRONG', 'EM', 'B', 'I', 'S', 'DEL', 'CODE', 'PRE', 'BR', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6'])
 
 function plainText(node: Node): string {
-  if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? ''
+  if (node.nodeType === Node.TEXT_NODE) {
+    const text = node.textContent ?? ''
+    // Markdown emits a formatting newline after the BR that already represents it.
+    return node.previousSibling instanceof Element && node.previousSibling.tagName === 'BR' ? text.replace(/^\r?\n/, '') : text
+  }
   if (!(node instanceof Element)) return Array.from(node.childNodes).map(plainText).join('')
   const content = Array.from(node.childNodes).map(plainText).join('')
   if (node.tagName === 'A') {
