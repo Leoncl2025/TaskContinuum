@@ -12,6 +12,7 @@ import type { AgentHostCreation, AgentHostWorker } from '../src/shared/agentHost
 import { agentHostTargetFixture } from './immutable-bindings-fixture'
 import { gitSyncUiFixture } from './remote-config-ui-fixture'
 import { sessionBindingKey } from '../src/renderer/chat/sessionBindings'
+import * as taskViewer from '../src/renderer/components/TaskViewer'
 
 afterEach(() => { delete window.workspace; delete window.agentHost; delete window.remoteVSCode; vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
@@ -129,6 +130,25 @@ async function selectCreationTarget(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('workspace switching in the desktop workbench', () => {
+  it('updates pane geometry without rerendering task content for every native resize pixel', async () => {
+    const { bridge } = fixtures()
+    await bridge.openFolder()
+    vi.stubGlobal('innerWidth', 1440)
+    const viewer = vi.spyOn(taskViewer, 'TaskViewer')
+    render(<App />)
+    await screen.findByRole('tab', { name: 'Actual UI task' })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Browse Agent Host sessions' })).toBeEnabled())
+    expect(viewer).toHaveBeenCalled()
+    viewer.mockClear()
+    for (const width of [1439, 1438, 1437, 1200, 1100, 1001, 1500]) {
+      vi.stubGlobal('innerWidth', width)
+      fireEvent(window, new Event('resize'))
+    }
+    expect(viewer).not.toHaveBeenCalled()
+    expect(screen.getByRole('separator', { name: 'Resize Explorer' })).toHaveAttribute('aria-valuenow', '258')
+    expect(screen.getByRole('tab', { name: 'Actual UI task' })).toHaveAttribute('aria-selected', 'true')
+  })
+
   it('restores the last task and exact chat after restart without opening a default chat during link loading', async () => {
     const { first, repository, bridge, agentHost, target } = creationFixture()
     const firstChat = agentHostTargetFixture('remembered-session')
