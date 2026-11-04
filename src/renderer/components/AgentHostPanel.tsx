@@ -1,4 +1,4 @@
-import { memo, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import stripAnsi from 'strip-ansi'
 import type { ResponsePart, TerminalState } from '@microsoft/agent-host-protocol'
@@ -183,22 +183,6 @@ function Responses({ parts, ...context }: ResponseContext & { parts: ResponsePar
     : <Response key={block.key} part={'tools' in block ? block.tools[0] : block.part} {...context} />)
 }
 
-const ChatTranscript = memo(function ChatTranscript({ view, machineName, aliases, ...context }: Pick<ResponseContext, 'owner' | 'bridge' | 'watchId'> & {
-  view: AgentHostView | undefined
-  machineName: string
-  aliases: Readonly<Record<string, string>>
-}) {
-  const activeTurn = view?.chat?.activeTurn
-  const turns = [...view?.chat?.turns ?? [], ...activeTurn ? [activeTurn] : []]
-  return <>
-    {!turns.length && <p className="muted">{view?.state === 'connected' ? 'No messages.' : 'Waiting for original history...'}</p>}
-    {turns.map((turn) => {
-      const actor = turn.message._meta?.taskcontinuumActor as { username?: string; machineName?: string; clientId?: string } | undefined
-      return <div key={turn.id} data-turn-id={turn.id}><article className="message message-user"><header><Icon name="account" /><strong>{typeof actor?.username === 'string' ? actor.username : 'User'}</strong>{typeof actor?.machineName === 'string' && <span className="message-model" title={actor.machineName}>{machineLabel({ machineName: actor.machineName, clientId: typeof actor.clientId === 'string' ? actor.clientId : undefined }, aliases)}</span>}</header>{turn.message.model && <><p className="message-notice">Requested model: {turn.message.model.id}</p>{Object.keys(turn.message.model.config ?? {}).length > 0 && <p className="message-notice">Requested config: {JSON.stringify(turn.message.model.config)}</p>}</>}<div className="message-text">{turn.message.text}</div><ChatImages images={imagesFor(turn)} /></article><article className="message message-assistant"><header><Icon name="copilot" /><strong title={machineName}>Copilot @ {context.owner}</strong></header><Responses parts={turn.responseParts} terminals={view?.terminals ?? {}} terminalStatus={view?.terminalStatus ?? {}} {...context} />{activeTurn?.id === turn.id && <p className="message-notice" role="status">Responding...</p>}</article></div>
-    })}
-  </>
-})
-
 type AgentHostPanelProps = {
   target: AgentHostTarget
   connectionRevision?: number
@@ -221,7 +205,6 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const aliases = useMachineAliases()
   const ownerLabel = machineLabel(target.owner, aliases)
   const key = agentHostKey(target)
-  const linkTarget = useMemo(() => ({ target, active }), [target, active])
   const contextId = task ? task.id : workspace.id
   const contextLabel = task ? task.id : workspace.name
   const viewKey = `${contextId}:${key}`
@@ -444,6 +427,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       setCatalog({ key: catalogKey, models: [], error: failure instanceof Error ? failure.message : 'The original session could not be verified. Reconnect to retry.' })
     } finally { operating.current = false; setBusy(false) }
   }
+  const turns = [...view?.chat?.turns ?? [], ...activeTurn ? [activeTurn] : []]
   const stateLabel = !bridge ? 'Desktop update required' : !view && (error || currentCatalog?.error) ? 'Connection failed' : !view || view.state === 'connecting' ? 'Connecting...' : view.state === 'offline' ? 'Offline history' : pending ? 'Delivery pending' : activeTurn ? 'Agent responding' : view.readOnly ? 'Read only' : 'Connected'
   const modelStatus = !bridge ? 'Desktop update required.' : !currentCatalog ? 'Loading models from the owner Host...' : currentCatalog.error ? undefined : !modelId ? 'Choose a model below to enable sending.' : !modelReady ? 'The selected model is unavailable. Choose another model or retry loading models.' : undefined
   const displayTitle = sessionTitle(target, view?.target && agentHostKey(view.target) === key ? view.chat?.title : undefined) || cachedTitle || 'Original Host chat'
@@ -469,7 +453,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       <div className="ahp-chat-secondary-actions">{chatActions}</div>
     </div>
   </HeaderTag>
-  return <ChatLinkTargetContext.Provider value={linkTarget}><aside className="chat-panel ahp-panel" aria-label={workspace ? 'Agent Host task creation chat' : 'Agent Host task chat'} data-update-blocker={updateBlocker}>
+  return <ChatLinkTargetContext.Provider value={{ target, active }}><aside className="chat-panel ahp-panel" aria-label={workspace ? 'Agent Host task creation chat' : 'Agent Host task chat'} data-update-blocker={updateBlocker}>
     {headerTarget ? active && createPortal(header, headerTarget) : header}
     {detailsOpen && <Dialog title="Chat details" className="ahp-chat-details" onClose={() => setDetailsKey(undefined)}>
       <dl>
@@ -493,7 +477,11 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       if (element.clientWidth !== logSize.current.width || element.clientHeight !== logSize.current.height) return
       following.current = element.scrollHeight - element.scrollTop - element.clientHeight < 60
     }}>
-      <ChatTranscript view={view} machineName={machineName} aliases={aliases} owner={ownerLabel} bridge={bridge} watchId={watchId} />
+      {!turns.length && <p className="muted">{view?.state === 'connected' ? 'No messages.' : 'Waiting for original history...'}</p>}
+      {turns.map((turn) => {
+        const actor = turn.message._meta?.taskcontinuumActor as { username?: string; machineName?: string; clientId?: string } | undefined
+        return <div key={turn.id} data-turn-id={turn.id}><article className="message message-user"><header><Icon name="account" /><strong>{typeof actor?.username === 'string' ? actor.username : 'User'}</strong>{typeof actor?.machineName === 'string' && <span className="message-model" title={actor.machineName}>{machineLabel({ machineName: actor.machineName, clientId: typeof actor.clientId === 'string' ? actor.clientId : undefined }, aliases)}</span>}</header>{turn.message.model && <><p className="message-notice">Requested model: {turn.message.model.id}</p>{Object.keys(turn.message.model.config ?? {}).length > 0 && <p className="message-notice">Requested config: {JSON.stringify(turn.message.model.config)}</p>}</>}<div className="message-text">{turn.message.text}</div><ChatImages images={imagesFor(turn)} /></article><article className="message message-assistant"><header><Icon name="copilot" /><strong title={machineName}>Copilot @ {ownerLabel}</strong></header><Responses parts={turn.responseParts} terminals={view?.terminals ?? {}} terminalStatus={view?.terminalStatus ?? {}} owner={ownerLabel} bridge={bridge} watchId={watchId} />{activeTurn?.id === turn.id && <p className="message-notice" role="status">Responding...</p>}</article></div>
+      })}
     </div>
     <form className="composer-area" onSubmit={(event) => { event.preventDefault(); void send() }}>
       <ChatImageStatus input={imageInput} />

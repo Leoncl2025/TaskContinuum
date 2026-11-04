@@ -1,5 +1,5 @@
 import { Activity, useCallback, useEffect, useEffectEvent, useRef, useState, useSyncExternalStore } from 'react'
-import type { CSSProperties, ReactNode } from 'react'
+import type { CSSProperties } from 'react'
 import type { DesktopInfo } from '../shared/desktop'
 import { filterTasks } from '../shared/tasks'
 import type { WorkspaceSnapshot } from '../shared/workspace'
@@ -12,7 +12,7 @@ import { Dialog, Icon, IconButton } from './components/Primitives'
 import { TaskSidebar } from './components/TaskSidebar'
 import { TaskViewer } from './components/TaskViewer'
 import { defaultLayout, isCompact, panelSizes, readLayout, resizePanel, saveLayout, subscribeCompact, subscribeViewport, viewportWidth } from './layout'
-import type { LayoutPanel, LayoutPreferences } from './layout'
+import type { LayoutPanel } from './layout'
 import { PanelSash } from './components/PanelSash'
 import { useWorkspaces } from './useWorkspaces'
 import { WorkspacePicker } from './components/WorkspacePicker'
@@ -33,22 +33,6 @@ import { registerInstallSafety } from './installSafety'
 import appIcon from '../../build/icon.png'
 
 type DialogName = 'quick-open' | 'settings' | 'remote-devices' | 'updates' | null
-
-function WorkbenchBody({ layout, children }: { layout: LayoutPreferences; children: ReactNode }) {
-  const width = useSyncExternalStore(subscribeViewport, viewportWidth, () => 1440)
-  const sizes = panelSizes(layout, width)
-  return <div className="workbench-body" style={{ '--sidebar-width': `${sizes.sidebar.width}px`, '--details-width': `${sizes.details.width}px` } as CSSProperties}>{children}</div>
-}
-
-function WorkbenchSash({ layout, panel, onResize, onReset }: {
-  layout: LayoutPreferences
-  panel: LayoutPanel
-  onResize(width: number): void
-  onReset(): void
-}) {
-  const width = useSyncExternalStore(subscribeViewport, viewportWidth, () => 1440)
-  return <PanelSash panel={panel} {...panelSizes(layout, width)[panel]} onResize={onResize} onReset={onReset} />
-}
 
 export default function App() {
   const workspaces = useWorkspaces()
@@ -102,6 +86,8 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const [desktopError, setDesktopError] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const compact = useSyncExternalStore(subscribeCompact, isCompact, () => false)
+  const desktopWidth = useSyncExternalStore(subscribeViewport, viewportWidth, () => 1440)
+  const sizes = panelSizes(layout, desktopWidth)
   const task = tasks.find((item) => item.id === selectedId)
   const primaryPanel = task || taskAgentOpen ? 'chat' : 'details'
   const taskBindings = task ? bindings[task.id] ?? [] : []
@@ -264,7 +250,6 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   }
 
   function changePanelWidth(panel: LayoutPanel, width: number): void {
-    const desktopWidth = viewportWidth()
     setLayout((current) => resizePanel(current, panel, width, desktopWidth))
   }
 
@@ -376,7 +361,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     {selection.error && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{selection.error}</span><IconButton icon="close" label="Dismiss selection memory error" onClick={selection.dismissError} /></div>}
     {machineAliasesError && dialog !== 'remote-devices' && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{machineAliasesError}</span><IconButton icon="refresh" label="Reload workspace machine aliases" onClick={() => { void refreshMachineAliases() }} /></div>}
     {connectionError && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{connectionError}</span>{links.error ? <IconButton icon="refresh" label="Reload session links" disabled={links.busy || sessionBusy} onClick={() => { setActionError(null); void links.reload() }} /> : <IconButton icon="close" label="Dismiss Agent Host error" onClick={() => setActionError(null)} />}</div>}
-    <WorkbenchBody layout={layout}>
+    <div className="workbench-body" style={{ '--sidebar-width': `${sizes.sidebar.width}px`, '--details-width': `${sizes.details.width}px` } as CSSProperties}>
       <nav className="activity-bar" aria-label="Workbench navigation">
         <button type="button" className={sidebarVisible && sidebarView === 'tasks' ? 'activity active' : 'activity'} aria-label="Tasks" title="Tasks" aria-pressed={sidebarVisible && sidebarView === 'tasks'} onClick={openSidebar}><Icon name="checklist" /></button>
         <button type="button" className={sidebarVisible && sidebarView === 'sessions' ? 'activity active' : 'activity'} aria-label="Agent Host sessions" title="Native Agent Host sessions" aria-pressed={sidebarVisible && sidebarView === 'sessions'} onClick={openAgentHostSessions}><Icon name="server-environment" /></button>
@@ -388,7 +373,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
       </nav>
 
       {sidebarVisible && (sidebarView === 'sessions' ? <AgentHostSessionsSidebar key={task?.id ?? 'no-task'} taskId={task?.id} taskTitle={task?.title} taskReady={Boolean(task && links.ready)} bindings={bindings} activeKey={activeBinding ? sessionBindingKey(activeBinding) : undefined} localOwnerId={links.localOwner?.clientId} cachedTitles={sessionTitles.titles} titleCacheError={sessionTitles.error} onTitles={sessionTitles.remember} busy={links.busy} onSelect={task ? (binding) => selectSession(task.id, binding) : undefined} onDetach={task ? (binding) => detachSession(task.id, binding) : undefined} onLink={linkAgentHost} onCreated={agentHostCreated} onDevices={() => setDialog('remote-devices')} onTasks={openSidebar} onClose={toggleSidebar} /> : <TaskSidebar key={createdTaskId ?? 'initial'} tasks={tasks} selectedId={selectedId} query={query} onQuery={setQuery} onSelect={selectTask} onCreate={onCreateRepository} onCreateTask={openTaskCreation} creationDisabled={!workspaces.available || workspaceLocked || workspaces.busy} onClose={toggleSidebar} workspace={workspace ?? undefined} workspaceControls={workspaceControls} />)}
-      {!compact && sidebarVisible && <WorkbenchSash layout={layout} panel="sidebar" onResize={(width) => changePanelWidth('sidebar', width)} onReset={() => changePanelWidth('sidebar', defaultLayout.sidebarWidth)} />}
+      {!compact && sidebarVisible && <PanelSash panel="sidebar" {...sizes.sidebar} onResize={(width) => changePanelWidth('sidebar', width)} onReset={() => changePanelWidth('sidebar', defaultLayout.sidebarWidth)} />}
 
       <Activity mode={compact && sidebarVisible ? 'hidden' : 'visible'}><main className="main-panel" aria-label="Task workspace" aria-keyshortcuts="Control+Shift+PageUp Control+Shift+PageDown">
         <div className="editor-tabs" role="tablist" aria-label="Open tasks" aria-keyshortcuts="Control+PageUp Control+PageDown">
@@ -425,7 +410,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
               </div>
             </aside>}
           </Activity>
-          {!compact && chatVisible && detailsVisible && <WorkbenchSash layout={layout} panel="details" onResize={(width) => changePanelWidth('details', width)} onReset={() => changePanelWidth('details', defaultLayout.detailsWidth)} />}
+          {!compact && chatVisible && detailsVisible && <PanelSash panel="details" {...sizes.details} onResize={(width) => changePanelWidth('details', width)} onReset={() => changePanelWidth('details', defaultLayout.detailsWidth)} />}
           <Activity mode={detailsVisible ? 'visible' : 'hidden'}><aside className="task-details-panel" aria-label="Task details">
             <header className="panel-header"><span>TASK DETAILS</span><IconButton icon="layout-sidebar-right-off" label="Hide task details" onClick={toggleDetails} /></header>
             <div className="task-details-content">
@@ -442,7 +427,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
           </aside></Activity>
         </div>
       </main></Activity>
-    </WorkbenchBody>
+    </div>
 
     <footer className="statusbar" aria-label="Workbench status"><span className="local-status"><Icon name={taskAgentOpen || agentHostBinding ? 'server-environment' : workspace ? 'folder' : 'repo'} />{taskAgentOpen ? 'TASK CREATION' : agentHostBinding ? 'AGENT HOST' : workspace ? 'LOCAL WORKSPACE' : 'NO WORKSPACE'}</span><span><Icon name="checklist" />{tasks.length} tasks</span><span>{selectedId ?? 'No task selected'}</span><span className="statusbar-spacer" /><span className="response-status" role="status" title={taskAgentOpen ? undefined : agentHostBinding?.owner.machineName}>{workspaces.busy ? 'Loading workspace...' : links.busy ? 'Saving or loading session links...' : sessionBusy ? 'Agent Host active' : taskAgentOpen ? 'Local task creation chat' : agentHostBinding ? `Agent Host @ ${machineLabel(agentHostBinding.owner, aliases)}` : workspace ? 'Select an Agent Host chat' : 'Create or open a task repository'}</span><button type="button" onClick={taskAgentOpen ? showChat : openAgentHostSessions}><Icon name={taskAgentOpen ? 'comment-discussion' : agentHostBinding ? 'link' : 'plug'} />{taskAgentOpen ? 'Task creation chat' : agentHostBinding ? 'Agent Host linked' : 'No Agent Host linked'}</button><span className="platform-status">{desktopError ? 'Desktop bridge error' : desktop ? `Desktop · ${desktop.version}` : 'Browser preview'}</span></footer>
 
