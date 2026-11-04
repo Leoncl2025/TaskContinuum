@@ -125,10 +125,10 @@ it is retained for the standard release bundle, although the current client uses
 full installer downloads rather than differential downloads. Do not rename
 assets after generating metadata.
 
-### Manual-only v0.2.0 release
+### Manual-only v0.2.x releases
 
-The initial v0.2.0 release is explicitly unsigned, like v0.1.1, because production
-signing has not been configured. It must be installed manually. The update UI is
+The v0.2.0 and v0.2.1 releases are explicitly unsigned, like v0.1.1, because
+production signing has not been configured. They must be installed manually. The update UI is
 included, but in-app installation remains disabled: no trusted update policy or
 publisher is manufactured, and no signature check is bypassed.
 
@@ -142,7 +142,7 @@ their sizes and SHA-256 values before publishing. Do not use the signed release
 script's default description or claim that a signed upgrade was tested.
 Never replace the assets of an already published version.
 
-Installing this release preserves the existing application identity and
+Installing these releases preserves the existing application identity and
 user-data location. Existing configuration formats must still satisfy the
 [device-trust upgrade requirements](workspace-git-sync.md#durable-device-trust-one-format-breaking-change);
 an installer upgrade does not migrate or authorize old signed history.

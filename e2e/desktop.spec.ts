@@ -108,7 +108,7 @@ test('launches the production workbench with a sandboxed renderer', async () => 
     bridge: Object.keys(window.desktop ?? {}).sort(),
     retiredBridges: ['copilot', 'vscodeChat', 'sharedSessions'].filter((name) => Reflect.has(window, name)),
   }))
-  expect(surface).toEqual({ require: 'undefined', process: 'undefined', bridge: ['close', 'copyText', 'getFullScreen', 'getInfo', 'minimize', 'onFullScreenChanged', 'toggleFullScreen', 'toggleMaximize'], retiredBridges: [] })
+  expect(surface).toEqual({ require: 'undefined', process: 'undefined', bridge: ['close', 'copyText', 'getFullScreen', 'getInfo', 'links', 'minimize', 'onFullScreenChanged', 'toggleFullScreen', 'toggleMaximize'], retiredBridges: [] })
   await expect(page.getByRole('complementary', { name: 'Task explorer' })).toBeVisible()
   await expect(page.getByRole('complementary', { name: 'Task chat' })).toBeVisible()
   await expect(page.getByRole('complementary', { name: 'Task chat' })).toContainText('Select a task to open its Agent Host chat.')
