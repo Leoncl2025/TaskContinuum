@@ -19,6 +19,51 @@ test.beforeAll(async () => {
 })
 test.afterAll(async () => { await server?.close() })
 
+for (const scenario of [
+  { method: 'Enter', width: 1440, height: 900 },
+  { method: 'Enter', width: 360, height: 740 },
+  { method: 'send button', width: 1440, height: 900 },
+]) {
+  test(`follows the latest output immediately on ${scenario.method} at ${scenario.width}px while delivery is pending`, async ({ page }) => {
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    await page.setViewportSize({ width: scenario.width, height: scenario.height })
+    await page.goto(url)
+    const panel = page.getByRole('complementary', { name: 'Agent Host task chat' })
+    await expect(panel.getByText('Connected', { exact: true })).toBeVisible()
+    await panel.getByRole('combobox', { name: 'Agent Host model' }).selectOption('gpt-6')
+    await page.evaluate(async () => {
+      await document.fonts.ready
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+      window.agentHost!.send = async () => {
+        window.compactChatFixture.calls.send++
+        await new Promise<void>(() => undefined)
+      }
+    })
+    const input = panel.getByRole('textbox', { name: 'Message Agent Host' })
+    const log = panel.getByRole('log')
+    const distanceFromBottom = () => log.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)
+    await input.fill('Show the latest output')
+    expect(await log.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(300)
+    await log.evaluate((element) => { element.scrollTop = 100; element.dispatchEvent(new Event('scroll', { bubbles: true })) })
+    await page.evaluate(() => window.compactChatFixture.setState('connected'))
+    await expect.poll(distanceFromBottom).toBeGreaterThan(300)
+    await input.press('Shift+Enter')
+    await expect(input).toHaveValue('Show the latest output\n')
+    expect(await distanceFromBottom()).toBeGreaterThan(300)
+    expect(await page.evaluate(() => window.compactChatFixture.calls.send)).toBe(0)
+    if (scenario.method === 'Enter') await input.press('Enter')
+    else await panel.getByRole('button', { name: 'Send to Agent Host', exact: true }).click()
+    expect(await page.evaluate(() => window.compactChatFixture.calls.send)).toBe(1)
+    await expect.poll(distanceFromBottom).toBeLessThanOrEqual(1)
+    await expect(panel.getByRole('button', { name: 'Send to Agent Host', exact: true })).toBeDisabled()
+    await expect(input).toHaveValue('Show the latest output\n')
+    await page.evaluate(() => window.compactChatFixture.setState('connected'))
+    await expect.poll(distanceFromBottom).toBeLessThanOrEqual(1)
+    expect(errors).toEqual([])
+  })
+}
+
 for (const theme of ['light', 'dark'] as const) {
   test(`keeps linked sessions compact with independent detail disclosure in ${theme} mode`, async ({ page }, testInfo) => {
     const errors: string[] = []

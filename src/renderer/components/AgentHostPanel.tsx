@@ -390,6 +390,8 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   async function send(): Promise<void> {
     if (!canSend || !bridge || operating.current || imageInput.isReading() || !draft.trim() && !images.length) return
     operating.current = true
+    following.current = true
+    if (log.current) log.current.scrollTop = log.current.scrollHeight
     setBusy(true)
     setError(undefined)
     const command = { id: crypto.randomUUID(), text: draft.trim(), draft: draft.trim(), images }
@@ -399,7 +401,6 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       if (!mounted.current) return
       await bridge.send(target, command.id, command.text, command.images.length ? command.images : undefined, { id: modelId, ...(Object.keys(config).length ? { config } : {}) })
       confirm(command)
-      following.current = true
     } catch (failure) { if (attempted.current?.id === command.id) setError(failure instanceof Error ? failure.message : 'Delivery was not confirmed. Inspect the original before retrying.') }
     // Hidden Activities retain state even while their effects are paused.
     finally { operating.current = false; setBusy(false) }

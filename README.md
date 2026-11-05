@@ -24,6 +24,9 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
 - Selecting a task or session opens its chat pane and automatically focuses the
   message input, preserving drafts and the caret. Background updates do not steal
   focus, and open dialogs keep control; selecting an unlinked task creates no chat.
+- Sending with Enter or the send button immediately jumps to the latest output,
+  without waiting for delivery. Shift+Enter stays a newline. Browsing older
+  messages pauses automatic following until returning to the bottom or sending again.
 - Task creation through the UI, a local agent, or CLI.
 - Streaming Markdown, model options, image attachments, and terminal output.
 - Message text supports up to **12,000 characters** (UTF-16 code units), with the

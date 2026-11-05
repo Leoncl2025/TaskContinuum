@@ -41,6 +41,89 @@ function fixture() {
   return { target, bridge, view, emit: () => { for (const listener of listeners) listener({ id: watchId, view: structuredClone(view) }) } }
 }
 
+async function browseHistory(log: HTMLElement) {
+  let scrollHeight = 2000
+  Object.defineProperties(log, {
+    clientWidth: { configurable: true, value: 600 },
+    clientHeight: { configurable: true, value: 500 },
+    scrollHeight: { configurable: true, get: () => scrollHeight },
+  })
+  await act(async () => {
+    fireEvent(window, new Event('resize'))
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  })
+  log.scrollTop = 400
+  fireEvent.scroll(log)
+  return (height: number) => { scrollHeight = height }
+}
+
+describe('chat following on explicit send', () => {
+  it.each(['Enter', 'send button'])('jumps to the bottom on %s before delivery completes and respects later history browsing', async (method) => {
+    const setup = fixture()
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Agent Host model' }), await screen.findByRole('option', { name: 'GPT-6' }))
+    const log = screen.getByRole('log')
+    const grow = await browseHistory(log)
+    act(() => setup.emit())
+    expect(log.scrollTop).toBe(400)
+    const input = screen.getByRole('textbox', { name: 'Message Agent Host' })
+    fireEvent.change(input, { target: { value: 'Show the latest output' } })
+    let complete!: () => void
+    vi.mocked(setup.bridge.send).mockImplementation(() => {
+      expect(log.scrollTop).toBe(2000)
+      return new Promise<void>((resolve) => { complete = resolve })
+    })
+    if (method === 'Enter') fireEvent.keyDown(input, { key: 'Enter' })
+    else fireEvent.click(screen.getByRole('button', { name: 'Send to Agent Host' }))
+    expect(log.scrollTop).toBe(2000)
+    expect(setup.bridge.send).toHaveBeenCalledOnce()
+    expect(input).toHaveValue('Show the latest output')
+    expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeDisabled()
+    grow(2600)
+    act(() => setup.emit())
+    expect(log.scrollTop).toBe(2600)
+    log.scrollTop = 300
+    fireEvent.scroll(log)
+    grow(3200)
+    act(() => setup.emit())
+    expect(log.scrollTop).toBe(300)
+    await act(async () => { complete() })
+    grow(4000)
+    act(() => setup.emit())
+    expect(log.scrollTop).toBe(300)
+    expect(input).toHaveValue('')
+    expect(setup.bridge.send).toHaveBeenCalledOnce()
+    expect(setup.bridge.watch).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    { name: 'Shift+Enter', draft: 'Keep my draft', selectModel: true, readOnly: false, event: { key: 'Enter', shiftKey: true } },
+    { name: 'IME composition', draft: 'Keep my draft', selectModel: true, readOnly: false, event: { key: 'Enter', isComposing: true } },
+    { name: 'an empty message', draft: '   ', selectModel: true, readOnly: false, event: { key: 'Enter' } },
+    { name: 'an unselected model', draft: 'Keep my draft', selectModel: false, readOnly: false, event: { key: 'Enter' } },
+    { name: 'a read-only chat', draft: 'Keep my draft', selectModel: true, readOnly: true, event: { key: 'Enter' } },
+  ])('keeps the history position for $name', async ({ draft, selectModel, readOnly, event }) => {
+    const setup = fixture()
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    const option = await screen.findByRole('option', { name: 'GPT-6' })
+    if (selectModel) await user.selectOptions(screen.getByRole('combobox', { name: 'Agent Host model' }), option)
+    const log = screen.getByRole('log')
+    const grow = await browseHistory(log)
+    const input = screen.getByRole('textbox', { name: 'Message Agent Host' })
+    fireEvent.change(input, { target: { value: draft } })
+    if (readOnly) act(() => { setup.view.readOnly = true; setup.emit() })
+    fireEvent.keyDown(input, event)
+    expect(log.scrollTop).toBe(400)
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+    grow(2600)
+    act(() => setup.emit())
+    expect(log.scrollTop).toBe(400)
+    expect(input).toHaveValue(draft)
+  })
+})
+
 it('protects unsent input retained in a hidden Activity pane without sending or clearing it', async () => {
   const setup = fixture()
   const panel = <AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />
