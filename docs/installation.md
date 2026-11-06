@@ -111,3 +111,17 @@ Click the chain icon (`Link <session> to <task>`) beside your session.
 ![Link a session to a task](images/installation/link-session-to-task.png)
 
 With automatic links enabled for the same workspace, remote machines can see the linked local session.
+
+## 7. Connect your local machine to the Dev Box
+
+Clone the same task repo to `Q:\src\task-tc` if needed. For an existing checkout, pull the latest changes:
+
+```powershell
+git -C 'Q:\src\task-tc' pull
+```
+
+Open Task Continuum, click the folder icon, and select `Q:\src\task-tc`.
+
+![Open the task repo on your local machine](images/installation/open-local-repository.png)
+
+Follow [5. Set up connections](#5-set-up-connections) on this machine using the same Microsoft work account as the Dev Box. Wait for the devices to connect.
