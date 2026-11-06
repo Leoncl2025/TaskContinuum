@@ -79,6 +79,9 @@ required GitHub assets and session/draft protection.
 
 ## Get started
 
+For a screenshot-based walkthrough, see the
+[installation guide](docs/installation.md).
+
 Open the workspace folder containing `.agentdesk/config.json`, or choose
 **Create task repository**.
 
