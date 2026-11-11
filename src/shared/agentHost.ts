@@ -22,11 +22,18 @@ export interface AgentHostSession extends AgentHostTarget {
   canSend: boolean
 }
 
+export interface AgentHostHistoryTransfer {
+  receivedBytes: number
+  totalBytes: number
+  resumed?: boolean
+}
+
 export interface AgentHostView {
   target: AgentHostTarget
   state: 'connecting' | 'connected' | 'offline'
   protocolVersion?: AgentHostProtocolVersion
   chat?: ChatState
+  historyTransfer?: AgentHostHistoryTransfer
   terminals: Record<string, TerminalState>
   terminalStatus?: Record<string, { state: 'loading' | 'error'; error?: string }>
   canSend: boolean

@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import stripAnsi from 'strip-ansi'
 import type { ResponsePart, TerminalState } from '@microsoft/agent-host-protocol'
 import { agentHostKey } from '../../shared/agentHost'
-import type { AgentHostBridge, AgentHostTarget, AgentHostView } from '../../shared/agentHost'
+import type { AgentHostBridge, AgentHostHistoryTransfer, AgentHostTarget, AgentHostView } from '../../shared/agentHost'
 import type { TaskRecord } from '../../shared/tasks'
 import type { WorkspaceSnapshot } from '../../shared/workspace'
 import { MAX_CHAT_TEXT_LENGTH } from '../../shared/chatAttachments'
@@ -29,6 +29,13 @@ function terminalText(state: TerminalState | undefined): string {
 
 function retainChatHistory(previous: AgentHostView | undefined, value: AgentHostView): AgentHostView {
   return value.chat === undefined && previous?.chat ? { ...value, chat: previous.chat } : value
+}
+
+function formatHistoryTransfer(progress: AgentHostHistoryTransfer, syncing = false): string {
+  const MiB = 1024 * 1024
+  const percent = progress.totalBytes > 0 ? Math.min(100, Math.floor((progress.receivedBytes / progress.totalBytes) * 100)) : 100
+  const prefix = progress.resumed ? 'Resuming original history' : syncing ? 'Syncing original history' : 'Receiving original history'
+  return `${prefix}... ${percent}% (${(progress.receivedBytes / MiB).toFixed(1)} / ${(progress.totalBytes / MiB).toFixed(1)} MiB)`
 }
 
 type TerminalStatus = NonNullable<AgentHostView['terminalStatus']>
@@ -191,11 +198,12 @@ const ChatTranscript = memo(function ChatTranscript({ view, machineName, aliases
   const activeTurn = view?.chat?.activeTurn
   const turns = [...view?.chat?.turns ?? [], ...activeTurn ? [activeTurn] : []]
   return <>
-    {!turns.length && <p className="muted">{view?.state === 'connected' ? 'No messages.' : 'Waiting for original history...'}</p>}
+    {!turns.length && <p className="muted">{view?.state === 'connected' ? 'No messages.' : view?.historyTransfer ? formatHistoryTransfer(view.historyTransfer) : 'Waiting for original history...'}</p>}
     {turns.map((turn) => {
       const actor = turn.message._meta?.taskcontinuumActor as { username?: string; machineName?: string; clientId?: string } | undefined
       return <div key={turn.id} data-turn-id={turn.id}><article className="message message-user"><header><Icon name="account" /><strong>{typeof actor?.username === 'string' ? actor.username : 'User'}</strong>{typeof actor?.machineName === 'string' && <span className="message-model" title={actor.machineName}>{machineLabel({ machineName: actor.machineName, clientId: typeof actor.clientId === 'string' ? actor.clientId : undefined }, aliases)}</span>}</header>{turn.message.model && <><p className="message-notice">Requested model: {turn.message.model.id}</p>{Object.keys(turn.message.model.config ?? {}).length > 0 && <p className="message-notice">Requested config: {JSON.stringify(turn.message.model.config)}</p>}</>}<div className="message-text">{turn.message.text}</div><ChatImages images={imagesFor(turn)} /></article><article className="message message-assistant"><header><Icon name="copilot" /><strong title={machineName}>Copilot @ {context.owner}</strong></header><Responses parts={turn.responseParts} terminals={view?.terminals ?? {}} terminalStatus={view?.terminalStatus ?? {}} {...context} />{activeTurn?.id === turn.id && <p className="message-notice" role="status">Responding...</p>}</article></div>
     })}
+    {turns.length > 0 && view?.historyTransfer && <p className="message-notice" role="status">{formatHistoryTransfer(view.historyTransfer, true)}</p>}
   </>
 })
 

@@ -15,6 +15,11 @@ import { isAgentHostTurnBoundary } from './agentHostConnection'
 import { AgentHostGatewayScheduler, GATEWAY_LIMITS } from './agentHostGatewayScheduler'
 import { abortable } from './shared/abortable'
 import { AGENT_HOST_LIMIT_HEADER, AGENT_HOST_LIMIT_RPC_CODE, AGENT_HOST_LIMITS, AgentHostSizeLimitError, agentHostSizeLimit } from './agentHostLimits'
+import {
+  AGENT_HOST_SNAPSHOT_SUPERSEDED_RPC_CODE, AgentHostSnapshotStore, AgentHostSnapshotSupersededError,
+  SNAPSHOT_TRANSFER_METHODS, snapshotChunkRequestSchema, snapshotPrepareRequestSchema, snapshotTransferLookupSchema,
+} from './agentHostSnapshotTransfer'
+import type { SnapshotChunkRequest, SnapshotPrepareRequest, SnapshotTransferLimits, SnapshotTransferLookup } from './agentHostSnapshotTransfer'
 import type { DesktopOperations } from './desktopOperations'
 import { DesktopOperationUnavailableError } from './desktopOperations'
 
@@ -28,6 +33,7 @@ export interface AgentHostGatewayOptions {
   authorize(token: string, target: AgentHostTarget, send: boolean): Promise<AgentHostAccess>
   connection(target: AgentHostTarget): Promise<AgentHostConnection>
   operations?: DesktopOperations
+  snapshotLimits?: Partial<SnapshotTransferLimits>
 }
 const rpcSchema = z.object({ jsonrpc: z.literal('2.0'), id: z.union([z.number().int().nonnegative(), z.string().max(128)]).optional(), method: z.string().max(100), params: z.record(z.string(), z.unknown()) }).strict()
 const subscribeSchema = z.object({ channel: z.string().max(512), delivery: z.unknown().optional(), view: z.unknown().optional() }).strict()
@@ -41,6 +47,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
   const sockets = new WebSocketServer({ noServer: true, maxPayload: AGENT_HOST_LIMITS.requestBytes, perMessageDeflate: false })
   const checks = new Set<() => void>()
   const scheduler = new AgentHostGatewayScheduler()
+  const snapshotStore = new AgentHostSnapshotStore(options.snapshotLimits)
   let bufferedEventBytes = 0
   let bufferedResponseBytes = 0
   let terminalLeases = 0
@@ -297,7 +304,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
       let channel = agentHostDiagnosticChannel(resource, target)
       const terminal = hintedMethod === 'subscribe' && resource !== undefined && agentHostTerminalIdSchema.safeParse(resource).success
       const activeTerminal = terminal && connection.isActiveTerminal(resource)
-      const lane = hintedMethod === 'ping' || hintedMethod === 'unsubscribe' ? 'control'
+      const lane = hintedMethod === 'ping' || hintedMethod === 'unsubscribe' || hintedMethod === SNAPSHOT_TRANSFER_METHODS.release ? 'control'
         : hintedMethod === 'dispatchAction' ? 'execution'
           : terminal && !activeTerminal ? 'history' : 'interactive'
       const isInitialization = hintedMethod === 'initialize' || hintedMethod === 'reconnect'
@@ -366,8 +373,17 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
               if (!initialized) throw new Error('Initialize first.')
             }
             if (precedingUnsubscribe) await precedingUnsubscribe
-            if (request.method === 'subscribe' && resource && (cancellations.get(resource) ?? 0) !== generation) throw new Error('Subscription was cancelled.')
+            const subscriptionSensitive = request.method === 'subscribe'
+              || request.method === SNAPSHOT_TRANSFER_METHODS.prepare
+              || request.method === SNAPSHOT_TRANSFER_METHODS.activate
+            if (subscriptionSensitive && resource && (cancellations.get(resource) ?? 0) !== generation) throw new Error('Subscription was cancelled.')
             let result: unknown
+            let pendingSnapshotOp:
+              | { kind: 'prepare'; params: SnapshotPrepareRequest }
+              | { kind: 'chunk'; params: SnapshotChunkRequest }
+              | { kind: 'activate'; params: SnapshotTransferLookup }
+              | { kind: 'release'; params: SnapshotTransferLookup }
+              | undefined
             if (isInitialization) {
               if (!initializer || initialized) throw new Error('Already initialized.')
               let resources: string[]
@@ -385,7 +401,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
                 ready.push({ resource: item, pending, snapshot })
               }
               result = request.method === 'initialize'
-                ? { ...connection.handshake, snapshots: ready.map((item) => item.snapshot), _meta: { taskcontinuumCanSend: initialAccess.canSend, taskcontinuumModelSelection: true, taskcontinuumModelConfig: true, taskcontinuumStreamedSendValidation: true } }
+                ? { ...connection.handshake, snapshots: ready.map((item) => item.snapshot), _meta: { taskcontinuumCanSend: initialAccess.canSend, taskcontinuumModelSelection: true, taskcontinuumModelConfig: true, taskcontinuumStreamedSendValidation: true, taskcontinuumChunkedChatSnapshot: snapshotStore.capability } }
                 : { type: 'snapshot', snapshots: ready.map((item) => item.snapshot) }
             } else if (request.method === 'ping') {
               z.object({ channel: z.literal('ahp-root://') }).strict().parse(request.params)
@@ -455,9 +471,32 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
                 await connection.cancel(action.turnId, async () => { await requestAuthorization(true) })
               } else throw new Error('This action is not available through the session gateway.')
               result = {}
+            } else if (request.method === SNAPSHOT_TRANSFER_METHODS.prepare) {
+              const params = snapshotPrepareRequestSchema.parse(request.params)
+              if (params.channel !== target.chatId || params.subscribe && pendingSubscriptions.has(params.channel)) {
+                throw new Error('Channel not authorized or subscription in progress.')
+              }
+              pendingSnapshotOp = { kind: 'prepare', params }
+            } else if (request.method === SNAPSHOT_TRANSFER_METHODS.chunk) {
+              const params = snapshotChunkRequestSchema.parse(request.params)
+              if (params.channel !== target.chatId) throw new Error('Channel not authorized.')
+              pendingSnapshotOp = { kind: 'chunk', params }
+            } else if (request.method === SNAPSHOT_TRANSFER_METHODS.activate) {
+              const params = snapshotTransferLookupSchema.parse(request.params)
+              if (params.channel !== target.chatId || pendingSubscriptions.has(params.channel)) {
+                throw new Error('Channel not authorized or subscription in progress.')
+              }
+              pendingSnapshotOp = { kind: 'activate', params }
+            } else if (request.method === SNAPSHOT_TRANSFER_METHODS.release) {
+              const params = snapshotTransferLookupSchema.parse(request.params)
+              if (params.channel !== target.chatId) throw new Error('Channel not authorized.')
+              pendingSnapshotOp = { kind: 'release', params }
             } else throw new Error('This command is not available through the session gateway.')
             step = 'authorization'
             await requestAuthorization(false)
+            if (subscriptionSensitive && resource && (cancellations.get(resource) ?? 0) !== generation) {
+              throw new Error('Subscription was cancelled.')
+            }
             for (const item of ready) {
               if (pendingSubscriptions.get(item.resource) !== item.pending || !connection.allowedChannel(item.resource)
                 || request.method === 'subscribe' && (cancellations.get(item.resource) ?? 0) !== generation) throw new Error('Subscription was cancelled or channel access changed.')
@@ -466,8 +505,35 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
             if (ready.length && request.method === 'subscribe') result = { snapshot: ready[0].snapshot }
             if (ready.length && request.method === 'initialize') result = { ...result as object, snapshots: ready.map((item) => item.snapshot) }
             if (ready.length && request.method === 'reconnect') result = { type: 'snapshot', snapshots: ready.map((item) => item.snapshot) }
+            let activatedSnapshot: { resource: string; fromSeq: number; tailEvents: ActionEnvelope[] } | undefined
+            if (pendingSnapshotOp?.kind === 'prepare') {
+              const prepared = snapshotStore.prepare(target, connection, pendingSnapshotOp.params)
+              result = prepared
+              if (prepared.mode === 'inline' && pendingSnapshotOp.params.subscribe) {
+                activatedSnapshot = { resource: pendingSnapshotOp.params.channel, fromSeq: prepared.snapshot.fromSeq, tailEvents: [] }
+              }
+            } else if (pendingSnapshotOp?.kind === 'chunk') {
+              result = snapshotStore.chunk(target, connection, pendingSnapshotOp.params)
+            } else if (pendingSnapshotOp?.kind === 'activate') {
+              if (pendingSubscriptions.has(pendingSnapshotOp.params.channel)) throw new Error('Subscription in progress.')
+              const activated = snapshotStore.activate(target, connection, pendingSnapshotOp.params)
+              result = { fromSeq: activated.fromSeq }
+              activatedSnapshot = { resource: pendingSnapshotOp.params.channel, fromSeq: activated.fromSeq, tailEvents: activated.tailEvents }
+            } else if (pendingSnapshotOp?.kind === 'release') {
+              snapshotStore.release(target, connection, pendingSnapshotOp.params)
+              result = {}
+            }
             step = 'response'
             if (id !== undefined && !send({ jsonrpc: '2.0', id, result })) throw new Error('Agent Host connection closed before replying.')
+            if (activatedSnapshot) {
+              subscribed.add(activatedSnapshot.resource)
+              delivered.set(activatedSnapshot.resource, activatedSnapshot.fromSeq)
+              for (const envelope of activatedSnapshot.tailEvents) {
+                if (connection.allowedChannel(activatedSnapshot.resource) && envelope.serverSeq > (delivered.get(activatedSnapshot.resource) ?? -1)) {
+                  if (send({ jsonrpc: '2.0', method: 'action', params: envelope })) delivered.set(activatedSnapshot.resource, envelope.serverSeq)
+                }
+              }
+            }
             for (const item of ready) {
               pendingSubscriptions.delete(item.resource)
               subscribed.add(item.resource)
@@ -496,6 +562,8 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
               const limit = agentHostSizeLimit(error)
               if (id !== undefined) send({ jsonrpc: '2.0', id, error: limit
                 ? { code: AGENT_HOST_LIMIT_RPC_CODE, message: limit.message, data: limit.toData() }
+                : error instanceof AgentHostSnapshotSupersededError
+                ? { code: AGENT_HOST_SNAPSHOT_SUPERSEDED_RPC_CODE, message: error.message, data: error.toData() }
                 : error instanceof TerminalUnavailableError
                 ? { code: -32000, message: 'Terminal output is unavailable from the owner Host. Retry manually.' }
                 : error instanceof AgentHostProtocolError ? { code: AhpErrorCodes.UnsupportedProtocolVersion, message: error.message }
@@ -517,6 +585,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
     hasActiveWork: () => pendingUpgrades > 0 || activeRequests > 0,
     revalidate: () => { for (const check of checks) check() },
     close: () => {
+      snapshotStore.close()
       for (const abort of upgrades) abort.abort(new DOMException('The session gateway closed.', 'AbortError'))
       for (const socket of sockets.clients) socket.terminate()
       sockets.close()

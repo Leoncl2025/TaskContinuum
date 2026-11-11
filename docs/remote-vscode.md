@@ -595,6 +595,26 @@ timeout**, allowing large history snapshots to arrive over slower cross-region
 Dev Tunnel links. Heartbeats are still sent every 15 seconds. Transport handshake
 deadlines, gateway queue expiry and all message/buffer limits remain unchanged.
 
+When both desktops support `taskcontinuumChunkedChatSnapshot`, remote chat
+subscriptions and uncertain-delivery refreshes automatically transfer snapshots
+larger than **256 KiB** in base64 byte-range chunks (**64 KiB–1 MiB**, adapting
+to chunk round-trip latency and stepping down on a timeout) instead of a single
+monolithic JSON-RPC response:
+
+- Small snapshots ($\le$ 256 KiB) return inline in one round trip.
+- Larger snapshots stream into a private per-target `.snapshot.part` file on
+  disk. If the Dev Tunnel drops or the desktop restarts mid-transfer, reconnecting
+  verifies the saved byte prefix and resumes from the exact byte offset whenever
+  the gateway's retained snapshot export or SHA-256 digest still matches.
+- Live incremental chat actions (`tailEvents`, up to 1,024 events / 16 MiB)
+  occurring while chunks transfer or across a brief reconnect are buffered on the
+  gateway export and flushed atomically upon activation. If the snapshot epoch
+  resets or overflows that bounded tail, the gateway returns typed RPC `-32051`
+  (`TC_AHP_SNAPSHOT_SUPERSEDED`) and the client cleanly restarts from the latest
+  snapshot while keeping any previously verified history visible.
+- Native localhost Agent Hosts and older gateways without the capability continue
+  using standard `subscribe` automatically.
+
 Private offline history uses compact JSON and a matching 1 GiB plus 64 KiB
 metadata-envelope limit, measured on the exact bytes written. Large histories
 are not silently skipped or truncated. A size failure is reported separately

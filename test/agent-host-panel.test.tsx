@@ -653,6 +653,38 @@ describe('Agent Host chat UI', () => {
     expect(bridge.cancel).not.toHaveBeenCalled()
   })
 
+  it('displays chunked history transfer and breakpoint resume progress without hiding retained turns', async () => {
+    const setup = fixture()
+    const initialChat = setup.view.chat!
+    setup.view.state = 'connecting'
+    setup.view.canSend = false
+    setup.view.chat = undefined
+    setup.view.historyTransfer = { receivedBytes: 50 * 1024 * 1024, totalBytes: 100 * 1024 * 1024 }
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onClose={vi.fn()} onDetach={vi.fn()} />)
+    expect(await screen.findByText('Receiving original history... 50% (50.0 / 100.0 MiB)')).toBeVisible()
+
+    setup.view.historyTransfer = { receivedBytes: 75 * 1024 * 1024, totalBytes: 100 * 1024 * 1024, resumed: true }
+    act(() => setup.emit())
+    expect(screen.getByText('Resuming original history... 75% (75.0 / 100.0 MiB)')).toBeVisible()
+
+    setup.view.chat = initialChat
+    responseHistory(setup.view, [{ kind: 'markdown' as ResponsePartKind.Markdown, id: 'retained-chunked', content: 'Loaded over chunks' }])
+    setup.view.state = 'connected'
+    setup.view.canSend = true
+    setup.view.historyTransfer = undefined
+    act(() => setup.emit())
+    expect(screen.getByText('Loaded over chunks')).toBeVisible()
+
+    // Background reconnect with chunked resume keeps the existing conversation visible alongside status.
+    setup.view.state = 'connecting'
+    setup.view.canSend = false
+    setup.view.chat = undefined
+    setup.view.historyTransfer = { receivedBytes: 40 * 1024 * 1024, totalBytes: 100 * 1024 * 1024, resumed: true }
+    act(() => setup.emit())
+    expect(screen.getByText('Loaded over chunks')).toBeVisible()
+    expect(screen.getByText('Resuming original history... 40% (40.0 / 100.0 MiB)')).toBeVisible()
+  })
+
   it('keeps loaded history when a hidden chat resumes with a connecting view, then accepts fresh updates and an empty reset', async () => {
     const setup = fixture()
     responseHistory(setup.view, [{ kind: 'markdown' as ResponsePartKind.Markdown, id: 'retained-answer', content: 'Previously loaded conversation' }])

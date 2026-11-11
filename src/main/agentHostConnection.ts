@@ -5,7 +5,7 @@ import { AhpClient } from '@microsoft/agent-host-protocol/client'
 import type { AhpTransport, Subscription } from '@microsoft/agent-host-protocol/client'
 import { MessageKind, sessionReducer, terminalReducer } from '@microsoft/agent-host-protocol'
 import type { ActionEnvelope, ChatTurnStartedAction, ChatTurnCancelledAction, InitializeResult, MessageEmbeddedResourceAttachment, ModelSelection, SessionModelInfo, SessionState, Snapshot, TerminalState } from '@microsoft/agent-host-protocol'
-import type { AgentHostProtocolVersion, AgentHostTarget, AgentHostView } from '../shared/agentHost'
+import type { AgentHostHistoryTransfer, AgentHostProtocolVersion, AgentHostTarget, AgentHostView } from '../shared/agentHost'
 import { agentHostProtocolVersions } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
@@ -16,6 +16,8 @@ import type { AgentHostDiagnosticDetails, AgentHostDiagnosticEvent } from './age
 import { agentHostKey, agentHostModelInfoSchema, agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminalIdSchema, requireAgentHostProtocolVersion } from './agentHostProtocol'
 import { JsonFileSizeError, readJsonBounded, writeJsonAtomic, writeTextAtomic } from './shared/storage'
 import { AGENT_HOST_LIMITS, AgentHostSizeLimitError, agentHostSizeLimit } from './agentHostLimits'
+import { chunkedSnapshotCapabilitySchema, receiveChunkedChatSnapshot, removePartialSnapshotFiles } from './agentHostSnapshotTransfer'
+import type { ChunkedSnapshotCapability } from './agentHostSnapshotTransfer'
 
 export type AgentHostEvent = { type: 'action'; envelope: ActionEnvelope } | { type: 'snapshot'; snapshot: Snapshot } | { type: 'state' }
 export function isAgentHostTurnBoundary(event: AgentHostEvent): boolean {
@@ -35,6 +37,7 @@ export class AgentHostConnection {
   private error?: string
   private cacheError?: string
   private lastSizeFailure?: AgentHostSizeLimitError
+  private historyTransfer?: AgentHostHistoryTransfer
   private chat: AgentHostChatState
   private readonly snapshots = new Map<string, Snapshot>()
   private readonly listeners = new Set<(event: AgentHostEvent) => void>()
@@ -87,10 +90,16 @@ export class AgentHostConnection {
     const pending = this.commands.find((command) => command.state === 'pending' || command.state === 'uncertain')
     const readOnly = this.readOnly
     return { target: this.target, state: this.state, protocolVersion: this.initialized?.protocolVersion, chat,
+      ...(this.historyTransfer ? { historyTransfer: { ...this.historyTransfer } } : {}),
       terminals: Object.fromEntries([...this.snapshots].filter(([resource]) => this.referencedTerminals.has(resource)).map(([resource, snapshot]) => [resource, structuredClone(snapshot.state) as TerminalState])),
       terminalStatus: Object.fromEntries([...this.terminalStatus].filter(([resource]) => this.referencedTerminals.has(resource)).map(([resource, status]) => [resource, { ...status }])),
       canSend: this.connected && !readOnly && !pending && !this.sending && !chat?.activeTurn && !chat?.draft?.text && !chat?.draft?.attachments?.length && !chat?.queuedMessages?.length, readOnly,
       error: [this.error, this.cacheError].filter(Boolean).join(' ') || undefined, ...(pending ? { pendingTurn: { id: pending.id, state: pending.state as 'pending' | 'uncertain' } } : {}) }
+  }
+
+  private chunkedSnapshotCapability(): ChunkedSnapshotCapability | undefined {
+    const parsed = chunkedSnapshotCapabilitySchema.safeParse(this.initialized?._meta?.taskcontinuumChunkedChatSnapshot)
+    return parsed.success ? parsed.data : undefined
   }
 
   get handshake(): InitializeResult {
@@ -296,6 +305,48 @@ export class AgentHostConnection {
     }
     this.subscribing.add(resource)
     try {
+      const chunkedCapability = resource === this.target.chatId ? this.chunkedSnapshotCapability() : undefined
+      if (chunkedCapability) {
+        const subscription = active.client.attachSubscription(resource)
+        try {
+          const received = await receiveChunkedChatSnapshot({
+            baseFilePath: this.file,
+            target: this.target,
+            subscribe: true,
+            signal: active.abort.signal,
+            capability: chunkedCapability,
+            request: (method, params) => active.client.request(method as Parameters<AhpClient['request']>[0], params as never),
+            onProgress: (progress) => {
+              if (this.current !== active && progress !== undefined) return
+              this.historyTransfer = progress
+              this.emit({ type: 'state' })
+            },
+            onChunkSaved: () => {
+              if (this.current === active) this.failures = 0
+            },
+          })
+          if (this.current !== active) {
+            this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'closed', channel, reason: 'transport-closed', elapsedMs: performance.now() - started })
+            return
+          }
+          this.acceptSnapshot(received.snapshot, freshChat)
+          this.diagnose('connection.subscribe', {
+            traceId: active.traceId, status: 'ok', channel, elapsedMs: performance.now() - started,
+            bytes: received.totalBytes, count: received.chunksTransferred,
+          })
+          void this.pump(subscription, active, resource)
+        } catch (error) {
+          await subscription.close()
+          if (this.current === active) {
+            try { await active.client.unsubscribe(resource) }
+            catch (failure) { this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'error', channel, step: 'response', error: failure }) }
+          }
+          throw error
+        } finally {
+          if (this.current !== active || !this.subscribing.has(resource)) await subscription.close()
+        }
+        return
+      }
       const { result, subscription } = await active.client.subscribe(resource, { delivery: { maxLatencyMs: 25 } })
       try {
         if (this.current !== active) {
@@ -304,6 +355,7 @@ export class AgentHostConnection {
         }
         if (!result.snapshot || result.snapshot.resource !== resource) throw new Error('Agent Host did not return the requested snapshot.')
         this.acceptSnapshot(result.snapshot, freshChat)
+        if (resource === this.target.chatId) void removePartialSnapshotFiles(this.file)
         if (agentHostTerminalIdSchema.safeParse(resource).success) this.terminalSubscriptions.set(resource, subscription)
         this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'ok', channel, elapsedMs: performance.now() - started })
         void this.pump(subscription, active, resource)
@@ -607,9 +659,20 @@ export class AgentHostConnection {
       await this.open()
       const active = this.current
       if (!active || !this.connected) throw new Error('Reconnect to the original Agent Host before reviewing delivery.')
-      const response = await active.client.request('subscribe', { channel: this.target.chatId })
-      if (this.current !== active || !this.connected || !response.snapshot) throw new Error('The Agent Host connection changed while reviewing delivery.')
-      this.acceptSnapshot(response.snapshot)
+      const chunkedCapability = this.chunkedSnapshotCapability()
+      const snapshot = chunkedCapability
+        ? (await receiveChunkedChatSnapshot({
+          baseFilePath: this.file,
+          target: this.target,
+          subscribe: false,
+          signal: active.abort.signal,
+          capability: chunkedCapability,
+          request: (method, params) => active.client.request(method as Parameters<AhpClient['request']>[0], params as never),
+          onChunkSaved: () => { if (this.current === active) this.failures = 0 },
+        })).snapshot
+        : (await active.client.request('subscribe', { channel: this.target.chatId })).snapshot
+      if (this.current !== active || !this.connected || !snapshot) throw new Error('The Agent Host connection changed while reviewing delivery.')
+      this.acceptSnapshot(snapshot)
       await this.reconcile()
       await authorize()
       if (this.current !== active || !this.connected) throw new Error('The Agent Host connection changed while reviewing delivery.')
@@ -645,6 +708,7 @@ export class AgentHostConnection {
     this.diagnose('connection.offline', { traceId: active.traceId, status: 'closed', reason, ...(this.lastSizeFailure ? { error: this.lastSizeFailure } : {}) })
     this.current = undefined
     this.modelCatalog = undefined
+    this.historyTransfer = undefined
     this.connected = false
     clearInterval(this.heartbeat)
     active.abort.abort()
