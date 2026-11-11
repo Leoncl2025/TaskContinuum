@@ -3,12 +3,64 @@ import { randomUUID } from 'node:crypto'
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import type { ChatState, Snapshot } from '@microsoft/agent-host-protocol'
 import type { AhpTransport } from '@microsoft/agent-host-protocol/client'
 import { AgentHostConnection } from '../src/main/agentHostConnection'
 import { connectLocalAgentHost } from '../src/main/agentHostTransport'
 import { startAgentHostFixture } from './agent-host-fixture'
+
+it.each([59_999, 60_000])('uses a 60-second deadline for a chat snapshot delayed by %i ms', async (delay) => {
+  const directory = await mkdtemp(join(tmpdir(), 'continuum-history-deadline-'))
+  const host = await startAgentHostFixture()
+  const target = { sessionId: host.sessionId, chatId: host.chatId, owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+  let release!: () => void
+  let received!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const snapshotReceived = new Promise<void>((resolve) => { received = resolve })
+  const connection = new AgentHostConnection(target, directory, async (signal) => {
+    const transport = await connectLocalAgentHost(host.endpoint, signal)
+    return {
+      send: (message) => transport.send(message),
+      recv: async () => {
+        const frame = await transport.recv()
+        if (frame?.kind === 'text') {
+          const message = JSON.parse(frame.text) as { result?: { snapshot?: Snapshot } }
+          if (message.result?.snapshot?.resource === target.chatId) {
+            received()
+            await gate
+          }
+        }
+        return frame
+      },
+      close: () => { release(); return transport.close() },
+    }
+  })
+  try {
+    host.historyText(2, 'Slow original history')
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const result = connection.open().catch((error: unknown) => error)
+    await snapshotReceived
+    await vi.advanceTimersByTimeAsync(delay)
+    release()
+    if (delay < 60_000) {
+      expect(await result).toBeUndefined()
+      expect(connection.state).toBe('connected')
+      expect(connection.view.chat?.turns).toHaveLength(2)
+    } else {
+      expect(await result).toHaveProperty('timeoutMs', 60_000)
+      expect(connection.state).toBe('offline')
+    }
+    expect(host.dispatches).toEqual([])
+    expect(host.methods).not.toContain('createSession')
+  } finally {
+    release()
+    vi.useRealTimers()
+    await connection.close()
+    await host.close()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
 
 it.each(['reconnect', 'cached-restart'] as const)('keeps verified history visible until a fresh chat snapshot arrives during %s', async (mode) => {
   const directory = await mkdtemp(join(tmpdir(), 'continuum-history-refresh-'))

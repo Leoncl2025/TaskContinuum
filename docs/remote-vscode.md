@@ -589,6 +589,11 @@ Outstanding response writes are bounded at 80 MiB per connection and 128 MiB
 across the gateway, and release their budget when their send callback completes.
 Ordinary incremental event queues keep their separate 16/32 MiB limits.
 
+AgentHostConnection gives each native or remote AHP request a **60-second response
+timeout**, allowing large history snapshots to arrive over slower cross-region
+Dev Tunnel links. Heartbeats are still sent every 15 seconds. Transport handshake
+deadlines, gateway queue expiry and all message/buffer limits remain unchanged.
+
 Private offline history uses compact JSON and a matching 64 MiB plus 64 KiB
 metadata-envelope limit, measured on the exact bytes written. Large histories
 are not silently skipped or truncated. A size failure is reported separately
@@ -607,7 +612,7 @@ own single slot. Across connections, the respective budgets are 16, 16
 connection at 32 pending requests, 16 MiB and 32 retained terminal
 subscriptions; all connections are capped at 128 pending requests, 32 MiB
 and 128 retained terminals. Queued requests expire after 10 seconds, before the
-existing 15-second client RPC timeout; overloaded connections fail rather
+60-second client RPC timeout; overloaded connections fail rather
 than accumulating stale work. Initialization is a barrier for subsequent
 requests. Every processed request still checks current authorization before
 work and before its response; send/cancel additionally recheck send access

@@ -228,7 +228,7 @@ export class AgentHostConnection {
         stepStarted = performance.now()
       }
       try {
-        const client = new AhpClient(await this.transport(abort.signal, traceId), { requestTimeoutMs: 15000, subscriptionBuffer: 4096 })
+        const client = new AhpClient(await this.transport(abort.signal, traceId), { requestTimeoutMs: 60000, subscriptionBuffer: 4096 })
         active = { client, abort, traceId }
         if (this.closed) { abort.abort(); await client.shutdown(); throw new Error('Agent Host view is closed.') }
         advance('initialize')
