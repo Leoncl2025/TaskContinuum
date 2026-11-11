@@ -581,12 +581,13 @@ action. Failed historical subscriptions are not replayed on reconnect.
 The owner rechecks the terminal's chat reference and native session/chat claim
 before returning a snapshot; terminal failures do not take down the chat.
 
-History snapshots use a shared **64 MiB UTF-8 message limit** on both the native
-and remote receiving transports. Each transport additionally caps unread data at
-80 MiB and 1,024 messages. The gateway can return these large snapshots without
-raising its client request limit: incoming requests remain limited to 16 MiB.
-Outstanding response writes are bounded at 80 MiB per connection and 128 MiB
-across the gateway, and release their budget when their send callback completes.
+History snapshots use a shared **1 GiB UTF-8 message limit**
+(1,073,741,824 bytes) on both the native and remote receiving transports.
+Each transport additionally caps unread data at 1 GiB plus 16 MiB and 1,024
+messages. The gateway can return these large snapshots without raising its client
+request limit: incoming requests remain limited to 16 MiB. Outstanding response
+writes are bounded at 1 GiB plus 16 MiB per connection and 2 GiB across the
+gateway, and release their budget when their send callback completes.
 Ordinary incremental event queues keep their separate 16/32 MiB limits.
 
 AgentHostConnection gives each native or remote AHP request a **60-second response
@@ -594,7 +595,7 @@ timeout**, allowing large history snapshots to arrive over slower cross-region
 Dev Tunnel links. Heartbeats are still sent every 15 seconds. Transport handshake
 deadlines, gateway queue expiry and all message/buffer limits remain unchanged.
 
-Private offline history uses compact JSON and a matching 64 MiB plus 64 KiB
+Private offline history uses compact JSON and a matching 1 GiB plus 64 KiB
 metadata-envelope limit, measured on the exact bytes written. Large histories
 are not silently skipped or truncated. A size failure is reported separately
 from missing sessions, authorization failures or unsupported protocol versions;
@@ -602,6 +603,12 @@ the remote gateway reveals it only after current access checks. Oversized live
 history stops automatic reconnect attempts until an explicit retry rather than
 repeatedly downloading the same oversized snapshot. No replacement chat or
 execution replay is used. Both desktops need this update for large remote history.
+
+The configured byte limit is not a memory guarantee: Node/Electron decoded-string
+and heap limits can still prevent an exceptionally large JSON snapshot from being
+processed. Transport decoding failures are reported explicitly and close the
+connection instead of escaping the socket callback. Large histories can consume
+substantially more memory than their serialized size.
 
 The gateway uses separate per-connection async budgets: P0 has two slots for
 ping/unsubscribe, P1 has two for models, session/chat and running terminals

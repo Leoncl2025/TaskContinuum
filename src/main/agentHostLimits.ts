@@ -1,16 +1,17 @@
 import { z } from 'zod'
 
 const MiB = 1024 * 1024
+const GiB = 1024 * MiB
 
 export const AGENT_HOST_LIMITS = {
-  messageBytes: 64 * MiB,
-  receiveBufferBytes: 80 * MiB,
+  messageBytes: GiB,
+  receiveBufferBytes: GiB + 16 * MiB,
   receiveBufferMessages: 1024,
   requestBytes: 16 * MiB,
-  responseBufferBytes: 80 * MiB,
-  responseBufferGlobalBytes: 128 * MiB,
+  responseBufferBytes: GiB + 16 * MiB,
+  responseBufferGlobalBytes: 2 * GiB,
   // A cached snapshot adds the exact target and schema envelope.
-  cacheBytes: 64 * MiB + 64 * 1024,
+  cacheBytes: GiB + 64 * 1024,
 } as const
 
 export const AGENT_HOST_LIMIT_HEADER = 'x-taskcontinuum-ahp-limit'
@@ -19,8 +20,8 @@ export const AGENT_HOST_LIMIT_RPC_CODE = -32050
 const limitDataSchema = z.object({
   code: z.literal('TC_AHP_LIMIT'),
   kind: z.enum(['message', 'receive-buffer', 'send-buffer', 'request', 'cache']),
-  limitBytes: z.number().int().positive().max(1e9),
-  actualBytes: z.number().int().nonnegative().max(1e9).optional(),
+  limitBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  actualBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
 }).strict()
 type LimitData = z.infer<typeof limitDataSchema>
 
@@ -34,7 +35,9 @@ export class AgentHostSizeLimitError extends Error {
       cache: 'Offline chat history',
     }[kind]
     const size = actualBytes === undefined ? '' : ` (${actualBytes} bytes)`
-    super(`${label}${size} exceeds the ${(limitBytes / MiB).toFixed(limitBytes % MiB ? 1 : 0)} MiB limit (${limitBytes} bytes). No history was truncated, no replacement session was created, and no message was replayed.`)
+    const unit = limitBytes >= GiB && limitBytes % GiB === 0 ? GiB : MiB
+    const unitName = unit === GiB ? 'GiB' : 'MiB'
+    super(`${label}${size} exceeds the ${(limitBytes / unit).toFixed(limitBytes % unit ? 1 : 0)} ${unitName} limit (${limitBytes} bytes). No history was truncated, no replacement session was created, and no message was replayed.`)
     this.name = 'AgentHostSizeLimitError'
   }
 

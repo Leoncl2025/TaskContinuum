@@ -6,7 +6,7 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AhpClient } from '@microsoft/agent-host-protocol/client'
-import WebSocket, { WebSocketServer } from 'ws'
+import WebSocket from 'ws'
 import { expect, it, vi } from 'vitest'
 import { AgentHostConnection } from '../src/main/agentHostConnection'
 import { AgentHostRegistry } from '../src/main/agentHostRegistry'
@@ -15,7 +15,23 @@ import type { AgentHostGatewayOptions } from '../src/main/agentHostGateway'
 import { AGENT_HOST_LIMITS, AgentHostSizeLimitError, agentHostSizeLimit } from '../src/main/agentHostLimits'
 import { agentHostKey } from '../src/shared/agentHost'
 import { connectAgentHostWebSocket, connectLocalAgentHost } from '../src/main/agentHostTransport'
-import { startAgentHostFixture } from './agent-host-fixture'
+import { startAgentHostFixture, startAgentHostTransportFixture } from './agent-host-fixture'
+
+// Keep saturation fixtures small; agent-host-limits.test.ts verifies production GiB budgets.
+vi.mock('../src/main/agentHostLimits', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/main/agentHostLimits')>()
+  return {
+    ...actual,
+    AGENT_HOST_LIMITS: {
+      ...actual.AGENT_HOST_LIMITS,
+      messageBytes: 64 * 1024 * 1024,
+      receiveBufferBytes: 80 * 1024 * 1024,
+      responseBufferBytes: 80 * 1024 * 1024,
+      responseBufferGlobalBytes: 128 * 1024 * 1024,
+      cacheBytes: 64 * 1024 * 1024 + 64 * 1024,
+    },
+  }
+})
 
 const originalSnapshotBytes = 42_045_143
 
@@ -210,24 +226,8 @@ it('locates the original large chat and restores it through the read-only gatewa
   }
 }, 30000)
 
-async function rawTransport() {
-  const server = new WebSocketServer({ port: 0, host: '127.0.0.1', maxPayload: AGENT_HOST_LIMITS.requestBytes })
-  await once(server, 'listening')
-  const connected = new Promise<WebSocket>((resolve) => server.once('connection', resolve))
-  const address = server.address()
-  if (!address || typeof address === 'string') throw new Error('Missing fixture port.')
-  const transport = await connectAgentHostWebSocket(`ws://127.0.0.1:${address.port}`, {}, new AbortController().signal)
-  const socket = await connected
-  const close = async () => {
-    await transport.close()
-    for (const peer of server.clients) peer.terminate()
-    await new Promise<void>((resolve) => server.close(() => resolve()))
-  }
-  return { transport, socket, close }
-}
-
 it.each([AGENT_HOST_LIMITS.messageBytes, AGENT_HOST_LIMITS.messageBytes + 1])('enforces the real WebSocket message boundary at %i bytes', async (bytes) => {
-  const f = await rawTransport()
+  const f = await startAgentHostTransportFixture()
   try {
     const receiving = f.transport.recv()
     const checked = bytes > AGENT_HOST_LIMITS.messageBytes
@@ -239,7 +239,7 @@ it.each([AGENT_HOST_LIMITS.messageBytes, AGENT_HOST_LIMITS.messageBytes + 1])('e
 }, 20000)
 
 it('bounds unread history backlog instead of allowing unlimited large frames', async () => {
-  const f = await rawTransport()
+  const f = await startAgentHostTransportFixture()
   try {
     const frame = Buffer.alloc(originalSnapshotBytes, 'x')
     await new Promise<void>((resolve, reject) => f.socket.send(frame, { binary: false }, (error) => error ? reject(error) : resolve()))
@@ -252,7 +252,7 @@ it('bounds unread history backlog instead of allowing unlimited large frames', a
 }, 20000)
 
 it('retains the small outgoing request and receive message-count caps', async () => {
-  const f = await rawTransport()
+  const f = await startAgentHostTransportFixture()
   try {
     expect(() => f.transport.send('x'.repeat(AGENT_HOST_LIMITS.requestBytes + 1))).toThrow('16 MiB')
     for (let index = 0; index <= AGENT_HOST_LIMITS.receiveBufferMessages; index++) f.socket.send('{"notification":true}')

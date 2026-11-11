@@ -1,11 +1,32 @@
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { WebSocketServer } from 'ws'
+import type { Socket } from 'node:net'
+import { WebSocket, WebSocketServer } from 'ws'
 import { chatReducer, terminalReducer, MessageKind } from '@microsoft/agent-host-protocol'
 import type { ActionEnvelope, ChatState, Message, RootState, SessionState, Snapshot, TerminalState } from '@microsoft/agent-host-protocol'
 import type { AgentHostEndpoint } from '../src/main/agentHostProtocol'
 import { modelConfigFixture } from './agent-host-model-fixture'
+import { AGENT_HOST_LIMITS } from '../src/main/agentHostLimits'
+import { connectAgentHostWebSocket } from '../src/main/agentHostTransport'
+
+export async function startAgentHostTransportFixture() {
+  const server = new WebSocketServer({ port: 0, host: '127.0.0.1', maxPayload: AGENT_HOST_LIMITS.requestBytes })
+  await once(server, 'listening')
+  const connected = new Promise<{ socket: WebSocket; stream: Socket }>((resolve) => {
+    server.once('connection', (socket, request) => resolve({ socket, stream: request.socket }))
+  })
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('Missing fixture port.')
+  const transport = await connectAgentHostWebSocket(`ws://127.0.0.1:${address.port}`, {}, new AbortController().signal)
+  const { socket, stream } = await connected
+  const close = async () => {
+    await transport.close()
+    for (const peer of server.clients) peer.terminate()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+  return { transport, socket, stream, close }
+}
 
 export async function startAgentHostFixture(initializeMeta?: Record<string, unknown>, protocolVersion = '0.9.0') {
   const server = createServer()

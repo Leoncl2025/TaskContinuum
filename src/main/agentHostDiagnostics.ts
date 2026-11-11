@@ -56,8 +56,8 @@ const captureRecordSchema = z.object({
   elapsedMs: z.number().int().min(0).max(1e9).optional(),
   queueMs: z.number().int().min(0).max(1e9).optional(),
   authMs: z.number().int().min(0).max(1e9).optional(),
-  bytes: z.number().int().min(0).max(1e9).optional(),
-  limitBytes: z.number().int().min(0).max(1e9).optional(),
+  bytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+  limitBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
   limitKind: z.enum(['message', 'receive-buffer', 'send-buffer', 'request', 'cache']).optional(),
   pending: z.number().int().min(0).max(1e9).optional(),
   count: z.number().int().min(0).max(1e9).optional(),
@@ -120,8 +120,8 @@ export interface AgentHostDiagnosticDetails {
 }
 
 function fingerprint(value: string): string { return createHash('sha256').update(value).digest('hex').slice(0, 16) }
-function safeNumber(value: number | undefined): number | undefined {
-  return value !== undefined && Number.isFinite(value) && value >= 0 && value <= 1e9 ? Math.round(value) : undefined
+function safeNumber(value: number | undefined, maximum = 1e9): number | undefined {
+  return value !== undefined && Number.isFinite(value) && value >= 0 && value <= maximum ? Math.round(value) : undefined
 }
 function safeUuid(value: string | undefined): string | undefined {
   return value && z.uuid().safeParse(value).success ? value : undefined
@@ -166,6 +166,7 @@ function entry(event: AgentHostDiagnosticEvent, details: AgentHostDiagnosticDeta
   const parentTraceId = safeUuid(details.parentTraceId)
   const error = details.error
   const limit = agentHostSizeLimit(error)
+  const bytes = safeNumber(limit?.actualBytes ?? details.bytes, Number.MAX_SAFE_INTEGER)
   const timeout = error instanceof Error && error.name === 'RpcTimeoutError' ? safeNumber((error as Error & { timeoutMs?: number }).timeoutMs) : undefined
   const rpcCode = error instanceof Error && error.name === 'RpcError' && Number.isInteger((error as Error & { code?: number }).code)
     ? (error as Error & { code: number }).code : undefined
@@ -184,7 +185,7 @@ function entry(event: AgentHostDiagnosticEvent, details: AgentHostDiagnosticDeta
     ...(safeNumber(details.elapsedMs) !== undefined ? { elapsedMs: safeNumber(details.elapsedMs) } : {}),
     ...(safeNumber(details.queueMs) !== undefined ? { queueMs: safeNumber(details.queueMs) } : {}),
     ...(safeNumber(details.authMs) !== undefined ? { authMs: safeNumber(details.authMs) } : {}),
-    ...(safeNumber(limit?.actualBytes ?? details.bytes) !== undefined ? { bytes: safeNumber(limit?.actualBytes ?? details.bytes) } : {}),
+    ...(bytes !== undefined ? { bytes } : {}),
     ...(limit ? { limitBytes: limit.limitBytes, limitKind: limit.kind } : {}),
     ...(safeNumber(details.pending) !== undefined ? { pending: safeNumber(details.pending) } : {}),
     ...(safeNumber(details.count) !== undefined ? { count: safeNumber(details.count) } : {}),

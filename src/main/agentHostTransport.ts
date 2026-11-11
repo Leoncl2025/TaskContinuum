@@ -100,7 +100,13 @@ class BoundedAgentHostTransport implements AhpTransport {
         socket.terminate()
         return
       }
-      const text = (Array.isArray(data) ? Buffer.concat(data) : Buffer.isBuffer(data) ? data : Buffer.from(data)).toString('utf8')
+      let text: string
+      try { text = (Array.isArray(data) ? Buffer.concat(data) : Buffer.isBuffer(data) ? data : Buffer.from(data)).toString('utf8') }
+      catch (error) {
+        this.finish(new Error('Agent Host text could not be decoded within runtime memory or string limits. No history was truncated and no message was replayed.', { cause: error }))
+        socket.terminate()
+        return
+      }
       if (this.waiting) { const waiter = this.waiting; this.waiting = undefined; waiter.resolve({ kind: 'text', text }) }
       else { this.queue.push({ text, bytes }); this.bytes += bytes }
     })

@@ -23,25 +23,27 @@ import {
 afterEach(async () => { await stopAgentHostDiagnostics() })
 
 describe('Agent Host diagnostic logs', () => {
-  it('exports size-limit metadata through nested transport errors without exposing history or paths', async () => {
+  it.each(['message', 'cache', 'send-buffer'] as const)('exports %s size-limit metadata through nested transport errors without exposing history or paths', async (kind) => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-ahp-size-log-'))
     try {
       await startAgentHostDiagnostics(directory)
-      const cause = new AgentHostSizeLimitError('message', AGENT_HOST_LIMITS.messageBytes, AGENT_HOST_LIMITS.messageBytes + 1)
+      const limitBytes = kind === 'cache' ? AGENT_HOST_LIMITS.cacheBytes
+        : kind === 'send-buffer' ? AGENT_HOST_LIMITS.responseBufferGlobalBytes : AGENT_HOST_LIMITS.messageBytes
+      const cause = new AgentHostSizeLimitError(kind, limitBytes, limitBytes + 1)
       logAgentHostDiagnostic('connection.open', {
         status: 'error', step: 'chat',
         error: new Error('Private snapshot C:\\secret-history with bearer-token', { cause }),
       })
-      logAgentHostDiagnostic('connection.cache', { status: 'ok', step: 'cache', bytes: 42_045_143 })
+      logAgentHostDiagnostic('connection.cache', { status: 'ok', step: 'cache', bytes: AGENT_HOST_LIMITS.cacheBytes })
       const capture = await captureAgentHostDiagnostics(directory, {}, new AbortController().signal)
       const text = capture.jsonl.toString('utf8')
       for (const secret of ['secret-history', 'bearer-token', 'Private snapshot']) expect(text).not.toContain(secret)
       const records = text.trim().split('\n').map((line) => JSON.parse(line))
       expect(records).toContainEqual(expect.objectContaining({
-        event: 'connection.open', errorKind: 'size-limit', limitKind: 'message',
-        limitBytes: AGENT_HOST_LIMITS.messageBytes, bytes: AGENT_HOST_LIMITS.messageBytes + 1,
+        event: 'connection.open', errorKind: 'size-limit', limitKind: kind,
+        limitBytes, bytes: limitBytes + 1,
       }))
-      expect(records).toContainEqual(expect.objectContaining({ event: 'connection.cache', status: 'ok', bytes: 42_045_143 }))
+      expect(records).toContainEqual(expect.objectContaining({ event: 'connection.cache', status: 'ok', bytes: AGENT_HOST_LIMITS.cacheBytes }))
     } finally { await stopAgentHostDiagnostics(); await rm(directory, { recursive: true, force: true }) }
   })
 
@@ -180,23 +182,28 @@ describe('Agent Host diagnostic logs', () => {
       await startAgentHostDiagnostics(directory)
       await connection.open()
       host.stallRoot()
-      await expect(connection.models()).rejects.toThrow('Request "subscribe" timed out after 15000ms')
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+      const timedOut = expect(connection.models()).rejects.toThrow('Request "subscribe" timed out after 60000ms')
+      await vi.advanceTimersByTimeAsync(60_000)
+      await timedOut
+      vi.useRealTimers()
       expect(connection.view.state).toBe('connected')
       expect(host.dispatches).toHaveLength(0)
       await flushAgentHostDiagnostics()
       const records = (await readFile(join(directory, 'agent-host-diagnostics', 'agent-host.jsonl'), 'utf8'))
         .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>)
       const failure = records.find((record) => record.event === 'connection.models' && record.status === 'error')
-      expect(failure).toMatchObject({ step: 'root', errorKind: 'timeout', timeoutMs: 15000, errorMethod: 'subscribe' })
-      expect(failure?.elapsedMs).toBeGreaterThanOrEqual(15000)
+      expect(failure).toMatchObject({ step: 'root', errorKind: 'timeout', timeoutMs: 60000, errorMethod: 'subscribe' })
+      expect(failure?.elapsedMs).toBeGreaterThanOrEqual(60000)
       expect(records).toContainEqual(expect.objectContaining({ event: 'connection.subscribe', channel: 'chat', status: 'ok', traceId: failure?.traceId }))
     } finally {
+      vi.useRealTimers()
       await connection.close()
       await host.close()
       await stopAgentHostDiagnostics()
       await rm(directory, { recursive: true, force: true })
     }
-  }, 25000)
+  })
 
   it('keeps ping responsive while an owner model lookup is blocked', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-ahp-diagnostics-'))
