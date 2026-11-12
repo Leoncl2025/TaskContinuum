@@ -308,6 +308,7 @@ export class AgentHostConnection {
       const chunkedCapability = resource === this.target.chatId ? this.chunkedSnapshotCapability() : undefined
       if (chunkedCapability) {
         const subscription = active.client.attachSubscription(resource)
+        let activatedOnServer = false
         try {
           const received = await receiveChunkedChatSnapshot({
             baseFilePath: this.file,
@@ -325,6 +326,7 @@ export class AgentHostConnection {
               if (this.current === active) this.failures = 0
             },
           })
+          activatedOnServer = true
           if (this.current !== active) {
             this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'closed', channel, reason: 'transport-closed', elapsedMs: performance.now() - started })
             return
@@ -337,7 +339,7 @@ export class AgentHostConnection {
           void this.pump(subscription, active, resource)
         } catch (error) {
           await subscription.close()
-          if (this.current === active) {
+          if (activatedOnServer && this.current === active) {
             try { await active.client.unsubscribe(resource) }
             catch (failure) { this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'error', channel, step: 'response', error: failure }) }
           }

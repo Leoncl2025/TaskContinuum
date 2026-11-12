@@ -29,7 +29,8 @@ export const SNAPSHOT_TRANSFER_LIMITS = {
   maxLifetimeMs: 2 * 60 * 60 * 1000,
   partRetentionMs: 24 * 60 * 60 * 1000,
   maxExportsPerTarget: 2,
-  maxExportsGlobal: 8,
+  maxExportsGlobal: 32,
+  maxLeasesPerExport: 32,
   maxTailEvents: 1024,
   maxTailBytes: 16 * 1024 * 1024,
   maxSupersedeRetries: 3,
@@ -51,12 +52,14 @@ export const snapshotPrepareRequestSchema = z.object({
   channel: agentHostChatIdSchema,
   subscribe: z.boolean(),
   resumeTransferId: z.uuid().optional(),
+  resumeLeaseId: z.uuid().optional(),
 }).strict()
 export type SnapshotPrepareRequest = z.infer<typeof snapshotPrepareRequestSchema>
 
 export const snapshotChunkRequestSchema = z.object({
   channel: agentHostChatIdSchema,
   transferId: z.uuid(),
+  leaseId: z.uuid().optional(),
   offset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   length: z.number().int().positive().max(AGENT_HOST_LIMITS.requestBytes).optional(),
 }).strict()
@@ -65,6 +68,7 @@ export type SnapshotChunkRequest = z.infer<typeof snapshotChunkRequestSchema>
 export const snapshotTransferLookupSchema = z.object({
   channel: agentHostChatIdSchema,
   transferId: z.uuid(),
+  leaseId: z.uuid().optional(),
 }).strict()
 export type SnapshotTransferLookup = z.infer<typeof snapshotTransferLookupSchema>
 
@@ -82,6 +86,7 @@ const prepareResponseSchema = z.discriminatedUnion('mode', [
   z.object({
     mode: z.literal('chunked'),
     transferId: z.uuid(),
+    leaseId: z.uuid(),
     fromSeq: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     totalBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     chunkBytes: z.number().int().positive().max(AGENT_HOST_LIMITS.requestBytes),
@@ -109,6 +114,7 @@ const partMetadataSchema = z.object({
   schemaVersion: z.literal(1),
   target: agentHostTargetSchema,
   transferId: z.uuid(),
+  leaseId: z.uuid().optional(),
   fromSeq: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   totalBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   sha256: sha256Schema,
@@ -142,6 +148,13 @@ export function isAgentHostSnapshotSuperseded(error: unknown): boolean {
   return false
 }
 
+interface SnapshotLease {
+  readonly leaseId: string
+  owner: object | undefined
+  readonly subscribe: boolean
+  touchedAt: number
+}
+
 interface SnapshotExport {
   readonly transferId: string
   readonly targetKey: string
@@ -154,6 +167,7 @@ interface SnapshotExport {
   readonly createdAt: number
   touchedAt: number
   superseded: boolean
+  readonly leases: Map<string, SnapshotLease>
   tailEvents: ActionEnvelope[]
   tailBytes: number
   unlisten: () => void
@@ -172,6 +186,9 @@ export class AgentHostSnapshotStore {
     this.sweepTimer.unref()
   }
 
+  get exportCount(): number { return this.exports.size }
+  get bufferedBytes(): number { return this.totalBytes }
+
   get capability(): ChunkedSnapshotCapability {
     return {
       version: 1,
@@ -181,8 +198,19 @@ export class AgentHostSnapshotStore {
     }
   }
 
+  private isLeaseExpired(lease: SnapshotLease, now: number): boolean {
+    return now - lease.touchedAt > this.limits.idleTtlMs
+  }
+
   private isExpired(record: SnapshotExport, now: number): boolean {
     return now - record.touchedAt > this.limits.idleTtlMs || now - record.createdAt > this.limits.maxLifetimeMs
+  }
+
+  private hasConnectedLease(record: SnapshotExport): boolean {
+    for (const lease of record.leases.values()) {
+      if (lease.owner !== undefined) return true
+    }
+    return false
   }
 
   private evict(transferId: string): void {
@@ -190,20 +218,117 @@ export class AgentHostSnapshotStore {
     if (!record) return
     this.exports.delete(transferId)
     this.totalBytes -= record.totalBytes
+    record.leases.clear()
     record.tailEvents = []
     record.tailBytes = 0
     record.unlisten()
   }
 
-  sweep(now = Date.now()): void {
-    for (const [id, record] of this.exports) {
-      if (record.superseded || record.connection.state !== 'connected' || this.isExpired(record, now)) {
-        this.evict(id)
+  private acquireLease(
+    record: SnapshotExport,
+    owner: object | undefined,
+    subscribe: boolean,
+    now: number,
+    resumeLeaseId?: string,
+  ): string {
+    if (resumeLeaseId) {
+      const prior = record.leases.get(resumeLeaseId)
+      if (prior) {
+        prior.owner = owner
+        prior.touchedAt = now
+        record.touchedAt = now
+        return prior.leaseId
       }
+    }
+    if (owner !== undefined) {
+      for (const existing of record.leases.values()) {
+        if (existing.owner === owner) {
+          existing.touchedAt = now
+          record.touchedAt = now
+          return existing.leaseId
+        }
+      }
+    }
+    if (record.leases.size >= this.limits.maxLeasesPerExport) {
+      for (const [id, lease] of record.leases) {
+        if (lease.owner === undefined) { record.leases.delete(id); break }
+      }
+      if (record.leases.size >= this.limits.maxLeasesPerExport) {
+        throw new Error('Agent Host snapshot export lease limit reached.')
+      }
+    }
+    const leaseId = randomUUID()
+    record.leases.set(leaseId, { leaseId, owner, subscribe, touchedAt: now })
+    record.touchedAt = now
+    return leaseId
+  }
+
+  private releaseOwnerTargetLeases(owner: object | undefined, targetKey: string, keepTransferId?: string, keepLeaseId?: string): void {
+    if (owner === undefined) return
+    for (const [id, record] of [...this.exports]) {
+      if (record.targetKey !== targetKey) continue
+      for (const [leaseId, lease] of [...record.leases]) {
+        if (lease.owner === owner && !(id === keepTransferId && leaseId === keepLeaseId)) {
+          record.leases.delete(leaseId)
+        }
+      }
+      if (record.leases.size === 0) this.evict(id)
     }
   }
 
-  prepare(target: AgentHostTarget, connection: AgentHostConnection, request: SnapshotPrepareRequest): SnapshotPrepareResponse {
+  private consumeLease(record: SnapshotExport, owner: object | undefined, leaseId?: string): void {
+    if (leaseId !== undefined) {
+      record.leases.delete(leaseId)
+    } else if (owner !== undefined) {
+      for (const [id, lease] of [...record.leases]) {
+        if (lease.owner === owner) record.leases.delete(id)
+      }
+    } else if (record.leases.size === 1) {
+      record.leases.clear()
+    }
+    if (record.leases.size === 0) this.evict(record.transferId)
+  }
+
+  disconnectOwner(owner: object): void {
+    const now = Date.now()
+    for (const [id, record] of [...this.exports]) {
+      for (const [leaseId, lease] of [...record.leases]) {
+        if (lease.owner !== owner) continue
+        if (lease.subscribe) {
+          lease.owner = undefined
+          lease.touchedAt = now
+        } else {
+          record.leases.delete(leaseId)
+        }
+      }
+      if (record.leases.size === 0) this.evict(id)
+    }
+  }
+
+  releaseOwner(owner: object, channel?: string): void {
+    for (const [id, record] of [...this.exports]) {
+      if (channel !== undefined && record.chatId !== channel) continue
+      for (const [leaseId, lease] of [...record.leases]) {
+        if (lease.owner === owner) record.leases.delete(leaseId)
+      }
+      if (record.leases.size === 0) this.evict(id)
+    }
+  }
+
+  sweep(now = Date.now()): void {
+    for (const [id, record] of [...this.exports]) {
+      if (record.superseded || record.connection.state !== 'connected' || this.isExpired(record, now)) {
+        this.evict(id)
+        continue
+      }
+      for (const [leaseId, lease] of [...record.leases]) {
+        if (this.isLeaseExpired(lease, now)) record.leases.delete(leaseId)
+      }
+      if (record.leases.size === 0) this.evict(id)
+    }
+  }
+
+  prepare(target: AgentHostTarget, connection: AgentHostConnection, request: SnapshotPrepareRequest, owner?: object): SnapshotPrepareResponse {
     if (this.closed) throw new Error('Agent Host session gateway is closed.')
     if (request.channel !== target.chatId || !connection.allowedChannel(request.channel)) {
       throw new Error('Channel not authorized.')
@@ -215,10 +340,12 @@ export class AgentHostSnapshotStore {
     if (request.subscribe && request.resumeTransferId) {
       const existing = this.exports.get(request.resumeTransferId)
       if (existing && existing.targetKey === targetKey && existing.connection === connection && !existing.superseded && !this.isExpired(existing, now)) {
-        existing.touchedAt = now
+        const leaseId = this.acquireLease(existing, owner, request.subscribe, now, request.resumeLeaseId)
+        this.releaseOwnerTargetLeases(owner, targetKey, existing.transferId, leaseId)
         return {
           mode: 'chunked',
           transferId: existing.transferId,
+          leaseId,
           fromSeq: existing.fromSeq,
           totalBytes: existing.totalBytes,
           chunkBytes: Math.min(this.limits.initialChunkBytes, this.limits.maxChunkBytes),
@@ -233,10 +360,12 @@ export class AgentHostSnapshotStore {
     for (const existing of this.exports.values()) {
       if (existing.targetKey === targetKey && existing.connection === connection && !existing.superseded
         && existing.fromSeq === snapshot.fromSeq && !this.isExpired(existing, now)) {
-        existing.touchedAt = now
+        const leaseId = this.acquireLease(existing, owner, request.subscribe, now, request.resumeLeaseId)
+        this.releaseOwnerTargetLeases(owner, targetKey, existing.transferId, leaseId)
         return {
           mode: 'chunked',
           transferId: existing.transferId,
+          leaseId,
           fromSeq: existing.fromSeq,
           totalBytes: existing.totalBytes,
           chunkBytes: Math.min(this.limits.initialChunkBytes, this.limits.maxChunkBytes),
@@ -247,6 +376,7 @@ export class AgentHostSnapshotStore {
       }
     }
 
+    this.releaseOwnerTargetLeases(owner, targetKey)
     const payload = Buffer.from(JSON.stringify(snapshot), 'utf8')
     const totalBytes = payload.byteLength
     if (totalBytes > AGENT_HOST_LIMITS.messageBytes) {
@@ -271,10 +401,12 @@ export class AgentHostSnapshotStore {
       createdAt: now,
       touchedAt: now,
       superseded: false,
+      leases: new Map(),
       tailEvents: [],
       tailBytes: 0,
       unlisten: () => {},
     }
+    const leaseId = this.acquireLease(record, owner, request.subscribe, now)
     const supersede = () => {
       if (record.superseded) return
       record.superseded = true
@@ -305,6 +437,7 @@ export class AgentHostSnapshotStore {
     return {
       mode: 'chunked',
       transferId,
+      leaseId,
       fromSeq: record.fromSeq,
       totalBytes,
       chunkBytes: Math.min(this.limits.initialChunkBytes, this.limits.maxChunkBytes),
@@ -315,26 +448,42 @@ export class AgentHostSnapshotStore {
   }
 
   private ensureCapacity(targetKey: string, incomingBytes: number): void {
-    const forTarget = [...this.exports.values()]
-      .filter((item) => item.targetKey === targetKey)
-      .sort((left, right) => left.touchedAt - right.touchedAt)
-    while (forTarget.length >= this.limits.maxExportsPerTarget) {
-      const oldest = forTarget.shift()!
-      this.evict(oldest.transferId)
+    for (const [id, record] of [...this.exports]) {
+      if (record.leases.size === 0) this.evict(id)
     }
-    const byAge = () => [...this.exports.values()].sort((left, right) => left.touchedAt - right.touchedAt)
+    const targetDisconnected = () => [...this.exports.values()]
+      .filter((item) => item.targetKey === targetKey && !this.hasConnectedLease(item))
+      .sort((left, right) => left.touchedAt - right.touchedAt)
+    while ([...this.exports.values()].filter((item) => item.targetKey === targetKey).length >= this.limits.maxExportsPerTarget) {
+      const candidate = targetDisconnected()[0]
+      if (!candidate) break
+      this.evict(candidate.transferId)
+    }
+    const globalDisconnected = () => [...this.exports.values()]
+      .filter((item) => !this.hasConnectedLease(item))
+      .sort((left, right) => left.touchedAt - right.touchedAt)
     while (this.exports.size >= this.limits.maxExportsGlobal
       || this.totalBytes + incomingBytes > AGENT_HOST_LIMITS.responseBufferGlobalBytes) {
-      const oldest = byAge()[0]
-      if (!oldest) break
-      this.evict(oldest.transferId)
+      const candidate = globalDisconnected()[0]
+      if (!candidate) break
+      this.evict(candidate.transferId)
     }
     if (this.totalBytes + incomingBytes > AGENT_HOST_LIMITS.responseBufferGlobalBytes) {
       throw new AgentHostSizeLimitError('send-buffer', AGENT_HOST_LIMITS.responseBufferGlobalBytes, this.totalBytes + incomingBytes)
     }
+    if (this.exports.size >= this.limits.maxExportsGlobal) {
+      throw new Error('Agent Host snapshot export capacity is busy. Retry shortly.')
+    }
   }
 
-  private lookup(target: AgentHostTarget, connection: AgentHostConnection, channel: string, transferId: string): SnapshotExport {
+  private lookup(
+    target: AgentHostTarget,
+    connection: AgentHostConnection,
+    channel: string,
+    transferId: string,
+    owner?: object,
+    leaseId?: string,
+  ): SnapshotExport {
     if (this.closed) throw new Error('Agent Host session gateway is closed.')
     if (channel !== target.chatId || !connection.allowedChannel(channel)) throw new Error('Channel not authorized.')
     const now = Date.now()
@@ -346,12 +495,24 @@ export class AgentHostSnapshotStore {
       this.evict(transferId)
       throw new AgentHostSnapshotSupersededError()
     }
+    if (leaseId !== undefined) {
+      const lease = record.leases.get(leaseId)
+      if (!lease || this.isLeaseExpired(lease, now) || lease.owner !== undefined && owner !== undefined && lease.owner !== owner) {
+        throw new AgentHostSnapshotSupersededError()
+      }
+      if (owner !== undefined) lease.owner = owner
+      lease.touchedAt = now
+    } else if (owner !== undefined) {
+      for (const lease of record.leases.values()) {
+        if (lease.owner === owner) lease.touchedAt = now
+      }
+    }
     record.touchedAt = now
     return record
   }
 
-  chunk(target: AgentHostTarget, connection: AgentHostConnection, request: SnapshotChunkRequest): SnapshotChunkResponse {
-    const record = this.lookup(target, connection, request.channel, request.transferId)
+  chunk(target: AgentHostTarget, connection: AgentHostConnection, request: SnapshotChunkRequest, owner?: object): SnapshotChunkResponse {
+    const record = this.lookup(target, connection, request.channel, request.transferId, owner, request.leaseId)
     if (request.offset >= record.totalBytes) throw new Error('Snapshot chunk offset exceeds snapshot size.')
     const length = Math.min(
       Math.max(1, request.length ?? this.limits.minChunkBytes),
@@ -368,17 +529,22 @@ export class AgentHostSnapshotStore {
     }
   }
 
-  activate(target: AgentHostTarget, connection: AgentHostConnection, request: SnapshotTransferLookup): { fromSeq: number; tailEvents: ActionEnvelope[] } {
-    const record = this.lookup(target, connection, request.channel, request.transferId)
-    return { fromSeq: record.fromSeq, tailEvents: [...record.tailEvents] }
+  activate(target: AgentHostTarget, connection: AgentHostConnection, request: SnapshotTransferLookup, owner?: object): { fromSeq: number; tailEvents: ActionEnvelope[] } {
+    const record = this.lookup(target, connection, request.channel, request.transferId, owner, request.leaseId)
+    const result = { fromSeq: record.fromSeq, tailEvents: [...record.tailEvents] }
+    this.consumeLease(record, owner, request.leaseId)
+    return result
   }
 
-  release(target: AgentHostTarget, connection: AgentHostConnection, request: SnapshotTransferLookup): void {
+  release(target: AgentHostTarget, connection: AgentHostConnection, request: SnapshotTransferLookup, owner?: object): void {
     if (request.channel !== target.chatId || !connection.allowedChannel(request.channel)) throw new Error('Channel not authorized.')
     const record = this.exports.get(request.transferId)
-    if (record && record.targetKey === agentHostKey(target) && record.connection === connection && record.superseded) {
-      this.evict(record.transferId)
+    if (!record || record.targetKey !== agentHostKey(target) || record.connection !== connection) return
+    if (request.leaseId !== undefined) {
+      const lease = record.leases.get(request.leaseId)
+      if (!lease || lease.owner !== undefined && owner !== undefined && lease.owner !== owner) return
     }
+    this.consumeLease(record, owner, request.leaseId)
   }
 
   close(): void {
@@ -454,6 +620,7 @@ async function openResumablePart(
     schemaVersion: 1,
     target,
     transferId: manifest.transferId,
+    leaseId: manifest.leaseId,
     fromSeq: manifest.fromSeq,
     totalBytes: manifest.totalBytes,
     sha256: manifest.sha256,
@@ -544,7 +711,10 @@ export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshot
         const prepared = prepareResponseSchema.parse(await options.request(SNAPSHOT_TRANSFER_METHODS.prepare, {
           channel: options.target.chatId,
           subscribe: options.subscribe,
-          ...(saved ? { resumeTransferId: saved.transferId } : {}),
+          ...(saved ? {
+            resumeTransferId: saved.transferId,
+            ...(saved.leaseId ? { resumeLeaseId: saved.leaseId } : {}),
+          } : {}),
         }))
 
         if (prepared.mode === 'inline') {
@@ -557,7 +727,14 @@ export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshot
           return { snapshot, chunksTransferred: 0, totalBytes: bytes, resumed: false }
         }
 
+        const releaseRemoteLease = () => options.request(SNAPSHOT_TRANSFER_METHODS.release, {
+          channel: options.target.chatId,
+          transferId: prepared.transferId,
+          leaseId: prepared.leaseId,
+        }).catch(() => undefined)
+
         if (prepared.totalBytes > AGENT_HOST_LIMITS.messageBytes) {
+          await releaseRemoteLease()
           await removePartialSnapshotFiles(options.baseFilePath)
           throw new AgentHostSizeLimitError('message', AGENT_HOST_LIMITS.messageBytes, prepared.totalBytes)
         }
@@ -597,6 +774,7 @@ export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshot
               rawResponse = await options.request(SNAPSHOT_TRANSFER_METHODS.chunk, {
                 channel: options.target.chatId,
                 transferId: prepared.transferId,
+                leaseId: prepared.leaseId,
                 offset,
                 length: requested,
               })
@@ -642,6 +820,7 @@ export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshot
 
           if (hash.digest('hex') !== prepared.sha256) {
             await handle.close()
+            await releaseRemoteLease()
             await removePartialSnapshotFiles(options.baseFilePath)
             throw new Error('Agent Host chat snapshot checksum mismatch. No history was truncated and no message was replayed.')
           }
@@ -653,6 +832,7 @@ export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshot
         let text: string
         try { text = fullBuffer.toString('utf8') }
         catch (error) {
+          await releaseRemoteLease()
           await removePartFilesSafe(options.baseFilePath)
           throw new Error('Agent Host text could not be decoded within runtime memory or string limits. No history was truncated and no message was replayed.', { cause: error })
         }
@@ -665,6 +845,7 @@ export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshot
           }
           new AgentHostChatState(options.target.chatId).snapshot(snapshot)
         } catch (error) {
+          await releaseRemoteLease()
           await removePartFilesSafe(options.baseFilePath)
           throw error
         }
@@ -673,15 +854,13 @@ export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshot
           const activated = activateResponseSchema.parse(await options.request(SNAPSHOT_TRANSFER_METHODS.activate, {
             channel: options.target.chatId,
             transferId: prepared.transferId,
+            leaseId: prepared.leaseId,
           }))
           if (activated.fromSeq !== prepared.fromSeq) {
             throw new Error('Agent Host activated a different snapshot sequence.')
           }
         } else {
-          await options.request(SNAPSHOT_TRANSFER_METHODS.release, {
-            channel: options.target.chatId,
-            transferId: prepared.transferId,
-          }).catch(() => undefined)
+          await releaseRemoteLease()
         }
 
         await removePartFilesSafe(options.baseFilePath)

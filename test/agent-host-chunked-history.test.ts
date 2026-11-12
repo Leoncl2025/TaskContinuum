@@ -7,11 +7,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ChatState } from '@microsoft/agent-host-protocol'
 import type { AhpTransport, JsonRpcMessage } from '@microsoft/agent-host-protocol/client'
+import { AhpClient } from '@microsoft/agent-host-protocol/client'
 import { expect, it, vi } from 'vitest'
 import { AgentHostConnection } from '../src/main/agentHostConnection'
 import { attachAgentHostGateway } from '../src/main/agentHostGateway'
 import type { SnapshotTransferLimits } from '../src/main/agentHostSnapshotTransfer'
-import { SNAPSHOT_TRANSFER_METHODS } from '../src/main/agentHostSnapshotTransfer'
+import { AgentHostSnapshotStore, SNAPSHOT_TRANSFER_METHODS } from '../src/main/agentHostSnapshotTransfer'
 import { connectAgentHostWebSocket, connectLocalAgentHost } from '../src/main/agentHostTransport'
 import { agentHostKey } from '../src/shared/agentHost'
 import type { AgentHostHistoryTransfer } from '../src/shared/agentHost'
@@ -470,6 +471,170 @@ it('rejects tampered chunk bytes, cleans partial files, and preserves uncertain-
     expect(await remote.resolveDelivery(uncertainId, 'check', async () => {})).toBe('confirmed')
   } finally {
     await remote?.close()
+    await f.close()
+  }
+})
+
+it('reclaims released or activated exports immediately so newer snapshots never evict a slow downloader', async () => {
+  const f = await startChunkedGatewayFixture({
+    inlineBytes: 4 * 1024,
+    minChunkBytes: 16 * 1024,
+    initialChunkBytes: 16 * 1024,
+    maxChunkBytes: 16 * 1024,
+    maxExportsPerTarget: 2,
+  })
+  let slowClient: AgentHostConnection | undefined
+  let fastSubscriber: AgentHostConnection | undefined
+  let rawReader: AhpClient | undefined
+  let thirdSubscriber: AgentHostConnection | undefined
+  const slowOffsets: number[] = []
+  let slowPaused!: () => void
+  let releaseSlow!: () => void
+  const slowEntered = new Promise<void>((resolve) => { slowPaused = resolve })
+  const slowGate = new Promise<void>((resolve) => { releaseSlow = resolve })
+  try {
+    f.host.historyBytes(80 * 1024)
+    slowClient = new AgentHostConnection(f.target, join(f.directory, 'slow-caller'), async (signal) => {
+      const inner = await connectAgentHostWebSocket(f.url, {}, signal)
+      return {
+        send: (message) => {
+          const parsed = typeof message === 'string' ? JSON.parse(message) as { method?: string; params?: { offset?: number } } : message as { method?: string; params?: { offset?: number } }
+          if (parsed.method === SNAPSHOT_TRANSFER_METHODS.chunk && typeof parsed.params?.offset === 'number') {
+            slowOffsets.push(parsed.params.offset)
+            if (parsed.params.offset === 16 * 1024) {
+              slowPaused()
+              void slowGate.then(() => inner.send(message))
+              return
+            }
+          }
+          inner.send(message)
+        },
+        recv: () => inner.recv(),
+        close: () => { releaseSlow(); return inner.close() },
+      }
+    })
+
+    const slowOpening = slowClient.open()
+    await slowEntered
+
+    // Advance chat (Export #2): Client B reads and calls release; Export #2 must be freed immediately.
+    const turnB = randomUUID()
+    f.host.action({ type: 'chat/turnStarted', turnId: turnB, startedAt: new Date().toISOString(), message: { text: 'Turn B', origin: { kind: 'user' } } })
+    f.host.action({ type: 'chat/turnComplete', turnId: turnB, duration: 1 })
+    rawReader = new AhpClient(await connectAgentHostWebSocket(f.url, {}, new AbortController().signal))
+    rawReader.connect()
+    await rawReader.initialize({ clientId: randomUUID(), protocolVersions: ['1.0.0'] })
+    const preparedB = await rawReader.request(
+      SNAPSHOT_TRANSFER_METHODS.prepare as Parameters<AhpClient['request']>[0],
+      { channel: f.target.chatId, subscribe: false } as never,
+    ) as unknown as { mode: 'chunked'; transferId: string; leaseId: string }
+    expect(preparedB.mode).toBe('chunked')
+    await rawReader.request(
+      SNAPSHOT_TRANSFER_METHODS.release as Parameters<AhpClient['request']>[0],
+      { channel: f.target.chatId, transferId: preparedB.transferId, leaseId: preparedB.leaseId } as never,
+    )
+
+    // Advance chat again (Export #3): Fast subscriber connects and activates; Export #3 is also freed.
+    const turnC = randomUUID()
+    f.host.action({ type: 'chat/turnStarted', turnId: turnC, startedAt: new Date().toISOString(), message: { text: 'Turn C', origin: { kind: 'user' } } })
+    f.host.action({ type: 'chat/turnComplete', turnId: turnC, duration: 1 })
+    fastSubscriber = new AgentHostConnection(f.target, join(f.directory, 'fast-caller'), (signal) => connectAgentHostWebSocket(f.url, {}, signal))
+    await fastSubscriber.open()
+
+    // Advance chat a third time (Export #4): Third subscriber opens while slowClient is STILL paused on Export #1!
+    const turnD = randomUUID()
+    f.host.action({ type: 'chat/turnStarted', turnId: turnD, startedAt: new Date().toISOString(), message: { text: 'Turn D', origin: { kind: 'user' } } })
+    f.host.action({ type: 'chat/turnComplete', turnId: turnD, duration: 1 })
+    thirdSubscriber = new AgentHostConnection(f.target, join(f.directory, 'third-caller'), (signal) => connectAgentHostWebSocket(f.url, {}, signal))
+    await thirdSubscriber.open()
+
+    // Resume slowClient: Export #1 was NEVER evicted and slowClient never restarts from offset 0!
+    releaseSlow()
+    await slowOpening
+    expect(slowClient.state).toBe('connected')
+    expect(slowOffsets.filter((offset) => offset === 0)).toHaveLength(1)
+    await expect.poll(() => slowClient!.view.chat?.turns.map((turn) => turn.id)).toContain(turnD)
+  } finally {
+    releaseSlow()
+    await rawReader?.shutdown()
+    await thirdSubscriber?.close()
+    await fastSubscriber?.close()
+    await slowClient?.close()
+    await f.close()
+  }
+})
+
+it('tracks per-consumer leases on shared exports, isolates cross-socket releases, and frees buffers on unsubscribe', async () => {
+  const f = await startChunkedGatewayFixture({
+    inlineBytes: 4 * 1024,
+    minChunkBytes: 16 * 1024,
+    initialChunkBytes: 16 * 1024,
+    maxChunkBytes: 16 * 1024,
+    maxExportsPerTarget: 2,
+  })
+  const store = new AgentHostSnapshotStore({
+    inlineBytes: 4 * 1024,
+    minChunkBytes: 16 * 1024,
+    initialChunkBytes: 16 * 1024,
+    maxChunkBytes: 16 * 1024,
+    maxExportsPerTarget: 2,
+  })
+  try {
+    f.host.historyBytes(64 * 1024)
+    await f.native.open()
+    const socketA = {}
+    const socketB = {}
+    const socketC = {}
+
+    // A and B share the exact same snapshot export via distinct consumer leases.
+    const prepA = store.prepare(f.target, f.native, { channel: f.target.chatId, subscribe: true }, socketA)
+    const prepB = store.prepare(f.target, f.native, { channel: f.target.chatId, subscribe: false }, socketB)
+    expect(prepA.mode === 'chunked' && prepB.mode === 'chunked').toBe(true)
+    if (prepA.mode !== 'chunked' || prepB.mode !== 'chunked') throw new Error('Expected chunked mode.')
+    expect(prepA.transferId).toBe(prepB.transferId)
+    expect(prepA.leaseId).not.toBe(prepB.leaseId)
+    expect(store.exportCount).toBe(1)
+    expect(store.bufferedBytes).toBeGreaterThan(60 * 1024)
+
+    // Unrelated socket C omitting leaseId cannot evict A or B's shared export.
+    store.release(f.target, f.native, { channel: f.target.chatId, transferId: prepA.transferId }, socketC)
+    expect(store.exportCount).toBe(1)
+
+    // B releasing its lease keeps the shared export alive for A.
+    store.release(f.target, f.native, { channel: f.target.chatId, transferId: prepB.transferId, leaseId: prepB.leaseId }, socketB)
+    expect(store.exportCount).toBe(1)
+    expect(store.chunk(f.target, f.native, { channel: f.target.chatId, transferId: prepA.transferId, leaseId: prepA.leaseId, offset: 0 }).nextOffset).toBe(16 * 1024)
+
+    // A activating its lease drops remaining leases to 0 and immediately evicts the export buffer.
+    store.activate(f.target, f.native, { channel: f.target.chatId, transferId: prepA.transferId, leaseId: prepA.leaseId }, socketA)
+    expect(store.exportCount).toBe(0)
+    expect(store.bufferedBytes).toBe(0)
+
+    // Explicit unsubscribe (releaseOwner) immediately frees an in-flight subscription lease; abnormal disconnect retains it for resume.
+    const socketCancel = {}
+    const socketDrop = {}
+    const cancelPrep = store.prepare(f.target, f.native, { channel: f.target.chatId, subscribe: true }, socketCancel)
+    expect(cancelPrep.mode).toBe('chunked')
+    expect(store.exportCount).toBe(1)
+    store.releaseOwner(socketCancel, f.target.chatId)
+    expect(store.exportCount).toBe(0)
+
+    const dropPrep = store.prepare(f.target, f.native, { channel: f.target.chatId, subscribe: true }, socketDrop)
+    if (dropPrep.mode !== 'chunked') throw new Error('Expected chunked mode.')
+    store.disconnectOwner(socketDrop)
+    expect(store.exportCount).toBe(1)
+    const socketReconnect = {}
+    const resumed = store.prepare(f.target, f.native, {
+      channel: f.target.chatId,
+      subscribe: true,
+      resumeTransferId: dropPrep.transferId,
+      resumeLeaseId: dropPrep.leaseId,
+    }, socketReconnect)
+    expect(resumed).toMatchObject({ mode: 'chunked', transferId: dropPrep.transferId, leaseId: dropPrep.leaseId, resumed: true })
+    store.activate(f.target, f.native, { channel: f.target.chatId, transferId: dropPrep.transferId, leaseId: dropPrep.leaseId }, socketReconnect)
+    expect(store.exportCount).toBe(0)
+  } finally {
+    store.close()
     await f.close()
   }
 })

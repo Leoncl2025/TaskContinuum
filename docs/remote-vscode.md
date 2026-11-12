@@ -603,9 +603,14 @@ monolithic JSON-RPC response:
 
 - Small snapshots ($\le$ 256 KiB) return inline in one round trip.
 - Larger snapshots stream into a private per-target `.snapshot.part` file on
-  disk. If the Dev Tunnel drops or the desktop restarts mid-transfer, reconnecting
-  verifies the saved byte prefix and resumes from the exact byte offset whenever
-  the gateway's retained snapshot export or SHA-256 digest still matches.
+  disk. Each consumer receives an explicit `leaseId`: completing (`activate` or
+  `release`) or unsubscribing immediately releases that consumer's lease and
+  reclaims the snapshot buffer once no leases remain, while an abnormal socket
+  drop retains a subscription lease for breakpoint resumption without allowing
+  completed transfers to evict active downloaders. If the Dev Tunnel drops or
+  the desktop restarts mid-transfer, reconnecting verifies the saved byte prefix
+  and resumes from the exact byte offset whenever the gateway's retained snapshot
+  export or SHA-256 digest still matches.
 - Live incremental chat actions (`tailEvents`, up to 1,024 events / 16 MiB)
   occurring while chunks transfer or across a brief reconnect are buffered on the
   gateway export and flushed atomically upon activation. If the snapshot epoch

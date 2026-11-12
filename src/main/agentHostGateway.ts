@@ -212,6 +212,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
       const obsolete = queue.filter((envelope) => envelope.channel === resource)
       discard(obsolete)
       queue = queue.filter((envelope) => envelope.channel !== resource)
+      snapshotStore.releaseOwner(socket, resource)
       releaseTerminal(resource)
     }
     async function flush(): Promise<void> {
@@ -277,6 +278,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
       logAgentHostDiagnostic('gateway.socket', { target, traceId, status: 'closed', reason: closeReason ?? 'client-closed', closeCode: code, pending: pendingRequests })
       closed = true
       scheduler.cancel(socket)
+      snapshotStore.disconnectOwner(socket)
       checks.delete(revalidate)
       clearInterval(heartbeat)
       clearTimeout(flushTimer)
@@ -507,20 +509,20 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
             if (ready.length && request.method === 'reconnect') result = { type: 'snapshot', snapshots: ready.map((item) => item.snapshot) }
             let activatedSnapshot: { resource: string; fromSeq: number; tailEvents: ActionEnvelope[] } | undefined
             if (pendingSnapshotOp?.kind === 'prepare') {
-              const prepared = snapshotStore.prepare(target, connection, pendingSnapshotOp.params)
+              const prepared = snapshotStore.prepare(target, connection, pendingSnapshotOp.params, socket)
               result = prepared
               if (prepared.mode === 'inline' && pendingSnapshotOp.params.subscribe) {
                 activatedSnapshot = { resource: pendingSnapshotOp.params.channel, fromSeq: prepared.snapshot.fromSeq, tailEvents: [] }
               }
             } else if (pendingSnapshotOp?.kind === 'chunk') {
-              result = snapshotStore.chunk(target, connection, pendingSnapshotOp.params)
+              result = snapshotStore.chunk(target, connection, pendingSnapshotOp.params, socket)
             } else if (pendingSnapshotOp?.kind === 'activate') {
               if (pendingSubscriptions.has(pendingSnapshotOp.params.channel)) throw new Error('Subscription in progress.')
-              const activated = snapshotStore.activate(target, connection, pendingSnapshotOp.params)
+              const activated = snapshotStore.activate(target, connection, pendingSnapshotOp.params, socket)
               result = { fromSeq: activated.fromSeq }
               activatedSnapshot = { resource: pendingSnapshotOp.params.channel, fromSeq: activated.fromSeq, tailEvents: activated.tailEvents }
             } else if (pendingSnapshotOp?.kind === 'release') {
-              snapshotStore.release(target, connection, pendingSnapshotOp.params)
+              snapshotStore.release(target, connection, pendingSnapshotOp.params, socket)
               result = {}
             }
             step = 'response'
