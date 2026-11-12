@@ -6,13 +6,14 @@ import remarkGfm from 'remark-gfm'
 import remarkBreaks from 'remark-breaks'
 import { IconButton } from './Primitives'
 import { mathRehypePlugins, prepareMarkdownMath } from '../markdownMath'
+import { highlightMarkdownCode, markdownCodeText } from '../markdownSyntax'
 import { parseChatLink } from '../../shared/chatLinks'
 import { MarkdownLink, MarkdownLinks } from './MarkdownLinks'
 import '../sessions.css'
 
 function ChatCodeBlock({ children, node }: ExtraProps & { children?: ReactNode }) {
   const code = node?.children[0]
-  const source = code?.type === 'element' ? code.children.flatMap((child) => child.type === 'text' ? [child.value] : []).join('') : ''
+  const source = code?.type === 'element' ? markdownCodeText(code) : ''
   const classNames = code?.type === 'element' ? code.properties.className : undefined
   const languageClass = Array.isArray(classNames) ? classNames.find((name) => typeof name === 'string' && name.startsWith('language-')) : undefined
   const language = typeof languageClass === 'string' ? languageClass.slice('language-'.length) : 'Code'
@@ -43,11 +44,12 @@ const markdownComponents: Components = {
   pre: ChatCodeBlock,
   table: ({ children }) => <div className="message-table" role="region" aria-label="Message table" tabIndex={0}><table>{children}</table></div>,
 }
+const rehypePlugins = [...mathRehypePlugins, highlightMarkdownCode]
 
 export const ChatMarkdown = memo(function ChatMarkdown({ source }: { source: string }) {
   const math = useMemo(() => prepareMarkdownMath(source), [source])
   return <MarkdownLinks>
-    <div className="message-text message-markdown"><Markdown remarkPlugins={[remarkGfm, math.plugin, remarkBreaks]} rehypePlugins={mathRehypePlugins} skipHtml
+    <div className="message-text message-markdown"><Markdown remarkPlugins={[remarkGfm, math.plugin, remarkBreaks]} rehypePlugins={rehypePlugins} skipHtml
       urlTransform={(url) => parseChatLink(url) ? url : ''} components={markdownComponents}>{math.source}</Markdown></div>
   </MarkdownLinks>
 })

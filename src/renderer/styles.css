@@ -45,6 +45,15 @@ textarea { resize: vertical; }
   --selection: #494949;
   --selection-text: #fff;
   --editor-bg: var(--raised);
+  --syntax-keyword: #c586c0;
+  --syntax-string: #ce9178;
+  --syntax-comment: #88ae78;
+  --syntax-number: #b5cea8;
+  --syntax-type: #4ec9b0;
+  --syntax-function: #dcdcaa;
+  --syntax-variable: #9cdcfe;
+  --syntax-tag: #569cd6;
+  --syntax-meta: #d7ba7d;
   color-scheme: dark;
 }
 .workbench { display: flex; flex-direction: column; height: 100dvh; min-height: 420px; overflow: hidden; background: var(--bg); color: var(--text); }
@@ -79,6 +88,15 @@ textarea { resize: vertical; }
   --shadow: #00000012;
   --selection: #e3e3e3;
   --selection-text: #242424;
+  --syntax-keyword: #0000ff;
+  --syntax-string: #a31515;
+  --syntax-comment: #008000;
+  --syntax-number: #096348;
+  --syntax-type: #216f85;
+  --syntax-function: #795e26;
+  --syntax-variable: #001080;
+  --syntax-tag: #800000;
+  --syntax-meta: #795e26;
   color-scheme: light;
 }
 .codicon { flex-shrink: 0; }

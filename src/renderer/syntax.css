@@ -1,0 +1,12 @@
+:is(.message-markdown, .workspace-markdown) pre .hljs { color: var(--text); }
+:is(.message-markdown, .workspace-markdown) .hljs :is(.hljs-keyword, .hljs-selector-tag, .hljs-doctag) { color: var(--syntax-keyword); }
+:is(.message-markdown, .workspace-markdown) .hljs :is(.hljs-string, .hljs-regexp, .hljs-addition, .hljs-meta .hljs-string) { color: var(--syntax-string); }
+:is(.message-markdown, .workspace-markdown) .hljs :is(.hljs-comment, .hljs-quote) { color: var(--syntax-comment); }
+:is(.message-markdown, .workspace-markdown) .hljs :is(.hljs-number, .hljs-literal, .hljs-symbol, .hljs-bullet) { color: var(--syntax-number); }
+:is(.message-markdown, .workspace-markdown) .hljs :is(.hljs-type, .hljs-built_in, .hljs-title.class_) { color: var(--syntax-type); }
+:is(.message-markdown, .workspace-markdown) .hljs :is(.hljs-title, .hljs-section) { color: var(--syntax-function); }
+:is(.message-markdown, .workspace-markdown) .hljs :is(.hljs-variable, .hljs-property, .hljs-attr, .hljs-attribute, .hljs-template-variable) { color: var(--syntax-variable); }
+:is(.message-markdown, .workspace-markdown) .hljs :is(.hljs-tag, .hljs-name, .hljs-selector-id, .hljs-selector-class, .hljs-deletion) { color: var(--syntax-tag); }
+:is(.message-markdown, .workspace-markdown) .hljs :is(.hljs-meta, .hljs-meta .hljs-keyword) { color: var(--syntax-meta); }
+:is(.message-markdown, .workspace-markdown) .hljs .hljs-emphasis { font-style: italic; }
+:is(.message-markdown, .workspace-markdown) .hljs .hljs-strong { font-weight: 600; }
