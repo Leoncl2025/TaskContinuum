@@ -130,6 +130,92 @@ async function selectCreationTarget(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('workspace switching in the desktop workbench', () => {
+  it('distinguishes a marker-only restart from unlinking and waits for explicit selection after canonical recovery', async () => {
+    const { bridge, first, repository, agentHost, target } = creationFixture()
+    const saved = [target, ...['two', 'three', 'four'].map((name) => agentHostTargetFixture(name))]
+    const remote = gitSyncUiFixture()
+    window.remoteVSCode = remote.remote
+    remote.setStatus({ ...remote.getStatus(), enabled: true, state: 'idle' })
+    repository[first.id] = {
+      document: { schemaVersion: '2.1', bindings: {} }, revision: 'a'.repeat(64),
+      bindingIssues: { 'T-0002': {
+        state: 'awaiting-sync', pendingOperationIds: ['b'.repeat(64)], savedBindings: saved.map((item) => ({ provider: 'agent-host', ...item })), savedRecordCount: 4,
+        reasons: [{ code: 'awaiting-sync', message: 'The exact signed operation is missing after restart. Retry on the publishing device.' }],
+      } },
+    }
+    localStorage.setItem(`taskcontinuum:workbench-selection:v2:${first.id}`, JSON.stringify({
+      version: 2, taskId: 'T-0002', openTaskIds: ['T-0002'], sessions: { 'T-0002': sessionBindingKey({ agentHost: target }) },
+    }))
+    vi.mocked(agentHost.list).mockResolvedValue({ sessions: saved.map((item, index) => ({ ...item, title: `Saved chat ${index + 1}`, provider: 'copilotcli', updatedAt: '', canSend: true })), warnings: [] })
+    const user = userEvent.setup()
+    const rendered = render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    const chat = screen.getByRole('complementary', { name: 'Task chat' })
+    await within(chat).findByRole('heading', { name: 'Session links waiting for sync' })
+    expect(within(chat).queryByText(/No Agent Host chat is linked/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/last selected session is no longer linked/)).not.toBeInTheDocument()
+    expect(agentHost.watch).not.toHaveBeenCalled()
+    expect(agentHost.models).not.toHaveBeenCalled()
+    vi.mocked(remote.api.syncNow).mockRejectedValueOnce(new Error('Staged metadata changes block safe synchronization.'))
+    await user.click(within(chat).getByRole('button', { name: 'Retry sync' }))
+    expect(await within(chat).findByRole('alert')).toHaveTextContent('Staged metadata')
+    await user.click(within(chat).getByRole('button', { name: 'Review saved associations' }))
+    const sidebar = screen.getByRole('complementary', { name: 'Agent Host sessions' })
+    const retained = within(sidebar).getByRole('list', { name: 'Saved associations for T-0002' })
+    expect(within(retained).getAllByRole('listitem')).toHaveLength(4)
+    expect(within(sidebar).queryByText('No sessions linked to this task.')).not.toBeInTheDocument()
+    expect(within(retained).queryByRole('button')).not.toBeInTheDocument()
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+    repository[first.id] = { document: { schemaVersion: '2.1', bindings: { 'T-0002': saved.map((item) => ({ provider: 'agent-host', ...item })) } }, revision: 'c'.repeat(64) }
+    await act(async () => remote.notifyBindings())
+    await waitFor(() => expect(within(sidebar).getAllByRole('treeitem')).toHaveLength(4))
+    expect(agentHost.watch).not.toHaveBeenCalled()
+    expect(screen.queryByText(/last selected session is no longer linked/)).not.toBeInTheDocument()
+    expect(JSON.parse(localStorage.getItem(`taskcontinuum:workbench-selection:v2:${first.id}`)!).sessions['T-0002']).toBeNull()
+    rendered.unmount()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    expect(agentHost.watch).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
+    await user.click(await screen.findByRole('button', { name: 'Open Saved chat 3' }))
+    await waitFor(() => expect(agentHost.watch).toHaveBeenCalledExactlyOnceWith(saved[2]))
+    expect(agentHost.create).not.toHaveBeenCalled()
+    expect(agentHost.send).not.toHaveBeenCalled()
+  })
+
+  it('does not open saved sessions when temporary cancellation is declined or confirmed', async () => {
+    const { first, repository, agentHost, target } = creationFixture()
+    const remote = gitSyncUiFixture()
+    window.remoteVSCode = remote.remote
+    remote.setStatus({ ...remote.getStatus(), enabled: true, state: 'idle' })
+    const revision = 'a'.repeat(64), operationId = 'b'.repeat(64)
+    repository[first.id] = {
+      document: { schemaVersion: '2.1', bindings: {} }, revision,
+      bindingIssues: { 'T-0002': { state: 'awaiting-sync', reasons: [{ code: 'awaiting-sync', message: 'Wait for the exact operation.' }], pendingOperationIds: [operationId], savedBindings: [{ provider: 'agent-host', ...target }], savedRecordCount: 1 } },
+    }
+    const user = userEvent.setup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    const chat = screen.getByRole('complementary', { name: 'Task chat' })
+    await within(chat).findByRole('heading', { name: 'Session links waiting for sync' })
+    await user.click(within(chat).getByText('Recovery options'))
+    await user.click(within(chat).getByRole('button', { name: 'Review cancellation of temporary change' }))
+    expect(remote.api.cancelPendingBinding).toHaveBeenCalledExactlyOnceWith('T-0002', [operationId], revision)
+    expect(within(chat).getByRole('heading', { name: 'Session links waiting for sync' })).toBeInTheDocument()
+    expect(agentHost.watch).not.toHaveBeenCalled()
+    vi.mocked(remote.api.cancelPendingBinding).mockImplementationOnce(async () => {
+      repository[first.id] = { document: { schemaVersion: '2.1', bindings: { 'T-0002': [{ provider: 'agent-host', ...target }] } }, revision: 'c'.repeat(64) }
+      return true
+    })
+    await user.click(within(chat).getByRole('button', { name: 'Review cancellation of temporary change' }))
+    await waitFor(() => expect(within(chat).queryByRole('heading', { name: 'Session links waiting for sync' })).not.toBeInTheDocument())
+    expect(agentHost.watch).not.toHaveBeenCalled()
+    expect(agentHost.send).not.toHaveBeenCalled()
+    expect(agentHost.create).not.toHaveBeenCalled()
+  })
+
   it('updates pane geometry without rerendering task content for every native resize pixel', async () => {
     const { bridge } = fixtures()
     await bridge.openFolder()
@@ -850,7 +936,9 @@ describe('workspace switching in the desktop workbench', () => {
     vi.mocked(bridge.getSessionLinks).mockRejectedValueOnce(new Error('Saved links could not be read.'))
     await user.click(screen.getByRole('button', { name: 'Create and assign to T-0002' }))
     const sidebar = screen.getByRole('complementary', { name: 'Agent Host sessions' })
-    expect(await screen.findByText(/Saved links could not be read/)).toBeInTheDocument()
+    const status = await within(sidebar).findByRole('region', { name: 'Session link status for T-0002' })
+    expect(within(status).getByText(/Saved links could not be read/)).toBeInTheDocument()
+    expect(within(status).getByRole('heading', { name: 'Session links are blocked' })).toBeInTheDocument()
     expect(within(sidebar).getByText('ahp-session:/new-chat')).toBeInTheDocument()
     await user.click(within(sidebar).getByRole('button', { name: 'Open created chat' }))
     expect(await screen.findByRole('complementary', { name: 'Agent Host task chat' })).toBeInTheDocument()

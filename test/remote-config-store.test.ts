@@ -688,6 +688,7 @@ describe('SSH binding overlay and exact canonical reconciliation', () => {
     expect(snapshot.document.bindings['T-0001']).toBeUndefined()
     expect(snapshot.provisional).toEqual([])
     expect(snapshot.awaitingSync).toHaveLength(1)
+    expect(snapshot.bindingIssues?.['T-0001']).toMatchObject({ state: 'awaiting-sync', savedBindings: [binding('old')], pendingOperationIds: [f.change.operationId] })
     expect(requestSync).toHaveBeenCalled()
     expect((await reopened.acceptNotification(notice(f.change), a.actor.deviceId)).result).toBe('awaiting-sync')
     await appendRecord(f.recordsRoot, f.change)
@@ -704,6 +705,96 @@ describe('SSH binding overlay and exact canonical reconciliation', () => {
     expect((await f.store.read()).document.bindings['T-0001']).toBeUndefined()
     await f.overlay.cancel(f.change.operationId)
     expect((await f.store.read()).document.bindings['T-0001']).toEqual([binding('old')])
+  })
+
+  it('retains the complete four-session history as non-authorizing metadata when a missing remote operation expires', async () => {
+    const f = await receiving()
+    let parent = f.base
+    const saved = [binding('old')]
+    for (let count = 2; count <= 4; count++) {
+      saved.push(binding(`saved-${count}`))
+      parent = await operation({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [...saved] }, parents: [parent.operationId] })
+      await appendRecord(f.recordsRoot, parent)
+    }
+    const original = await readRecords(f.recordsRoot)
+    const changed = await operation({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [...saved, binding('new')] }, parents: [parent.operationId] })
+    await f.store.acceptNotification(notice(changed), a.actor.deviceId)
+    expect(await readRecords(f.outboxRoot)).toEqual([])
+    f.advance(60000)
+    const waiting = await readRepositorySessionLinks(f.workspaceRoot)
+    expect(waiting.document.bindings['T-0001']).toBeUndefined()
+    expect(waiting.bindingIssues?.['T-0001']).toMatchObject({
+      state: 'awaiting-sync', pendingOperationIds: [changed.operationId], savedBindings: saved, savedRecordCount: 4,
+      reasons: [{ code: 'awaiting-sync', operationId: changed.operationId, message: expect.stringContaining('publishing device') }],
+    })
+    expect((await f.store.readForAuthorization()).document.bindings['T-0001']).toBeUndefined()
+    expect(await readRecords(f.recordsRoot)).toEqual(original)
+    expect(await readRecords(f.outboxRoot)).toEqual([])
+    f.advance(7 * 24 * 60 * 60 * 1000)
+    const stillWaiting = await f.store.read()
+    expect(stillWaiting.bindingIssues?.['T-0001']?.state).toBe('awaiting-sync')
+    expect(stillWaiting.document.bindings['T-0001']).toBeUndefined()
+    await appendRecord(f.recordsRoot, changed)
+    const synced = await f.store.read()
+    expect(synced.bindingIssues?.['T-0001']).toBeUndefined()
+    expect(synced.awaitingSync).toEqual([])
+    expect(synced.document.bindings['T-0001']).toEqual([...saved, binding('new')])
+    expect(await readRecords(f.recordsRoot)).toHaveLength(5)
+  })
+
+  it('cancels only the reviewed task markers at the exact revision without changing or publishing binding history', async () => {
+    const f = await receiving()
+    await f.store.acceptNotification(notice(f.change), a.actor.deviceId)
+    const active = await f.store.read()
+    await expect(f.store.cancelPendingBinding('T-0001', [f.change.operationId], active.revision)).rejects.toThrow('pending changes')
+    f.advance(60000)
+    const waiting = await f.store.read()
+    const markerFile = join(f.stateDirectory, 'pending-overlay.json')
+    const markers = await readFile(markerFile, 'utf8')
+    await expect(f.store.cancelPendingBinding('T-0001', [f.change.operationId], f.before.revision)).rejects.toThrow('changed')
+    await expect(f.store.cancelPendingBinding('T-0002', [f.change.operationId], waiting.revision)).rejects.toThrow('pending changes')
+    await expect(f.store.cancelPendingBinding('T-0001', [f.change.operationId, 'f'.repeat(64)], waiting.revision)).rejects.toThrow('pending changes')
+    expect(await readFile(markerFile, 'utf8')).toBe(markers)
+    const original = await readRecords(f.recordsRoot)
+    const recovered = await f.store.cancelPendingBinding('T-0001', [f.change.operationId], waiting.revision)
+    expect(recovered.awaitingSync).toEqual([])
+    expect(recovered.bindingIssues?.['T-0001']).toBeUndefined()
+    expect(recovered.document.bindings['T-0001']).toEqual([binding('old')])
+    expect(await readRecords(f.recordsRoot)).toEqual(original)
+    expect(await readRecords(f.outboxRoot)).toEqual([])
+    expect(f.changed).not.toHaveBeenCalled()
+    await appendRecord(f.recordsRoot, f.change)
+    expect((await f.store.read()).document.bindings['T-0001']).toEqual([binding('new')])
+  })
+
+  it('rejects stale cancellation after the exact canonical operation arrives', async () => {
+    const f = await receiving()
+    await f.store.acceptNotification(notice(f.change), a.actor.deviceId)
+    f.advance(60000)
+    const waiting = await f.store.read()
+    await appendRecord(f.recordsRoot, f.change)
+    await expect(f.store.cancelPendingBinding('T-0001', [f.change.operationId], waiting.revision)).rejects.toThrow('changed')
+    const current = await f.store.read()
+    expect(current.document.bindings['T-0001']).toEqual([binding('new')])
+    expect(current.bindingIssues?.['T-0001']).toBeUndefined()
+    expect(await readRecords(f.recordsRoot)).toEqual([f.base, f.change].sort((a, b) => a.operationId.localeCompare(b.operationId)))
+  })
+
+  it('does not use cancellation to bypass blocked validation or erase pending evidence', async () => {
+    const f = await receiving()
+    await f.store.acceptNotification(notice(f.change), a.actor.deviceId)
+    f.advance(60000)
+    const forged = await createRecord({
+      kind: 'binding', workspaceId, actor: a.actor, payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0002', targets: [binding('forged')] },
+    }, () => Buffer.alloc(64))
+    await appendRecord(f.recordsRoot, forged)
+    const blocked = await f.store.read()
+    const markerFile = join(f.stateDirectory, 'pending-overlay.json')
+    const original = await readFile(markerFile, 'utf8')
+    expect(blocked.bindingIssues?.['T-0002']?.state).toBe('blocked')
+    await expect(f.store.cancelPendingBinding('T-0001', [f.change.operationId], blocked.revision)).rejects.toThrow('invalid or unauthorized')
+    expect(await readFile(markerFile, 'utf8')).toBe(original)
+    expect((await f.store.read()).awaitingSync).toHaveLength(1)
   })
 
   it('handles out-of-order notices, deletion and a canonical causal successor without reviving ancestors', async () => {
@@ -732,6 +823,8 @@ describe('SSH binding overlay and exact canonical reconciliation', () => {
     expect(conflict.document.bindings['T-0001']).toBeUndefined()
     expect(conflict.document.bindings['T-0002']).toBeUndefined()
     expect(conflict.provisional).toEqual(['T-0001'])
+    expect(conflict.bindingIssues?.['T-0001']?.state).toBe('conflict')
+    expect(conflict.bindingIssues?.['T-0002']?.state).toBe('conflict')
   })
 
   it('rejects wrong scope, forged actors and dependency smuggling without changing routing', async () => {

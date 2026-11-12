@@ -217,13 +217,20 @@ export class BindingOverlay {
   }
 
   cancel(operationId: string): Promise<void> {
-    operationIdSchema.parse(operationId)
+    return this.cancelMany([operationId])
+  }
+
+  cancelMany(operationIds: readonly string[]): Promise<void> {
+    z.array(operationIdSchema).min(1).max(remoteConfigLimits.overlayOperations).parse(operationIds)
     return this.queue(async () => {
       const next = new Map(this.markers)
-      if (!next.delete(operationId)) return
+      for (const id of operationIds) {
+        if (!next.has(id)) throw new RemoteConfigError('stale-revision', 'A pending binding changed. Reload its current state before cancelling.')
+        next.delete(id)
+      }
       await this.persist(next)
       this.markers = next
-      this.entries.delete(operationId)
+      for (const id of operationIds) this.entries.delete(id)
       this.schedule()
       this.options.onChange?.()
     })

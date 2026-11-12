@@ -8,6 +8,8 @@ import { Icon, IconButton } from './Primitives'
 import { AgentHostCreationControls } from './AgentHostCreationControls'
 import type { SessionTitleUpdate } from '../chat/useSessionTitles'
 import { machineLabel, useMachineAliases } from '../machineAliases'
+import type { SessionBindingIssue } from '../../shared/sessionBindings'
+import { SessionBindingStatus } from './SessionBindingStatus'
 
 type SessionView = 'current' | 'link' | 'create'
 interface Props {
@@ -28,6 +30,9 @@ interface Props {
   onCreated?(taskId: string, session: AgentHostSession): Promise<void>
   onDevices(): void
   onClose(): void
+  bindingIssue?: SessionBindingIssue
+  onRetrySync?(): Promise<void>
+  onCancelPending?(): Promise<void>
 }
 
 function SessionTree({ taskId, bindings, activeKey, sessions, cachedTitles, disabled, onSelect, onUnlink }: {
@@ -97,7 +102,7 @@ function SessionTree({ taskId, bindings, activeKey, sessions, cachedTitles, disa
   </ul>
 }
 
-export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, activeKey, localOwnerId, busy = false, initialView = 'current', cachedTitles, titleCacheError, onTitles, onSelect, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
+export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, activeKey, localOwnerId, busy = false, initialView = 'current', cachedTitles, titleCacheError, onTitles, onSelect, onDetach, onLink, onCreated, onDevices, onClose, bindingIssue, onRetrySync, onCancelPending }: Props) {
   const bridge = window.agentHost
   const aliases = useMachineAliases()
   const [view, setView] = useState<SessionView>(initialView)
@@ -112,7 +117,8 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
   const [revision, setRevision] = useState(0)
   const [detach, setDetach] = useState<SessionBinding>()
   const running = useRef(false)
-  const linked = taskId ? bindings[taskId] ?? [] : []
+  const linked = taskId && !bindingIssue ? bindings[taskId] ?? [] : []
+  const canEdit = taskReady && (!bindingIssue || bindingIssue.state === 'conflict' && !bindingIssue.pendingOperationIds.length)
   const detachmentChanged = Boolean(detach && !linked.some((item) => sessionBindingKey(item) === sessionBindingKey(detach)))
   useEffect(() => {
     let active = true
@@ -154,9 +160,11 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
       {error && <p className="copilot-error" role="alert">{error}</p>}
       {titleCacheError && <p className="muted" role="status">{titleCacheError}</p>}
       {!taskId && <p className="muted">Select a task to link or create a session.</p>}
+      {taskId && bindingIssue && <SessionBindingStatus taskId={taskId} issue={bindingIssue} cachedTitles={cachedTitles} busy={busy || operating}
+        onRetry={async () => { if (!onRetrySync) throw new Error('Open the task workspace to retry session binding synchronization.'); await onRetrySync() }} onCancel={onCancelPending} onDevices={onDevices} />}
       {view === 'current' && <>
         {taskId && <SessionTree taskId={taskId} bindings={linked} activeKey={activeKey} sessions={sessions} cachedTitles={cachedTitles} disabled={!taskReady || busy || operating} onSelect={onSelect} onUnlink={onDetach ? (binding) => { setDetach(binding); setError(undefined) } : undefined} />}
-        {!linked.length && <p className="muted">{busy ? 'Loading task sessions...' : 'No sessions linked to this task.'}</p>}
+        {!linked.length && !bindingIssue && <p className="muted">{busy ? 'Loading task sessions...' : 'No sessions linked to this task.'}</p>}
         {detach && <section className="session-inline-confirm" aria-label="Detach conversation"><p>Detach {detach.id} from {taskId}? Conversation history stays on its Host.</p>{detachmentChanged && <p role="alert">The task binding changed. Cancel and review the current sessions.</p>}<div className="session-sidebar-actions"><button type="button" className="secondary-button" disabled={operating} onClick={() => setDetach(undefined)}>Keep conversation</button><button type="button" className="primary-button" disabled={!taskReady || busy || operating || detachmentChanged} onClick={() => { void run(async () => { if (onDetach) await onDetach(detach); setDetach(undefined) }) }}>Detach session</button></div></section>}
       </>}
       {view === 'link' && <>
@@ -169,10 +177,10 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
         {filtered.map((session) => {
           const label = cachedTitles?.[agentHostKey(session)] ?? session.title
           const assigned = Object.entries(bindings).find(([, members]) => members.some((member) => member.owner.clientId === session.owner.clientId && member.id === session.sessionId))?.[0]
-          return <section key={agentHostKey(session)} className="ahp-catalog-item" aria-label={`Host session ${label}`}><div><strong><Icon name="copilot" />{label}</strong><p className="muted" title={session.owner.machineName}>{machineLabel(session.owner, aliases)} / {session.canSend ? 'Read and send' : 'Read only'}</p><span className="muted ahp-session-id">{session.sessionId}</span>{assigned && <p className="muted">Linked to {assigned}</p>}</div><IconButton icon="link" label={`Link ${label} to ${taskId ?? 'task'}`} disabled={loading || operating || busy || !taskReady || !taskId || Boolean(assigned && assigned !== taskId)} onClick={() => { void run(async () => { await onLink(session); setView('current') }) }} /></section>
+          return <section key={agentHostKey(session)} className="ahp-catalog-item" aria-label={`Host session ${label}`}><div><strong><Icon name="copilot" />{label}</strong><p className="muted" title={session.owner.machineName}>{machineLabel(session.owner, aliases)} / {session.canSend ? 'Read and send' : 'Read only'}</p><span className="muted ahp-session-id">{session.sessionId}</span>{assigned && <p className="muted">Linked to {assigned}</p>}</div><IconButton icon="link" label={`Link ${label} to ${taskId ?? 'task'}`} disabled={loading || operating || busy || !canEdit || !taskId || Boolean(assigned && assigned !== taskId)} onClick={() => { void run(async () => { await onLink(session); setView('current') }) }} /></section>
         })}
       </>}
-      {view === 'create' && <AgentHostCreationControls taskId={taskId} taskReady={taskReady} disabled={operating || busy} onCreated={created} />}
+      {view === 'create' && <AgentHostCreationControls taskId={taskId} taskReady={canEdit} disabled={operating || busy} onCreated={created} />}
     </div>
   </aside>
 }

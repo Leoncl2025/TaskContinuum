@@ -2,6 +2,7 @@ import { dialog, ipcMain, shell } from 'electron'
 import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import { z } from 'zod'
 import type { WorkspaceGitSyncStatus } from '../../shared/gitSync'
+import { remoteConfigLimits } from '../../shared/remoteConfig'
 import type { RemoteSettingChanges } from './settingsFile'
 import { machineAliasChangeSchema } from './machineAlias'
 import { handleDesktopOperation } from '../desktopOperations'
@@ -11,6 +12,7 @@ export interface GitSyncActions {
   enable(root: string): Promise<void>
   disable(root: string): Promise<void>
   syncNow(root: string): Promise<void>
+  cancelPendingBinding(root: string, taskId: string, operationIds: string[], expectedRevision: string | null): Promise<void>
   revokeDevice(root: string, deviceId: string): Promise<void>
   setSettings(root: string, expectedRevision: string | null, changes: RemoteSettingChanges): Promise<void>
   setMachineAlias(root: string, deviceId: string, alias: string | null, expectedRevision: string | null): Promise<void>
@@ -39,6 +41,24 @@ export function registerGitSyncBridge(requireWindow: (event: IpcMainInvokeEvent)
   })
   handle('disable', async () => service.disable(await currentRoot()))
   handle('sync', async () => service.syncNow(await currentRoot()))
+  handle('cancel-pending-binding', async (window, value) => {
+    const request = z.object({
+      taskId: z.string().max(64).regex(/^T-\d{4,}$/),
+      operationIds: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(remoteConfigLimits.overlayOperations).refine((ids) => new Set(ids).size === ids.length, 'Duplicate pending operation IDs.'),
+      expectedRevision: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+    }).strict().parse(value)
+    const root = await currentRoot()
+    const consent = await dialog.showMessageBox(window, {
+      type: 'warning', title: 'Cancel temporary session association',
+      message: `Cancel ${request.operationIds.length} unresolved temporary change(s) for ${request.taskId}?`,
+      detail: `Workspace: ${root}\nThis removes only the local pending markers. Signed binding history and original chats are not deleted or changed. The last validated associations can become available again, but you must explicitly select a session before opening it. If the original signed operation arrives later, it will still be validated and may change or conflict with those associations. To undo a published change, use an explicit new binding operation instead.\n\nOnly continue after reviewing the saved associations and the publishing device's pending changes.`,
+      buttons: ['Keep waiting', 'Cancel temporary change'], defaultId: 0, cancelId: 0,
+    })
+    if (consent.response !== 1) return false
+    await unchanged(root)
+    await service.cancelPendingBinding(root, request.taskId, request.operationIds, request.expectedRevision)
+    return true
+  })
   handle('revoke', async (window, value) => {
     const root = await currentRoot()
     const deviceId = z.uuid().parse(value)

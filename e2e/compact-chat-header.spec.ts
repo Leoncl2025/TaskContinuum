@@ -20,6 +20,53 @@ test.beforeAll(async () => {
 test.afterAll(async () => { await server?.close() })
 
 for (const scenario of [
+  { state: 'awaiting-sync', title: 'Session links waiting for sync', width: 1440, theme: 'light' },
+  { state: 'awaiting-sync', title: 'Session links waiting for sync', width: 360, theme: 'dark' },
+  { state: 'conflict', title: 'Session links need conflict resolution', width: 1440, theme: 'light' },
+  { state: 'blocked', title: 'Session links are blocked', width: 1440, theme: 'dark' },
+]) {
+  test(`distinguishes ${scenario.state} from unlinking at ${scenario.width}px and never opens retained sessions`, async ({ page }, testInfo) => {
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    await page.setViewportSize({ width: scenario.width, height: 1100 })
+    await page.goto(`${url}?workbench&panes&sessions&binding-state=${scenario.state}&theme=${scenario.theme}`)
+    await page.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
+    const sidebar = page.getByRole('complementary', { name: 'Agent Host sessions', exact: true })
+    const notice = sidebar.getByRole('region', { name: 'Session link status for T-0002', exact: true })
+    await expect(notice.getByRole('heading', { name: scenario.title, exact: true })).toBeVisible()
+    await expect(sidebar.getByText('No sessions linked to this task.', { exact: true })).toHaveCount(0)
+    await expect(page.getByText(/The last selected session is no longer linked/)).toHaveCount(0)
+    expect(await page.evaluate(() => window.compactChatFixture.calls.watch)).toBe(0)
+    if (scenario.state === 'awaiting-sync') {
+      const saved = notice.getByRole('list', { name: 'Saved associations for T-0002' })
+      await expect(saved.getByRole('listitem')).toHaveCount(4)
+      await expect(saved.getByRole('button')).toHaveCount(0)
+      for (const row of await saved.getByRole('listitem').all()) await expect(row).toHaveAttribute('aria-disabled', 'true')
+      await notice.getByRole('button', { name: 'Retry sync', exact: true }).click()
+      await expect(notice.getByRole('alert')).toContainText('user changes are staged')
+      await expect(saved.getByRole('listitem')).toHaveCount(4)
+      await notice.getByText('Recovery options', { exact: true }).click()
+      await notice.getByRole('button', { name: 'Review cancellation of temporary change', exact: true }).click()
+      await expect(notice.getByRole('heading', { name: scenario.title, exact: true })).toBeVisible()
+      expect(await page.evaluate(() => window.compactChatFixture.calls.watch)).toBe(0)
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page.screenshot({ path: testInfo.outputPath(`binding-${scenario.state}-${scenario.width}-${scenario.theme}.png`) })
+    if (scenario.state === 'awaiting-sync') {
+      await page.evaluate(() => window.compactChatFixture.resolveBindings())
+      await expect(notice).toHaveCount(0)
+      await expect(sidebar.getByRole('treeitem')).toHaveCount(4)
+      expect(await page.evaluate(() => window.compactChatFixture.calls.watch)).toBe(0)
+      await sidebar.getByRole('button', { name: 'Open A focused release plan', exact: true }).click()
+      await expect(page.getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible()
+      expect(await page.evaluate(() => window.compactChatFixture.calls.watch)).toBe(1)
+    }
+    expect(await page.evaluate(() => window.compactChatFixture.calls.send)).toBe(0)
+    expect(errors).toEqual([])
+  })
+}
+
+for (const scenario of [
   { method: 'Enter', width: 1440, height: 900 },
   { method: 'Enter', width: 360, height: 740 },
   { method: 'send button', width: 1440, height: 900 },

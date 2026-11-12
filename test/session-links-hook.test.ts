@@ -51,6 +51,34 @@ function fixture() {
 }
 
 describe('repository-backed Agent Host binding state', () => {
+  it('exposes pending state separately from active bindings and retains it through failed synchronization', async () => {
+    const { workspace, bridge } = fixture()
+    const remote = gitSyncUiFixture()
+    window.remoteVSCode = remote.remote
+    const saved = link('retained')
+    const snapshot: SessionLinksSnapshot = {
+      ...linksSnapshot({}, 'a'.repeat(64)),
+      bindingIssues: { 'T-0002': { state: 'awaiting-sync', reasons: [{ code: 'awaiting-sync', message: 'The exact operation is not in validated Git data.' }], pendingOperationIds: ['b'.repeat(64)], savedBindings: [saved], savedRecordCount: 4 } },
+    }
+    vi.mocked(bridge.getSessionLinks).mockResolvedValue(snapshot)
+    const { result } = renderHook(() => useSessionLinks(workspace))
+    await waitFor(() => expect(result.current.ready).toBe(true))
+    expect(result.current.bindings).toEqual({})
+    expect(result.current.bindingIssues).toEqual(snapshot.bindingIssues)
+    vi.mocked(remote.api.syncNow).mockRejectedValueOnce(new Error('Synchronization is paused because user changes are staged.'))
+    await act(async () => { await expect(result.current.synchronize()).rejects.toThrow('staged') })
+    expect(result.current.bindingIssues['T-0002'].savedBindings).toEqual([saved])
+    expect(result.current.bindings).toEqual({})
+    await act(() => result.current.cancelPending('T-0002'))
+    expect(remote.api.cancelPendingBinding).toHaveBeenCalledExactlyOnceWith('T-0002', ['b'.repeat(64)], snapshot.revision)
+    expect(result.current.bindingIssues['T-0002'].state).toBe('awaiting-sync')
+    vi.mocked(remote.api.syncNow).mockImplementationOnce(async () => { vi.mocked(bridge.getSessionLinks).mockResolvedValue(linksSnapshot({ 'T-0002': link('synced') }, 'c'.repeat(64))) })
+    await act(() => result.current.synchronize())
+    expect(result.current.bindingIssues).toEqual({})
+    expect(result.current.bindings['T-0002'][0].id).toBe('copilotcli:/synced')
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+  })
+
   it('rejects v2 bindings without activating or migrating existing sessions', async () => {
     const { workspace, bridge } = fixture()
     const legacy = linksSnapshot({ 'T-0002': link('unsupported') })
@@ -115,7 +143,7 @@ describe('repository-backed Agent Host binding state', () => {
     await waitFor(() => expect(view.result.current.ready).toBe(true))
     const synced = linksSnapshot({ 'T-0002': link('ssh-change') }, 'c'.repeat(64))
     vi.mocked(bridge.getSessionLinks).mockResolvedValue(synced)
-    await act(async () => remote.notify())
+    await act(async () => remote.notifyBindings())
     expect(view.result.current.bindings['T-0002'][0].agentHost).toEqual(agentHostTargetFixture('ssh-change', localOwner))
     let finish!: (value: SessionLinksSnapshot) => void
     vi.mocked(bridge.updateSessionLink).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
@@ -123,7 +151,7 @@ describe('repository-backed Agent Host binding state', () => {
     act(() => { saving = view.result.current.attach('T-0003', attachment('saving')) })
     const final = linksSnapshot({ ...synced.document.bindings, 'T-0004': link('newer-ssh-change') }, 'd'.repeat(64))
     vi.mocked(bridge.getSessionLinks).mockResolvedValue(final)
-    act(() => remote.notify())
+    act(() => remote.notifyBindings())
     await act(async () => { finish(synced); await saving })
     expect(view.result.current.bindings['T-0004'][0].id).toBe('copilotcli:/newer-ssh-change')
     expect(bridge.updateSessionLink).toHaveBeenCalledOnce()
@@ -249,7 +277,7 @@ describe('repository-backed Agent Host binding state', () => {
     await expect(result.current.attach('T-0002', attachment('blocked'))).rejects.toThrow('Reload repository session links')
     expect(bridge.updateSessionLink).not.toHaveBeenCalled()
     vi.mocked(bridge.getSessionLinks).mockResolvedValue(linksSnapshot({ 'T-0002': link('restored') }, 'c'.repeat(64)))
-    await act(async () => remote.notify())
+    await act(async () => remote.notifyBindings())
     expect(result.current.ready).toBe(true)
     expect(result.current.error).toBeNull()
     expect(result.current.bindings['T-0002'][0].id).toBe('copilotcli:/restored')
@@ -264,7 +292,7 @@ describe('repository-backed Agent Host binding state', () => {
     await act(() => result.current.attach('T-0002', attachment('saved')))
     expect(result.current.bindings['T-0002'][0].id).toBe('copilotcli:/saved')
     vi.mocked(bridge.getSessionLinks).mockResolvedValue(linksSnapshot())
-    await act(async () => remote.notify())
+    await act(async () => remote.notifyBindings())
     expect(result.current.bindings).toEqual({})
     expect(result.current.ready).toBe(true)
   })
@@ -277,7 +305,7 @@ describe('repository-backed Agent Host binding state', () => {
     await waitFor(() => expect(result.current.ready).toBe(true))
     let finish!: (value: SessionLinksSnapshot) => void
     vi.mocked(bridge.getSessionLinks).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
-    act(() => remote.notify())
+    act(() => remote.notifyBindings())
     await act(() => result.current.attach('T-0002', attachment('saved')))
     await act(async () => { finish(linksSnapshot()) })
     expect(result.current.bindings['T-0002'][0].id).toBe('copilotcli:/saved')

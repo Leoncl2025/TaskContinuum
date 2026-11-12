@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { lstat, mkdir, realpath, rm } from 'node:fs/promises'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { z } from 'zod'
-import { sessionLinkEntries, taskSessionLinks, type SessionLink, type SessionLinksDocument, type SessionLinksSnapshot } from '../../shared/sessionBindings'
+import { sessionLinkEntries, taskSessionLinks, type SessionBindingIssue, type SessionLink, type SessionLinksDocument, type SessionLinksSnapshot } from '../../shared/sessionBindings'
 import {
   remoteConfigLimits, type BindingNotificationAcknowledgement, type DeviceAliasPayload, type RemoteActor, type RemoteConfigSnapshot,
   type RemoteConfigStoreStatus, type RemotePayloads, type RemoteRecord, type RemoteRecordFile, type RemoteRecordKind,
@@ -246,11 +246,39 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     const resolution = await this.measure('configuration.snapshot', 'resolution', () => resolveRecords(unionRecords(records, overlay?.records ?? []), this.options.trust))
     logAgentHostDiagnostic('configuration.snapshot', { scope: this.options.workspaceRoot, step: 'records', status: 'ok', count: records.length })
     const bindings = resolution.bindings
+    const bindingIssues: Record<string, SessionBindingIssue> = {}
+    const bindingRecordCounts = new Map<string, number>()
+    for (const record of records) if (record.kind === 'binding') bindingRecordCounts.set(record.payload.taskId, (bindingRecordCounts.get(record.payload.taskId) ?? 0) + 1)
+    for (const entity of Object.values(resolution.entities)) {
+      if (entity.kind !== 'binding' || entity.state !== 'blocked' && entity.state !== 'needs-resolution') continue
+      const taskId = entity.key.slice('binding:'.length)
+      bindingIssues[taskId] = {
+        state: entity.state === 'needs-resolution' ? 'conflict' : 'blocked',
+        reasons: resolution.diagnostics.filter((issue) => !issue.entityKey || issue.entityKey === entity.key)
+          .map(({ code, message, operationId }) => ({ code, message, ...(operationId ? { operationId } : {}) })),
+        pendingOperationIds: [], savedBindings: [], savedRecordCount: bindingRecordCounts.get(taskId) ?? 0,
+      }
+    }
     for (const marker of overlay?.awaitingSync ?? []) {
+      const issue = bindingIssues[marker.taskId] ??= {
+        state: 'awaiting-sync', reasons: [], pendingOperationIds: [],
+        savedBindings: [...bindings[marker.taskId] ?? []],
+        savedRecordCount: bindingRecordCounts.get(marker.taskId) ?? 0,
+      }
+      issue.pendingOperationIds.push(marker.operationId)
+      const queued = outbox.some((record) => record.operationId === marker.operationId)
+      const diagnostic = {
+        code: 'awaiting-sync',
+        message: queued
+          ? 'The exact signed binding operation is saved in this device\'s outbox but has not reached validated Git data. Retry synchronization; saved associations remain paused.'
+          : 'A temporary binding expired or was recovered after restart, but its exact signed operation has not arrived in validated Git data. Retry synchronization here and on the publishing device. This remains pending until that operation arrives or you explicitly cancel the temporary change.',
+        operationId: marker.operationId,
+      }
+      issue.reasons.push(diagnostic)
       delete bindings[marker.taskId]
       const entity = resolution.entities[`binding:${marker.taskId}`]
       if (entity) entity.state = 'blocked'
-      resolution.diagnostics.push({ code: 'awaiting-sync', message: 'A provisional binding expired or was recovered after restart. Await the exact canonical operation or explicitly cancel it.', entityKey: `binding:${marker.taskId}`, operationId: marker.operationId })
+      resolution.diagnostics.push({ ...diagnostic, entityKey: `binding:${marker.taskId}` })
     }
     const document: SessionLinksDocument = { schemaVersion: '2.1', bindings }
     const revision = sha({ resolution: resolution.revision, canonical: canonical.map((record) => record.operationId), overlay: overlay?.revision ?? null, initialized: state.initialized })
@@ -263,6 +291,7 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     }
     return {
       document, revision, initialized: state.initialized, records, resolution,
+      ...(Object.keys(bindingIssues).length ? { bindingIssues } : {}),
       pendingOperationIds: this.pendingRecords({ canonical, outbox }).map((record) => record.operationId),
       provisional: overlay?.provisional ?? [], awaitingSync: overlay?.awaitingSync ?? [],
     }
@@ -660,6 +689,23 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
 
   receiveOverlay(notification: unknown, senderId: string): Promise<BindingNotificationAcknowledgement> {
     return this.acceptNotification(notification, senderId)
+  }
+
+  cancelPendingBinding(taskId: string, operationIds: string[], expectedRevision: string | null): Promise<RemoteConfigSnapshot> {
+    sessionLinkTaskIdSchema.parse(taskId)
+    z.array(operationIdSchema).min(1).max(remoteConfigLimits.overlayOperations).refine((ids) => new Set(ids).size === ids.length, 'Duplicate pending operation IDs.').parse(operationIds)
+    return this.transaction(async (state, recovered) => {
+      if (!state.initialized) throw new RemoteConfigError('initialization-required', 'Enable the immutable binding store before reviewing temporary bindings.')
+      if (!this.options.overlay) throw new RemoteConfigError('overlay-disabled', 'This workspace does not have a temporary binding overlay.')
+      const before = await this.ensureRevision(state, expectedRevision)
+      const pending = before.awaitingSync.filter((marker) => marker.taskId === taskId).map((marker) => marker.operationId).sort()
+      if (!pending.length || canonicalJson(pending) !== canonicalJson([...operationIds].sort())) {
+        throw new RemoteConfigError('stale-revision', 'The pending changes for this task changed. Reload and review them before cancelling.')
+      }
+      await this.options.overlay.cancelMany(pending)
+      const snapshot = await this.snapshot(state)
+      return { value: snapshot, changed: recovered, snapshot }
+    })
   }
 
   async close(): Promise<void> {

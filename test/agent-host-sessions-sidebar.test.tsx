@@ -9,6 +9,7 @@ import type { SessionBindings } from '../src/renderer/chat/sessionBindings'
 import { agentHostTargetFixture } from './immutable-bindings-fixture'
 import { MachineAliasesProvider } from '../src/renderer/MachineAliasesProvider'
 import { gitSyncUiFixture } from './remote-config-ui-fixture'
+import type { SessionBindingIssue } from '../src/shared/sessionBindings'
 
 afterEach(() => { delete window.agentHost; delete window.remoteVSCode })
 
@@ -27,6 +28,57 @@ function binding(name: string, title = 'Agent Host') {
 }
 
 describe('AgentHostSessionsSidebar', () => {
+  it('shows retained associations and an explicit synchronization blocker instead of an unlinked empty state', async () => {
+    const saved = ['one', 'two', 'three', 'four'].map((name) => ({ provider: 'agent-host' as const, ...agentHostTargetFixture(name) }))
+    const issue: SessionBindingIssue = {
+      state: 'awaiting-sync', pendingOperationIds: ['a'.repeat(64)], savedBindings: saved, savedRecordCount: 4,
+      reasons: [{ code: 'awaiting-sync', message: 'The exact signed operation has not reached validated Git data.' }],
+    }
+    window.agentHost = bridge(saved.map((link, index) => ({ ...link, title: `Saved ${index + 1}`, provider: 'copilotcli', updatedAt: '', canSend: true })))
+    const retry = vi.fn(async () => { throw new Error('Staged changes are blocking synchronization. They were not changed.') })
+    const cancel = vi.fn(async () => {})
+    const select = vi.fn()
+    const user = userEvent.setup()
+    render(<AgentHostSessionsSidebar taskId="T-0072" taskReady bindingIssue={issue} onRetrySync={retry} onCancelPending={cancel}
+      onSelect={select} onDetach={vi.fn()} onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} />)
+    const status = screen.getByRole('region', { name: 'Session link status for T-0072' })
+    expect(within(status).getByRole('heading', { name: 'Session links waiting for sync' })).toBeInTheDocument()
+    expect(screen.queryByText('No sessions linked to this task.')).not.toBeInTheDocument()
+    const retained = within(status).getByRole('list', { name: 'Saved associations for T-0072' })
+    expect(within(retained).getAllByRole('listitem')).toHaveLength(4)
+    for (const row of within(retained).getAllByRole('listitem')) expect(row).toHaveAttribute('aria-disabled', 'true')
+    expect(within(retained).queryByRole('button')).not.toBeInTheDocument()
+    await user.click(within(retained).getByText(saved[0].sessionId))
+    expect(select).not.toHaveBeenCalled()
+    expect(window.agentHost.watch).not.toHaveBeenCalled()
+    await user.click(within(status).getByRole('button', { name: 'Retry sync' }))
+    expect(await within(status).findByRole('alert')).toHaveTextContent('Staged changes')
+    expect(within(retained).getAllByRole('listitem')).toHaveLength(4)
+    await user.click(within(status).getByText('Recovery options'))
+    expect(cancel).not.toHaveBeenCalled()
+    expect(within(status).getByText(/A later arrival can still change or conflict/)).toBeInTheDocument()
+    await user.click(within(status).getByRole('button', { name: 'Review cancellation of temporary change' }))
+    expect(cancel).toHaveBeenCalledOnce()
+    expect(select).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('tab', { name: 'Link' }))
+    expect(await screen.findByRole('button', { name: 'Link Saved 1 to T-0072' })).toBeDisabled()
+    expect(window.agentHost.create).not.toHaveBeenCalled()
+    expect(window.agentHost.send).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['conflict', 'Session links need conflict resolution'],
+    ['blocked', 'Session links are blocked'],
+  ] as const)('keeps %s distinct from both synchronization and a genuinely empty task', (state, title) => {
+    window.agentHost = bridge()
+    render(<AgentHostSessionsSidebar taskId="T-0072" taskReady bindingIssue={{ state, reasons: [{ code: 'validation', message: 'Review the signed binding heads before changing access.' }], pendingOperationIds: [], savedBindings: [], savedRecordCount: 4 }}
+      onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} />)
+    expect(screen.getByRole('heading', { name: title })).toBeInTheDocument()
+    expect(screen.queryByText('No sessions linked to this task.')).not.toBeInTheDocument()
+    expect(screen.getByText('Review the signed binding heads before changing access.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Review cancellation of temporary change' })).not.toBeInTheDocument()
+  })
+
   it('shows compact rows without a duplicate task heading and expands details separately from activation and unlink', async () => {
     const first = { ...binding('compact-first', 'First conversation'), ownerIsRemote: true }
     const second = binding('compact-second', 'Second conversation')

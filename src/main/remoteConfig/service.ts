@@ -224,7 +224,8 @@ export class WorkspaceSyncService {
     runtime.status.pending = snapshot.pendingOperationIds.length
     runtime.status.revision = snapshot.revision
     runtime.status.provisionalTasks = snapshot.provisional
-    runtime.status.conflicts = [...new Set(snapshot.resolution.diagnostics.map((issue) => issue.entityKey ?? issue.code))]
+    runtime.status.bindingIssues = snapshot.bindingIssues
+    runtime.status.conflicts = [...new Set(snapshot.resolution.diagnostics.filter((issue) => issue.code !== 'awaiting-sync').map((issue) => issue.entityKey ?? issue.code))]
     runtime.status.settings = this.settings(snapshot, runtime.local.clientId)
     runtime.status.machineAliases = snapshot.resolution.machineAliases
     for (const [grantId, peerId] of runtime.grants) {
@@ -256,7 +257,7 @@ export class WorkspaceSyncService {
     if (changed) this.connectionsChanged(runtime.root)
     this.publishStatus(runtime)
     const bindingKey = canonicalJson({ document: snapshot.document, blocked: snapshot.resolution.blocked,
-      provisional: snapshot.provisional, awaitingSync: snapshot.awaitingSync })
+      provisional: snapshot.provisional, awaitingSync: snapshot.awaitingSync, bindingIssues: snapshot.bindingIssues ?? {} })
     if (runtime.bindingKey !== bindingKey) {
       runtime.bindingKey = bindingKey
       this.options.onBindingsChanged?.(runtime.root)
@@ -623,6 +624,8 @@ export class WorkspaceSyncService {
       cycle: ({ signal }) => this.cycle(runtime, signal),
       onStatus: (status) => {
         runtime.status.state = status.state === 'running' ? 'syncing' : status.state === 'stopped' ? 'disabled' : status.state === 'error' ? 'error' : runtime.status.error ? 'error' : 'idle'
+        if (status.state === 'error') runtime.status.syncError = status.error
+        else if (status.state === 'idle') runtime.status.syncError = undefined
         if (status.error) runtime.status.error = status.error
         this.publishStatus(runtime)
       },
@@ -787,6 +790,14 @@ export class WorkspaceSyncService {
     runtime.scheduler.request('manual')
     await runtime.scheduler.whenIdle()
     if (runtime.status.error) throw new Error(runtime.status.error)
+  }
+  async cancelPendingBinding(root: string, taskId: string, operationIds: string[], expectedRevision: string | null): Promise<void> {
+    const runtime = await this.ensure(root, false)
+    if (!runtime?.enrollment.enabled) throw new Error('Enable automatic workspace links before reviewing pending binding changes.')
+    await this.checkUpstream(runtime)
+    await runtime.store.cancelPendingBinding(taskId, operationIds, expectedRevision)
+    runtime.refreshGeneration++
+    await this.refresh(runtime)
   }
   async setSettings(root: string, expectedRevision: string | null, changes: RemoteSettingChanges): Promise<void> {
     const runtime = await this.ensure(root, false)

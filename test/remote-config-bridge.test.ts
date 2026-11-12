@@ -27,6 +27,7 @@ function setup() {
   const service: GitSyncActions = {
     status: vi.fn(async () => status), enable: vi.fn(async () => {}), disable: vi.fn(async () => {}),
     syncNow: vi.fn(async () => {}), revokeDevice: vi.fn(async () => {}), setSettings: vi.fn(async () => {}),
+    cancelPendingBinding: vi.fn(async () => {}),
     setMachineAlias: vi.fn(async () => {}),
   }
   const currentRoot = vi.fn(async () => 'Q:\\workspace')
@@ -111,5 +112,26 @@ describe('Git synchronization IPC boundary', () => {
     expect(mocks.open).toHaveBeenCalledExactlyOnceWith('Q:\\appdata\\settings.json')
     mocks.open.mockResolvedValue('No associated editor.')
     await expect(invoke('open-settings')).rejects.toThrow('No associated editor')
+  })
+
+  it('requires explicit cancellation consent and rechecks the workspace while preserving exact task, operations and revision', async () => {
+    const { service, invoke, currentRoot } = setup()
+    const request = { taskId: 'T-0072', operationIds: ['a'.repeat(64)], expectedRevision: 'b'.repeat(64) }
+    expect(await invoke('cancel-pending-binding', request)).toBe(false)
+    expect(service.cancelPendingBinding).not.toHaveBeenCalled()
+    const detail = mocks.consent.mock.calls[0]?.[1]?.detail
+    expect(detail).toContain('Signed binding history and original chats are not deleted')
+    expect(detail).toContain('explicitly select a session')
+    expect(detail).toContain('arrives later')
+    mocks.consent.mockResolvedValue({ response: 1 })
+    expect(await invoke('cancel-pending-binding', request)).toBe(true)
+    expect(service.cancelPendingBinding).toHaveBeenCalledExactlyOnceWith('Q:\\workspace', request.taskId, request.operationIds, request.expectedRevision)
+    currentRoot.mockResolvedValueOnce('Q:\\workspace').mockResolvedValueOnce('Q:\\other')
+    await expect(invoke('cancel-pending-binding', request)).rejects.toThrow('changed')
+    expect(service.cancelPendingBinding).toHaveBeenCalledOnce()
+    for (const invalid of [{ ...request, taskId: '../T-0072' }, { ...request, operationIds: [] }, { ...request, operationIds: [request.operationIds[0], request.operationIds[0]] }, { ...request, expectedRevision: 'stale' }, { ...request, root: 'Q:\\other' }]) {
+      await expect(invoke('cancel-pending-binding', invalid)).rejects.toThrow()
+    }
+    expect(service.cancelPendingBinding).toHaveBeenCalledOnce()
   })
 })

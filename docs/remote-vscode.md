@@ -924,6 +924,35 @@ not confirm it. Descendants and concurrent operations use the normal resolver.
 Provisional values have a 60-second lifetime. Expiry/restart leaves an explicit
 awaiting-sync marker and disables the binding, rather than reactivating an older
 route. Restore the publisher/upstream and synchronize the original operation.
+The session sidebar and chat placeholder distinguish **waiting for sync**,
+**conflicting/blocked**, and a genuinely unlinked task. Validated saved
+associations are shown read-only while waiting; they are not connection
+authority. An unresolved binding operation replaces a task's complete session
+collection, so its missing payload cannot safely be assumed to affect only one
+session. The task-wide access pause therefore remains fail-closed.
+
+Use **Retry sync** to run the existing safe Git synchronization and reload the
+binding state. Its precise failure, such as staged changes or an unavailable
+upstream, is shown without discarding user edits. A successful pull that lacks the
+exact operation does not clear the pending state. Receiving another device's SSH
+hint does not put its operation in the receiver's publication outbox: the author
+durably saves the operation before sending the hint, but Git publication can
+still be blocked or pending on that device. Without its exact validated Git
+operation, a marker can remain indefinitely, including across restart. The
+marker alone does not retain the original sender or prove why publication failed.
+
+Under **Recovery options**, review the saved associations and publishing device
+before requesting cancellation. A native confirmation explains that only the
+reviewed local markers are removed, not signed history or original chats.
+Cancellation rechecks the active workspace, exact operation IDs and current
+revision; stale requests and blocked validation are rejected. A later canonical
+arrival is still validated normally and may update or conflict with the saved
+associations. After either synchronization recovery or cancellation, a task
+with a confirmed blocked/pending binding snapshot requires explicit session selection rather
+than restoring its old selection or opening a replacement automatically.
+Retaining binding records does not establish that the owner's original chat
+content is complete; that must be verified independently on the original Host.
+
 Conflicting heads remain visible; ambiguous bindings are disabled. A canonical
 session cannot be actively claimed by two tasks. Resolve conflicts with an
 explicit binding/detach at the current revision, not by deleting record history.

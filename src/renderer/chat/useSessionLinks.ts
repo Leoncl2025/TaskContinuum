@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { SessionLinksSnapshot } from '../../shared/sessionBindings'
+import type { SessionBindingIssue, SessionLinksSnapshot } from '../../shared/sessionBindings'
 import { taskSessionLinks } from '../../shared/sessionBindings'
 import type { WorkspaceSnapshot } from '../../shared/workspace'
 import type { SessionBinding, SessionBindings } from './sessionBindings'
 
 function uiBindings(snapshot: SessionLinksSnapshot): SessionBindings {
   if (snapshot.document.schemaVersion !== '2.1') throw new Error('Workspace session bindings require schema v2.1. Previous bindings are unsupported and are not migrated. Use a fresh workspace binding configuration and link existing native sessions again.')
-  return Object.fromEntries(Object.keys(snapshot.document.bindings).map((taskId) => [taskId, taskSessionLinks(snapshot.document.bindings, taskId).map((link) => {
+  return Object.fromEntries(Object.keys(snapshot.document.bindings).map((taskId) => [taskId, (snapshot.bindingIssues?.[taskId] ? [] : taskSessionLinks(snapshot.document.bindings, taskId)).map((link) => {
     if (link.provider !== 'agent-host' || 'hostId' in link || !link.sessionId || !link.chatId || !link.owner?.clientId || !link.owner.machineName) throw new Error('Workspace session bindings must contain owned logical Agent Host targets. Host-pinned bindings are not supported.')
     return { id: link.sessionId, title: 'Agent Host', owner: link.owner, ownerIsRemote: link.owner.clientId !== snapshot.localOwner?.clientId, agentHost: { sessionId: link.sessionId, chatId: link.chatId, owner: link.owner } }
   })]))
 }
+const noIssues: Readonly<Record<string, SessionBindingIssue>> = Object.freeze({})
 
 export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
   const bridge = window.workspace
@@ -111,6 +112,23 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
     await run(({ workspace, bridge, snapshot }) => bridge.updateSessionLink({ workspaceId: workspace.id, taskId, sessionId: null, ...(binding ? { detachTarget: binding.agentHost } : {}), expectedRevision: snapshot.revision }))
   }
 
+  async function cancelPending(taskId: string): Promise<void> {
+    await run(async ({ workspace, bridge, snapshot }) => {
+      const issue = snapshot.bindingIssues?.[taskId]
+      const api = window.remoteVSCode?.gitSync
+      if (!api?.cancelPendingBinding) throw new Error('Update this desktop to review and cancel pending binding changes safely.')
+      if (!issue?.pendingOperationIds.length) throw new Error('No unresolved temporary change is available. Reload the current task associations.')
+      await api.cancelPendingBinding(taskId, issue.pendingOperationIds, snapshot.revision)
+      return bridge.getSessionLinks(workspace.id)
+    })
+  }
+
+  async function synchronize(): Promise<void> {
+    const api = window.remoteVSCode?.gitSync
+    if (!workspace || !api) throw new Error('Open the desktop workspace to retry binding synchronization.')
+    try { await api.syncNow() } finally { await reload() }
+  }
+
   async function reload(): Promise<SessionLinksSnapshot | undefined> {
     if (!workspace || !bridge || pending.current) return
     readGeneration.current += 1
@@ -130,7 +148,7 @@ export function useSessionLinks(workspace: WorkspaceSnapshot | null) {
   }
 
   return {
-    bindings, busy, error, attach, detach, reload, localOwner: snapshot?.localOwner,
+    bindings, bindingIssues: snapshot?.bindingIssues ?? noIssues, busy, error, attach, detach, reload, cancelPending, synchronize, localOwner: snapshot?.localOwner,
     ready: !busy && !error && workspace !== null && snapshot !== null,
   }
 }

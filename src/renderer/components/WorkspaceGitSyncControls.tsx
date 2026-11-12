@@ -82,6 +82,7 @@ export function WorkspaceGitSyncControls() {
       </select></label>
     </div>}
     {!!status?.provisionalTasks.length && <p role="status">Provisional bindings: {status.provisionalTasks.join(', ')}. Waiting for the same operations in Git.</p>}
+    {Object.entries(status?.bindingIssues ?? {}).filter(([, issue]) => issue.state === 'awaiting-sync').map(([taskId, issue]) => <p key={taskId} role="status">Session links for {taskId} are waiting for synchronization, not unlinked. {issue.savedRecordCount === undefined ? 'Saved binding records were not reset.' : `${issue.savedRecordCount} binding record(s) are retained.`} Review the task's session sidebar to retry or safely cancel the unresolved temporary change.</p>)}
     {!!status?.conflicts.length && <p role="alert" className="copilot-error">Configuration needs resolution: {status.conflicts.join(', ')}.{otherConflicts && ' Ambiguous bindings are disabled; select the intended session again to resolve.'}{aliasConflicts && ' Rename the affected machines, then explicitly save or clear each conflicting alias.'}</p>}
     {!!machines.length && <p className="muted workspace-links-description">Machine aliases sync with this workspace in its public configuration. Do not include secrets. Hostnames and connection identities stay unchanged.{!enabled && ' Enable automatic links to edit aliases.'}</p>}
     {machines.map((machine) => {

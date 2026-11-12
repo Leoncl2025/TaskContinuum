@@ -1,4 +1,4 @@
-import { Activity, useCallback, useEffect, useEffectEvent, useRef, useState, useSyncExternalStore } from 'react'
+import { Activity, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { DesktopInfo } from '../shared/desktop'
 import { filterTasks } from '../shared/tasks'
@@ -8,6 +8,7 @@ import { useWorkbenchSelection } from './chat/useWorkbenchSelection'
 import { sessionBindingKey } from './chat/sessionBindings'
 import type { SessionBinding } from './chat/sessionBindings'
 import { taskSessionLinks } from '../shared/sessionBindings'
+import type { SessionBindingIssue } from '../shared/sessionBindings'
 import { Dialog, Icon, IconButton } from './components/Primitives'
 import { TaskSidebar } from './components/TaskSidebar'
 import { TaskViewer } from './components/TaskViewer'
@@ -23,6 +24,7 @@ import type { TaskCreationMode } from './components/TaskCreationDialog'
 import { RemoteDevicesDialog } from './components/RemoteDevicesDialog'
 import { AgentHostPanel } from './components/AgentHostPanel'
 import { AgentHostSessionsSidebar } from './components/AgentHostSessionsSidebar'
+import { SessionBindingStatus } from './components/SessionBindingStatus'
 import type { AgentHostSession } from '../shared/agentHost'
 import { agentHostKey } from '../shared/agentHost'
 import { useSessionTitles } from './chat/useSessionTitles'
@@ -105,10 +107,19 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const task = tasks.find((item) => item.id === selectedId)
   const primaryPanel = task || taskAgentOpen ? 'chat' : 'details'
   const taskBindings = task ? bindings[task.id] ?? [] : []
+  const bindingIssue = useMemo<SessionBindingIssue | undefined>(() => {
+    if (!task) return
+    const issue = links.bindingIssues[task.id]
+    if (issue) return issue
+    if (links.error) return {
+      state: 'blocked', reasons: [{ code: 'binding-read-failed', message: links.error }],
+      pendingOperationIds: [], savedBindings: (bindings[task.id] ?? []).map((binding) => ({ provider: 'agent-host', ...binding.agentHost })),
+    }
+  }, [task, links.bindingIssues, links.error, bindings])
   const activeKey = task ? Object.hasOwn(selectedSessions, task.id) ? selectedSessions[task.id]
     : taskBindings[0] ? sessionBindingKey(taskBindings[0]) : undefined : undefined
-  const activeBinding = taskBindings.find((binding) => sessionBindingKey(binding) === activeKey)
-  const missingSelectedSession = links.ready && typeof activeKey === 'string' && !activeBinding
+  const activeBinding = !bindingIssue ? taskBindings.find((binding) => sessionBindingKey(binding) === activeKey) : undefined
+  const missingSelectedSession = links.ready && !bindingIssue && typeof activeKey === 'string' && !activeBinding
   const agentHostBinding = activeBinding?.agentHost
   const activePanelKey = task && activeBinding ? `${task.id}:${sessionBindingKey(activeBinding)}` : undefined
   const panelKeys = new Set([...visitedSessions, ...activePanelKey ? [activePanelKey] : []])
@@ -138,6 +149,13 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   useEffect(() => { currentTaskId.current = selectedId }, [selectedId])
   useEffect(() => { currentSessionKey.current = activeKey }, [activeKey])
   const rememberDefaultSession = selection.rememberDefaultSession
+  const clearRememberedSession = selection.clearSession
+  useEffect(() => {
+    const pausedTasks = new Set(Object.keys(links.bindingIssues))
+    for (const taskId of pausedTasks) {
+      if (selectedSessions[taskId] !== null && (Object.hasOwn(selectedSessions, taskId) || task?.id === taskId)) clearRememberedSession(taskId)
+    }
+  }, [links.bindingIssues, selectedSessions, task, clearRememberedSession])
   useEffect(() => {
     if (task && activeBinding && links.ready) rememberDefaultSession(task.id, sessionBindingKey(activeBinding))
   }, [task, activeBinding, links.ready, rememberDefaultSession])
@@ -387,7 +405,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
         <button type="button" className="activity" aria-label="Preferences" title="Preferences and integration status" onClick={() => setDialog('settings')}><Icon name="settings-gear" /></button>
       </nav>
 
-      {sidebarVisible && (sidebarView === 'sessions' ? <AgentHostSessionsSidebar key={task?.id ?? 'no-task'} taskId={task?.id} taskTitle={task?.title} taskReady={Boolean(task && links.ready)} bindings={bindings} activeKey={activeBinding ? sessionBindingKey(activeBinding) : undefined} localOwnerId={links.localOwner?.clientId} cachedTitles={sessionTitles.titles} titleCacheError={sessionTitles.error} onTitles={sessionTitles.remember} busy={links.busy} onSelect={task ? (binding) => selectSession(task.id, binding) : undefined} onDetach={task ? (binding) => detachSession(task.id, binding) : undefined} onLink={linkAgentHost} onCreated={agentHostCreated} onDevices={() => setDialog('remote-devices')} onClose={toggleSidebar} /> : <TaskSidebar key={createdTaskId ?? 'initial'} tasks={tasks} selectedId={selectedId} query={query} onQuery={setQuery} onSelect={selectTask} onCreate={onCreateRepository} onCreateTask={openTaskCreation} creationDisabled={!workspaces.available || workspaceLocked || workspaces.busy} onClose={toggleSidebar} workspace={workspace ?? undefined} workspaceControls={workspaceControls} />)}
+      {sidebarVisible && (sidebarView === 'sessions' ? <AgentHostSessionsSidebar key={task?.id ?? 'no-task'} taskId={task?.id} taskTitle={task?.title} taskReady={Boolean(task && links.ready)} bindings={bindings} bindingIssue={bindingIssue} onRetrySync={links.synchronize} onCancelPending={task ? () => links.cancelPending(task.id) : undefined} activeKey={activeBinding ? sessionBindingKey(activeBinding) : undefined} localOwnerId={links.localOwner?.clientId} cachedTitles={sessionTitles.titles} titleCacheError={sessionTitles.error} onTitles={sessionTitles.remember} busy={links.busy} onSelect={task ? (binding) => selectSession(task.id, binding) : undefined} onDetach={task ? (binding) => detachSession(task.id, binding) : undefined} onLink={linkAgentHost} onCreated={agentHostCreated} onDevices={() => setDialog('remote-devices')} onClose={toggleSidebar} /> : <TaskSidebar key={createdTaskId ?? 'initial'} tasks={tasks} selectedId={selectedId} query={query} onQuery={setQuery} onSelect={selectTask} onCreate={onCreateRepository} onCreateTask={openTaskCreation} creationDisabled={!workspaces.available || workspaceLocked || workspaces.busy} onClose={toggleSidebar} workspace={workspace ?? undefined} workspaceControls={workspaceControls} />)}
       {!compact && sidebarVisible && <WorkbenchSash layout={layout} panel="sidebar" onResize={(width) => changePanelWidth('sidebar', width)} onReset={() => changePanelWidth('sidebar', defaultLayout.sidebarWidth)} />}
 
       <Activity mode={compact && sidebarVisible ? 'hidden' : 'visible'}><main className="main-panel" aria-label="Task workspace" aria-keyshortcuts="Control+Shift+PageUp Control+Shift+PageDown">
@@ -416,12 +434,15 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
               <header className="panel-header"><span>AGENT HOST</span><IconButton icon="close" label="Hide chat panel" onClick={toggleChat} /></header>
               <div className="chat-context"><Icon name="server-environment" /><div><strong>{task?.title ?? 'Native Agent Host chats'}</strong><span>{task?.id ?? 'No task selected'}</span></div></div>
               <div className="empty-workbench">
+                {task && bindingIssue ? <SessionBindingStatus taskId={task.id} issue={bindingIssue} busy={links.busy} onRetry={links.synchronize}
+                  onCancel={() => links.cancelPending(task.id)} onReview={openAgentHostSessions} onDevices={() => setDialog('remote-devices')} /> : <>
                 <span className="chat-welcome-icon"><Icon name="comment-discussion" /></span>
                 <h2>{task ? 'Keep the conversation moving' : 'Your task conversations, front and center'}</h2>
                 <p>{!task ? 'Select a task to open its Agent Host chat.' : taskBindings.length ? `Choose a linked session for ${task.id} in the Agent Host sessions sidebar.` : `No Agent Host chat is linked to ${task.id}. Link an existing chat or create one from the Agent Host sessions sidebar.`}</p>
                 {missingSelectedSession && <p role="status">The last selected session is no longer linked to this task. Choose a current session; no replacement was opened.</p>}
                 <p className="muted">Local SDK and Companion sessions are not supported. Existing session data is left untouched.</p>
                 {task && workspace && <button type="button" className="primary-button" disabled={links.busy} onClick={openAgentHostSessions}>Browse Agent Host sessions</button>}
+                </>}
               </div>
             </aside>}
           </Activity>

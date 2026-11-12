@@ -4,6 +4,7 @@ import type { ResponsePartKind, Turn } from '@microsoft/agent-host-protocol'
 import type { AgentHostBridge, AgentHostSession, AgentHostView } from '../../src/shared/agentHost'
 import type { WorkspaceGitSyncStatus } from '../../src/shared/gitSync'
 import type { WorkspaceSnapshot } from '../../src/shared/workspace'
+import type { SessionBindingIssue, SessionLinksSnapshot } from '../../src/shared/sessionBindings'
 import App from '../../src/renderer/App'
 import { defaultLayout, saveLayout } from '../../src/renderer/layout'
 import { AgentHostPanel } from '../../src/renderer/components/AgentHostPanel'
@@ -43,6 +44,21 @@ const sidebarSessions: AgentHostSession[] = [
     title, provider: 'copilotcli', updatedAt: '', canSend: true,
   })),
 ]
+const bindingStateParameter = parameters.get('binding-state')
+let bindingState: SessionBindingIssue['state'] | undefined = bindingStateParameter === 'awaiting-sync' || bindingStateParameter === 'conflict' || bindingStateParameter === 'blocked' ? bindingStateParameter : undefined
+let bindingRevision = 1
+const bindingListeners = new Set<() => void>()
+const syncListeners = new Set<() => void>()
+function bindingIssue(): SessionBindingIssue | undefined {
+  if (!bindingState) return undefined
+  return {
+    state: bindingState, pendingOperationIds: bindingState === 'awaiting-sync' ? ['b'.repeat(64)] : [],
+    reasons: [{ code: bindingState, message: bindingState === 'awaiting-sync' ? 'The temporary change expired after restart. Its exact signed operation is missing from validated Git data; retry here and on the publishing device.'
+      : bindingState === 'conflict' ? 'Concurrent signed binding heads need an explicit resolution; no session was selected.' : 'The binding owner or author is unavailable under the current trust policy.' }],
+    savedBindings: bindingState === 'awaiting-sync' ? sidebarSessions.map(({ sessionId, chatId, owner }) => ({ provider: 'agent-host', sessionId, chatId, owner })) : [],
+    savedRecordCount: 4,
+  }
+}
 window.agentHost = {
   list: async () => ({ sessions: parameters.has('sessions') ? sidebarSessions : [], warnings: [] }),
   models: async () => [{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }],
@@ -59,17 +75,27 @@ const status: WorkspaceGitSyncStatus = {
   enabled: true, workspaceId: 'fixture', intervalMs: 15000, state: 'idle', pending: 0,
   provisionalTasks: [], conflicts: [], peers: [], revision: 'a'.repeat(64),
   machineAliases: { [target.owner.clientId]: long ? 'Studio build workstation '.repeat(3) : 'Studio' },
+  ...(bindingState ? { bindingIssues: { 'T-0002': bindingIssue()! } } : {}),
 }
 declare global {
   interface Window {
     compactChatFixture: {
       setState(state: AgentHostView['state'], readOnly?: boolean): void
       calls: typeof calls
+      resolveBindings(): void
     }
   }
 }
 window.compactChatFixture = {
   calls,
+  resolveBindings() {
+    bindingState = undefined
+    bindingRevision++
+    status.bindingIssues = undefined
+    status.syncError = undefined
+    for (const listener of bindingListeners) listener()
+    for (const listener of syncListeners) listener()
+  },
   setState(state, readOnly = false) {
     view.state = state
     view.readOnly = readOnly
@@ -95,20 +121,27 @@ if (parameters.has('workbench')) {
     getTaskCreationContext: unsupported, createTask: unsupported, getTaskAgentInstructions: unsupported,
     getRepositoryStatus: unsupported, openRepositoryCreation: unsupported,
     getRepositoryPushPlan: unsupported, verifyRepositoryPublication: unsupported,
-    getSessionLinks: async () => ({
-      document: { schemaVersion: '2.1', bindings: { 'T-0002': parameters.has('sessions')
+    getSessionLinks: async (): Promise<SessionLinksSnapshot> => ({
+      document: { schemaVersion: '2.1', bindings: bindingState ? {} : { 'T-0002': parameters.has('sessions')
         ? sidebarSessions.map(({ sessionId, chatId, owner }) => ({ provider: 'agent-host' as const, sessionId, chatId, owner }))
         : [{ provider: 'agent-host', ...target }] } },
-      revision: 'a'.repeat(64), localOwner: parameters.has('sessions')
+      revision: bindingRevision.toString(16).padStart(64, '0'), ...(bindingState ? { bindingIssues: { 'T-0002': bindingIssue()! } } : {}), localOwner: parameters.has('sessions')
         ? { clientId: '22222222-2222-4222-8222-222222222222', machineName: 'Local desktop' } : target.owner,
     }),
     updateSessionLink: unsupported,
   }
   window.remoteVSCode = {
     gitSync: {
-      status: async () => status, enable: unsupported, disable: unsupported, syncNow: unsupported,
+      status: async () => status, enable: unsupported, disable: unsupported,
+      syncNow: parameters.has('binding-state') ? async () => {
+        status.syncError = 'Git synchronization is paused because user changes are staged. No user files were modified.'
+        for (const listener of syncListeners) listener()
+        throw new Error(status.syncError)
+      } : unsupported,
+      cancelPendingBinding: parameters.has('binding-state') ? async () => false : unsupported,
       revokeDevice: unsupported, setMachineAlias: unsupported, setSetting: unsupported, openSettings: unsupported,
-      onStatusChanged: () => () => {}, onBindingsChanged: () => () => {},
+      onStatusChanged: (listener) => { syncListeners.add(listener); return () => { syncListeners.delete(listener) } },
+      onBindingsChanged: (listener) => { bindingListeners.add(listener); return () => { bindingListeners.delete(listener) } },
     },
   }
   window.desktop = {

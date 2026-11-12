@@ -7,6 +7,10 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
 - **Smooth cross-device session switching:** move between local and remote
   conversations while preserving each session's draft in memory.
 - Multiple conversations per task.
+- Pending temporary associations, binding conflicts and blocked validation are
+  distinct from an unlinked task. Saved associations remain visible read-only,
+  with synchronization retry and confirmed local cancellation; recovery never
+  automatically opens an old or replacement session.
 - Compact session rows show only the conversation title, machine and unlink
   action, without repeating the task heading. Select the title or machine to
   open its chat; only the separate arrow button expands identities and access

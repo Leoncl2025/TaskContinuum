@@ -37,7 +37,11 @@ export async function registerRepositorySessionLinksBackend(root: string, backen
 }
 
 function bindingSnapshot(snapshot: SessionLinksSnapshot): SessionLinksSnapshot {
-  return { document: documentSchema.parse(snapshot.document), revision: snapshot.revision, ...(snapshot.localOwner ? { localOwner: snapshot.localOwner } : {}) }
+  return {
+    document: documentSchema.parse(snapshot.document), revision: snapshot.revision,
+    ...(snapshot.localOwner ? { localOwner: snapshot.localOwner } : {}),
+    ...(snapshot.bindingIssues ? { bindingIssues: structuredClone(snapshot.bindingIssues) } : {}),
+  }
 }
 
 function canonicalBindings(document: SessionLinksDocument): Record<string, SessionLink[]> {

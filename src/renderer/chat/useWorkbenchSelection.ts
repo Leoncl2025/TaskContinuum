@@ -113,8 +113,8 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
     }, true)
   }, [update])
 
-  const clearSession = useCallback((taskId: string, expectedKey: string) => {
-    update((selection) => selection && Object.hasOwn(selection.sessions, taskId) && selection.sessions[taskId] !== expectedKey
+  const clearSession = useCallback((taskId: string, expectedKey?: string) => {
+    update((selection) => expectedKey !== undefined && selection && Object.hasOwn(selection.sessions, taskId) && selection.sessions[taskId] !== expectedKey
       ? selection : { version: 2, taskId: selection ? selection.taskId : taskId, openTaskIds: selection?.openTaskIds ?? [taskId], sessions: rememberSession(selection, taskId, null) })
   }, [update])
 

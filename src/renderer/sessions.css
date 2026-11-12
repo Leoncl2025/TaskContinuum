@@ -29,6 +29,15 @@
 .session-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .session-sidebar-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-block: 12px; }
 .session-inline-confirm { margin-top: 12px; border: 1px solid var(--border); padding: 10px; border-radius: var(--radius-md); font-size: 12px; overflow-wrap: anywhere; }
+.session-binding-status { min-width: 0; max-width: 640px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-md); font-size: 12px; text-align: left; overflow-wrap: anywhere; }
+.session-binding-status h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; font-size: 12px; }
+.session-binding-status p { margin: 8px 0; line-height: 1.5; }
+.session-binding-status details { margin-top: 8px; }
+.session-binding-status summary { cursor: pointer; }
+.session-binding-status details > code { display: block; margin-top: 6px; font-size: 11px; }
+.session-retained { display: grid; gap: 6px; padding: 0; list-style: none; }
+.session-retained li { display: grid; gap: 3px; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.session-retained li > span { font-size: 11px; }
 .local-sessions .panel-header { padding-left: 15px; letter-spacing: 0; }
 .copilot-connection { display: flex; align-items: center; gap: 10px; padding: 13px 15px 19px; }
 .copilot-connection > .codicon { font-size: 23px; color: var(--accent); }

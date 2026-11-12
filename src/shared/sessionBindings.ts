@@ -21,6 +21,16 @@ export interface SessionLinksSnapshot {
   document: SessionLinksDocument
   revision: string | null
   localOwner?: SessionOwner
+  /** Presentation only. Retained associations never authorize a connection. */
+  bindingIssues?: Record<string, SessionBindingIssue>
+}
+
+export interface SessionBindingIssue {
+  state: 'awaiting-sync' | 'conflict' | 'blocked'
+  reasons: Array<{ code: string; message: string; operationId?: string }>
+  pendingOperationIds: string[]
+  savedBindings: SessionLink[]
+  savedRecordCount?: number
 }
 
 export interface UpdateSessionLink {

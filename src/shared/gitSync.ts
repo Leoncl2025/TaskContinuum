@@ -12,6 +12,8 @@ export interface WorkspaceGitSyncStatus {
   state: 'disabled' | 'starting' | 'syncing' | 'idle' | 'error'
   lastSyncedAt?: string
   error?: string
+  syncError?: string
+  bindingIssues?: Record<string, SessionBindingIssue>
   pending: number
   provisionalTasks: string[]
   conflicts: string[]
@@ -28,6 +30,7 @@ export interface WorkspaceGitSyncBridge {
   enable(): Promise<boolean>
   disable(): Promise<void>
   syncNow(): Promise<void>
+  cancelPendingBinding(taskId: string, operationIds: string[], expectedRevision: string | null): Promise<boolean>
   revokeDevice(deviceId: string): Promise<void>
   setMachineAlias(deviceId: string, alias: string | null, expectedRevision: string | null): Promise<void>
   setSetting(key: 'autoLink' | 'tunnelEnabled' | 'connectTimeoutMs', value: boolean | number | null, expectedRevision: string | null): Promise<void>
@@ -36,3 +39,4 @@ export interface WorkspaceGitSyncBridge {
   onBindingsChanged(listener: () => void): () => void
 }
 import type { RemoteSettings } from './remoteConfig'
+import type { SessionBindingIssue } from './sessionBindings'

@@ -36,7 +36,7 @@ function descriptor(snapshot: WorkspaceSnapshot): WorkspaceDescriptor {
 }
 
 function visibleLinks(snapshot: SessionLinksSnapshot, localOwner?: SessionOwner): SessionLinksSnapshot {
-  return { document: snapshot.document, revision: snapshot.revision, ...(localOwner ? { localOwner } : {}) }
+  return { document: snapshot.document, revision: snapshot.revision, ...(localOwner ? { localOwner } : {}), ...(snapshot.bindingIssues ? { bindingIssues: snapshot.bindingIssues } : {}) }
 }
 
 export class WorkspaceStore {

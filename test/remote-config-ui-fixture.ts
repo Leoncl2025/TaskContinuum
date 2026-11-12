@@ -12,6 +12,7 @@ export function gitSyncUiFixture() {
     enable: vi.fn(async () => { status = { ...status, enabled: true, state: 'idle' }; return true }),
     disable: vi.fn(async () => { status = { ...status, enabled: false, state: 'disabled' } }),
     syncNow: vi.fn(async () => {}),
+    cancelPendingBinding: vi.fn(async () => false),
     revokeDevice: vi.fn(async () => {}),
     setMachineAlias: vi.fn(async (deviceId, alias, expectedRevision) => {
       if (expectedRevision !== status.revision) throw new Error('Workspace configuration changed. Refresh and retry.')
