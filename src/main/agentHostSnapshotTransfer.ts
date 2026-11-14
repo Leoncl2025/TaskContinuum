@@ -3,12 +3,12 @@ import { lstat, mkdir, open, rm } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { z } from 'zod'
-import type { ActionEnvelope, Snapshot } from '@microsoft/agent-host-protocol'
+import type { ActionEnvelope, ChatState, Snapshot } from '@microsoft/agent-host-protocol'
 import type { AgentHostHistoryTransfer, AgentHostTarget } from '../shared/agentHost'
 import type { AgentHostConnection } from './agentHostConnection'
 import { AGENT_HOST_LIMITS, AgentHostSizeLimitError } from './agentHostLimits'
 import { agentHostChatIdSchema, agentHostKey, agentHostTargetSchema } from './agentHostProtocol'
-import { AgentHostChatState } from './agentHostState'
+import { AgentHostChatState, AgentHostHistoryCursorError } from './agentHostState'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 
 export const SNAPSHOT_TRANSFER_METHODS = {
@@ -16,6 +16,7 @@ export const SNAPSHOT_TRANSFER_METHODS = {
   chunk: 'taskcontinuum/chatSnapshotChunk',
   activate: 'taskcontinuum/chatSnapshotActivate',
   release: 'taskcontinuum/chatSnapshotRelease',
+  containsTurn: 'taskcontinuum/chatHistoryContainsTurn',
 } as const
 
 export const AGENT_HOST_SNAPSHOT_SUPERSEDED_RPC_CODE = -32051
@@ -48,12 +49,33 @@ export const chunkedSnapshotCapabilitySchema = z.object({
 }).strict()
 export type ChunkedSnapshotCapability = z.infer<typeof chunkedSnapshotCapabilitySchema>
 
+export const pagedChatHistoryCapabilitySchema = z.object({ version: z.literal(1) }).strict()
+export const snapshotHistoryRequestSchema = z.object({
+  before: z.object({ epoch: z.uuid(), turnId: z.string().min(1).max(512) }).strict().optional(),
+}).strict()
+export type SnapshotHistoryRequest = z.infer<typeof snapshotHistoryRequestSchema>
+export const snapshotHistoryPageSchema = z.object({
+  epoch: z.uuid(),
+  totalTurns: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  beforeTurnId: z.string().min(1).max(512).optional(),
+}).strict()
+export type SnapshotHistoryPage = z.infer<typeof snapshotHistoryPageSchema>
+
+export const historyContainsTurnRequestSchema = z.object({
+  channel: agentHostChatIdSchema,
+  turnId: z.uuid(),
+}).strict()
+export const historyContainsTurnResponseSchema = z.object({ found: z.boolean(), epoch: z.uuid() }).strict()
+
 export const snapshotPrepareRequestSchema = z.object({
   channel: agentHostChatIdSchema,
   subscribe: z.boolean(),
+  history: snapshotHistoryRequestSchema.optional(),
   resumeTransferId: z.uuid().optional(),
   resumeLeaseId: z.uuid().optional(),
-}).strict()
+}).strict().refine((request) => !request.subscribe || !request.history?.before, {
+  message: 'Earlier history pages cannot replace the live chat subscription.',
+})
 export type SnapshotPrepareRequest = z.infer<typeof snapshotPrepareRequestSchema>
 
 export const snapshotChunkRequestSchema = z.object({
@@ -82,6 +104,7 @@ const prepareResponseSchema = z.discriminatedUnion('mode', [
       fromSeq: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
       state: z.unknown(),
     }).strict(),
+    history: snapshotHistoryPageSchema.optional(),
   }).strict(),
   z.object({
     mode: z.literal('chunked'),
@@ -93,6 +116,7 @@ const prepareResponseSchema = z.discriminatedUnion('mode', [
     maxChunkBytes: z.number().int().positive().max(AGENT_HOST_LIMITS.requestBytes),
     sha256: sha256Schema,
     resumed: z.boolean(),
+    history: snapshotHistoryPageSchema.optional(),
   }).strict(),
 ])
 export type SnapshotPrepareResponse = z.infer<typeof prepareResponseSchema>
@@ -161,6 +185,8 @@ interface SnapshotExport {
   readonly chatId: string
   readonly connection: AgentHostConnection
   readonly fromSeq: number
+  readonly historyKey: string
+  readonly history?: SnapshotHistoryPage
   readonly payload: Buffer
   readonly totalBytes: number
   readonly sha256: string
@@ -336,10 +362,15 @@ export class AgentHostSnapshotStore {
     const now = Date.now()
     this.sweep(now)
     const targetKey = agentHostKey(target)
+    const historyKey = request.history === undefined ? '' : JSON.stringify(request.history)
+    if (request.history?.before && request.history.before.epoch !== connection.historyEpoch) {
+      throw new AgentHostSnapshotSupersededError('The original history changed. Reload the recent conversation before paging again.')
+    }
 
     if (request.subscribe && request.resumeTransferId) {
       const existing = this.exports.get(request.resumeTransferId)
-      if (existing && existing.targetKey === targetKey && existing.connection === connection && !existing.superseded && !this.isExpired(existing, now)) {
+      if (existing && existing.targetKey === targetKey && existing.connection === connection && existing.historyKey === historyKey
+        && !existing.superseded && !this.isExpired(existing, now)) {
         const leaseId = this.acquireLease(existing, owner, request.subscribe, now, request.resumeLeaseId)
         this.releaseOwnerTargetLeases(owner, targetKey, existing.transferId, leaseId)
         return {
@@ -352,14 +383,25 @@ export class AgentHostSnapshotStore {
           maxChunkBytes: this.limits.maxChunkBytes,
           sha256: existing.sha256,
           resumed: true,
+          ...(existing.history ? { history: existing.history } : {}),
         }
       }
     }
 
-    const snapshot = connection.snapshot(target.chatId)
+    let page: ReturnType<AgentHostConnection['historySnapshot']> | undefined
+    try { page = request.history ? connection.historySnapshot(request.history.before?.turnId) : undefined }
+    catch (error) {
+      if (error instanceof AgentHostHistoryCursorError) throw new AgentHostSnapshotSupersededError(error.message)
+      throw error
+    }
+    const snapshot = page?.snapshot ?? connection.snapshot(target.chatId)
+    const history: SnapshotHistoryPage | undefined = page ? {
+      epoch: connection.historyEpoch, totalTurns: page.totalTurns,
+      ...(page.beforeTurnId ? { beforeTurnId: page.beforeTurnId } : {}),
+    } : undefined
     for (const existing of this.exports.values()) {
       if (existing.targetKey === targetKey && existing.connection === connection && !existing.superseded
-        && existing.fromSeq === snapshot.fromSeq && !this.isExpired(existing, now)) {
+        && existing.fromSeq === snapshot.fromSeq && existing.historyKey === historyKey && !this.isExpired(existing, now)) {
         const leaseId = this.acquireLease(existing, owner, request.subscribe, now, request.resumeLeaseId)
         this.releaseOwnerTargetLeases(owner, targetKey, existing.transferId, leaseId)
         return {
@@ -372,6 +414,7 @@ export class AgentHostSnapshotStore {
           maxChunkBytes: this.limits.maxChunkBytes,
           sha256: existing.sha256,
           resumed: existing.transferId === request.resumeTransferId,
+          ...(existing.history ? { history: existing.history } : {}),
         }
       }
     }
@@ -383,7 +426,7 @@ export class AgentHostSnapshotStore {
       throw new AgentHostSizeLimitError('message', AGENT_HOST_LIMITS.messageBytes, totalBytes)
     }
     if (totalBytes <= this.limits.inlineBytes) {
-      return { mode: 'inline', snapshot }
+      return { mode: 'inline', snapshot, ...(history ? { history } : {}) }
     }
 
     this.ensureCapacity(targetKey, totalBytes)
@@ -395,6 +438,8 @@ export class AgentHostSnapshotStore {
       chatId: target.chatId,
       connection,
       fromSeq: snapshot.fromSeq,
+      historyKey,
+      history,
       payload,
       totalBytes,
       sha256,
@@ -423,6 +468,8 @@ export class AgentHostSnapshotStore {
         return
       }
       if (event.type !== 'action' || event.envelope.channel !== target.chatId) return
+      if (record.history && record.history.epoch !== connection.historyEpoch) { supersede(); return }
+      if (record.history && event.envelope.action.type === 'chat/turnsLoaded') return
       if (event.envelope.serverSeq <= record.fromSeq) return
       const bytes = Buffer.byteLength(JSON.stringify(event.envelope))
       if (record.tailEvents.length >= this.limits.maxTailEvents || record.tailBytes + bytes > this.limits.maxTailBytes) {
@@ -444,6 +491,7 @@ export class AgentHostSnapshotStore {
       maxChunkBytes: this.limits.maxChunkBytes,
       sha256,
       resumed: false,
+      ...(history ? { history } : {}),
     }
   }
 
@@ -529,9 +577,9 @@ export class AgentHostSnapshotStore {
     }
   }
 
-  activate(target: AgentHostTarget, connection: AgentHostConnection, request: SnapshotTransferLookup, owner?: object): { fromSeq: number; tailEvents: ActionEnvelope[] } {
+  activate(target: AgentHostTarget, connection: AgentHostConnection, request: SnapshotTransferLookup, owner?: object): { fromSeq: number; tailEvents: ActionEnvelope[]; history?: SnapshotHistoryPage } {
     const record = this.lookup(target, connection, request.channel, request.transferId, owner, request.leaseId)
-    const result = { fromSeq: record.fromSeq, tailEvents: [...record.tailEvents] }
+    const result = { fromSeq: record.fromSeq, tailEvents: [...record.tailEvents], ...(record.history ? { history: record.history } : {}) }
     this.consumeLease(record, owner, request.leaseId)
     return result
   }
@@ -695,13 +743,27 @@ export interface ReceiveChunkedSnapshotOptions {
   subscribe: boolean
   signal: AbortSignal
   capability: ChunkedSnapshotCapability
+  history?: SnapshotHistoryRequest
   request(method: string, params: Record<string, unknown>): Promise<unknown>
   onProgress?(progress: AgentHostHistoryTransfer | undefined): void
   onChunkSaved?(): void
   partRetentionMs?: number
 }
 
-export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshotOptions): Promise<{ snapshot: Snapshot; chunksTransferred: number; totalBytes: number; resumed: boolean }> {
+function validateHistoryPage(snapshot: Snapshot, history: SnapshotHistoryPage | undefined, request: SnapshotHistoryRequest | undefined): void {
+  if (Boolean(history) !== Boolean(request)) throw new Error('Agent Host returned a different history transfer mode.')
+  if (!history) return
+  const turns = (snapshot.state as ChatState).turns
+  if (history.totalTurns !== undefined && history.totalTurns < turns.length || history.beforeTurnId && history.beforeTurnId !== turns[0]?.id
+    || request?.before && turns.some((turn) => turn.id === request.before?.turnId)) {
+    throw new Error('Agent Host returned an invalid history page boundary.')
+  }
+  if (request?.before && history.epoch !== request.before.epoch) throw new AgentHostSnapshotSupersededError()
+}
+
+export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshotOptions): Promise<{
+  snapshot: Snapshot; history?: SnapshotHistoryPage; chunksTransferred: number; totalBytes: number; resumed: boolean
+}> {
   const retentionMs = options.partRetentionMs ?? SNAPSHOT_TRANSFER_LIMITS.partRetentionMs
   try {
     for (let attempt = 0; attempt < SNAPSHOT_TRANSFER_LIMITS.maxSupersedeRetries; attempt++) {
@@ -711,6 +773,7 @@ export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshot
         const prepared = prepareResponseSchema.parse(await options.request(SNAPSHOT_TRANSFER_METHODS.prepare, {
           channel: options.target.chatId,
           subscribe: options.subscribe,
+          ...(options.history ? { history: options.history } : {}),
           ...(saved ? {
             resumeTransferId: saved.transferId,
             ...(saved.leaseId ? { resumeLeaseId: saved.leaseId } : {}),
@@ -723,8 +786,9 @@ export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshot
           const bytes = Buffer.byteLength(JSON.stringify(snapshot), 'utf8')
           if (bytes > AGENT_HOST_LIMITS.messageBytes) throw new AgentHostSizeLimitError('message', AGENT_HOST_LIMITS.messageBytes, bytes)
           new AgentHostChatState(options.target.chatId).snapshot(snapshot)
+          validateHistoryPage(snapshot, prepared.history, options.history)
           options.onProgress?.(undefined)
-          return { snapshot, chunksTransferred: 0, totalBytes: bytes, resumed: false }
+          return { snapshot, history: prepared.history, chunksTransferred: 0, totalBytes: bytes, resumed: false }
         }
 
         const releaseRemoteLease = () => options.request(SNAPSHOT_TRANSFER_METHODS.release, {
@@ -844,6 +908,7 @@ export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshot
             throw new Error('Agent Host returned a mismatched chunked chat snapshot.')
           }
           new AgentHostChatState(options.target.chatId).snapshot(snapshot)
+          validateHistoryPage(snapshot, prepared.history, options.history)
         } catch (error) {
           await releaseRemoteLease()
           await removePartFilesSafe(options.baseFilePath)
@@ -865,9 +930,9 @@ export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshot
 
         await removePartFilesSafe(options.baseFilePath)
         options.onProgress?.(undefined)
-        return { snapshot, chunksTransferred, totalBytes: prepared.totalBytes, resumed }
+        return { snapshot, history: prepared.history, chunksTransferred, totalBytes: prepared.totalBytes, resumed }
       } catch (error) {
-        if (isAgentHostSnapshotSuperseded(error) && attempt + 1 < SNAPSHOT_TRANSFER_LIMITS.maxSupersedeRetries) {
+        if (!options.history?.before && isAgentHostSnapshotSuperseded(error) && attempt + 1 < SNAPSHOT_TRANSFER_LIMITS.maxSupersedeRetries) {
           await removePartFilesSafe(options.baseFilePath)
           continue
         }

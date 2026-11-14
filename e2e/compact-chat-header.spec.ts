@@ -20,6 +20,99 @@ test.beforeAll(async () => {
 test.afterAll(async () => { await server?.close() })
 
 for (const scenario of [
+  { name: 'wide-light', width: 1440, height: 900, theme: 'light', zoom: 1 },
+  { name: 'wide-dark', width: 1440, height: 900, theme: 'dark', zoom: 1 },
+  { name: 'narrow-light', width: 360, height: 740, theme: 'light', zoom: 1 },
+  { name: 'zoomed-dark', width: 1440, height: 1100, theme: 'dark', zoom: 2 },
+]) {
+  test(`session history transfer stays on its interactive row in ${scenario.name}`, async ({ page }, testInfo) => {
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    await page.setViewportSize({ width: scenario.width, height: scenario.height })
+    await page.goto(`${url}?workbench&panes&sessions&theme=${scenario.theme}`)
+    await expect(page.getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible()
+    if (scenario.zoom !== 1) await page.evaluate((zoom) => {
+      document.body.style.zoom = String(zoom)
+      document.querySelector<HTMLElement>('.workbench')!.style.height = `${innerHeight / zoom}px`
+    }, scenario.zoom)
+    await page.getByRole('button', { name: 'Agent Host linked', exact: true }).click()
+    const sidebar = page.getByRole('complementary', { name: 'Agent Host sessions', exact: true })
+    const row = sidebar.getByRole('treeitem', { name: 'A focused release plan', exact: true })
+    const line = row.locator('.session-tree-row')
+    const original = await line.boundingBox()
+    await page.evaluate(() => {
+      window.compactChatFixture.setState('connecting')
+      window.compactChatFixture.setHistoryTransfer({ receivedBytes: 1024 * 1024, totalBytes: 117.1 * 1024 * 1024, kind: 'recent' })
+    })
+    const bar = row.getByRole('progressbar', { name: 'History transfer for A focused release plan' })
+    await expect(bar).toBeVisible()
+    await expect(bar).toHaveAttribute('aria-valuetext', 'Recent history: 0.8% (1.0 / 117.1 MiB)')
+    await expect(row.getByText('0.8%', { exact: true })).toBeVisible()
+    await expect(sidebar.getByRole('progressbar')).toHaveCount(1)
+    const bounds = await bar.boundingBox()
+    const current = await line.boundingBox()
+    expect(Math.abs(current!.height - original!.height)).toBeLessThanOrEqual(1)
+    expect(Math.abs(bounds!.width - current!.width)).toBeLessThanOrEqual(1)
+    expect(Math.abs(bounds!.height - current!.height)).toBeLessThanOrEqual(1)
+    expect(bounds!.x).toBeGreaterThanOrEqual(current!.x - 1)
+    expect(await bar.evaluate((element) => getComputedStyle(element).pointerEvents)).toBe('none')
+    const calls = await page.evaluate(() => ({ ...window.compactChatFixture.calls }))
+    await row.getByRole('button', { name: 'Show details for A focused release plan', exact: true }).click()
+    await expect(row.getByRole('group', { name: 'Details for A focused release plan', exact: true })).toBeVisible()
+    await row.getByRole('button', { name: 'Hide details for A focused release plan', exact: true }).click()
+    expect(await page.evaluate(() => window.compactChatFixture.calls)).toEqual(calls)
+    await expect(row.getByRole('button', { name: 'Unlink A focused release plan', exact: true })).toBeEnabled()
+    await page.evaluate(() => window.compactChatFixture.setHistoryTransfer({
+      receivedBytes: 106.8 * 1024 * 1024, totalBytes: 117.1 * 1024 * 1024, kind: 'recent', resumed: true,
+    }))
+    await expect(row.getByText('91.2%', { exact: true })).toBeVisible()
+    await expect(bar).toHaveAttribute('aria-valuetext', /Resumed from saved progress/)
+    expect(await row.locator('.session-transfer-status > span:not(.codicon)').evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+    await expect(page.getByRole('log').getByRole('progressbar')).toHaveCount(0)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page.mouse.move(1, 1)
+    // Native progress pseudo-elements have a 160ms width transition.
+    await page.waitForTimeout(200)
+    await sidebar.screenshot({ path: testInfo.outputPath(`session-history-transfer-${scenario.name}.png`) })
+    await page.evaluate(() => {
+      window.compactChatFixture.setHistoryTransfer(undefined)
+      window.compactChatFixture.setState('connected')
+    })
+    await expect(bar).toHaveCount(0)
+    await expect(row.locator('.session-machine')).toBeVisible()
+    expect(errors).toEqual([])
+  })
+}
+
+for (const theme of ['light', 'dark'] as const) {
+  test(`lazy history paging preserves the real visible scroll anchor in ${theme}`, async ({ page }, testInfo) => {
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    await page.setViewportSize({ width: 1100, height: 740 })
+    await page.goto(`${url}?lazy&theme=${theme}`)
+    const log = page.getByRole('log')
+    await expect(page.getByRole('button', { name: 'Load earlier messages', exact: true })).toBeVisible()
+    await page.evaluate(async () => { await document.fonts.ready })
+    const input = page.getByRole('textbox', { name: 'Message Agent Host' })
+    await input.fill('Keep this draft while browsing older messages')
+    await log.evaluate((element) => { element.scrollTop = 80; element.dispatchEvent(new Event('scroll', { bubbles: true })) })
+    await expect(page.getByRole('button', { name: 'Loading earlier messages...', exact: true })).toBeDisabled()
+    const anchor = log.locator('[data-turn-id="turn-0"]')
+    const before = await anchor.boundingBox()
+    await page.evaluate(() => window.compactChatFixture.completeHistoryLoad())
+    await expect(log.locator('[data-turn-id]')).toHaveCount(8)
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+    const after = await anchor.boundingBox()
+    expect(Math.abs(after!.y - before!.y)).toBeLessThanOrEqual(2)
+    expect(await page.evaluate(() => window.compactChatFixture.historyLoads)).toBe(1)
+    await expect(input).toHaveValue('Keep this draft while browsing older messages')
+    await expect(log.getByRole('progressbar')).toHaveCount(0)
+    expect(errors).toEqual([])
+    await page.screenshot({ path: testInfo.outputPath(`lazy-history-anchor-${theme}.png`) })
+  })
+}
+
+for (const scenario of [
   { method: 'Enter', width: 1440, height: 900 },
   { method: 'Enter', width: 360, height: 740 },
   { method: 'send button', width: 1440, height: 900 },

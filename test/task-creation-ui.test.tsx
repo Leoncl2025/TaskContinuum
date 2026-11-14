@@ -47,7 +47,8 @@ async function setup(mode: 'form' | 'agent' = 'form', configure?: (agent: AgentH
     }),
     models: vi.fn(async () => [{ id: 'local-model', name: 'Local model', provider: 'copilotcli' }]),
     watch: vi.fn(async () => { watchId = crypto.randomUUID(); emit(); return watchId }),
-    unwatch: vi.fn(async () => {}), terminal: vi.fn(async () => {}), releaseTerminal: vi.fn(async () => {}),
+    unwatch: vi.fn(async () => {}), loadHistory: vi.fn(async () => {}), terminal: vi.fn(async () => {}), releaseTerminal: vi.fn(async () => {}),
+    onHistoryTransfer: vi.fn(() => () => {}),
     send: vi.fn(async () => {}), resolveDelivery: vi.fn(async () => 'not-found' as const), cancel: vi.fn(async () => {}),
     onView: (listener) => { listeners.add(listener); return () => { listeners.delete(listener) } },
   }

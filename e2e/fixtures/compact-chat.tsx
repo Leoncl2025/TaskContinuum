@@ -1,7 +1,7 @@
 import { createRoot } from 'react-dom/client'
 import { MessageKind } from '@microsoft/agent-host-protocol'
 import type { ResponsePartKind, Turn } from '@microsoft/agent-host-protocol'
-import type { AgentHostBridge, AgentHostSession, AgentHostView } from '../../src/shared/agentHost'
+import type { AgentHostBridge, AgentHostHistoryTransfer, AgentHostSession, AgentHostView } from '../../src/shared/agentHost'
 import type { WorkspaceGitSyncStatus } from '../../src/shared/gitSync'
 import type { WorkspaceSnapshot } from '../../src/shared/workspace'
 import App from '../../src/renderer/App'
@@ -32,8 +32,15 @@ const view: AgentHostView = {
     })),
   },
 }
+if (parameters.has('lazy')) view.history = { hasMore: true, loadedTurns: 6, totalTurns: 8, loading: false }
+let historyLoads = 0
+let releaseHistory: (() => void) | undefined
 const listeners = new Set<Parameters<AgentHostBridge['onView']>[0]>()
-const emit = () => { for (const listener of listeners) listener({ id: 'fixture-watch', view: structuredClone(view) }) }
+const historyListeners = new Set<Parameters<AgentHostBridge['onHistoryTransfer']>[0]>()
+const emit = () => {
+  for (const listener of listeners) listener({ id: 'fixture-watch', view: structuredClone(view) })
+  for (const listener of historyListeners) listener({ root: 'C:\\layout-fixture', target, progress: view.historyTransfer })
+}
 const unsupported = async (): Promise<never> => { throw new Error('This layout fixture does not perform native operations.') }
 const calls = { watch: 0, unwatch: 0, send: 0 }
 const sidebarSessions: AgentHostSession[] = [
@@ -48,12 +55,27 @@ window.agentHost = {
   models: async () => [{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }],
   watch: async () => { calls.watch++; emit(); return 'fixture-watch' },
   unwatch: async () => { calls.unwatch++ }, terminal: async () => {}, releaseTerminal: async () => {},
+  loadHistory: async () => {
+    if (!view.history?.hasMore || !view.chat) throw new Error('No earlier history is available in this fixture.')
+    historyLoads++
+    view.history.loading = true
+    emit()
+    await new Promise<void>((resolve) => { releaseHistory = resolve })
+    view.chat.turns.unshift(...Array.from({ length: 2 }, (_, index) => ({
+      ...structuredClone(view.chat!.turns[0]), id: `older-${index}`,
+      message: { text: `Earlier question ${index}`, origin: { kind: MessageKind.User } },
+      responseParts: [{ kind: 'markdown' as ResponsePartKind.Markdown, id: `older-answer-${index}`, content: '## Earlier answer\n\nPreviously retained conversation content.\n\n- Earlier context\n- Another earlier detail' }],
+    })))
+    view.history = { hasMore: false, loadedTurns: view.chat.turns.length, totalTurns: view.chat.turns.length, loading: false }
+    emit()
+  },
   send: async () => { calls.send++; return unsupported() }, cancel: unsupported, resolveDelivery: unsupported,
   localCreationHosts: async () => [], localCreations: async () => [],
   creationWorkers: async () => [], creations: async () => [],
   createLocal: unsupported, localCreationStatus: unsupported, create: unsupported,
   creationStatus: unsupported, bindCreation: unsupported, abandonCreation: unsupported,
   onView: (listener) => { listeners.add(listener); return () => { listeners.delete(listener) } },
+  onHistoryTransfer: (listener) => { historyListeners.add(listener); return () => { historyListeners.delete(listener) } },
 }
 const status: WorkspaceGitSyncStatus = {
   enabled: true, workspaceId: 'fixture', intervalMs: 15000, state: 'idle', pending: 0,
@@ -64,6 +86,9 @@ declare global {
   interface Window {
     compactChatFixture: {
       setState(state: AgentHostView['state'], readOnly?: boolean): void
+      setHistoryTransfer(progress: AgentHostHistoryTransfer | undefined): void
+      completeHistoryLoad(): void
+      historyLoads: number
       calls: typeof calls
     }
   }
@@ -76,6 +101,14 @@ window.compactChatFixture = {
     view.canSend = state === 'connected' && !readOnly
     emit()
   },
+  setHistoryTransfer(progress) { view.historyTransfer = progress; emit() },
+  completeHistoryLoad() {
+    if (!releaseHistory) throw new Error('No fixture history page is waiting.')
+    const release = releaseHistory
+    releaseHistory = undefined
+    release()
+  },
+  get historyLoads() { return historyLoads },
 }
 const root = createRoot(document.getElementById('root')!)
 if (parameters.has('workbench')) {

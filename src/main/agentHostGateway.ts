@@ -17,7 +17,7 @@ import { abortable } from './shared/abortable'
 import { AGENT_HOST_LIMIT_HEADER, AGENT_HOST_LIMIT_RPC_CODE, AGENT_HOST_LIMITS, AgentHostSizeLimitError, agentHostSizeLimit } from './agentHostLimits'
 import {
   AGENT_HOST_SNAPSHOT_SUPERSEDED_RPC_CODE, AgentHostSnapshotStore, AgentHostSnapshotSupersededError,
-  SNAPSHOT_TRANSFER_METHODS, snapshotChunkRequestSchema, snapshotPrepareRequestSchema, snapshotTransferLookupSchema,
+  SNAPSHOT_TRANSFER_METHODS, historyContainsTurnRequestSchema, snapshotChunkRequestSchema, snapshotPrepareRequestSchema, snapshotTransferLookupSchema,
 } from './agentHostSnapshotTransfer'
 import type { SnapshotChunkRequest, SnapshotPrepareRequest, SnapshotTransferLimits, SnapshotTransferLookup } from './agentHostSnapshotTransfer'
 import type { DesktopOperations } from './desktopOperations'
@@ -131,6 +131,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
 
   function serve(socket: WebSocket, connection: AgentHostConnection, token: string, target: AgentHostTarget, initialAccess: AgentHostAccess, traceId: string): void {
     const subscribed = new Set<string>()
+    const pagedSubscriptions = new Set<string>()
     const retained = new Set<string>()
     const pendingSubscriptions = new Map<string, { events: ActionEnvelope[] }>()
     const delivered = new Map<string, number>()
@@ -206,6 +207,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
     }
     const cancelSubscription = (resource: string): void => {
       subscribed.delete(resource)
+      pagedSubscriptions.delete(resource)
       delivered.delete(resource)
       const pending = pendingSubscriptions.get(resource)
       if (pending) { pendingSubscriptions.delete(resource); discard(pending.events) }
@@ -240,6 +242,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
       if (event.type === 'state') { if (connection.state !== 'connected') fail('owner-offline', connection.sizeLimitError); return }
       if (event.type !== 'action' || event.envelope.channel === target.sessionId) return
       const resource = event.envelope.channel
+      if (pagedSubscriptions.has(resource) && event.envelope.action.type === 'chat/turnsLoaded') return
       const pending = pendingSubscriptions.get(resource)
       if (!pending && !subscribed.has(resource)) return
       const bytes = Buffer.byteLength(JSON.stringify(event.envelope))
@@ -306,9 +309,11 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
       let channel = agentHostDiagnosticChannel(resource, target)
       const terminal = hintedMethod === 'subscribe' && resource !== undefined && agentHostTerminalIdSchema.safeParse(resource).success
       const activeTerminal = terminal && connection.isActiveTerminal(resource)
+      const earlierHistory = hintedMethod === 'fetchTurns' || hintedMethod === SNAPSHOT_TRANSFER_METHODS.containsTurn
+        || hintedMethod === SNAPSHOT_TRANSFER_METHODS.prepare && params.history !== null && typeof params.history === 'object' && 'before' in params.history
       const lane = hintedMethod === 'ping' || hintedMethod === 'unsubscribe' || hintedMethod === SNAPSHOT_TRANSFER_METHODS.release ? 'control'
         : hintedMethod === 'dispatchAction' ? 'execution'
-          : terminal && !activeTerminal ? 'history' : 'interactive'
+          : terminal && !activeTerminal || earlierHistory ? 'history' : 'interactive'
       const isInitialization = hintedMethod === 'initialize' || hintedMethod === 'reconnect'
       let initializer = false
       if (isInitialization && !initialization) {
@@ -403,7 +408,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
                 ready.push({ resource: item, pending, snapshot })
               }
               result = request.method === 'initialize'
-                ? { ...connection.handshake, snapshots: ready.map((item) => item.snapshot), _meta: { taskcontinuumCanSend: initialAccess.canSend, taskcontinuumModelSelection: true, taskcontinuumModelConfig: true, taskcontinuumStreamedSendValidation: true, taskcontinuumChunkedChatSnapshot: snapshotStore.capability } }
+                ? { ...connection.handshake, snapshots: ready.map((item) => item.snapshot), _meta: { taskcontinuumCanSend: initialAccess.canSend, taskcontinuumModelSelection: true, taskcontinuumModelConfig: true, taskcontinuumStreamedSendValidation: true, taskcontinuumChunkedChatSnapshot: snapshotStore.capability, taskcontinuumPagedChatHistory: { version: 1 } } }
                 : { type: 'snapshot', snapshots: ready.map((item) => item.snapshot) }
             } else if (request.method === 'ping') {
               z.object({ channel: z.literal('ahp-root://') }).strict().parse(request.params)
@@ -478,6 +483,10 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
               if (params.channel !== target.chatId || params.subscribe && pendingSubscriptions.has(params.channel)) {
                 throw new Error('Channel not authorized or subscription in progress.')
               }
+              if (params.history?.before) {
+                step = 'native'
+                await connection.ensureEarlierHistory(params.history.before.epoch, params.history.before.turnId)
+              }
               pendingSnapshotOp = { kind: 'prepare', params }
             } else if (request.method === SNAPSHOT_TRANSFER_METHODS.chunk) {
               const params = snapshotChunkRequestSchema.parse(request.params)
@@ -493,6 +502,17 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
               const params = snapshotTransferLookupSchema.parse(request.params)
               if (params.channel !== target.chatId) throw new Error('Channel not authorized.')
               pendingSnapshotOp = { kind: 'release', params }
+            } else if (request.method === SNAPSHOT_TRANSFER_METHODS.containsTurn) {
+              const params = historyContainsTurnRequestSchema.parse(request.params)
+              if (params.channel !== target.chatId) throw new Error('Channel not authorized.')
+              step = 'native'
+              const found = await connection.containsTurn(params.turnId)
+              result = { found, epoch: connection.historyEpoch }
+            } else if (request.method === 'fetchTurns') {
+              const params = z.object({ channel: z.literal(target.chatId), cursor: z.string().min(1).max(8192).optional() }).strict().parse(request.params)
+              step = 'native'
+              await connection.fetchHistory(params.cursor)
+              result = {}
             } else throw new Error('This command is not available through the session gateway.')
             step = 'authorization'
             await requestAuthorization(false)
@@ -507,12 +527,12 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
             if (ready.length && request.method === 'subscribe') result = { snapshot: ready[0].snapshot }
             if (ready.length && request.method === 'initialize') result = { ...result as object, snapshots: ready.map((item) => item.snapshot) }
             if (ready.length && request.method === 'reconnect') result = { type: 'snapshot', snapshots: ready.map((item) => item.snapshot) }
-            let activatedSnapshot: { resource: string; fromSeq: number; tailEvents: ActionEnvelope[] } | undefined
+            let activatedSnapshot: { resource: string; fromSeq: number; tailEvents: ActionEnvelope[]; paged: boolean } | undefined
             if (pendingSnapshotOp?.kind === 'prepare') {
               const prepared = snapshotStore.prepare(target, connection, pendingSnapshotOp.params, socket)
               result = prepared
               if (prepared.mode === 'inline' && pendingSnapshotOp.params.subscribe) {
-                activatedSnapshot = { resource: pendingSnapshotOp.params.channel, fromSeq: prepared.snapshot.fromSeq, tailEvents: [] }
+                activatedSnapshot = { resource: pendingSnapshotOp.params.channel, fromSeq: prepared.snapshot.fromSeq, tailEvents: [], paged: prepared.history !== undefined }
               }
             } else if (pendingSnapshotOp?.kind === 'chunk') {
               result = snapshotStore.chunk(target, connection, pendingSnapshotOp.params, socket)
@@ -520,7 +540,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
               if (pendingSubscriptions.has(pendingSnapshotOp.params.channel)) throw new Error('Subscription in progress.')
               const activated = snapshotStore.activate(target, connection, pendingSnapshotOp.params, socket)
               result = { fromSeq: activated.fromSeq }
-              activatedSnapshot = { resource: pendingSnapshotOp.params.channel, fromSeq: activated.fromSeq, tailEvents: activated.tailEvents }
+              activatedSnapshot = { resource: pendingSnapshotOp.params.channel, fromSeq: activated.fromSeq, tailEvents: activated.tailEvents, paged: activated.history !== undefined }
             } else if (pendingSnapshotOp?.kind === 'release') {
               snapshotStore.release(target, connection, pendingSnapshotOp.params, socket)
               result = {}
@@ -529,6 +549,8 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
             if (id !== undefined && !send({ jsonrpc: '2.0', id, result })) throw new Error('Agent Host connection closed before replying.')
             if (activatedSnapshot) {
               subscribed.add(activatedSnapshot.resource)
+              if (activatedSnapshot.paged) pagedSubscriptions.add(activatedSnapshot.resource)
+              else pagedSubscriptions.delete(activatedSnapshot.resource)
               delivered.set(activatedSnapshot.resource, activatedSnapshot.fromSeq)
               for (const envelope of activatedSnapshot.tailEvents) {
                 if (connection.allowedChannel(activatedSnapshot.resource) && envelope.serverSeq > (delivered.get(activatedSnapshot.resource) ?? -1)) {
@@ -539,6 +561,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
             for (const item of ready) {
               pendingSubscriptions.delete(item.resource)
               subscribed.add(item.resource)
+              pagedSubscriptions.delete(item.resource)
               delivered.set(item.resource, item.snapshot.fromSeq)
               const events = item.pending.events
               discard(events)

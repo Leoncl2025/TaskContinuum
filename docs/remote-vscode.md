@@ -596,7 +596,7 @@ Dev Tunnel links. Heartbeats are still sent every 15 seconds. Transport handshak
 deadlines, gateway queue expiry and all message/buffer limits remain unchanged.
 
 When both desktops support `taskcontinuumChunkedChatSnapshot`, remote chat
-subscriptions and uncertain-delivery refreshes automatically transfer snapshots
+subscriptions and legacy uncertain-delivery refreshes automatically transfer snapshots
 larger than **256 KiB** in base64 byte-range chunks (**64 KiB–1 MiB**, adapting
 to chunk round-trip latency and stepping down on a timeout) instead of a single
 monolithic JSON-RPC response:
@@ -619,6 +619,47 @@ monolithic JSON-RPC response:
   snapshot while keeping any previously verified history visible.
 - Native localhost Agent Hosts and older gateways without the capability continue
   using standard `subscribe` automatically.
+
+Gateways also advertise `taskcontinuumPagedChatHistory` version 1. Clients with
+that capability load the **most recent completed turns first**, up to 20 turns
+and a 512 KiB completed-turn budget per page. Turns are never split or truncated
+to meet this budget: an individual larger turn still transfers in full, using
+the resumable byte-range protocol. The initial window preserves the complete
+active turn, draft, queued messages, permissions, and other live chat state, so
+the connection becomes usable as soon as that window is verified and activated,
+without downloading all older history in the background.
+
+Scrolling upward near the start of the displayed conversation, or choosing
+**Load earlier messages**, requests the next older page. New pages are prepended
+without changing the reader's visible scroll anchor or rewinding the live event
+sequence. Completed turns are immutable; the separately subscribed active turn
+continues receiving incremental updates while earlier pages load. Completed-turn
+count changes are tracked without replaying the active response. Cursors are bound
+to the owner history epoch; edits, resets, and stale cursors trigger a fresh
+recent-window connection instead of mixing histories. Native AHP
+`turnsNextCursor`, `fetchTurns`, and `chat/turnsLoaded` are honored when the
+original Host itself pages its retained history. Older-page preparation and
+native history reads use the historical request budget rather than occupying
+interactive history preparation.
+
+Transfer progress appears as a non-blocking fill on the corresponding linked
+session row, with the session title and controls still available. Percentage,
+byte counts, and resume details are exposed accessibly and in the status tooltip.
+A separate authorized, lightweight IPC notification keeps it updating when the
+chat view is hidden; byte-only updates do not republish full chat snapshots.
+Completed or cancelled transfers remove the fill. Connection
+and cache errors remain visible rather than being suppressed to make progress
+look successful.
+
+Only downloaded turns are available offline. Paging-aware histories use cache
+schema version 3 with explicit paging metadata; legacy full-snapshot histories
+retain version 2. New clients read both formats. Cached earlier pages are retained
+when the fresh recent window overlaps them in the same owner epoch, avoiding
+another download of already loaded history. Older clients reject a paging-aware
+cache rather than mistaking it for complete history. Delivery checks consult the
+original owner's retained-turn membership when a turn is outside the loaded
+window: an unloaded turn is never treated as proof that a message was not sent.
+Gateways and clients without paging keep the existing full-snapshot path.
 
 Private offline history uses compact JSON and a matching 1 GiB plus 64 KiB
 metadata-envelope limit, measured on the exact bytes written. Large histories

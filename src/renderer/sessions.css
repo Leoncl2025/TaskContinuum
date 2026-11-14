@@ -17,11 +17,20 @@
 .session-tree .session-row { display: grid; gap: 2px; min-width: 0; padding: 0 2px; }
 .session-tree .session-row strong { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 500; line-height: 18px; }
 .session-machine { display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: 11px; line-height: 18px; }
-.session-tree-row { display: flex; align-items: center; gap: 4px; min-width: 0; padding: 6px; border-radius: var(--radius-md); }
+.session-tree-row { position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; padding: 6px; border-radius: var(--radius-md); }
 .session-tree-row:hover { background: var(--hover); }
 .session-tree-row.is-selected { background: var(--selected); }
 .session-tree-row .session-row { flex: 1; min-width: 0; border: 0; background: none; }
 .session-tree-row > .icon-button { flex-shrink: 0; }
+.session-tree-row > button { position: relative; z-index: 1; }
+.session-transfer-mask { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; border: 0; border-radius: inherit; appearance: none; overflow: hidden; pointer-events: none; background: transparent; }
+.session-transfer-mask::-webkit-progress-bar { background: transparent; }
+.session-transfer-mask::-webkit-progress-value { background: color-mix(in srgb, var(--link) 12%, transparent); transition: width 160ms ease-out; }
+.session-transfer-mask::-moz-progress-bar { background: color-mix(in srgb, var(--link) 12%, transparent); }
+.session-transfer-status { display: flex; align-items: center; gap: 5px; min-width: 0; height: 18px; color: var(--link); font-size: 11px; line-height: 18px; }
+.session-transfer-status > .codicon { font-size: 12px; }
+.session-transfer-status > span:not(.codicon) { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.session-tree .session-transfer-status > strong { flex-shrink: 0; color: var(--text); font-size: 11px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .session-tree [role="treeitem"]:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .session-details { margin: 4px 6px 8px; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--raised); font-size: 11px; line-height: 1.5; }
 .session-details dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 8px; margin: 0; }
@@ -46,7 +55,7 @@
 .ahp-chat-status { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; white-space: nowrap; }
 .ahp-chat-status > span:first-child { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }
 .ahp-chat-status[data-state="Connected"] > span:first-child { background: var(--green); }
-.ahp-chat-status:is([data-state="Connecting..."], [data-state="Agent responding"], [data-state="Delivery pending"]) > span:first-child { background: var(--accent); }
+.ahp-chat-status:is([data-state="Connecting..."], [data-state="Loading recent history..."], [data-state="Loading earlier history..."], [data-state="Agent responding"], [data-state="Delivery pending"]) > span:first-child { background: var(--accent); }
 .ahp-chat-status:is([data-state="Connection failed"], [data-state="Desktop update required"]) > span:first-child { background: var(--error); }
 .ahp-chat-machine { display: inline-flex; align-items: center; min-width: 0; gap: 6px; }
 .ahp-chat-machine > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -71,6 +80,11 @@
   .titlebar .ahp-chat-state-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 }
 .ahp-panel .composer { position: relative; overflow: visible; }
+.ahp-panel .composer-area > .vscode-chat-notice { padding: 0 4px 8px; }
+.ahp-panel .composer-area > .message-notice { margin: 0 0 8px; padding-inline: 4px; }
+.ahp-chat-placeholder { max-width: 800px; margin: 0 auto; padding: 24px 18px; font-size: 12px; line-height: 1.6; }
+.ahp-history-pagination { max-width: 800px; margin-inline: auto; padding: 10px 18px; font-size: 11px; }
+.ahp-history-pagination > p { margin: 6px 0; }
 .ahp-panel .composer-toolbar { justify-content: flex-start; flex-wrap: wrap; gap: 4px; padding: 4px 12px 8px; }
 .ahp-panel .composer-toolbar > :last-child { margin-left: auto; }
 .ahp-model-controls { display: flex; min-width: 0; max-width: min(220px, 48%); }
@@ -141,7 +155,8 @@
 .ahp-activity-details { margin: 0 8px 8px; padding-left: 8px; border-left: 1px solid var(--border); }
 .ahp-activity-details .ahp-tool { margin-block: 0; }
 @media (prefers-reduced-motion: reduce) {
-  .ahp-activity .codicon-modifier-spin { animation: none; }
+  .ahp-activity .codicon-modifier-spin, .session-transfer-status .codicon-modifier-spin, .ahp-history-pagination .codicon-modifier-spin { animation: none; }
+  .session-transfer-mask::-webkit-progress-value { transition: none; }
 }
 .ahp-terminal { max-width: 100%; max-height: 240px; overflow: auto; margin-block: 8px; padding: 8px; border-radius: var(--radius-sm); font: 12px/1.5 Consolas, monospace; white-space: pre; background: var(--editor-bg); }
 .ahp-terminal-output .message-notice { margin-block: 6px; }

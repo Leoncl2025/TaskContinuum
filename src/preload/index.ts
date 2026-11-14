@@ -73,6 +73,7 @@ const agentHost: AgentHostBridge = {
   models: (target) => ipcRenderer.invoke('agent-host:models', target),
   watch: (target) => ipcRenderer.invoke('agent-host:watch', target),
   unwatch: (id) => ipcRenderer.invoke('agent-host:unwatch', id),
+  loadHistory: (watchId) => ipcRenderer.invoke('agent-host:load-history', watchId),
   terminal: (watchId, resource, leaseId, retry) => ipcRenderer.invoke('agent-host:terminal', watchId, resource, leaseId, retry),
   releaseTerminal: (watchId, resource, leaseId) => ipcRenderer.invoke('agent-host:release-terminal', watchId, resource, leaseId),
   send: (target, id, text, images, model) => ipcRenderer.invoke('agent-host:send', target, id, text, images, model),
@@ -82,6 +83,11 @@ const agentHost: AgentHostBridge = {
     const receive = (_event: Electron.IpcRendererEvent, value: { id: string; view: AgentHostView }) => listener(value)
     ipcRenderer.on('agent-host:view', receive)
     return () => ipcRenderer.removeListener('agent-host:view', receive)
+  },
+  onHistoryTransfer: (listener) => {
+    const receive = (_event: Electron.IpcRendererEvent, value: Parameters<typeof listener>[0]) => listener(value)
+    ipcRenderer.on('agent-host:history-transfer', receive)
+    return () => ipcRenderer.removeListener('agent-host:history-transfer', receive)
   },
 }
 contextBridge.exposeInMainWorld('agentHost', agentHost)

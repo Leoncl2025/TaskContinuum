@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { agentHostKey } from '../../shared/agentHost'
-import type { AgentHostSession } from '../../shared/agentHost'
+import type { AgentHostHistoryTransfer, AgentHostSession } from '../../shared/agentHost'
 import { sessionBindingKey } from '../chat/sessionBindings'
 import type { SessionBinding, SessionBindings } from '../chat/sessionBindings'
 import { Icon, IconButton } from './Primitives'
@@ -20,6 +20,7 @@ interface Props {
   busy?: boolean
   initialView?: SessionView
   cachedTitles?: Readonly<Record<string, string>>
+  historyTransfers?: Readonly<Record<string, AgentHostHistoryTransfer>>
   titleCacheError?: string
   onTitles?(sessions: readonly SessionTitleUpdate[]): void
   onSelect?(binding: SessionBinding): void
@@ -30,8 +31,18 @@ interface Props {
   onClose(): void
 }
 
-function SessionTree({ taskId, bindings, activeKey, sessions, cachedTitles, disabled, onSelect, onUnlink }: {
-  taskId: string; bindings: SessionBinding[]; activeKey?: string; sessions: AgentHostSession[]; cachedTitles?: Readonly<Record<string, string>>; disabled: boolean; onSelect?(binding: SessionBinding): void; onUnlink?(binding: SessionBinding): void
+function transferProgress(progress: AgentHostHistoryTransfer) {
+  const value = progress.totalBytes > 0 ? Math.max(0, Math.min(100, progress.receivedBytes / progress.totalBytes * 100)) : 0
+  const percent = value > 0 && value < 0.1 ? '<0.1' : `${Math.floor(value * 10) / 10}`
+  const divisor = progress.totalBytes >= 1024 * 1024 ? 1024 * 1024 : 1024
+  const size = `${(progress.receivedBytes / divisor).toFixed(1)} / ${(progress.totalBytes / divisor).toFixed(1)} ${divisor === 1024 ? 'KiB' : 'MiB'}`
+  const label = progress.kind === 'earlier' ? 'Earlier history' : progress.kind === 'recent' ? 'Recent history' : progress.resumed ? 'Resuming history' : 'Syncing history'
+  const description = `${label}: ${percent}% (${size})${progress.resumed ? ' - Resumed from saved progress' : ''}`
+  return { value, percent, label, description }
+}
+
+function SessionTree({ taskId, bindings, activeKey, sessions, cachedTitles, historyTransfers, disabled, onSelect, onUnlink }: {
+  taskId: string; bindings: SessionBinding[]; activeKey?: string; sessions: AgentHostSession[]; cachedTitles?: Readonly<Record<string, string>>; historyTransfers?: Readonly<Record<string, AgentHostHistoryTransfer>>; disabled: boolean; onSelect?(binding: SessionBinding): void; onUnlink?(binding: SessionBinding): void
 }) {
   const aliases = useMachineAliases()
   const [expanded, setExpanded] = useState<string[]>([])
@@ -69,15 +80,20 @@ function SessionTree({ taskId, bindings, activeKey, sessions, cachedTitles, disa
       const discovered = sessions.find((session) => agentHostKey(session) === agentHostKey(binding.agentHost))
       const cached = cachedTitles?.[agentHostKey(binding.agentHost)]
       const label = cached || discovered?.title || (binding.title !== 'Agent Host' ? binding.title : binding.id)
+      const progress = historyTransfers?.[agentHostKey(binding.agentHost)]
+      const transfer = progress && transferProgress(progress)
       const open = expanded.includes(key)
       const detailsId = `${detailsPrefix}-${index}`
       return <li key={key} role="treeitem" aria-label={label} aria-description={binding.id} aria-selected={key === activeKey} aria-expanded={open} aria-level={1}
         tabIndex={tabStop === key ? 0 : -1} ref={(element) => { if (element) elements.current.set(key, element); else elements.current.delete(key) }}
         onFocus={(event) => { if (event.target === event.currentTarget) setFocused(key) }} onKeyDown={(event) => navigate(event, key)}>
-        <div className={`session-tree-row ${key === activeKey ? 'is-selected' : ''}`}>
+        <div className={`session-tree-row ${key === activeKey ? 'is-selected' : ''}`} data-transferring={Boolean(transfer)}>
+          {transfer && <progress className="session-transfer-mask" aria-label={`History transfer for ${label}`} max={100} value={transfer.value} aria-valuetext={transfer.description} />}
           <button type="button" tabIndex={-1} className="session-row" aria-label={`Open ${label}`} title={label} onClick={() => { focus(key); onSelect?.(binding) }}>
             <strong title={cached && !discovered ? 'Last known title saved on this device' : undefined}>{label}</strong>
-            <span className="session-machine" title={binding.owner.machineName}>{machineLabel(binding.owner, aliases)}</span>
+            {transfer ? <span className="session-transfer-status" title={transfer.description}>
+              <Icon name="loading" className="codicon-modifier-spin" /><span>{transfer.label}</span><strong>{transfer.percent}%</strong>
+            </span> : <span className="session-machine" title={binding.owner.machineName}>{machineLabel(binding.owner, aliases)}</span>}
           </button>
           <IconButton icon={open ? 'chevron-up' : 'chevron-down'} label={`${open ? 'Hide' : 'Show'} details for ${label}`} tabIndex={-1} aria-expanded={open} aria-controls={detailsId}
             onClick={() => { focus(key); showDetails(key, !open) }} />
@@ -97,7 +113,7 @@ function SessionTree({ taskId, bindings, activeKey, sessions, cachedTitles, disa
   </ul>
 }
 
-export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, activeKey, localOwnerId, busy = false, initialView = 'current', cachedTitles, titleCacheError, onTitles, onSelect, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
+export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, activeKey, localOwnerId, busy = false, initialView = 'current', cachedTitles, historyTransfers, titleCacheError, onTitles, onSelect, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
   const bridge = window.agentHost
   const aliases = useMachineAliases()
   const [view, setView] = useState<SessionView>(initialView)
@@ -155,7 +171,7 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
       {titleCacheError && <p className="muted" role="status">{titleCacheError}</p>}
       {!taskId && <p className="muted">Select a task to link or create a session.</p>}
       {view === 'current' && <>
-        {taskId && <SessionTree taskId={taskId} bindings={linked} activeKey={activeKey} sessions={sessions} cachedTitles={cachedTitles} disabled={!taskReady || busy || operating} onSelect={onSelect} onUnlink={onDetach ? (binding) => { setDetach(binding); setError(undefined) } : undefined} />}
+        {taskId && <SessionTree taskId={taskId} bindings={linked} activeKey={activeKey} sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} disabled={!taskReady || busy || operating} onSelect={onSelect} onUnlink={onDetach ? (binding) => { setDetach(binding); setError(undefined) } : undefined} />}
         {!linked.length && <p className="muted">{busy ? 'Loading task sessions...' : 'No sessions linked to this task.'}</p>}
         {detach && <section className="session-inline-confirm" aria-label="Detach conversation"><p>Detach {detach.id} from {taskId}? Conversation history stays on its Host.</p>{detachmentChanged && <p role="alert">The task binding changed. Cancel and review the current sessions.</p>}<div className="session-sidebar-actions"><button type="button" className="secondary-button" disabled={operating} onClick={() => setDetach(undefined)}>Keep conversation</button><button type="button" className="primary-button" disabled={!taskReady || busy || operating || detachmentChanged} onClick={() => { void run(async () => { if (onDetach) await onDetach(detach); setDetach(undefined) }) }}>Detach session</button></div></section>}
       </>}

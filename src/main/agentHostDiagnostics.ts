@@ -52,7 +52,7 @@ const captureRecordSchema = z.object({
     'owner-offline', 'backpressure', 'queue-limit', 'client-closed', 'invalid-frame', 'shutdown', 'auth-required',
     'reimport', 'owner-disabled', 'identity-failed', 'coalesced', 'inputs-changed', 'generation-changed', 'cache-hit', 'cache-miss', 'retry-exhausted']).optional(),
   method: z.enum(['initialize', 'reconnect', 'ping', 'subscribe', 'unsubscribe', 'dispatchAction',
-    'snapshotPrepare', 'snapshotChunk', 'snapshotActivate', 'snapshotRelease', 'other']).optional(),
+    'snapshotPrepare', 'snapshotChunk', 'snapshotActivate', 'snapshotRelease', 'historyContainsTurn', 'other']).optional(),
   channel: z.enum(['root', 'session', 'chat', 'terminal', 'other']).optional(),
   elapsedMs: z.number().int().min(0).max(1e9).optional(),
   queueMs: z.number().int().min(0).max(1e9).optional(),
@@ -72,7 +72,7 @@ const captureRecordSchema = z.object({
     'transport-other', 'aborted', 'invalid-data', 'client-closed', 'ECONNRESET', 'ECONNREFUSED',
     'ETIMEDOUT', 'EPIPE', 'EACCES', 'store-busy', 'authorization-changed', 'size-limit', 'other']).optional(),
   errorMethod: z.enum(['initialize', 'reconnect', 'ping', 'subscribe', 'unsubscribe', 'dispatchAction',
-    'snapshotPrepare', 'snapshotChunk', 'snapshotActivate', 'snapshotRelease', 'other']).optional(),
+    'snapshotPrepare', 'snapshotChunk', 'snapshotActivate', 'snapshotRelease', 'historyContainsTurn', 'other']).optional(),
 })
 
 export type AgentHostDiagnosticEvent =
@@ -95,7 +95,7 @@ type Reason = 'heartbeat-failed' | 'transport-closed' | 'stream-ended' | 'stream
   | 'invalid-frame' | 'shutdown' | 'auth-required'
   | 'reimport' | 'owner-disabled' | 'identity-failed' | 'coalesced' | 'inputs-changed' | 'generation-changed' | 'cache-hit' | 'cache-miss' | 'retry-exhausted'
 type Method = 'initialize' | 'reconnect' | 'ping' | 'subscribe' | 'unsubscribe' | 'dispatchAction'
-  | 'snapshotPrepare' | 'snapshotChunk' | 'snapshotActivate' | 'snapshotRelease' | 'other'
+  | 'snapshotPrepare' | 'snapshotChunk' | 'snapshotActivate' | 'snapshotRelease' | 'historyContainsTurn' | 'other'
 type Channel = 'root' | 'session' | 'chat' | 'terminal' | 'other'
 
 export interface AgentHostDiagnosticDetails {
@@ -156,6 +156,7 @@ export function agentHostDiagnosticMethod(value: unknown): Method {
   if (value === 'taskcontinuum/chatSnapshotChunk') return 'snapshotChunk'
   if (value === 'taskcontinuum/chatSnapshotActivate') return 'snapshotActivate'
   if (value === 'taskcontinuum/chatSnapshotRelease') return 'snapshotRelease'
+  if (value === 'taskcontinuum/chatHistoryContainsTurn') return 'historyContainsTurn'
   return value === 'initialize' || value === 'reconnect' || value === 'ping' || value === 'subscribe'
     || value === 'unsubscribe' || value === 'dispatchAction' ? value : 'other'
 }

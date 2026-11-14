@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { createHash, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { mkdtemp, readdir, rm, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,10 +13,354 @@ import { AgentHostConnection } from '../src/main/agentHostConnection'
 import { attachAgentHostGateway } from '../src/main/agentHostGateway'
 import type { SnapshotTransferLimits } from '../src/main/agentHostSnapshotTransfer'
 import { AgentHostSnapshotStore, SNAPSHOT_TRANSFER_METHODS } from '../src/main/agentHostSnapshotTransfer'
-import { connectAgentHostWebSocket, connectLocalAgentHost } from '../src/main/agentHostTransport'
+import { connectAgentHostWebSocket as connectPagedAgentHostWebSocket, connectLocalAgentHost } from '../src/main/agentHostTransport'
 import { agentHostKey } from '../src/shared/agentHost'
 import type { AgentHostHistoryTransfer } from '../src/shared/agentHost'
 import { startAgentHostFixture } from './agent-host-fixture'
+import { AgentHostChatState, CHAT_HISTORY_PAGE_LIMITS } from '../src/main/agentHostState'
+
+// Keep byte-range regressions exercising a gateway without the newer paging capability.
+async function connectAgentHostWebSocket(url: string, headers: Record<string, string>, signal: AbortSignal): Promise<AhpTransport> {
+  const inner = await connectPagedAgentHostWebSocket(url, headers, signal)
+  return {
+    send: (message) => inner.send(message),
+    recv: async () => {
+      const frame = await inner.recv()
+      if (frame?.kind !== 'text') return frame
+      const message = JSON.parse(frame.text) as { result?: { _meta?: Record<string, unknown> } }
+      if (!message.result?._meta?.taskcontinuumPagedChatHistory) return frame
+      delete message.result._meta.taskcontinuumPagedChatHistory
+      return { ...frame, text: JSON.stringify(message) }
+    },
+    close: () => inner.close(),
+  }
+}
+
+it('transfers the newest bounded window first and downloads older turns only on explicit demand', async () => {
+  const f = await startChunkedGatewayFixture({ inlineBytes: 64 * 1024, minChunkBytes: 16 * 1024, initialChunkBytes: 16 * 1024, maxChunkBytes: 64 * 1024 }, true)
+  let remote: AgentHostConnection | undefined
+  let bytesReceived = 0
+  const requests: string[] = []
+  try {
+    f.host.historyBytes(8 * 1024 * 1024)
+    const expected = historyDigest(f.host.snapshot(f.host.chatId).state as ChatState)
+    remote = new AgentHostConnection(f.target, f.callerDirectory, async (signal) => {
+      const inner = await connectPagedAgentHostWebSocket(f.url, {}, signal)
+      return {
+        send: (message) => {
+          const parsed = (typeof message === 'string' ? JSON.parse(message) : message) as { method?: string }
+          if (parsed.method) requests.push(parsed.method)
+          return inner.send(message)
+        },
+        recv: async () => {
+          const frame = await inner.recv()
+          if (frame?.kind === 'text') bytesReceived += Buffer.byteLength(frame.text)
+          return frame
+        },
+        close: () => inner.close(),
+      }
+    })
+    await remote.open()
+    expect(remote.view.chat?.turns).toHaveLength(20)
+    expect(remote.view.chat?.turns[0].id).toBe('large-history-12')
+    expect(remote.view.history).toMatchObject({ hasMore: true, loadedTurns: 20, totalTurns: 32, loading: false })
+    expect(remote.view.canSend).toBe(true)
+    expect(bytesReceived).toBeLessThan(64 * 1024)
+    expect(requests.filter((method) => method === SNAPSHOT_TRANSFER_METHODS.prepare)).toHaveLength(1)
+    await remote.models()
+    expect(requests.filter((method) => method === SNAPSHOT_TRANSFER_METHODS.prepare)).toHaveLength(1)
+
+    await Promise.all([remote.loadHistory(), remote.loadHistory()])
+    expect(remote.view.chat?.turns).toHaveLength(31)
+    expect(remote.view.chat?.turns[0].id).toBe('large-history-1')
+    expect(requests.filter((method) => method === SNAPSHOT_TRANSFER_METHODS.prepare)).toHaveLength(2)
+    expect(bytesReceived).toBeLessThan(128 * 1024)
+    await remote.loadHistory()
+    expect(historyDigest(remote.view.chat!)).toBe(expected)
+    expect(remote.view.history).toMatchObject({ hasMore: false, loadedTurns: 32, totalTurns: 32, loading: false })
+    expect(bytesReceived).toBeGreaterThan(8 * 1024 * 1024)
+    expect(f.host.dispatches).toEqual([])
+  } finally {
+    await remote?.close()
+    await f.close()
+  }
+})
+
+it('respects the completed-turn page budget without truncating oversized turns or dropping live send state', async () => {
+  const f = await startChunkedGatewayFixture()
+  try {
+    f.host.historyText(50, 'r'.repeat(64 * 1024))
+    f.host.draft('Keep this owner draft')
+    f.host.action({ type: 'chat/turnStarted', turnId: randomUUID(), startedAt: new Date().toISOString(), message: { text: 'Current work', origin: { kind: 'user' } } })
+    const source = new AgentHostChatState(f.target.chatId)
+    source.snapshot(f.host.snapshot(f.target.chatId))
+    const page = source.historySnapshot()
+    const state = page.snapshot.state as ChatState
+    expect(state.turns.length).toBeGreaterThan(0)
+    expect(state.turns.length).toBeLessThanOrEqual(CHAT_HISTORY_PAGE_LIMITS.turns)
+    expect(state.turns.reduce((bytes, turn) => bytes + Buffer.byteLength(JSON.stringify(turn)), 0)).toBeLessThanOrEqual(CHAT_HISTORY_PAGE_LIMITS.bytes)
+    expect(state.activeTurn).toEqual((f.host.snapshot(f.target.chatId).state as ChatState).activeTurn)
+    expect(state.draft?.text).toBe('Keep this owner draft')
+    const displayed = new AgentHostChatState(f.target.chatId)
+    displayed.snapshot(page.snapshot)
+    const older = source.historySnapshot(page.beforeTurnId)
+    const sequence = displayed.lastSequence
+    displayed.prependHistory(older.snapshot, page.beforeTurnId!)
+    expect(displayed.lastSequence).toBe(sequence)
+    expect(displayed.sendState).toEqual(source.sendState)
+
+    f.host.historyText(1, 'z'.repeat(700 * 1024))
+    const oversized = new AgentHostChatState(f.target.chatId)
+    oversized.snapshot(f.host.snapshot(f.target.chatId))
+    expect(historyDigest(oversized.historySnapshot().snapshot.state as ChatState)).toBe(historyDigest(oversized.value!))
+  } finally {
+    await f.close()
+  }
+})
+
+it.each(['native', 'remote'] as const)('honors native AHP cursors and fetchTurns while paging a %s view', async (mode) => {
+  const f = await startChunkedGatewayFixture()
+  let remote: AgentHostConnection | undefined
+  try {
+    f.host.historyText(20, 'Native retained history')
+    f.host.historyWindow(3, 5)
+    const connection = mode === 'native' ? f.native : remote = new AgentHostConnection(f.target, f.callerDirectory, (signal) => connectPagedAgentHostWebSocket(f.url, {}, signal))
+    await connection.open()
+    expect(connection.view.chat?.turns).toHaveLength(3)
+    expect(connection.view.history).toMatchObject({ hasMore: true, loadedTurns: 3 })
+    expect(connection.view.history?.totalTurns).toBeUndefined()
+    await connection.loadHistory()
+    expect(connection.view.chat?.turns).toHaveLength(8)
+    expect(f.host.methods.filter((method) => method === 'fetchTurns')).toHaveLength(1)
+    while (connection.view.history?.hasMore) await connection.loadHistory()
+    expect(connection.view.chat?.turns).toHaveLength(20)
+    expect(new Set(connection.view.chat?.turns.map((turn) => turn.id)).size).toBe(20)
+    expect(f.host.dispatches).toEqual([])
+  } finally {
+    await remote?.close()
+    await f.close()
+  }
+})
+
+it('loads immutable earlier turns without replaying the live response or losing completed-turn counts', async () => {
+  const f = await startChunkedGatewayFixture({ minChunkBytes: 8 * 1024, initialChunkBytes: 8 * 1024, maxChunkBytes: 16 * 1024 })
+  let remote: AgentHostConnection | undefined
+  let hold = false
+  let completeTurn = false
+  let release!: () => void
+  let blocked!: () => void
+  const block = new Promise<void>((resolve) => { blocked = resolve })
+  const liveTurn = randomUUID()
+  try {
+    f.host.historyText(50, 'r'.repeat(64 * 1024))
+    remote = new AgentHostConnection(f.target, f.callerDirectory, async (signal) => {
+      const inner = await connectPagedAgentHostWebSocket(f.url, {}, signal)
+      return {
+        send: (message) => {
+          const parsed = (typeof message === 'string' ? JSON.parse(message) : message) as { method?: string; params?: { offset?: number } }
+          if (completeTurn && parsed.method === SNAPSHOT_TRANSFER_METHODS.chunk && (parsed.params?.offset ?? 0) >= 16 * 1024) {
+            completeTurn = false
+            f.host.action({ type: 'chat/turnComplete', turnId: liveTurn, duration: 1 })
+          }
+          return inner.send(message)
+        },
+        recv: async () => {
+          const frame = await inner.recv()
+          if (hold && frame?.kind === 'text' && frame.text.includes('"nextOffset"')) {
+            hold = false
+            blocked()
+            await new Promise<void>((resolve) => { release = resolve })
+          }
+          return frame
+        },
+        close: () => { release?.(); return inner.close() },
+      }
+    })
+    await remote.open()
+    expect(remote.view.chat?.turns[0].id).toBe('history-43')
+    hold = true
+    const loading = remote.loadHistory()
+    await block
+    f.host.action({ type: 'chat/turnStarted', turnId: liveTurn, startedAt: new Date().toISOString(), message: { text: 'Newest question', origin: { kind: 'user' } } })
+    f.host.action({ type: 'chat/responsePart', turnId: liveTurn, part: { kind: 'markdown', id: 'live-answer', content: '' } })
+    f.host.action({ type: 'chat/delta', turnId: liveTurn, partId: 'live-answer', content: 'Newest response' })
+    completeTurn = true
+    release()
+    await loading
+    const chat = remote.view.chat!
+    expect(chat.turns.find((turn) => turn.id === 'history-42')?.responseParts).toContainEqual({ kind: 'markdown', id: 'answer-42', content: 'r'.repeat(64 * 1024) })
+    expect(chat.turns.filter((turn) => turn.id === liveTurn)).toHaveLength(1)
+    expect(chat.turns.at(-1)?.responseParts).toContainEqual({ kind: 'markdown', id: 'live-answer', content: 'Newest response' })
+    expect(remote.view.history?.totalTurns).toBe(51)
+    expect(remote.view.history?.loading).toBe(false)
+  } finally {
+    release?.()
+    await remote?.close()
+    await f.close()
+  }
+})
+
+it('retains already downloaded earlier pages across reconnect without downloading them again', async () => {
+  const f = await startChunkedGatewayFixture()
+  let remote: AgentHostConnection | undefined
+  let prepares = 0
+  const transport = async (signal: AbortSignal) => {
+    const inner = await connectPagedAgentHostWebSocket(f.url, {}, signal)
+    return {
+      send: (message: JsonRpcMessage | string) => {
+        const parsed = (typeof message === 'string' ? JSON.parse(message) : message) as { method?: string }
+        if (parsed.method === SNAPSHOT_TRANSFER_METHODS.prepare) prepares++
+        return inner.send(message)
+      },
+      recv: () => inner.recv(), close: () => inner.close(),
+    }
+  }
+  try {
+    f.host.historyText(60, 'Cached earlier page')
+    remote = new AgentHostConnection(f.target, f.callerDirectory, transport)
+    await remote.open()
+    await remote.loadHistory()
+    expect(remote.view.chat?.turns).toHaveLength(40)
+    await remote.close()
+    prepares = 0
+    remote = new AgentHostConnection(f.target, f.callerDirectory, transport)
+    await remote.open()
+    expect(remote.view.chat?.turns).toHaveLength(40)
+    expect(remote.view.chat?.turns[0].id).toBe('history-20')
+    expect(prepares).toBe(1)
+    expect(remote.view.history).toMatchObject({ hasMore: true, loadedTurns: 40, totalTurns: 60 })
+  } finally {
+    await remote?.close()
+    await f.close()
+  }
+})
+
+it('does not use a retained cache turn as authoritative proof of delivery', async () => {
+  const f = await startChunkedGatewayFixture(undefined, true)
+  let remote: AgentHostConnection | undefined
+  const id = randomUUID()
+  try {
+    f.host.historyText(60, 'Retained source history')
+    remote = new AgentHostConnection(f.target, f.callerDirectory, (signal) => connectPagedAgentHostWebSocket(f.url, {}, signal))
+    await remote.open()
+    await remote.loadHistory()
+    await remote.close()
+    const directory = join(f.callerDirectory, 'agent-host')
+    const hash = createHash('sha256').update(agentHostKey(f.target)).digest('hex')
+    const cachePath = join(directory, `${hash}.cache.json`)
+    const cache = JSON.parse(await readFile(cachePath, 'utf8')) as { chat: { state: ChatState } }
+    cache.chat.state.turns[1].id = id
+    await writeFile(cachePath, JSON.stringify(cache))
+    await writeFile(join(directory, `${hash}.commands.json`), JSON.stringify({
+      schemaVersion: 2, target: f.target, commands: [{ id, hash: 'a'.repeat(64), state: 'uncertain' }],
+    }))
+    remote = new AgentHostConnection(f.target, f.callerDirectory, (signal) => connectPagedAgentHostWebSocket(f.url, {}, signal))
+    await remote.open()
+    expect(remote.view.chat?.turns.some((turn) => turn.id === id)).toBe(true)
+    expect(remote.view.pendingTurn).toMatchObject({ id, state: 'uncertain' })
+    f.host.action({ type: 'chat/activityChanged', activity: 'Live source update' })
+    await expect.poll(() => remote!.view.chat?.activity).toBe('Live source update')
+    expect(remote.view.pendingTurn).toMatchObject({ id, state: 'uncertain' })
+    expect(await remote.resolveDelivery(id, 'check', async () => {})).toBe('not-found')
+    expect(f.host.dispatches).toEqual([])
+  } finally {
+    await remote?.close()
+    await f.close()
+  }
+})
+
+it.each([false, true])('persists an explicit partial offline cache and rejects a corrupted boundary (%s)', async (corrupt) => {
+  const f = await startChunkedGatewayFixture()
+  let remote: AgentHostConnection | undefined
+  try {
+    f.host.historyText(60, 'Downloaded window')
+    remote = new AgentHostConnection(f.target, f.callerDirectory, (signal) => connectPagedAgentHostWebSocket(f.url, {}, signal))
+    await remote.open()
+    await remote.close()
+    const directory = join(f.callerDirectory, 'agent-host')
+    const name = (await readdir(directory)).find((entry) => entry.endsWith('.cache.json'))!
+    const path = join(directory, name)
+    const cache = JSON.parse(await readFile(path, 'utf8')) as { schemaVersion: number; history: { beforeTurnId: string } }
+    expect(cache.schemaVersion).toBe(3)
+    expect(cache.history.beforeTurnId).toBe('history-40')
+    if (corrupt) {
+      cache.history.beforeTurnId = 'unknown-turn'
+      await writeFile(path, JSON.stringify(cache))
+    }
+    remote = new AgentHostConnection(f.target, f.callerDirectory, async () => { throw new Error('Fixture owner unavailable.') })
+    await expect(remote.open()).rejects.toThrow()
+    if (corrupt) {
+      expect(remote.view.chat).toBeUndefined()
+      expect(remote.view.error).toContain('Offline chat history could not be read')
+    } else {
+      expect(remote.view.chat?.turns).toHaveLength(20)
+      expect(remote.view.history).toMatchObject({ hasMore: true, loadedTurns: 20 })
+      expect(() => remote!.loadHistory()).toThrow('Reconnect')
+    }
+  } finally {
+    await remote?.close()
+    await f.close()
+  }
+})
+
+it.each([false, true])('checks original retained-turn membership instead of treating an unloaded turn as missing (%s)', async (found) => {
+  const f = await startChunkedGatewayFixture(undefined, true)
+  let remote: AgentHostConnection | undefined
+  const turnId = randomUUID()
+  const methods: string[] = []
+  try {
+    f.host.historyText(50, 'Original history', found ? [turnId] : undefined)
+    const directory = join(f.callerDirectory, 'agent-host')
+    await mkdir(directory, { recursive: true })
+    const path = join(directory, `${createHash('sha256').update(agentHostKey(f.target)).digest('hex')}.commands.json`)
+    await writeFile(path, JSON.stringify({ schemaVersion: 2, target: f.target, commands: [{ id: turnId, hash: 'a'.repeat(64), state: 'uncertain' }] }))
+    remote = new AgentHostConnection(f.target, f.callerDirectory, async (signal) => {
+      const inner = await connectPagedAgentHostWebSocket(f.url, {}, signal)
+      return {
+        send: (message) => {
+          const parsed = (typeof message === 'string' ? JSON.parse(message) : message) as { method?: string }
+          if (parsed.method) methods.push(parsed.method)
+          return inner.send(message)
+        },
+        recv: () => inner.recv(), close: () => inner.close(),
+      }
+    })
+    await remote.open()
+    expect(remote.view.chat?.turns).toHaveLength(20)
+    expect(remote.view.chat?.turns.some((turn) => turn.id === turnId)).toBe(false)
+    expect(methods).toContain(SNAPSHOT_TRANSFER_METHODS.containsTurn)
+    expect(await remote.resolveDelivery(turnId, 'check', async () => {})).toBe(found ? 'confirmed' : 'not-found')
+    expect(methods.filter((method) => method === SNAPSHOT_TRANSFER_METHODS.prepare)).toHaveLength(1)
+    expect(remote.view.pendingTurn === undefined).toBe(found)
+    expect(f.host.dispatches).toEqual([])
+  } finally {
+    await remote?.close()
+    await f.close()
+  }
+})
+
+it('reconnects to the latest window after truncation outside the downloaded range', async () => {
+  const f = await startChunkedGatewayFixture()
+  let remote: AgentHostConnection | undefined
+  let unlisten: (() => void) | undefined
+  try {
+    f.host.historyText(50, 'Before edit')
+    remote = new AgentHostConnection(f.target, f.callerDirectory, (signal) => connectPagedAgentHostWebSocket(f.url, {}, signal))
+    unlisten = remote.listen(() => {})
+    await remote.open()
+    f.host.action({ type: 'chat/truncated', turnId: 'history-4' })
+    await expect.poll(() => remote!.state).toBe('offline')
+    expect(remote.view.chat?.turns).toHaveLength(20)
+    await remote.open()
+    expect(remote.view.chat?.turns.map((turn) => turn.id)).toEqual(['history-0', 'history-1', 'history-2', 'history-3', 'history-4'])
+    expect(remote.view.history?.hasMore).toBe(false)
+    expect(f.host.dispatches).toEqual([])
+  } finally {
+    unlisten?.()
+    await remote?.close()
+    await f.close()
+  }
+})
 
 function historyDigest(chat: ChatState): string {
   return createHash('sha256').update(JSON.stringify(chat)).digest('hex')

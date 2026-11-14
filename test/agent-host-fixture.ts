@@ -36,6 +36,8 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
   const chatId = `ahp-chat://default/${Buffer.from(sessionId).toString('base64url')}`
   let sequence = 1
   let chat: ChatState = { resource: chatId, title: 'Original Host chat', status: 1, modifiedAt: new Date().toISOString(), turns: [] }
+  let olderTurns: ChatState['turns'] = []
+  let historyPageSize = 5
   const session: SessionState = { provider: 'copilotcli', title: chat.title, status: 1, lifecycle: 'ready' as SessionState['lifecycle'], activeClients: [], chats: [{ resource: chatId, title: chat.title, status: 1, modifiedAt: chat.modifiedAt }, { resource: 'ahp-chat:/private-other', title: 'Unshared sibling title', status: 1, modifiedAt: chat.modifiedAt }], defaultChat: chatId }
   const subscriptions = new Map<import('ws').WebSocket, Set<string>>()
   const dispatches: unknown[] = []
@@ -118,6 +120,15 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
         result = { snapshot: snapshot(message.params.channel) }
       }
       else if (message.method === 'unsubscribe') subscriptions.get(socket)!.delete(message.params.channel)
+      else if (message.method === 'fetchTurns') {
+        if (message.params.channel !== chatId || message.params.cursor !== chat.turnsNextCursor || !chat.turnsNextCursor) {
+          socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32602, message: 'Invalid fixture history cursor.' } }))
+          return
+        }
+        const turns = olderTurns.slice(-historyPageSize)
+        olderTurns = olderTurns.slice(0, -turns.length)
+        action({ type: 'chat/turnsLoaded', turns, ...(olderTurns.length ? { turnsNextCursor: `fixture-before-${olderTurns.length}` } : {}) })
+      }
       else if (message.method === 'dispatchAction') {
         dispatches.push(message.params.action)
         if (loseNextSend) { loseNextSend = false; socket.terminate(); return }
@@ -156,11 +167,17 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
       else part.content += 'x'.repeat(padding)
       return size()
     },
-    historyText: (count: number, text: string) => {
+    historyText: (count: number, text: string, ids?: readonly string[]) => {
       chat = { ...chat, turns: Array.from({ length: count }, (_, index) => ({
-        id: `history-${index}`, state: 'complete', message: { text: `Question ${index}`, origin: { kind: MessageKind.User } },
+        id: ids?.[index] ?? `history-${index}`, state: 'complete', message: { text: `Question ${index}`, origin: { kind: MessageKind.User } },
         responseParts: [{ kind: 'markdown', id: `answer-${index}`, content: text }], usage: undefined,
       } as ChatState['turns'][number])) }
+    },
+    historyWindow: (count: number, pageSize = 5) => {
+      if (count < 1 || pageSize < 1) throw new Error('Fixture history windows and pages must contain at least one turn.')
+      historyPageSize = pageSize
+      olderTurns = chat.turns.slice(0, Math.max(0, chat.turns.length - count))
+      chat = { ...chat, turns: chat.turns.slice(-count), turnsNextCursor: olderTurns.length ? `fixture-before-${olderTurns.length}` : undefined }
     },
     modelQueries: () => modelQueries,
     failModels: (value: boolean) => { failModels = value },
