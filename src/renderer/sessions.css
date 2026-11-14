@@ -177,9 +177,9 @@
 .message-markdown .contains-task-list { padding-left: 0; list-style: none; }
 .message-markdown .task-list-item input { margin-right: 7px; }
 .message-markdown code { font-family: Consolas, 'Cascadia Code', monospace; font-size: 11px; background: var(--raised); padding: 2px 4px; border-radius: 3px; }
-.message-markdown pre { max-width: 100%; overflow: auto; padding: 12px; margin: 12px 0; background: var(--input); border: 1px solid var(--border); border-radius: var(--radius-md); white-space: pre; overflow-wrap: normal; }
+.message-markdown pre { max-width: 100%; overflow: auto; padding: 12px; margin: 12px 0; background: var(--code-bg, var(--input)); border: 1px solid var(--border); border-radius: var(--radius-md); white-space: pre; overflow-wrap: normal; }
 .message-markdown pre code { padding: 0; background: none; border-radius: 0; white-space: pre; }
-.message-code-block { min-width: 0; margin: 12px 0; background: var(--input); border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
+.message-code-block { min-width: 0; margin: 12px 0; background: var(--code-bg, var(--input)); border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
 .message-code-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; padding: 2px 8px 2px 12px; background: var(--raised); color: var(--muted); font-size: 11px; }
 .message-code-header > span { min-width: 0; overflow-wrap: anywhere; }
 .message-code-header .icon-button { flex-shrink: 0; }

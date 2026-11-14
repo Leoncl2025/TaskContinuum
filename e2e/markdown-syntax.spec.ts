@@ -39,6 +39,10 @@ for (const scenario of [
     for (const name of ['Chat code', 'Task document code']) {
       const section = page.getByRole('region', { name, exact: true })
       await expect(section.locator('pre code.hljs')).toHaveCount(4)
+      await expect(section.locator('pre').first()).toHaveCSS(
+        'background-color',
+        scenario.theme === 'dark' ? 'rgb(24, 24, 24)' : name === 'Chat code' ? 'rgb(255, 255, 255)' : 'rgb(245, 245, 245)',
+      )
       await expect(section.locator('.language-js .hljs-keyword').first()).toHaveText('const')
       await expect(section.locator('pre code.language-not-a-real-language')).not.toHaveClass(/hljs/)
       await expect(section.locator('.katex')).toHaveCount(1)

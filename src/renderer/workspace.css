@@ -18,7 +18,7 @@
 .workspace-markdown p { margin: 12px 0; }
 .workspace-markdown ul, .workspace-markdown ol { padding-left: 23px; }
 .workspace-markdown li { padding: 3px 0; }
-.workspace-markdown pre { max-width: 100%; overflow: auto; background: var(--raised); border: 1px solid var(--border); padding: 12px; border-radius: var(--radius-md); }
+.workspace-markdown pre { max-width: 100%; overflow: auto; background: var(--code-bg, var(--raised)); border: 1px solid var(--border); padding: 12px; border-radius: var(--radius-md); }
 .workspace-markdown code { font-family: Consolas, 'Cascadia Code', monospace; font-size: 11px; }
 .workspace-markdown blockquote { border-left: 2px solid var(--border); padding-left: 14px; margin-left: 0; color: var(--muted); }
 .workspace-markdown .document-table { overflow-x: auto; margin: 16px 0; }
