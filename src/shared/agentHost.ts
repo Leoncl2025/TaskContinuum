@@ -22,11 +22,34 @@ export interface AgentHostSession extends AgentHostTarget {
   canSend: boolean
 }
 
+export interface AgentHostHistoryTransfer {
+  receivedBytes: number
+  totalBytes: number
+  resumed?: boolean
+  kind?: 'recent' | 'earlier'
+}
+
+export interface AgentHostHistory {
+  hasMore: boolean
+  loadedTurns: number
+  totalTurns?: number
+  loading: boolean
+  error?: string
+}
+
+export interface AgentHostHistoryTransferEvent {
+  root: string
+  target: AgentHostTarget
+  progress?: AgentHostHistoryTransfer
+}
+
 export interface AgentHostView {
   target: AgentHostTarget
   state: 'connecting' | 'connected' | 'offline'
   protocolVersion?: AgentHostProtocolVersion
   chat?: ChatState
+  historyTransfer?: AgentHostHistoryTransfer
+  history?: AgentHostHistory
   terminals: Record<string, TerminalState>
   terminalStatus?: Record<string, { state: 'loading' | 'error'; error?: string }>
   canSend: boolean
@@ -50,12 +73,14 @@ export interface AgentHostBridge {
   models(target: AgentHostTarget): Promise<Pick<SessionModelInfo, 'id' | 'name' | 'provider' | 'configSchema'>[]>
   watch(target: AgentHostTarget): Promise<string>
   unwatch(id: string): Promise<void>
+  loadHistory(watchId: string): Promise<void>
   terminal(watchId: string, resource: string, leaseId: string, retry?: boolean): Promise<void>
   releaseTerminal(watchId: string, resource: string, leaseId: string): Promise<void>
   send(target: AgentHostTarget, id: string, text: string, images?: ChatImageAttachment[], model?: ModelSelection): Promise<void>
   resolveDelivery(target: AgentHostTarget, turnId: string, action: 'check' | 'abandon', acknowledged?: boolean): Promise<'confirmed' | 'not-found' | 'abandoned'>
   cancel(target: AgentHostTarget, turnId: string): Promise<void>
   onView(listener: (event: { id: string; view: AgentHostView }) => void): () => void
+  onHistoryTransfer(listener: (event: AgentHostHistoryTransferEvent) => void): () => void
 }
 
 export function agentHostKey(target: { sessionId: string; chatId: string; owner?: { clientId: string } }): string {

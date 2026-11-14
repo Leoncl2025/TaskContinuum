@@ -88,7 +88,8 @@ function creationFixture() {
       for (const listener of listeners) listener({ id, view })
       return id
     }),
-    unwatch: vi.fn(async (id) => { watched.delete(id) }), terminal: vi.fn(async () => {}), releaseTerminal: vi.fn(async () => {}),
+    unwatch: vi.fn(async (id) => { watched.delete(id) }), loadHistory: vi.fn(async () => {}), terminal: vi.fn(async () => {}), releaseTerminal: vi.fn(async () => {}),
+    onHistoryTransfer: vi.fn(() => () => {}),
     send: vi.fn(async () => {}), resolveDelivery: vi.fn(async () => 'not-found' as const), cancel: vi.fn(async () => {}),
     onView: (listener) => { listeners.add(listener); return () => { listeners.delete(listener) } },
   }
@@ -947,7 +948,8 @@ describe('workspace switching in the desktop workbench', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
     const panel = await screen.findByRole('complementary', { name: 'Agent Host task chat' })
-    await waitFor(() => expect(within(panel).getAllByRole('alert')).toHaveLength(2))
+    await waitFor(() => expect(within(panel).getAllByRole('alert')).toHaveLength(1))
+    expect(within(panel).getByRole('alert')).toHaveTextContent(message)
     expect(bridge.updateSessionLink).not.toHaveBeenCalled()
     await user.type(within(panel).getByRole('textbox', { name: 'Message Agent Host' }), 'Keep this unsent draft')
     await user.click(within(panel).getByRole('button', { name: 'Review session link' }))
@@ -966,6 +968,28 @@ describe('workspace switching in the desktop workbench', () => {
     expect(taskSessionLinks(repository[first.id].document.bindings, 'T-0002')).toEqual([{ provider: 'agent-host', ...target }])
     expect(agentHost.create).not.toHaveBeenCalled()
     expect(agentHost.send).not.toHaveBeenCalled()
+  })
+
+  it('shows lightweight progress only for the current workspace without creating another chat watch', async () => {
+    const { first, repository, agentHost, target } = creationFixture()
+    repository[first.id] = { document: { schemaVersion: '2.1', bindings: { 'T-0002': [{ provider: 'agent-host', ...target }] } }, revision: 'a'.repeat(64), localOwner: target.owner }
+    const user = userEvent.setup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+    await waitFor(() => expect(agentHost.onHistoryTransfer).toHaveBeenCalledOnce())
+    await user.click(await screen.findByRole('button', { name: 'Agent Host linked' }))
+    const sidebar = await screen.findByRole('complementary', { name: 'Agent Host sessions' })
+    const notify = vi.mocked(agentHost.onHistoryTransfer).mock.calls[0][0]
+    const progress = { receivedBytes: 1024 * 1024, totalBytes: 117.1 * 1024 * 1024, kind: 'recent' as const }
+    act(() => notify({ root: 'Q:\\different-workspace', target, progress }))
+    expect(within(sidebar).queryByRole('progressbar')).not.toBeInTheDocument()
+    const watches = vi.mocked(agentHost.watch).mock.calls.length
+    act(() => notify({ root: first.root, target, progress }))
+    expect(await within(sidebar).findByRole('progressbar')).toHaveAttribute('aria-valuetext', 'Recent history: 0.8% (1.0 / 117.1 MiB)')
+    expect(agentHost.watch).toHaveBeenCalledTimes(watches)
+    act(() => notify({ root: first.root, target }))
+    expect(within(sidebar).queryByRole('progressbar')).not.toBeInTheDocument()
   })
 
   it('opens the exact AHP Git link without creating, sending or cancelling a session', async () => {

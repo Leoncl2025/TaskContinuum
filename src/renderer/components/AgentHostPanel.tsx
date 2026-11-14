@@ -1,4 +1,4 @@
-import { memo, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import stripAnsi from 'strip-ansi'
 import type { ResponsePart, TerminalState } from '@microsoft/agent-host-protocol'
@@ -191,7 +191,7 @@ const ChatTranscript = memo(function ChatTranscript({ view, machineName, aliases
   const activeTurn = view?.chat?.activeTurn
   const turns = [...view?.chat?.turns ?? [], ...activeTurn ? [activeTurn] : []]
   return <>
-    {!turns.length && <p className="muted">{view?.state === 'connected' ? 'No messages.' : 'Waiting for original history...'}</p>}
+    {!turns.length && <p className="ahp-chat-placeholder muted">{view?.state === 'connected' ? 'No messages.' : view?.historyTransfer ? 'Loading recent history...' : 'Waiting for original history...'}</p>}
     {turns.map((turn) => {
       const actor = turn.message._meta?.taskcontinuumActor as { username?: string; machineName?: string; clientId?: string } | undefined
       return <div key={turn.id} data-turn-id={turn.id}><article className="message message-user"><header><Icon name="account" /><strong>{typeof actor?.username === 'string' ? actor.username : 'User'}</strong>{typeof actor?.machineName === 'string' && <span className="message-model" title={actor.machineName}>{machineLabel({ machineName: actor.machineName, clientId: typeof actor.clientId === 'string' ? actor.clientId : undefined }, aliases)}</span>}</header>{turn.message.model && <><p className="message-notice">Requested model: {turn.message.model.id}</p>{Object.keys(turn.message.model.config ?? {}).length > 0 && <p className="message-notice">Requested config: {JSON.stringify(turn.message.model.config)}</p>}</>}<div className="message-text">{turn.message.text}</div><ChatImages images={imagesFor(turn)} /></article><article className="message message-assistant"><header><Icon name="copilot" /><strong title={machineName}>Copilot @ {context.owner}</strong></header><Responses parts={turn.responseParts} terminals={view?.terminals ?? {}} terminalStatus={view?.terminalStatus ?? {}} {...context} />{activeTurn?.id === turn.id && <p className="message-notice" role="status">Responding...</p>}</article></div>
@@ -229,6 +229,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const view = savedView?.key === viewKey ? savedView.value : undefined
   const [watch, setWatch] = useState<{ key: string; id: string }>()
   const [error, setError] = useState<string>()
+  const [historyLoadError, setHistoryLoadError] = useState<{ key: string; message: string }>()
   const [deliveryReview, setDeliveryReview] = useState<{ id: string; status: 'checking' | 'not-found' | 'abandoning' | 'failed'; acknowledged: boolean; error?: string }>()
   const [draft, setDraft] = useState('')
   const [images, setImages] = useState<ChatImageAttachment[]>([])
@@ -254,6 +255,9 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const composer = useRef<HTMLTextAreaElement>(null)
   const log = useRef<HTMLDivElement>(null)
   const logSize = useRef({ width: 0, height: 0 })
+  const lastScrollTop = useRef(0)
+  const historyRequest = useRef<string | undefined>(undefined)
+  const historyAnchor = useRef<{ key: string; turnId?: string; offset: number; top: number; height: number; count: number } | undefined>(undefined)
   const attempted = useRef<{ id: string; text: string; draft: string; images: ChatImageAttachment[] } | undefined>(undefined)
   const firstMessageSent = useRef(false)
   const imageInput = useChatImageInput(`${contextId}:${key}`, images, setImages, busy)
@@ -277,6 +281,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     const loadModels = () => {
       if (!active || loadingModels) return
       loadingModels = true
+      setCatalog((current) => current?.key === catalogKey && current.error ? undefined : current)
       const generation = connectionGeneration
       let failed = false
       void bridge.models(selected).then((models) => {
@@ -309,6 +314,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       }))
       if (connected && value.chat?.resource === chatId) onTitles?.([{ ...selected, title: value.chat.title, updatedAt: value.chat.modifiedAt }])
       if (recovered) {
+        setHistoryLoadError(undefined)
         connectionGeneration++
         if (!loadedModels || connectionGeneration > 1) loadModels()
       }
@@ -340,8 +346,28 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const activeTurn = view?.chat?.activeTurn
   const responding = Boolean(activeTurn)
   const pending = Boolean(view?.pendingTurn)
+  const historyBusy = Boolean(view?.historyTransfer || view?.history?.loading)
   useEffect(() => { onBusy?.(busy || pending || responding); return () => onBusy?.(false) }, [busy, pending, responding, onBusy])
-  useEffect(() => { if (following.current && log.current) log.current.scrollTop = log.current.scrollHeight }, [view])
+  useEffect(() => {
+    if (following.current && log.current) {
+      log.current.scrollTop = log.current.scrollHeight
+      lastScrollTop.current = log.current.scrollTop
+    }
+  }, [view])
+  useLayoutEffect(() => {
+    const anchor = historyAnchor.current
+    const element = log.current
+    if (!anchor || !element) return
+    if (anchor.key !== watchKey) { historyAnchor.current = undefined; return }
+    if (view?.history?.loading) return
+    if ((view?.chat?.turns.length ?? 0) > anchor.count) {
+      const turn = [...element.querySelectorAll<HTMLElement>('[data-turn-id]')].find((item) => item.dataset.turnId === anchor.turnId)
+      if (turn && turn.getBoundingClientRect().height > 0) element.scrollTop += turn.getBoundingClientRect().top - element.getBoundingClientRect().top - anchor.offset
+      else element.scrollTop = anchor.top + element.scrollHeight - anchor.height
+      lastScrollTop.current = element.scrollTop
+    }
+    historyAnchor.current = undefined
+  }, [view, watchKey])
   useEffect(() => {
     const element = log.current
     if (!element) return
@@ -352,6 +378,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
         frame = undefined
         logSize.current = { width: element.clientWidth, height: element.clientHeight }
         if (following.current) element.scrollTop = element.scrollHeight
+        lastScrollTop.current = element.scrollTop
       })
     }
     const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(resize) : undefined
@@ -364,6 +391,25 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       if (frame !== undefined) cancelAnimationFrame(frame)
     }
   }, [])
+  async function loadEarlierHistory(): Promise<void> {
+    if (!bridge || !watchId || view?.state !== 'connected' || !view.history?.hasMore || view.history.loading || historyRequest.current === watchId) return
+    const element = log.current
+    const top = element?.getBoundingClientRect().top ?? 0
+    const anchor = element && [...element.querySelectorAll<HTMLElement>('[data-turn-id]')].find((item) => item.getBoundingClientRect().bottom > top)
+    if (element) historyAnchor.current = {
+      key: watchKey, turnId: anchor?.dataset.turnId, offset: (anchor?.getBoundingClientRect().top ?? top) - top,
+      top: element.scrollTop, height: element.scrollHeight, count: view.chat?.turns.length ?? 0,
+    }
+    following.current = false
+    historyRequest.current = watchId
+    setHistoryLoadError(undefined)
+    try { await bridge.loadHistory(watchId) }
+    catch (failure) {
+      if (mounted.current) setHistoryLoadError({ key: watchKey, message: failure instanceof Error ? failure.message : 'Earlier history could not be loaded. Retry when the owner is available.' })
+    } finally {
+      if (historyRequest.current === watchId) historyRequest.current = undefined
+    }
+  }
   function confirm(command: { id: string; text: string; draft: string; images: ChatImageAttachment[] }): void {
     if (attempted.current?.id !== command.id) return
     firstMessageSent.current = true
@@ -445,8 +491,11 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       setCatalog({ key: catalogKey, models: [], error: failure instanceof Error ? failure.message : 'The original session could not be verified. Reconnect to retry.' })
     } finally { operating.current = false; setBusy(false) }
   }
-  const stateLabel = !bridge ? 'Desktop update required' : !view && (error || currentCatalog?.error) ? 'Connection failed' : !view || view.state === 'connecting' ? 'Connecting...' : view.state === 'offline' ? 'Offline history' : pending ? 'Delivery pending' : activeTurn ? 'Agent responding' : view.readOnly ? 'Read only' : 'Connected'
-  const modelStatus = !bridge ? 'Desktop update required.' : !currentCatalog ? 'Loading models from the owner Host...' : currentCatalog.error ? undefined : !modelId ? 'Choose a model below to enable sending.' : !modelReady ? 'The selected model is unavailable. Choose another model or retry loading models.' : undefined
+  const connectionError = error ?? view?.error
+  const catalogError = currentCatalog?.error !== connectionError ? currentCatalog?.error : undefined
+  const historyFailure = view?.history?.error ?? (historyLoadError?.key === watchKey ? historyLoadError.message : undefined)
+  const stateLabel = !bridge ? 'Desktop update required' : !view && (error || currentCatalog?.error) ? 'Connection failed' : !view || view.state === 'connecting' ? view?.historyTransfer ? 'Loading recent history...' : 'Connecting...' : view.state === 'offline' ? 'Offline history' : pending ? 'Delivery pending' : activeTurn ? 'Agent responding' : historyBusy ? 'Loading earlier history...' : view.readOnly ? 'Read only' : 'Connected'
+  const modelStatus = !bridge ? 'Desktop update required.' : view?.state !== 'connected' ? undefined : !currentCatalog ? 'Loading models from the owner Host...' : currentCatalog.error ? undefined : !modelId ? 'Choose a model below to enable sending.' : !modelReady ? 'The selected model is unavailable. Choose another model or retry loading models.' : undefined
   const displayTitle = sessionTitle(target, view?.target && agentHostKey(view.target) === key ? view.chat?.title : undefined) || cachedTitle || 'Original Host chat'
   const detailsOpen = active && detailsKey === key
   const updateBlocker = busy || activeTurn || pending || imageInput.reading
@@ -492,13 +541,24 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       const element = event.currentTarget
       // Reflow scroll events are not a user leaving the bottom of the chat.
       if (element.clientWidth !== logSize.current.width || element.clientHeight !== logSize.current.height) return
+      const upward = element.scrollTop < lastScrollTop.current
+      lastScrollTop.current = element.scrollTop
       following.current = element.scrollHeight - element.scrollTop - element.clientHeight < 60
+      if (upward && element.scrollTop < 120) void loadEarlierHistory()
     }}>
+      {(view?.history?.hasMore || historyFailure) && <div className="ahp-history-pagination">
+        {view?.history?.hasMore && <button type="button" className="text-button" disabled={!watchId || view.state !== 'connected' || view.history.loading} onClick={() => { void loadEarlierHistory() }}>
+          <Icon name={view.history.loading ? 'loading' : 'chevron-up'} className={view.history.loading ? 'codicon-modifier-spin' : ''} />
+          {view.history.loading ? 'Loading earlier messages...' : 'Load earlier messages'}
+        </button>}
+        {view?.state === 'offline' && <p className="muted">Only previously loaded history is available offline.</p>}
+        {historyFailure && <p className="copilot-error" role="alert">{historyFailure}</p>}
+      </div>}
       <ChatTranscript view={view} machineName={machineName} aliases={aliases} owner={ownerLabel} bridge={bridge} watchId={watchId} />
     </div>
     <form className="composer-area" onSubmit={(event) => { event.preventDefault(); void send() }}>
       <ChatImageStatus input={imageInput} />
-      {(error || view?.error) && <p className="copilot-error vscode-chat-notice" role="alert">{error ?? view?.error}</p>}
+      {connectionError && <p className="copilot-error vscode-chat-notice" role="alert">{connectionError}</p>}
       {view?.pendingTurn?.state === 'uncertain' && <div className="vscode-chat-notice" role="group" aria-label="Resolve uncertain delivery">
         <p role="status">Delivery outcome unknown. The previous message was not replayed. Check the original chat on {machineName} before another send.</p>
         <button type="button" className="text-button" disabled={busy || view.state !== 'connected'} onClick={() => { void reviewDelivery('check') }}>Check original chat for this turn</button>
@@ -511,7 +571,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
         {deliveryReview?.id === view.pendingTurn.id && deliveryReview.error && <p className="copilot-error" role="alert">{deliveryReview.error}</p>}
       </div>}
       {view?.chat?.draft?.text && <p className="vscode-chat-notice muted">The owner has an unsent draft.</p>}
-      {currentCatalog?.error && <p className="copilot-error vscode-chat-notice" role="alert">{currentCatalog.error}</p>}
+      {catalogError && <p className="copilot-error vscode-chat-notice" role="alert">{catalogError}</p>}
       {onSessions && !view && (error || currentCatalog?.error) && <button type="button" className="text-button" disabled={busy} onClick={onSessions}><Icon name="link" />Review session link</button>}
       {modelStatus && <p className="message-notice" role="status">{modelStatus}</p>}
       {preferenceError && <p className="copilot-error message-notice" role="alert">{preferenceError}</p>}

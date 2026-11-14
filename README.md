@@ -118,7 +118,11 @@ messages, and fresh snapshots and streamed replies update the same conversation.
 The history is scoped to the current workspace, context, owner, session and chat;
 a Host-confirmed empty snapshot still clears it. Reconnection validates a new
 Host snapshot before replacing cached history, then continues incremental events.
-This does not add server-side history pagination or replay any messages.
+For remote chats over paired gateways, snapshots above **256 KiB** transfer in
+adaptive **64 KiB–1 MiB** byte-range chunks with on-disk `.snapshot.part`
+breakpoint resumption, full SHA-256 verification and live incremental catch-up,
+so slow or interrupted Dev Tunnel links can finish large histories without
+restarting from byte zero or replaying any messages.
 
 Restarting Task Continuum or reopening a workspace restores all task tabs that
 were still open, in the same order, along with the active task and its exact

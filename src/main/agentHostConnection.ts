@@ -5,24 +5,34 @@ import { AhpClient } from '@microsoft/agent-host-protocol/client'
 import type { AhpTransport, Subscription } from '@microsoft/agent-host-protocol/client'
 import { MessageKind, sessionReducer, terminalReducer } from '@microsoft/agent-host-protocol'
 import type { ActionEnvelope, ChatTurnStartedAction, ChatTurnCancelledAction, InitializeResult, MessageEmbeddedResourceAttachment, ModelSelection, SessionModelInfo, SessionState, Snapshot, TerminalState } from '@microsoft/agent-host-protocol'
-import type { AgentHostProtocolVersion, AgentHostTarget, AgentHostView } from '../shared/agentHost'
+import type { AgentHostHistoryTransfer, AgentHostProtocolVersion, AgentHostTarget, AgentHostView } from '../shared/agentHost'
 import { agentHostProtocolVersions } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
 import { modelConfigErrors } from '../shared/agentHostModelConfig'
-import { AgentHostChatState } from './agentHostState'
+import { AgentHostChatState, AgentHostHistoryCursorError } from './agentHostState'
 import { agentHostDiagnosticChannel, logAgentHostDiagnostic } from './agentHostDiagnostics'
 import type { AgentHostDiagnosticDetails, AgentHostDiagnosticEvent } from './agentHostDiagnostics'
 import { agentHostKey, agentHostModelInfoSchema, agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminalIdSchema, requireAgentHostProtocolVersion } from './agentHostProtocol'
 import { JsonFileSizeError, readJsonBounded, writeJsonAtomic, writeTextAtomic } from './shared/storage'
 import { AGENT_HOST_LIMITS, AgentHostSizeLimitError, agentHostSizeLimit } from './agentHostLimits'
+import {
+  AgentHostSnapshotSupersededError, SNAPSHOT_TRANSFER_LIMITS, SNAPSHOT_TRANSFER_METHODS, chunkedSnapshotCapabilitySchema,
+  historyContainsTurnResponseSchema, isAgentHostSnapshotSuperseded, pagedChatHistoryCapabilitySchema,
+  receiveChunkedChatSnapshot, removePartialSnapshotFiles, snapshotHistoryPageSchema,
+} from './agentHostSnapshotTransfer'
+import type { ChunkedSnapshotCapability, SnapshotHistoryPage } from './agentHostSnapshotTransfer'
 
-export type AgentHostEvent = { type: 'action'; envelope: ActionEnvelope } | { type: 'snapshot'; snapshot: Snapshot } | { type: 'state' }
+export type AgentHostEvent = { type: 'action'; envelope: ActionEnvelope } | { type: 'snapshot'; snapshot: Snapshot } | { type: 'state' | 'history-progress' }
 export function isAgentHostTurnBoundary(event: AgentHostEvent): boolean {
   return event.type === 'action' && ['chat/turnStarted', 'chat/turnComplete', 'chat/turnCancelled', 'chat/error', 'chat/turnResume'].includes(event.envelope.action.type)
 }
 const commandSchema = z.object({ id: z.uuid(), hash: z.string().regex(/^[a-f0-9]{64}$/), state: z.enum(['pending', 'uncertain', 'confirmed', 'failed', 'abandoned']) }).strict()
 const ledgerSchema = z.object({ schemaVersion: z.literal(2), target: agentHostTargetSchema, commands: z.array(commandSchema).max(1000) }).strict()
+const cacheSchema = z.discriminatedUnion('schemaVersion', [
+  z.object({ schemaVersion: z.literal(2), target: agentHostTargetSchema, chat: z.unknown() }).strict(),
+  z.object({ schemaVersion: z.literal(3), target: agentHostTargetSchema, chat: z.unknown(), history: snapshotHistoryPageSchema.optional() }).strict(),
+])
 type Command = z.infer<typeof commandSchema>
 type ModelCatalog = Pick<SessionModelInfo, 'id' | 'name' | 'provider' | 'configSchema'>[]
 type ActiveConnection = { client: AhpClient; abort: AbortController; traceId: string }
@@ -35,6 +45,13 @@ export class AgentHostConnection {
   private error?: string
   private cacheError?: string
   private lastSizeFailure?: AgentHostSizeLimitError
+  private historyTransfer?: AgentHostHistoryTransfer
+  private historyPage?: SnapshotHistoryPage
+  private historyError?: string
+  private historyGeneration = randomUUID()
+  private historyLoading?: { active: ActiveConnection; promise: Promise<void>; counts: { sequence: number; delta: number }[] }
+  private unverifiedCacheTurns = new Set<string>()
+  private nativeHistoryLoading?: { active: ActiveConnection; promise: Promise<void> }
   private chat: AgentHostChatState
   private readonly snapshots = new Map<string, Snapshot>()
   private readonly listeners = new Set<(event: AgentHostEvent) => void>()
@@ -72,8 +89,16 @@ export class AgentHostConnection {
     logAgentHostDiagnostic(event, { target: this.target, ...details })
   }
 
+  private updateHistoryProgress(progress: AgentHostHistoryTransfer | undefined): void {
+    const phaseChanged = Boolean(progress) !== Boolean(this.historyTransfer)
+    this.historyTransfer = progress
+    this.emit({ type: phaseChanged ? 'state' : 'history-progress' })
+  }
+
   get state(): AgentHostView['state'] { return this.connected ? 'connected' : this.opening ? 'connecting' : 'offline' }
   get sizeLimitError(): AgentHostSizeLimitError | undefined { return this.lastSizeFailure }
+  get historyEpoch(): string { return this.historyGeneration }
+  get historyProgress(): AgentHostHistoryTransfer | undefined { return this.historyTransfer ? { ...this.historyTransfer } : undefined }
   private get readOnly(): boolean { return this.initialized?._meta?.taskcontinuumCanSend === false || this.chat.sendState.readOnly }
 
   get hasActiveWork(): boolean {
@@ -87,10 +112,166 @@ export class AgentHostConnection {
     const pending = this.commands.find((command) => command.state === 'pending' || command.state === 'uncertain')
     const readOnly = this.readOnly
     return { target: this.target, state: this.state, protocolVersion: this.initialized?.protocolVersion, chat,
+      ...(this.historyTransfer ? { historyTransfer: { ...this.historyTransfer } } : {}),
+      ...(this.historyPage || this.chat.nativeHistoryCursor ? { history: {
+        hasMore: Boolean(this.historyPage?.beforeTurnId || this.chat.nativeHistoryCursor),
+        loadedTurns: this.chat.completedTurns,
+        totalTurns: this.historyPage?.totalTurns,
+        loading: this.current !== undefined && (this.historyLoading?.active === this.current || this.nativeHistoryLoading?.active === this.current),
+        ...(this.historyError ? { error: this.historyError } : {}),
+      } } : {}),
       terminals: Object.fromEntries([...this.snapshots].filter(([resource]) => this.referencedTerminals.has(resource)).map(([resource, snapshot]) => [resource, structuredClone(snapshot.state) as TerminalState])),
       terminalStatus: Object.fromEntries([...this.terminalStatus].filter(([resource]) => this.referencedTerminals.has(resource)).map(([resource, status]) => [resource, { ...status }])),
       canSend: this.connected && !readOnly && !pending && !this.sending && !chat?.activeTurn && !chat?.draft?.text && !chat?.draft?.attachments?.length && !chat?.queuedMessages?.length, readOnly,
       error: [this.error, this.cacheError].filter(Boolean).join(' ') || undefined, ...(pending ? { pendingTurn: { id: pending.id, state: pending.state as 'pending' | 'uncertain' } } : {}) }
+  }
+
+  private chunkedSnapshotCapability(): ChunkedSnapshotCapability | undefined {
+    const parsed = chunkedSnapshotCapabilitySchema.safeParse(this.initialized?._meta?.taskcontinuumChunkedChatSnapshot)
+    return parsed.success ? parsed.data : undefined
+  }
+
+  private get pagedHistory(): boolean {
+    return pagedChatHistoryCapabilitySchema.safeParse(this.initialized?._meta?.taskcontinuumPagedChatHistory).success
+  }
+
+  private requestExtension(active: ActiveConnection, method: string, params: Record<string, unknown>): Promise<unknown> {
+    return active.client.request(method as Parameters<AhpClient['request']>[0], params as never)
+  }
+
+  historySnapshot(beforeTurnId?: string): ReturnType<AgentHostChatState['historySnapshot']> {
+    if (!this.connected || !this.chat.loaded) throw new Error('This Agent Host channel is unavailable.')
+    if (this.historyPage?.beforeTurnId) throw new Error('A partial remote history cannot be exported as complete owner history.')
+    return this.chat.historySnapshot(beforeTurnId)
+  }
+
+  async ensureEarlierHistory(epoch: string, beforeTurnId: string): Promise<void> {
+    if (epoch !== this.historyEpoch) throw new AgentHostSnapshotSupersededError()
+    const active = this.current
+    if (!active || !this.connected) throw new Error('The original Agent Host is offline.')
+    if (this.chat.oldestTurnId === beforeTurnId && this.chat.nativeHistoryCursor) await this.fetchNativeHistory(active)
+    if (this.current !== active || epoch !== this.historyEpoch) throw new AgentHostSnapshotSupersededError()
+  }
+
+  async fetchHistory(cursor?: string): Promise<void> {
+    const active = this.current
+    if (!active || !this.connected) throw new Error('The original Agent Host is offline.')
+    if (cursor !== undefined && cursor !== this.chat.nativeHistoryCursor) throw new Error('The native history cursor changed. Reconnect before loading it.')
+    await this.fetchNativeHistory(active)
+  }
+
+  private fetchNativeHistory(active: ActiveConnection): Promise<void> {
+    if (this.nativeHistoryLoading?.active === active) return this.nativeHistoryLoading.promise
+    const cursor = this.chat.nativeHistoryCursor
+    if (!cursor) throw new Error('The native Agent Host has no earlier history cursor.')
+    const previousCount = this.chat.completedTurns
+    let notify!: () => void
+    let timer: ReturnType<typeof setTimeout>
+    const updated = new Promise<void>((resolve, reject) => {
+      notify = () => {
+        if (this.current !== active || this.chat.nativeHistoryCursor !== cursor || this.chat.completedTurns !== previousCount) resolve()
+      }
+      timer = setTimeout(() => reject(new Error('The native Agent Host did not publish the requested history page.')), 60000)
+      timer.unref()
+    })
+    const unlisten = this.listen(notify)
+    const operation = Promise.all([active.client.request('fetchTurns', { channel: this.target.chatId, cursor }), updated])
+      .then(() => {
+        if (this.current !== active || !this.connected) throw new Error('The connection changed while loading native history.')
+      }).finally(() => {
+        clearTimeout(timer)
+        unlisten()
+        if (this.nativeHistoryLoading?.promise === operation) this.nativeHistoryLoading = undefined
+      })
+    this.nativeHistoryLoading = { active, promise: operation }
+    return operation
+  }
+
+  private async originalHasTurn(id: string, active: ActiveConnection): Promise<boolean> {
+    if (this.current !== active) throw new Error('The connection changed while checking original history.')
+    if (this.historyPage && this.pagedHistory) {
+      const found = historyContainsTurnResponseSchema.parse(await this.requestExtension(active, SNAPSHOT_TRANSFER_METHODS.containsTurn, {
+        channel: this.target.chatId, turnId: id,
+      }))
+      if (this.current !== active || found.epoch !== this.historyPage.epoch) throw new Error('The original history changed while checking delivery. Reconnect before reviewing it.')
+      if (found.found) this.unverifiedCacheTurns.delete(id)
+      return found.found
+    }
+    if (this.chat.hasTurn(id)) return true
+    while (this.chat.nativeHistoryCursor && !this.chat.hasTurn(id)) await this.fetchNativeHistory(active)
+    if (this.current !== active) throw new Error('The connection changed while checking original history.')
+    return this.chat.hasTurn(id)
+  }
+
+  async containsTurn(id: string): Promise<boolean> {
+    z.uuid().parse(id)
+    const active = this.current
+    if (!active || !this.connected) throw new Error('The original Agent Host is offline.')
+    return this.originalHasTurn(id, active)
+  }
+
+  loadHistory(): Promise<void> {
+    const active = this.current
+    if (!active || !this.connected) throw new Error('Reconnect to the original Agent Host before loading earlier history.')
+    if (this.historyLoading?.active === active) return this.historyLoading.promise
+    const beforeTurnId = this.historyPage?.beforeTurnId
+    if (!beforeTurnId && !this.chat.nativeHistoryCursor) throw new Error('No earlier history remains to load.')
+    const epoch = this.historyPage?.epoch
+    const capability = this.chunkedSnapshotCapability()
+    const pageFile = `${this.file}.history-${active.traceId}`
+    const started = performance.now()
+    this.historyError = undefined
+    this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'begin', channel: 'chat', step: 'snapshot' })
+    const operation: Promise<void> = Promise.resolve().then(async () => {
+      try {
+        if (beforeTurnId && epoch && capability && this.pagedHistory) {
+          const received = await receiveChunkedChatSnapshot({
+            baseFilePath: pageFile, target: this.target, subscribe: false, signal: active.abort.signal,
+            capability, history: { before: { epoch, turnId: beforeTurnId } },
+            request: (method, params) => this.requestExtension(active, method, params),
+            onProgress: (progress) => {
+              if (this.current !== active) return
+              this.updateHistoryProgress(progress && { ...progress, kind: 'earlier' })
+            },
+            onChunkSaved: () => { if (this.current === active) this.failures = 0 },
+          })
+          if (this.current !== active || this.historyPage?.epoch !== epoch || this.historyPage.beforeTurnId !== beforeTurnId
+            || !received.history) throw new AgentHostSnapshotSupersededError()
+          const loading = this.historyLoading
+          if (!loading || loading.active !== active) throw new AgentHostSnapshotSupersededError()
+          this.chat.prependHistory(received.snapshot, beforeTurnId)
+          this.historyPage = {
+            ...received.history,
+            ...(received.history.totalTurns !== undefined ? {
+              totalTurns: received.history.totalTurns + loading.counts.filter((item) => item.sequence > received.snapshot.fromSeq).reduce((total, item) => total + item.delta, 0),
+            } : {}),
+          }
+          this.refreshTerminals()
+          this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'ok', channel: 'chat', step: 'snapshot',
+            elapsedMs: performance.now() - started, bytes: received.totalBytes, count: received.chunksTransferred })
+        } else {
+          await this.fetchNativeHistory(active)
+          this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'ok', channel: 'chat', step: 'snapshot', elapsedMs: performance.now() - started })
+        }
+      } catch (error) {
+        this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'error', channel: 'chat', step: 'snapshot', elapsedMs: performance.now() - started, error })
+        if (this.current === active) {
+          this.historyError = error instanceof Error ? error.message : 'Earlier history could not be loaded. Retry when the owner is available.'
+          if (isAgentHostSnapshotSuperseded(error) || error instanceof AgentHostHistoryCursorError) this.offline(active, 'stream-error', error)
+        }
+        throw error
+      } finally {
+        if (beforeTurnId) await removePartialSnapshotFiles(pageFile)
+        if (this.historyLoading?.promise === operation) this.historyLoading = undefined
+        if (this.current === active) {
+          this.historyTransfer = undefined
+          this.emit({ type: 'state' })
+        }
+      }
+    })
+    this.historyLoading = { active, promise: operation, counts: [] }
+    this.emit({ type: 'state' })
+    return operation
   }
 
   get handshake(): InitializeResult {
@@ -179,9 +360,14 @@ export class AgentHostConnection {
         this.commands = saved.commands.map((command) => command.state === 'pending' ? { ...command, state: 'uncertain' } : command)
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Agent Host delivery records are unreadable. No message was sent.') }
       try {
-        const saved = z.object({ schemaVersion: z.literal(2), target: agentHostTargetSchema, chat: z.unknown() }).strict().parse(await readJsonBounded(`${this.file}.cache.json`, AGENT_HOST_LIMITS.cacheBytes))
+        const saved = cacheSchema.parse(await readJsonBounded(`${this.file}.cache.json`, AGENT_HOST_LIMITS.cacheBytes))
         if (agentHostKey(saved.target) !== agentHostKey(this.target)) throw new Error('Cached chat identity changed.')
-        this.chat.snapshot(saved.chat as Snapshot)
+        const chat = new AgentHostChatState(this.target.chatId)
+        chat.snapshot(saved.chat as Snapshot)
+        const history = saved.schemaVersion === 3 ? saved.history : undefined
+        if (history?.beforeTurnId && history.beforeTurnId !== chat.oldestTurnId) throw new Error('The cached history page boundary changed.')
+        this.chat = chat
+        this.historyPage = history
         this.refreshTerminals()
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
@@ -246,6 +432,10 @@ export class AgentHostConnection {
         this.referencedTerminals.clear()
         this.activeTerminals.clear()
         await this.subscribe(this.target.sessionId, active)
+        if (this.current === active && this.error !== undefined) {
+          this.error = undefined
+          this.emit({ type: 'state' })
+        }
         advance('chat')
         await this.subscribe(this.target.chatId, active, true)
         advance('reconcile')
@@ -253,7 +443,7 @@ export class AgentHostConnection {
         this.connected = true
         this.failures = 0
         this.error = undefined
-        await this.reconcile()
+        await this.reconcile(true)
         this.emit({ type: 'state' })
         this.discoverActiveTerminals()
         this.heartbeat = setInterval(() => {
@@ -296,6 +486,50 @@ export class AgentHostConnection {
     }
     this.subscribing.add(resource)
     try {
+      const chunkedCapability = resource === this.target.chatId ? this.chunkedSnapshotCapability() : undefined
+      if (chunkedCapability) {
+        const subscription = active.client.attachSubscription(resource)
+        let activatedOnServer = false
+        try {
+          const received = await receiveChunkedChatSnapshot({
+            baseFilePath: this.file,
+            target: this.target,
+            subscribe: true,
+            signal: active.abort.signal,
+            capability: chunkedCapability,
+            ...(this.pagedHistory ? { history: {} } : {}),
+            request: (method, params) => this.requestExtension(active, method, params),
+            onProgress: (progress) => {
+              if (this.current !== active) return
+              this.updateHistoryProgress(progress && { ...progress, ...(this.pagedHistory ? { kind: 'recent' as const } : {}) })
+            },
+            onChunkSaved: () => {
+              if (this.current === active) this.failures = 0
+            },
+          })
+          activatedOnServer = true
+          if (this.current !== active) {
+            this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'closed', channel, reason: 'transport-closed', elapsedMs: performance.now() - started })
+            return
+          }
+          this.acceptSnapshot(received.snapshot, freshChat, received.history)
+          this.diagnose('connection.subscribe', {
+            traceId: active.traceId, status: 'ok', channel, elapsedMs: performance.now() - started,
+            bytes: received.totalBytes, count: received.chunksTransferred,
+          })
+          void this.pump(subscription, active, resource)
+        } catch (error) {
+          await subscription.close()
+          if (activatedOnServer && this.current === active) {
+            try { await active.client.unsubscribe(resource) }
+            catch (failure) { this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'error', channel, step: 'response', error: failure }) }
+          }
+          throw error
+        } finally {
+          if (this.current !== active || !this.subscribing.has(resource)) await subscription.close()
+        }
+        return
+      }
       const { result, subscription } = await active.client.subscribe(resource, { delivery: { maxLatencyMs: 25 } })
       try {
         if (this.current !== active) {
@@ -304,6 +538,7 @@ export class AgentHostConnection {
         }
         if (!result.snapshot || result.snapshot.resource !== resource) throw new Error('Agent Host did not return the requested snapshot.')
         this.acceptSnapshot(result.snapshot, freshChat)
+        if (resource === this.target.chatId) void removePartialSnapshotFiles(this.file)
         if (agentHostTerminalIdSchema.safeParse(resource).success) this.terminalSubscriptions.set(resource, subscription)
         this.diagnose('connection.subscribe', { traceId: active.traceId, status: 'ok', channel, elapsedMs: performance.now() - started })
         void this.pump(subscription, active, resource)
@@ -323,7 +558,7 @@ export class AgentHostConnection {
     }
   }
 
-  private acceptSnapshot(snapshot: Snapshot, freshChat = false): void {
+  private acceptSnapshot(snapshot: Snapshot, freshChat = false, history?: SnapshotHistoryPage): void {
     if (!Number.isSafeInteger(snapshot.fromSeq) || snapshot.fromSeq < 0 || !this.allowedChannel(snapshot.resource)) throw new Error('Invalid Agent Host snapshot identity.')
     const replaceChat = freshChat && snapshot.resource === this.target.chatId
     if (!replaceChat && (snapshot.resource === this.target.chatId ? this.chat.lastSequence : this.snapshots.get(snapshot.resource)?.fromSeq ?? -1) > snapshot.fromSeq) return
@@ -334,9 +569,25 @@ export class AgentHostConnection {
     }
     if (snapshot.resource === this.target.chatId) {
       // A reconnect may restart serverSeq; keep displayed history until validation succeeds.
+      const previous = this.chat
+      const previousHistory = this.historyPage
+      const wasLoaded = previous.loaded
       const chat = replaceChat ? new AgentHostChatState(this.target.chatId) : this.chat
       chat.snapshot(snapshot)
+      this.unverifiedCacheTurns.clear()
+      if (replaceChat && history && previousHistory?.epoch === history.epoch) {
+        const retained = chat.retainEarlierHistory(previous)
+        if (retained.length) {
+          this.unverifiedCacheTurns = new Set(retained)
+          const hasMore = Boolean(previousHistory.beforeTurnId) || history.totalTurns === undefined
+            || history.totalTurns > chat.completedTurns
+          history = { ...history, beforeTurnId: hasMore ? chat.oldestTurnId : undefined }
+        }
+      }
       this.chat = chat
+      this.historyPage = history
+      this.historyError = undefined
+      if (replaceChat || !wasLoaded) this.historyGeneration = randomUUID()
     } else this.snapshots.set(snapshot.resource, structuredClone(snapshot))
     if (snapshot.resource === this.target.chatId) this.refreshTerminals()
     this.emit({ type: 'snapshot', snapshot })
@@ -361,7 +612,19 @@ export class AgentHostConnection {
         const envelope = event.params
         if (!this.allowedChannel(envelope.channel) || !Number.isSafeInteger(envelope.serverSeq)) throw new Error('Agent Host event identity changed.')
         if (envelope.channel === this.target.chatId) {
+          if (envelope.action.type === 'chat/truncated' && this.historyPage) {
+            this.offline(active, 'stream-error', new AgentHostSnapshotSupersededError('The original history was edited. Reloading its recent window.'))
+            return
+          }
+          const loading = this.historyLoading
+          const previousCount = this.chat.completedTurns
           if (!this.chat.apply(envelope)) continue
+          if (loading?.active === active && this.chat.completedTurns !== previousCount) {
+            if (loading.counts.length >= SNAPSHOT_TRANSFER_LIMITS.maxTailEvents) throw new AgentHostSnapshotSupersededError('History changed too quickly while loading a page.')
+            loading.counts.push({ sequence: envelope.serverSeq, delta: this.chat.completedTurns - previousCount })
+          }
+          if (envelope.action.type === 'chat/truncated') this.historyGeneration = randomUUID()
+          if (this.historyPage?.totalTurns !== undefined) this.historyPage.totalTurns += this.chat.completedTurns - previousCount
           this.refreshTerminals()
         } else {
           const prior = this.snapshots.get(envelope.channel)
@@ -425,9 +688,15 @@ export class AgentHostConnection {
     this.stopTerminal(resource)
   }
 
-  private async reconcile(): Promise<void> {
+  private async reconcile(authoritative = false): Promise<void> {
     let changed = false
-    for (const command of this.commands) if ((command.state === 'pending' || command.state === 'uncertain') && this.chat.hasTurn(command.id)) { command.state = 'confirmed'; changed = true }
+    for (const command of this.commands) {
+      if (command.state !== 'pending' && command.state !== 'uncertain') continue
+      const active = this.current
+      const found = authoritative && active ? await this.originalHasTurn(command.id, active)
+        : this.chat.hasTurn(command.id) && !this.unverifiedCacheTurns.has(command.id)
+      if (found) { command.state = 'confirmed'; changed = true }
+    }
     if (changed) { await this.save(); this.emit({ type: 'state' }) }
   }
 
@@ -607,17 +876,28 @@ export class AgentHostConnection {
       await this.open()
       const active = this.current
       if (!active || !this.connected) throw new Error('Reconnect to the original Agent Host before reviewing delivery.')
-      const response = await active.client.request('subscribe', { channel: this.target.chatId })
-      if (this.current !== active || !this.connected || !response.snapshot) throw new Error('The Agent Host connection changed while reviewing delivery.')
-      this.acceptSnapshot(response.snapshot)
-      await this.reconcile()
+      const chunkedCapability = this.chunkedSnapshotCapability()
+      const snapshot = this.pagedHistory ? undefined : chunkedCapability
+        ? (await receiveChunkedChatSnapshot({
+          baseFilePath: this.file,
+          target: this.target,
+          subscribe: false,
+          signal: active.abort.signal,
+          capability: chunkedCapability,
+          request: (method, params) => this.requestExtension(active, method, params),
+          onChunkSaved: () => { if (this.current === active) this.failures = 0 },
+        })).snapshot
+        : (await active.client.request('subscribe', { channel: this.target.chatId })).snapshot
+      if (this.current !== active || !this.connected || !this.pagedHistory && !snapshot) throw new Error('The Agent Host connection changed while reviewing delivery.')
+      if (snapshot) this.acceptSnapshot(snapshot)
+      await this.reconcile(true)
       await authorize()
       if (this.current !== active || !this.connected) throw new Error('The Agent Host connection changed while reviewing delivery.')
       const latest = this.commands.find((command) => command.id === id)
       if (latest?.state === 'confirmed') return 'confirmed'
       if (latest !== record || latest.state !== 'uncertain') throw new Error('The delivery record changed while reviewing it.')
       if (action === 'check') return 'not-found'
-      if (this.chat.hasTurn(id)) {
+      if (await this.originalHasTurn(id, active)) {
         record.state = 'confirmed'
         try { await this.save() } catch (error) { if (record.state === 'confirmed') record.state = 'uncertain'; throw error }
         this.emit({ type: 'state' })
@@ -645,6 +925,7 @@ export class AgentHostConnection {
     this.diagnose('connection.offline', { traceId: active.traceId, status: 'closed', reason, ...(this.lastSizeFailure ? { error: this.lastSizeFailure } : {}) })
     this.current = undefined
     this.modelCatalog = undefined
+    this.historyTransfer = undefined
     this.connected = false
     clearInterval(this.heartbeat)
     active.abort.abort()
@@ -674,11 +955,17 @@ export class AgentHostConnection {
     clearInterval(this.heartbeat)
     if (this.current) this.offline(this.current, 'shutdown')
     await this.opening?.catch(() => undefined)
+    if (this.historyLoading) await Promise.allSettled([this.historyLoading.promise])
+    if (this.nativeHistoryLoading) await Promise.allSettled([this.nativeHistoryLoading.promise])
     await this.writing
     const chat = this.chat.toSnapshot()
     try {
       if (chat) {
-        const text = JSON.stringify({ schemaVersion: 2, target: this.target, chat }) + '\n'
+        const paged = Boolean(this.historyPage || this.chat.nativeHistoryCursor)
+        const text = JSON.stringify({
+          schemaVersion: paged ? 3 : 2, target: this.target, chat,
+          ...(this.historyPage ? { history: this.historyPage } : {}),
+        }) + '\n'
         const bytes = Buffer.byteLength(text)
         if (bytes > AGENT_HOST_LIMITS.cacheBytes) throw new AgentHostSizeLimitError('cache', AGENT_HOST_LIMITS.cacheBytes, bytes)
         await writeTextAtomic(`${this.file}.cache.json`, text)

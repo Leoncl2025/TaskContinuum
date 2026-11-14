@@ -195,6 +195,8 @@ it('locates the original large chat and restores it through the read-only gatewa
     remote = new AgentHostConnection(target, join(directory, 'caller'), (signal) => connectAgentHostWebSocket(url, {}, signal))
     await remote.open()
     expect(remote.view).toMatchObject({ target, state: 'connected', canSend: false, readOnly: true, protocolVersion: '1.0.0' })
+    expect(remote.view.chat?.turns).toHaveLength(20)
+    while (remote.view.history?.hasMore) await remote.loadHistory()
     expect(remote.view.chat?.turns).toHaveLength(32)
     expect(createHash('sha256').update(JSON.stringify(remote.view.chat)).digest('hex'))
       .toBe(createHash('sha256').update(JSON.stringify(host.snapshot(host.chatId).state)).digest('hex'))

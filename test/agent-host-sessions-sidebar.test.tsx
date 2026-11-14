@@ -15,7 +15,7 @@ afterEach(() => { delete window.agentHost; delete window.remoteVSCode })
 function bridge(sessions: AgentHostSession[] = []): AgentHostBridge {
   return {
     list: vi.fn(async () => ({ sessions, warnings: [] })),
-    watch: vi.fn(), unwatch: vi.fn(), terminal: vi.fn(), releaseTerminal: vi.fn(), send: vi.fn(), resolveDelivery: vi.fn(), cancel: vi.fn(), models: vi.fn(async () => []), onView: vi.fn(() => () => {}),
+    watch: vi.fn(), unwatch: vi.fn(), loadHistory: vi.fn(), terminal: vi.fn(), releaseTerminal: vi.fn(), send: vi.fn(), resolveDelivery: vi.fn(), cancel: vi.fn(), models: vi.fn(async () => []), onView: vi.fn(() => () => {}), onHistoryTransfer: vi.fn(() => () => {}),
     creationWorkers: vi.fn(async () => []), creations: vi.fn(async () => []), create: vi.fn(), creationStatus: vi.fn(), bindCreation: vi.fn(), abandonCreation: vi.fn(),
     localCreationHosts: vi.fn(async () => []), localCreations: vi.fn(async () => []), createLocal: vi.fn(), localCreationStatus: vi.fn(),
   }
@@ -27,6 +27,48 @@ function binding(name: string, title = 'Agent Host') {
 }
 
 describe('AgentHostSessionsSidebar', () => {
+  it('overlays the exact session row with real byte progress without intercepting its controls', async () => {
+    const first = binding('transfer-first', 'Transferring conversation')
+    const second = binding('transfer-second', 'Other conversation')
+    window.agentHost = bridge()
+    const props = { taskId: 'T-0002', taskReady: true, bindings: { 'T-0002': [first, second] },
+      activeKey: sessionBindingKey(first), onSelect: vi.fn(), onDetach: vi.fn(async () => {}),
+      onLink: vi.fn(), onDevices: vi.fn(), onClose: vi.fn() }
+    const progress = { receivedBytes: 1024 * 1024, totalBytes: 117.1 * 1024 * 1024, kind: 'recent' as const }
+    const rendered = render(<AgentHostSessionsSidebar {...props} historyTransfers={{ [agentHostKey(first.agentHost)]: progress }} />)
+    const row = screen.getByRole('treeitem', { name: first.title })
+    const other = screen.getByRole('treeitem', { name: second.title })
+    const bar = within(row).getByRole('progressbar', { name: `History transfer for ${first.title}` })
+    expect(Number(bar.getAttribute('value'))).toBeCloseTo(100 / 117.1)
+    expect(bar).toHaveAttribute('aria-valuetext', 'Recent history: 0.8% (1.0 / 117.1 MiB)')
+    expect(within(row).getByText('0.8%')).toBeVisible()
+    expect(within(row).getByText(first.title)).toBeVisible()
+    expect(within(other).queryByRole('progressbar')).not.toBeInTheDocument()
+    const user = userEvent.setup()
+    await user.click(within(row).getByRole('button', { name: `Open ${first.title}` }))
+    expect(props.onSelect).toHaveBeenCalledExactlyOnceWith(first)
+    await user.click(within(row).getByRole('button', { name: `Show details for ${first.title}` }))
+    expect(within(row).getByRole('group', { name: `Details for ${first.title}` })).toBeVisible()
+    expect(within(row).getByRole('button', { name: `Unlink ${first.title}` })).toBeEnabled()
+    rendered.rerender(<AgentHostSessionsSidebar {...props} historyTransfers={{}} />)
+    expect(within(row).queryByRole('progressbar')).not.toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: `Open ${first.title}` })).toHaveTextContent(first.owner.machineName)
+    expect(window.agentHost.watch).not.toHaveBeenCalled()
+  })
+
+  it('keeps progress tied to owner and chat identities and exposes resume information', () => {
+    const first = binding('same-transfer-id', 'Same title')
+    const secondTarget = { ...first.agentHost, owner: { clientId: crypto.randomUUID(), machineName: 'Other owner' } }
+    const second = { ...first, owner: secondTarget.owner, agentHost: secondTarget }
+    window.agentHost = bridge()
+    render(<AgentHostSessionsSidebar taskId="T-0002" taskReady bindings={{ 'T-0002': [first, second] }}
+      historyTransfers={{ [agentHostKey(second.agentHost)]: { receivedBytes: 75 * 1024, totalBytes: 100 * 1024, resumed: true } }}
+      onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} />)
+    const rows = screen.getAllByRole('treeitem', { name: first.title })
+    expect(within(rows[0]).queryByRole('progressbar')).not.toBeInTheDocument()
+    expect(within(rows[1]).getByRole('progressbar')).toHaveAttribute('aria-valuetext', 'Resuming history: 75% (75.0 / 100.0 KiB) - Resumed from saved progress')
+  })
+
   it('shows compact rows without a duplicate task heading and expands details separately from activation and unlink', async () => {
     const first = { ...binding('compact-first', 'First conversation'), ownerIsRemote: true }
     const second = binding('compact-second', 'Second conversation')

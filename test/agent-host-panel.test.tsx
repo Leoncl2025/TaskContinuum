@@ -33,7 +33,8 @@ function fixture() {
     abandonCreation: vi.fn(async () => { throw new Error('No creation operation in the chat panel.') }),
     models: vi.fn(async () => [{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }]),
     watch: vi.fn(async () => { watchId = crypto.randomUUID(); for (const listener of listeners) listener({ id: watchId, view: structuredClone(view) }); return watchId }),
-    unwatch: vi.fn(async () => {}), terminal: vi.fn(async () => {}), releaseTerminal: vi.fn(async () => {}),
+    unwatch: vi.fn(async () => {}), loadHistory: vi.fn(async () => {}), terminal: vi.fn(async () => {}), releaseTerminal: vi.fn(async () => {}),
+    onHistoryTransfer: vi.fn(() => () => {}),
     send: vi.fn(async () => {}), resolveDelivery: vi.fn(async () => 'not-found' as const), cancel: vi.fn(async () => {}),
     onView: (listener) => { listeners.add(listener); return () => listeners.delete(listener) },
   }
@@ -651,6 +652,95 @@ describe('Agent Host chat UI', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send to Agent Host' })).toBeEnabled())
     expect(bridge.send).toHaveBeenCalledOnce()
     expect(bridge.cancel).not.toHaveBeenCalled()
+  })
+
+  it('keeps transfer details out of the transcript while preserving retained turns during resume', async () => {
+    const setup = fixture()
+    const initialChat = setup.view.chat!
+    setup.view.state = 'connecting'
+    setup.view.canSend = false
+    setup.view.chat = undefined
+    setup.view.historyTransfer = { receivedBytes: 50 * 1024 * 1024, totalBytes: 100 * 1024 * 1024 }
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onClose={vi.fn()} onDetach={vi.fn()} />)
+    expect(await screen.findByRole('status', { name: 'Loading recent history...' })).toBeVisible()
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+    expect(screen.queryByText(/50.0 \/ 100.0 MiB/)).not.toBeInTheDocument()
+
+    setup.view.historyTransfer = { receivedBytes: 75 * 1024 * 1024, totalBytes: 100 * 1024 * 1024, resumed: true }
+    act(() => setup.emit())
+    expect(screen.getByRole('status', { name: 'Loading recent history...' })).toBeVisible()
+    expect(screen.queryByText(/75.0 \/ 100.0 MiB/)).not.toBeInTheDocument()
+
+    setup.view.chat = initialChat
+    responseHistory(setup.view, [{ kind: 'markdown' as ResponsePartKind.Markdown, id: 'retained-chunked', content: 'Loaded over chunks' }])
+    setup.view.state = 'connected'
+    setup.view.canSend = true
+    setup.view.historyTransfer = undefined
+    act(() => setup.emit())
+    expect(screen.getByText('Loaded over chunks')).toBeVisible()
+
+    // Background reconnect with chunked resume keeps the existing conversation visible alongside status.
+    setup.view.state = 'connecting'
+    setup.view.canSend = false
+    setup.view.chat = undefined
+    setup.view.historyTransfer = { receivedBytes: 40 * 1024 * 1024, totalBytes: 100 * 1024 * 1024, resumed: true }
+    act(() => setup.emit())
+    expect(screen.getByText('Loaded over chunks')).toBeVisible()
+    expect(screen.getByRole('status', { name: 'Loading recent history...' })).toBeVisible()
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+  })
+
+  it('loads an earlier page on upward browsing and anchors the existing turns without changing the draft', async () => {
+    const setup = fixture()
+    responseHistory(setup.view, [{ kind: 'markdown' as ResponsePartKind.Markdown, id: 'current-answer', content: 'Current visible answer' }])
+    setup.view.history = { hasMore: true, loadedTurns: 1, totalTurns: 10, loading: false }
+    let release!: () => void
+    vi.mocked(setup.bridge.loadHistory).mockImplementation(async () => {
+      setup.view.history!.loading = true
+      setup.emit()
+      await new Promise<void>((resolve) => { release = resolve })
+      const older = { ...structuredClone(setup.view.chat!.turns[0]), id: 'older-turn',
+        responseParts: [{ kind: 'markdown' as ResponsePartKind.Markdown, id: 'older-answer', content: 'Earlier visible answer' }] }
+      setup.view.chat!.turns.unshift(older)
+      setup.view.history = { hasMore: true, loadedTurns: 2, totalTurns: 10, loading: false }
+      setup.emit()
+    })
+    const rendered = render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onClose={vi.fn()} onDetach={vi.fn()} />)
+    await screen.findByText('Current visible answer')
+    const current = rendered.container.querySelector('[data-turn-id="activity-turn"]')
+    const input = screen.getByRole('textbox', { name: 'Message Agent Host' })
+    fireEvent.change(input, { target: { value: 'Keep my unsent draft' } })
+    const log = screen.getByRole('log')
+    const grow = await browseHistory(log)
+    fireEvent.scroll(log, { target: { scrollTop: 80 } })
+    await waitFor(() => expect(setup.bridge.loadHistory).toHaveBeenCalledOnce())
+    expect(screen.getByRole('button', { name: 'Loading earlier messages...' })).toBeDisabled()
+    fireEvent.scroll(log, { target: { scrollTop: 60 } })
+    expect(setup.bridge.loadHistory).toHaveBeenCalledOnce()
+    grow(3200)
+    await act(async () => { release() })
+    await screen.findByText('Earlier visible answer')
+    expect(log.scrollTop).toBe(1280)
+    expect(rendered.container.querySelector('[data-turn-id="activity-turn"]')).toBe(current)
+    expect(input).toHaveValue('Keep my unsent draft')
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+  })
+
+  it('surfaces an earlier-page failure without discarding messages or enabling offline history requests', async () => {
+    const setup = fixture()
+    responseHistory(setup.view, [{ kind: 'markdown' as ResponsePartKind.Markdown, id: 'kept-answer', content: 'Keep this loaded answer' }])
+    setup.view.history = { hasMore: true, loadedTurns: 1, loading: false }
+    vi.mocked(setup.bridge.loadHistory).mockRejectedValueOnce(new Error('Earlier page failed verification.'))
+    const user = userEvent.setup()
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onClose={vi.fn()} onDetach={vi.fn()} />)
+    await user.click(await screen.findByRole('button', { name: 'Load earlier messages' }))
+    expect(await screen.findByText('Earlier page failed verification.')).toHaveAttribute('role', 'alert')
+    expect(screen.getByText('Keep this loaded answer')).toBeVisible()
+    act(() => { setup.view.state = 'offline'; setup.emit() })
+    expect(screen.getByRole('button', { name: 'Load earlier messages' })).toBeDisabled()
+    expect(screen.getByText('Only previously loaded history is available offline.')).toBeVisible()
+    expect(setup.bridge.send).not.toHaveBeenCalled()
   })
 
   it('keeps loaded history when a hidden chat resumes with a connecting view, then accepts fresh updates and an empty reset', async () => {

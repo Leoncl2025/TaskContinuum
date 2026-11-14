@@ -51,7 +51,8 @@ function fixture() {
       return { ...operation, state: 'abandoned' as const, error: undefined }
     }),
     models: vi.fn(async () => []), watch: vi.fn(async () => 'watch'),
-    unwatch: vi.fn(async () => {}), terminal: vi.fn(async () => {}), releaseTerminal: vi.fn(async () => {}),
+    unwatch: vi.fn(async () => {}), loadHistory: vi.fn(async () => {}), terminal: vi.fn(async () => {}), releaseTerminal: vi.fn(async () => {}),
+    onHistoryTransfer: vi.fn(() => () => {}),
     send: vi.fn(async () => {}), resolveDelivery: vi.fn(async () => 'not-found' as const), cancel: vi.fn(async () => {}),
     onView: () => () => {},
   }

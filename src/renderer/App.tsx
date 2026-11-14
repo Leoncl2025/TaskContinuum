@@ -23,7 +23,7 @@ import type { TaskCreationMode } from './components/TaskCreationDialog'
 import { RemoteDevicesDialog } from './components/RemoteDevicesDialog'
 import { AgentHostPanel } from './components/AgentHostPanel'
 import { AgentHostSessionsSidebar } from './components/AgentHostSessionsSidebar'
-import type { AgentHostSession } from '../shared/agentHost'
+import type { AgentHostHistoryTransfer, AgentHostSession, AgentHostTarget } from '../shared/agentHost'
 import { agentHostKey } from '../shared/agentHost'
 import { useSessionTitles } from './chat/useSessionTitles'
 import { machineLabel, useMachineAliases, useWorkspaceGitSync } from './machineAliases'
@@ -73,6 +73,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   onPublishRepository(workspace: WorkspaceSnapshot): void
 }) {
   const workspace = workspaces.state.current
+  const workspaceRoot = workspace?.root
   const sessionTitles = useSessionTitles(workspace?.id)
   const selection = useWorkbenchSelection(workspace?.id)
   const aliases = useMachineAliases()
@@ -118,6 +119,24 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   }))
   const [agentHostBusy, setAgentHostBusy] = useState(false)
   const [agentHostRevision, setAgentHostRevision] = useState(0)
+  const [historyTransfers, setHistoryTransfers] = useState<Record<string, AgentHostHistoryTransfer>>({})
+  const reportHistoryTransfer = useCallback((target: AgentHostTarget, progress: AgentHostHistoryTransfer | undefined) => {
+    const key = agentHostKey(target)
+    setHistoryTransfers((current) => {
+      if (!progress && !current[key]) return current
+      const next = { ...current }
+      if (progress) next[key] = progress
+      else delete next[key]
+      return next
+    })
+  }, [])
+  useEffect(() => {
+    const bridge = window.agentHost
+    if (!bridge || !workspaceRoot) return
+    return bridge.onHistoryTransfer((event) => {
+      if (event.root === workspaceRoot) reportHistoryTransfer(event.target, event.progress)
+    })
+  }, [workspaceRoot, reportHistoryTransfer])
   const creationLifetime = useRef({ active: false })
   const sessionViewLifetime = useRef({ active: false })
   const currentTaskId = useRef(selectedId)
@@ -387,7 +406,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
         <button type="button" className="activity" aria-label="Preferences" title="Preferences and integration status" onClick={() => setDialog('settings')}><Icon name="settings-gear" /></button>
       </nav>
 
-      {sidebarVisible && (sidebarView === 'sessions' ? <AgentHostSessionsSidebar key={task?.id ?? 'no-task'} taskId={task?.id} taskTitle={task?.title} taskReady={Boolean(task && links.ready)} bindings={bindings} activeKey={activeBinding ? sessionBindingKey(activeBinding) : undefined} localOwnerId={links.localOwner?.clientId} cachedTitles={sessionTitles.titles} titleCacheError={sessionTitles.error} onTitles={sessionTitles.remember} busy={links.busy} onSelect={task ? (binding) => selectSession(task.id, binding) : undefined} onDetach={task ? (binding) => detachSession(task.id, binding) : undefined} onLink={linkAgentHost} onCreated={agentHostCreated} onDevices={() => setDialog('remote-devices')} onClose={toggleSidebar} /> : <TaskSidebar key={createdTaskId ?? 'initial'} tasks={tasks} selectedId={selectedId} query={query} onQuery={setQuery} onSelect={selectTask} onCreate={onCreateRepository} onCreateTask={openTaskCreation} creationDisabled={!workspaces.available || workspaceLocked || workspaces.busy} onClose={toggleSidebar} workspace={workspace ?? undefined} workspaceControls={workspaceControls} />)}
+      {sidebarVisible && (sidebarView === 'sessions' ? <AgentHostSessionsSidebar key={task?.id ?? 'no-task'} taskId={task?.id} taskTitle={task?.title} taskReady={Boolean(task && links.ready)} bindings={bindings} activeKey={activeBinding ? sessionBindingKey(activeBinding) : undefined} localOwnerId={links.localOwner?.clientId} cachedTitles={sessionTitles.titles} historyTransfers={historyTransfers} titleCacheError={sessionTitles.error} onTitles={sessionTitles.remember} busy={links.busy} onSelect={task ? (binding) => selectSession(task.id, binding) : undefined} onDetach={task ? (binding) => detachSession(task.id, binding) : undefined} onLink={linkAgentHost} onCreated={agentHostCreated} onDevices={() => setDialog('remote-devices')} onClose={toggleSidebar} /> : <TaskSidebar key={createdTaskId ?? 'initial'} tasks={tasks} selectedId={selectedId} query={query} onQuery={setQuery} onSelect={selectTask} onCreate={onCreateRepository} onCreateTask={openTaskCreation} creationDisabled={!workspaces.available || workspaceLocked || workspaces.busy} onClose={toggleSidebar} workspace={workspace ?? undefined} workspaceControls={workspaceControls} />)}
       {!compact && sidebarVisible && <WorkbenchSash layout={layout} panel="sidebar" onResize={(width) => changePanelWidth('sidebar', width)} onReset={() => changePanelWidth('sidebar', defaultLayout.sidebarWidth)} />}
 
       <Activity mode={compact && sidebarVisible ? 'hidden' : 'visible'}><main className="main-panel" aria-label="Task workspace" aria-keyshortcuts="Control+Shift+PageUp Control+Shift+PageDown">

@@ -3,6 +3,7 @@ import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import type { AgentHostTarget } from '../shared/agentHost'
+import { agentHostKey } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
 import { agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminalIdSchema } from './agentHostProtocol'
 import { logAgentHostDiagnostic } from './agentHostDiagnostics'
@@ -17,11 +18,64 @@ import { handleDesktopOperation } from './desktopOperations'
 
 export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>, manager: AgentHostManager) {
   const watches = new Map<string, { window: BrowserWindow; root: string; target: AgentHostTarget; connection: AgentHostConnection; leases: Map<string, Set<string>>; close(): void }>()
+  const progressWatches = new Map<string, { schedule(): void; close(): void }>()
   let consenting: Promise<void> | undefined
   async function current(event: IpcMainInvokeEvent, window: BrowserWindow, root: string, target?: AgentHostTarget): Promise<void> {
     if (window.isDestroyed() || window.webContents.isDestroyed() || requireWindow(event) !== window || await currentRoot() !== root) throw new Error('The workspace or window changed. No message was sent.')
     if (target) await manager.authorize(root, target)
     if (window.isDestroyed() || requireWindow(event) !== window || await currentRoot() !== root) throw new Error('The workspace changed while verifying the session.')
+  }
+  const progressKey = (window: BrowserWindow, root: string, target: AgentHostTarget) => JSON.stringify([window.id, root, agentHostKey(target)])
+  function trackProgress(event: IpcMainInvokeEvent, window: BrowserWindow, root: string, target: AgentHostTarget, connection: AgentHostConnection): void {
+    const key = progressKey(window, root, target)
+    if (progressWatches.has(key)) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let publishing = false
+    let dirty = false
+    let stopped = false
+    let lastProgress: string | undefined
+    const close = () => {
+      if (stopped) return
+      stopped = true
+      clearTimeout(timer)
+      unlisten()
+      progressWatches.delete(key)
+      if (lastProgress !== '' && !window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('agent-host:history-transfer', { root, target })
+      }
+    }
+    const publish = async () => {
+      timer = undefined
+      if (stopped || publishing) return
+      publishing = true
+      dirty = false
+      try {
+        await current(event, window, root, target)
+        if (stopped) return
+        const progress = connection.historyProgress
+        const signature = progress ? JSON.stringify(progress) : ''
+        if (signature !== lastProgress) {
+          lastProgress = signature
+          window.webContents.send('agent-host:history-transfer', { root, target, progress })
+        }
+        const observed = [...watches.values()].some((watch) => watch.window === window && watch.root === root && watch.connection === connection)
+        if (!observed && !progress && connection.state !== 'connecting') close()
+      } catch (error) {
+        logAgentHostDiagnostic('connection.subscribe', { target, status: 'error', step: 'authorization', error })
+        close()
+      } finally {
+        publishing = false
+        if (dirty && !stopped) schedule()
+      }
+    }
+    const schedule = () => {
+      if (stopped) return
+      dirty = true
+      if (!publishing && !timer) timer = setTimeout(() => { void publish() }, 25)
+    }
+    const unlisten = connection.listen((event) => { if (event.type === 'state' || event.type === 'history-progress') schedule() })
+    progressWatches.set(key, { schedule, close })
+    schedule()
   }
   handleDesktopOperation(ipcMain, 'agent-host:list', async (event) => {
     const window = requireWindow(event)
@@ -132,6 +186,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     }
     const schedule = (event?: AgentHostEvent) => {
       if (stopped) return
+      if (event?.type === 'history-progress') return
       dirty = true
       urgent ||= event !== undefined && isAgentHostTurnBoundary(event)
       if (refreshing) return
@@ -145,10 +200,12 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
       clearTimeout(timer)
       unlisten()
       watches.delete(id)
+      progressWatches.get(progressKey(window, root, target))?.schedule()
       for (const [resource, owners] of leases) owners.forEach(() => connection.releaseTerminal(resource))
       leases.clear()
     }
     watches.set(id, { window, root, target, connection, leases, close })
+    trackProgress(event, window, root, target, connection)
     schedule()
     void connection.open().catch(() => schedule())
     return id
@@ -158,6 +215,17 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     const watch = watches.get(z.uuid().parse(value))
     if (watch && watch.window !== window) throw new Error('This view belongs to another window.')
     watch?.close()
+  })
+  handleDesktopOperation(ipcMain, 'agent-host:load-history', async (event, value: unknown) => {
+    const window = requireWindow(event)
+    const id = z.uuid().parse(value)
+    const watch = watches.get(id)
+    if (!watch || watch.window !== window) throw new Error('This Agent Host view is no longer active.')
+    await current(event, window, watch.root, watch.target)
+    if (watches.get(id) !== watch) throw new Error('This Agent Host view is no longer active.')
+    await watch.connection.loadHistory()
+    await current(event, window, watch.root, watch.target)
+    if (watches.get(id) !== watch) throw new Error('This Agent Host view is no longer active.')
   })
   handleDesktopOperation(ipcMain, 'agent-host:terminal', async (event, watchValue: unknown, resourceValue: unknown, leaseValue: unknown, retryValue?: unknown) => {
     const window = requireWindow(event)
@@ -255,5 +323,8 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     const connection = await manager.connection(root, target)
     return connection.cancel(turnId, () => current(event, window, root, target))
   })
-  return { close: () => { for (const watch of watches.values()) watch.close() } }
+  return { close: () => {
+    for (const watch of watches.values()) watch.close()
+    for (const progress of progressWatches.values()) progress.close()
+  } }
 }

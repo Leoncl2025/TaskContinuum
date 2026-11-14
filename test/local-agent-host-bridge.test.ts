@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { registerAgentHostBridge } from '../src/main/agentHostBridge'
 import type { AgentHostManager } from '../src/main/agentHostManager'
 import type { AgentHostEvent } from '../src/main/agentHostConnection'
+import type { AgentHostHistoryTransfer } from '../src/shared/agentHost'
 import type { ActionEnvelope } from '@microsoft/agent-host-protocol'
 import type { LocalAgentHostCreateRequest, LocalAgentHostCreation } from '../src/shared/localAgentHostCreation'
 import type { AgentHostCreateRequest, AgentHostCreationLocation, AgentHostWorker } from '../src/shared/agentHostCreation'
@@ -38,9 +39,9 @@ function fixture() {
     workers: vi.fn<(root: string, taskId: string, location: AgentHostCreationLocation) => Promise<AgentHostWorker[]>>(async () => []),
     create: vi.fn(async (_root: string, request: AgentHostCreateRequest, authorize: () => Promise<void>) => { await authorize(); return { ...request, state: 'creating' as const } }),
   } }
-  registerAgentHostBridge(requireWindow, currentRoot, manager as unknown as AgentHostManager)
+  const registered = registerAgentHostBridge(requireWindow, currentRoot, manager as unknown as AgentHostManager)
   const invoke = (channel: string, ...values: unknown[]) => ipc.handlers.get(`agent-host:${channel}`)!({} as IpcMainInvokeEvent, ...values)
-  return { request, result, localCreations, manager, currentRoot, invoke, window,
+  return { request, result, localCreations, manager, currentRoot, invoke, window, close: registered.close,
     change: (what: 'root' | 'window' | 'webContents' | 'identity') => {
       if (what === 'root') root = 'Q:\\different-workspace'
       if (what === 'window') destroyed = true
@@ -54,11 +55,14 @@ function terminalFixture() {
   const target = { sessionId: 'copilotcli:/original', chatId: 'ahp-chat:/original', owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
   const connection = {
     view: { target, state: 'connected' },
+    state: 'connected',
+    historyProgress: undefined as AgentHostHistoryTransfer | undefined,
     open: vi.fn(async () => {}),
     listen: vi.fn<(listener: (event: AgentHostEvent) => void) => () => void>(() => () => {}),
     retainTerminal: vi.fn(),
     terminal: vi.fn(async () => {}),
     releaseTerminal: vi.fn(),
+    loadHistory: vi.fn(async () => {}),
     resolveDelivery: vi.fn(async (_id: string, _action: 'check' | 'abandon', authorize: () => Promise<void>) => { await authorize(); return 'not-found' as const }),
   }
   const manager = Object.assign(setup.manager, {
@@ -69,6 +73,96 @@ function terminalFixture() {
 }
 
 describe('timely Agent Host view publication', () => {
+  it('updates active transfer bytes through the lightweight channel without republishing chat history', async () => {
+    vi.useFakeTimers()
+    const setup = terminalFixture()
+    const listeners = new Set<(event: AgentHostEvent) => void>()
+    setup.connection.listen.mockImplementation((listener) => { listeners.add(listener); return () => listeners.delete(listener) })
+    setup.connection.historyProgress = { receivedBytes: 10, totalBytes: 100 }
+    try {
+      await setup.invoke('watch', setup.target)
+      await vi.advanceTimersByTimeAsync(25)
+      const send = vi.mocked(setup.window.webContents.send)
+      send.mockClear()
+      Object.defineProperty(setup.connection, 'view', { get: () => { throw new Error('Byte progress must not clone the active chat.') } })
+      setup.connection.historyProgress = { receivedBytes: 80, totalBytes: 100 }
+      for (const listener of listeners) listener({ type: 'history-progress' })
+      await vi.advanceTimersByTimeAsync(25)
+      expect(send).toHaveBeenCalledExactlyOnceWith('agent-host:history-transfer', { root: 'Q:\\workspace', target: setup.target, progress: setup.connection.historyProgress })
+    } finally {
+      setup.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps lightweight progress updating after unwatch without reading the full conversation', async () => {
+    vi.useFakeTimers()
+    const setup = terminalFixture()
+    const listeners = new Set<(event: AgentHostEvent) => void>()
+    setup.connection.listen.mockImplementation((listener) => { listeners.add(listener); return () => listeners.delete(listener) })
+    setup.connection.historyProgress = { receivedBytes: 10, totalBytes: 100 }
+    try {
+      const id = await setup.invoke('watch', setup.target)
+      await vi.advanceTimersByTimeAsync(25)
+      await setup.invoke('unwatch', id)
+      const send = vi.mocked(setup.window.webContents.send)
+      send.mockClear()
+      Object.defineProperty(setup.connection, 'view', { get: () => { throw new Error('Progress must not clone chat history.') } })
+      setup.connection.historyProgress = { receivedBytes: 80, totalBytes: 100, kind: 'recent' }
+      for (const listener of listeners) listener({ type: 'state' })
+      await vi.advanceTimersByTimeAsync(25)
+      expect(send).toHaveBeenCalledExactlyOnceWith('agent-host:history-transfer', { root: 'Q:\\workspace', target: setup.target, progress: setup.connection.historyProgress })
+      expect(listeners.size).toBe(1)
+      send.mockClear()
+      setup.connection.historyProgress = undefined
+      for (const listener of listeners) listener({ type: 'state' })
+      await vi.advanceTimersByTimeAsync(25)
+      expect(send).toHaveBeenCalledExactlyOnceWith('agent-host:history-transfer', { root: 'Q:\\workspace', target: setup.target, progress: undefined })
+      expect(listeners.size).toBe(0)
+    } finally {
+      setup.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears detached progress rather than publishing data after the workspace changes', async () => {
+    vi.useFakeTimers()
+    const setup = terminalFixture()
+    const listeners = new Set<(event: AgentHostEvent) => void>()
+    setup.connection.listen.mockImplementation((listener) => { listeners.add(listener); return () => listeners.delete(listener) })
+    setup.connection.historyProgress = { receivedBytes: 10, totalBytes: 100 }
+    try {
+      const id = await setup.invoke('watch', setup.target)
+      await vi.advanceTimersByTimeAsync(25)
+      await setup.invoke('unwatch', id)
+      const send = vi.mocked(setup.window.webContents.send)
+      send.mockClear()
+      setup.change('root')
+      setup.connection.historyProgress = { receivedBytes: 80, totalBytes: 100 }
+      for (const listener of listeners) listener({ type: 'state' })
+      await vi.advanceTimersByTimeAsync(25)
+      expect(send).toHaveBeenCalledExactlyOnceWith('agent-host:history-transfer', { root: 'Q:\\workspace', target: setup.target })
+      expect(listeners.size).toBe(0)
+    } finally {
+      setup.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('loads history only for the active authorized window and rechecks the workspace after loading', async () => {
+    const setup = terminalFixture()
+    try {
+      const id = await setup.invoke('watch', setup.target)
+      await setup.invoke('load-history', id)
+      expect(setup.connection.loadHistory).toHaveBeenCalledOnce()
+      await expect(setup.invoke('load-history', randomUUID())).rejects.toThrow('no longer active')
+      setup.connection.loadHistory.mockImplementationOnce(async () => { setup.change('root') })
+      await expect(setup.invoke('load-history', id)).rejects.toThrow('workspace')
+    } finally {
+      setup.close()
+    }
+  })
+
   it('publishes turn boundaries without the text debounce and preserves updates during a publication', async () => {
     vi.useFakeTimers()
     const setup = terminalFixture()
