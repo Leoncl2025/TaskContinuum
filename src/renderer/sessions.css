@@ -55,7 +55,7 @@
 .ahp-chat-status { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; white-space: nowrap; }
 .ahp-chat-status > span:first-child { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }
 .ahp-chat-status[data-state="Connected"] > span:first-child { background: var(--green); }
-.ahp-chat-status:is([data-state="Connecting..."], [data-state="Loading recent history..."], [data-state="Loading earlier history..."], [data-state="Agent responding"], [data-state="Delivery pending"]) > span:first-child { background: var(--accent); }
+.ahp-chat-status:is([data-state="Connecting..."], [data-state="Syncing history..."], [data-state="Resuming history..."], [data-state="Loading recent history..."], [data-state="Loading earlier history..."], [data-state="Agent responding"], [data-state="Delivery pending"]) > span:first-child { background: var(--accent); }
 .ahp-chat-status:is([data-state="Connection failed"], [data-state="Desktop update required"]) > span:first-child { background: var(--error); }
 .ahp-chat-machine { display: inline-flex; align-items: center; min-width: 0; gap: 6px; }
 .ahp-chat-machine > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -19,7 +19,7 @@ import type { AgentHostHistoryTransfer } from '../src/shared/agentHost'
 import { startAgentHostFixture } from './agent-host-fixture'
 import { AgentHostChatState, CHAT_HISTORY_PAGE_LIMITS } from '../src/main/agentHostState'
 
-// Keep byte-range regressions exercising a gateway without the newer paging capability.
+// Keep byte-range regressions exercising a gateway without paging or completed-cache capabilities.
 async function connectAgentHostWebSocket(url: string, headers: Record<string, string>, signal: AbortSignal): Promise<AhpTransport> {
   const inner = await connectPagedAgentHostWebSocket(url, headers, signal)
   return {
@@ -28,13 +28,304 @@ async function connectAgentHostWebSocket(url: string, headers: Record<string, st
       const frame = await inner.recv()
       if (frame?.kind !== 'text') return frame
       const message = JSON.parse(frame.text) as { result?: { _meta?: Record<string, unknown> } }
-      if (!message.result?._meta?.taskcontinuumPagedChatHistory) return frame
+      if (!message.result?._meta) return frame
       delete message.result._meta.taskcontinuumPagedChatHistory
+      delete message.result._meta.taskcontinuumChatSnapshotCache
       return { ...frame, text: JSON.stringify(message) }
     },
     close: () => inner.close(),
   }
 }
+
+it.each(['recent', 'full', 'legacy'] as const)('does not re-download unchanged %s history after a desktop restart', async (mode) => {
+  const f = await startChunkedGatewayFixture()
+  let remote: AgentHostConnection | undefined
+  let receivedBytes = 0
+  const methods: string[] = []
+  const responses: string[] = []
+  const transport = async (signal: AbortSignal): Promise<AhpTransport> => {
+    const inner = await connectPagedAgentHostWebSocket(f.url, {}, signal)
+    return {
+      send: (message) => {
+        const request = (typeof message === 'string' ? JSON.parse(message) : message) as { method?: string }
+        if (request.method) methods.push(request.method)
+        return inner.send(message)
+      },
+      recv: async () => {
+        const frame = await inner.recv()
+        if (frame?.kind !== 'text') return frame
+        receivedBytes += Buffer.byteLength(frame.text)
+        const message = JSON.parse(frame.text) as { result?: { mode?: string; _meta?: Record<string, unknown> } }
+        if (message.result?.mode) responses.push(message.result.mode)
+        if (mode !== 'recent' && message.result?._meta?.taskcontinuumPagedChatHistory) {
+          delete message.result._meta.taskcontinuumPagedChatHistory
+          if (mode === 'legacy') delete message.result._meta.taskcontinuumChatSnapshotCache
+          return { ...frame, text: JSON.stringify(message) }
+        }
+        return frame
+      },
+      close: () => inner.close(),
+    }
+  }
+  try {
+    f.host.historyText(1, 'Completed response '.repeat(48 * 1024))
+    remote = new AgentHostConnection(f.target, f.callerDirectory, transport)
+    await remote.open()
+    const expected = historyDigest(remote.view.chat!)
+    expect(methods).toContain(SNAPSHOT_TRANSFER_METHODS.chunk)
+    await remote.close()
+    expect((await readdir(join(f.callerDirectory, 'agent-host'))).some((name) => name.includes('.snapshot.part'))).toBe(false)
+    methods.length = 0
+    responses.length = 0
+    receivedBytes = 0
+    remote = new AgentHostConnection(f.target, f.callerDirectory, transport)
+    await remote.open()
+    expect(methods).not.toContain(SNAPSHOT_TRANSFER_METHODS.chunk)
+    expect(responses).toContain(mode === 'legacy' ? 'chunked' : 'cached')
+    if (mode === 'legacy') expect(methods).toContain(SNAPSHOT_TRANSFER_METHODS.activate)
+    expect(receivedBytes).toBeLessThan(16 * 1024)
+    expect(historyDigest(remote.view.chat!)).toBe(expected)
+    expect(remote.view.historyTransfer).toBeUndefined()
+    expect(remote.state).toBe('connected')
+    expect(f.host.dispatches).toEqual([])
+  } finally {
+    await remote?.close()
+    await f.close()
+  }
+})
+
+it.each(['response', 'draft', 'truncation'] as const)('refreshes a completed cache when the owner changes its %s', async (change) => {
+  const f = await startChunkedGatewayFixture()
+  let remote: AgentHostConnection | undefined
+  const modes: string[] = []
+  const transport = async (signal: AbortSignal): Promise<AhpTransport> => {
+    const inner = await connectPagedAgentHostWebSocket(f.url, {}, signal)
+    return {
+      send: (message) => inner.send(message),
+      recv: async () => {
+        const frame = await inner.recv()
+        if (frame?.kind === 'text') {
+          const message = JSON.parse(frame.text) as { result?: { mode?: string } }
+          if (message.result?.mode) modes.push(message.result.mode)
+        }
+        return frame
+      },
+      close: () => inner.close(),
+    }
+  }
+  const id = randomUUID()
+  try {
+    f.host.action({ type: 'chat/turnStarted', turnId: id, startedAt: new Date().toISOString(), message: { text: 'Current question', origin: { kind: 'user' } } })
+    f.host.action({ type: 'chat/responsePart', turnId: id, part: { kind: 'markdown', id: 'answer', content: 'r'.repeat(800 * 1024) } })
+    remote = new AgentHostConnection(f.target, f.callerDirectory, transport)
+    await remote.open()
+    await remote.close()
+    if (change === 'response') f.host.action({ type: 'chat/delta', turnId: id, partId: 'answer', content: '-new-content' })
+    else if (change === 'draft') f.host.action({ type: 'chat/draftChanged', draft: { text: 'New owner draft', origin: { kind: 'user' } } })
+    else f.host.action({ type: 'chat/truncated' })
+    const expected = historyDigest(f.host.snapshot(f.target.chatId).state as ChatState)
+    await expect.poll(() => historyDigest(f.native.view.chat!)).toBe(expected)
+    modes.length = 0
+    remote = new AgentHostConnection(f.target, f.callerDirectory, transport)
+    await remote.open()
+    expect(modes).not.toContain('cached')
+    expect(historyDigest(remote.view.chat!)).toBe(expected)
+    expect(remote.view.error).toBeUndefined()
+    expect(f.host.dispatches).toEqual([])
+  } finally {
+    await remote?.close()
+    await f.close()
+  }
+})
+
+it('keeps live actions arriving during cached subscription activation without duplicates', async () => {
+  const f = await startChunkedGatewayFixture()
+  let remote: AgentHostConnection | undefined
+  let delayCache = false
+  let blocked!: () => void
+  let release!: () => void
+  const cacheReply = new Promise<void>((resolve) => { blocked = resolve })
+  const transport = async (signal: AbortSignal): Promise<AhpTransport> => {
+    const inner = await connectPagedAgentHostWebSocket(f.url, {}, signal)
+    return {
+      send: (message) => inner.send(message),
+      recv: async () => {
+        const frame = await inner.recv()
+        if (delayCache && frame?.kind === 'text' && frame.text.includes('"mode":"cached"')) {
+          delayCache = false
+          blocked()
+          await new Promise<void>((resolve) => { release = resolve })
+        }
+        return frame
+      },
+      close: () => { release?.(); return inner.close() },
+    }
+  }
+  try {
+    f.host.historyText(1, 'Last synchronized response')
+    remote = new AgentHostConnection(f.target, f.callerDirectory, transport)
+    await remote.open()
+    await remote.close()
+    delayCache = true
+    remote = new AgentHostConnection(f.target, f.callerDirectory, transport)
+    const opening = remote.open()
+    await cacheReply
+    const id = randomUUID()
+    f.host.action({ type: 'chat/turnStarted', turnId: id, startedAt: new Date().toISOString(), message: { text: 'Concurrent question', origin: { kind: 'user' } } })
+    f.host.action({ type: 'chat/responsePart', turnId: id, part: { kind: 'markdown', id: 'concurrent-answer', content: '' } })
+    f.host.action({ type: 'chat/delta', turnId: id, partId: 'concurrent-answer', content: 'Concurrent response' })
+    f.host.action({ type: 'chat/turnComplete', turnId: id, duration: 1 })
+    release()
+    await opening
+    await expect.poll(() => remote!.view.chat?.turns.at(-1)?.id).toBe(id)
+    expect(remote.view.chat?.turns.filter((turn) => turn.id === id)).toHaveLength(1)
+    expect(historyDigest(remote.view.chat!)).toBe(historyDigest(f.host.snapshot(f.target.chatId).state as ChatState))
+    expect(f.host.dispatches).toEqual([])
+  } finally {
+    release?.()
+    await remote?.close()
+    await f.close()
+  }
+})
+
+it('validates cached content independently of stale sequences and owner history epochs', async () => {
+  const f = await startChunkedGatewayFixture()
+  let remote: AgentHostConnection | undefined
+  const modes: string[] = []
+  try {
+    f.host.historyText(60, 'Owner retained history')
+    const transport = async (signal: AbortSignal): Promise<AhpTransport> => {
+      const inner = await connectPagedAgentHostWebSocket(f.url, {}, signal)
+      return {
+        send: (message) => inner.send(message),
+        recv: async () => {
+          const frame = await inner.recv()
+          if (frame?.kind === 'text') {
+            const message = JSON.parse(frame.text) as { result?: { mode?: string } }
+            if (message.result?.mode) modes.push(message.result.mode)
+          }
+          return frame
+        },
+        close: () => inner.close(),
+      }
+    }
+    remote = new AgentHostConnection(f.target, f.callerDirectory, transport)
+    await remote.open()
+    await remote.loadHistory()
+    await remote.close()
+    const directory = join(f.callerDirectory, 'agent-host')
+    const name = (await readdir(directory)).find((entry) => entry.endsWith('.cache.json'))!
+    const path = join(directory, name)
+    const cache = JSON.parse(await readFile(path, 'utf8')) as { chat: { fromSeq: number } }
+    cache.chat.fromSeq = 100000
+    await writeFile(path, JSON.stringify(cache))
+    const epoch = f.native.historyEpoch
+    f.host.drop()
+    await expect.poll(() => f.native.state).toBe('offline')
+    await f.native.open()
+    expect(f.native.historyEpoch).not.toBe(epoch)
+    modes.length = 0
+    remote = new AgentHostConnection(f.target, f.callerDirectory, transport)
+    await remote.open()
+    expect(modes).toContain('cached')
+    expect(remote.view.chat?.turns).toHaveLength(20)
+    expect(remote.view.chat?.turns[0].id).toBe('history-40')
+    const id = randomUUID()
+    f.host.action({ type: 'chat/turnStarted', turnId: id, startedAt: new Date().toISOString(), message: { text: 'New epoch question', origin: { kind: 'user' } } })
+    await expect.poll(() => remote!.view.chat?.activeTurn?.id).toBe(id)
+  } finally {
+    await remote?.close()
+    await f.close()
+  }
+})
+
+it.each(['content', 'invalid-json'] as const)('repairs a %s cache from verified owner data rather than trusting it', async (corruption) => {
+  const f = await startChunkedGatewayFixture()
+  let remote: AgentHostConnection | undefined
+  const modes: string[] = []
+  try {
+    f.host.historyText(1, 'Verified owner response '.repeat(32 * 1024))
+    const transport = async (signal: AbortSignal): Promise<AhpTransport> => {
+      const inner = await connectPagedAgentHostWebSocket(f.url, {}, signal)
+      return {
+        send: (message) => inner.send(message),
+        recv: async () => {
+          const frame = await inner.recv()
+          if (frame?.kind === 'text') {
+            const message = JSON.parse(frame.text) as { result?: { mode?: string } }
+            if (message.result?.mode) modes.push(message.result.mode)
+          }
+          return frame
+        },
+        close: () => inner.close(),
+      }
+    }
+    remote = new AgentHostConnection(f.target, f.callerDirectory, transport)
+    await remote.open()
+    const expected = historyDigest(remote.view.chat!)
+    await remote.close()
+    const directory = join(f.callerDirectory, 'agent-host')
+    const name = (await readdir(directory)).find((entry) => entry.endsWith('.cache.json'))!
+    const path = join(directory, name)
+    if (corruption === 'invalid-json') await writeFile(path, '{')
+    else {
+      const cache = JSON.parse(await readFile(path, 'utf8')) as { chat: { state: ChatState } }
+      cache.chat.state.turns[0].message.text = 'Incorrect cached question'
+      await writeFile(path, JSON.stringify(cache))
+    }
+    modes.length = 0
+    remote = new AgentHostConnection(f.target, f.callerDirectory, transport)
+    await remote.open()
+    expect(modes).not.toContain('cached')
+    expect(historyDigest(remote.view.chat!)).toBe(expected)
+    expect(remote.view.error).toBeUndefined()
+    expect(f.host.dispatches).toEqual([])
+  } finally {
+    await remote?.close()
+    await f.close()
+  }
+})
+
+it('rejects a mismatched cache acknowledgement without replacing the displayed history', async () => {
+  const f = await startChunkedGatewayFixture()
+  let remote: AgentHostConnection | undefined
+  let corrupt = false
+  try {
+    f.host.historyText(1, 'Previously verified response')
+    const transport = async (signal: AbortSignal): Promise<AhpTransport> => {
+      const inner = await connectPagedAgentHostWebSocket(f.url, {}, signal)
+      return {
+        send: (message) => inner.send(message),
+        recv: async () => {
+          const frame = await inner.recv()
+          if (corrupt && frame?.kind === 'text') {
+            const message = JSON.parse(frame.text) as { result?: { mode?: string; stateSha256?: string } }
+            if (message.result?.mode === 'cached') {
+              message.result.stateSha256 = 'a'.repeat(64)
+              return { ...frame, text: JSON.stringify(message) }
+            }
+          }
+          return frame
+        },
+        close: () => inner.close(),
+      }
+    }
+    remote = new AgentHostConnection(f.target, f.callerDirectory, transport)
+    await remote.open()
+    const expected = historyDigest(remote.view.chat!)
+    await remote.close()
+    corrupt = true
+    remote = new AgentHostConnection(f.target, f.callerDirectory, transport)
+    await expect(remote.open()).rejects.toThrow('unverified cached snapshot')
+    expect(remote.state).toBe('offline')
+    expect(historyDigest(remote.view.chat!)).toBe(expected)
+    expect(remote.view.error).toBeTruthy()
+    expect(f.host.dispatches).toEqual([])
+  } finally {
+    await remote?.close()
+    await f.close()
+  }
+})
 
 it('transfers the newest bounded window first and downloads older turns only on explicit demand', async () => {
   const f = await startChunkedGatewayFixture({ inlineBytes: 64 * 1024, minChunkBytes: 16 * 1024, initialChunkBytes: 16 * 1024, maxChunkBytes: 64 * 1024 }, true)

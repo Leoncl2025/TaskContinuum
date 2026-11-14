@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import stripAnsi from 'strip-ansi'
 import type { ResponsePart, TerminalState } from '@microsoft/agent-host-protocol'
 import { agentHostKey } from '../../shared/agentHost'
-import type { AgentHostBridge, AgentHostTarget, AgentHostView } from '../../shared/agentHost'
+import type { AgentHostBridge, AgentHostHistoryTransfer, AgentHostTarget, AgentHostView } from '../../shared/agentHost'
 import type { TaskRecord } from '../../shared/tasks'
 import type { WorkspaceSnapshot } from '../../shared/workspace'
 import { MAX_CHAT_TEXT_LENGTH } from '../../shared/chatAttachments'
@@ -29,6 +29,11 @@ function terminalText(state: TerminalState | undefined): string {
 
 function retainChatHistory(previous: AgentHostView | undefined, value: AgentHostView): AgentHostView {
   return value.chat === undefined && previous?.chat ? { ...value, chat: previous.chat } : value
+}
+
+function historyTransferLabel(progress: AgentHostHistoryTransfer): string {
+  return progress.kind === 'recent' ? 'Loading recent history...' : progress.kind === 'earlier' ? 'Loading earlier history...'
+    : progress.resumed ? 'Resuming history...' : 'Syncing history...'
 }
 
 type TerminalStatus = NonNullable<AgentHostView['terminalStatus']>
@@ -191,7 +196,7 @@ const ChatTranscript = memo(function ChatTranscript({ view, machineName, aliases
   const activeTurn = view?.chat?.activeTurn
   const turns = [...view?.chat?.turns ?? [], ...activeTurn ? [activeTurn] : []]
   return <>
-    {!turns.length && <p className="ahp-chat-placeholder muted">{view?.state === 'connected' ? 'No messages.' : view?.historyTransfer ? 'Loading recent history...' : 'Waiting for original history...'}</p>}
+    {!turns.length && <p className="ahp-chat-placeholder muted">{view?.state === 'connected' ? 'No messages.' : view?.historyTransfer ? historyTransferLabel(view.historyTransfer) : 'Waiting for original history...'}</p>}
     {turns.map((turn) => {
       const actor = turn.message._meta?.taskcontinuumActor as { username?: string; machineName?: string; clientId?: string } | undefined
       return <div key={turn.id} data-turn-id={turn.id}><article className="message message-user"><header><Icon name="account" /><strong>{typeof actor?.username === 'string' ? actor.username : 'User'}</strong>{typeof actor?.machineName === 'string' && <span className="message-model" title={actor.machineName}>{machineLabel({ machineName: actor.machineName, clientId: typeof actor.clientId === 'string' ? actor.clientId : undefined }, aliases)}</span>}</header>{turn.message.model && <><p className="message-notice">Requested model: {turn.message.model.id}</p>{Object.keys(turn.message.model.config ?? {}).length > 0 && <p className="message-notice">Requested config: {JSON.stringify(turn.message.model.config)}</p>}</>}<div className="message-text">{turn.message.text}</div><ChatImages images={imagesFor(turn)} /></article><article className="message message-assistant"><header><Icon name="copilot" /><strong title={machineName}>Copilot @ {context.owner}</strong></header><Responses parts={turn.responseParts} terminals={view?.terminals ?? {}} terminalStatus={view?.terminalStatus ?? {}} {...context} />{activeTurn?.id === turn.id && <p className="message-notice" role="status">Responding...</p>}</article></div>
@@ -494,7 +499,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const connectionError = error ?? view?.error
   const catalogError = currentCatalog?.error !== connectionError ? currentCatalog?.error : undefined
   const historyFailure = view?.history?.error ?? (historyLoadError?.key === watchKey ? historyLoadError.message : undefined)
-  const stateLabel = !bridge ? 'Desktop update required' : !view && (error || currentCatalog?.error) ? 'Connection failed' : !view || view.state === 'connecting' ? view?.historyTransfer ? 'Loading recent history...' : 'Connecting...' : view.state === 'offline' ? 'Offline history' : pending ? 'Delivery pending' : activeTurn ? 'Agent responding' : historyBusy ? 'Loading earlier history...' : view.readOnly ? 'Read only' : 'Connected'
+  const stateLabel = !bridge ? 'Desktop update required' : !view && (error || currentCatalog?.error) ? 'Connection failed' : !view || view.state === 'connecting' ? view?.historyTransfer ? historyTransferLabel(view.historyTransfer) : 'Connecting...' : view.state === 'offline' ? 'Offline history' : pending ? 'Delivery pending' : activeTurn ? 'Agent responding' : historyBusy ? 'Loading earlier history...' : view.readOnly ? 'Read only' : 'Connected'
   const modelStatus = !bridge ? 'Desktop update required.' : view?.state !== 'connected' ? undefined : !currentCatalog ? 'Loading models from the owner Host...' : currentCatalog.error ? undefined : !modelId ? 'Choose a model below to enable sending.' : !modelReady ? 'The selected model is unavailable. Choose another model or retry loading models.' : undefined
   const displayTitle = sessionTitle(target, view?.target && agentHostKey(view.target) === key ? view.chat?.title : undefined) || cachedTitle || 'Original Host chat'
   const detailsOpen = active && detailsKey === key

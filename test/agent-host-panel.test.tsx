@@ -662,13 +662,13 @@ describe('Agent Host chat UI', () => {
     setup.view.chat = undefined
     setup.view.historyTransfer = { receivedBytes: 50 * 1024 * 1024, totalBytes: 100 * 1024 * 1024 }
     render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onClose={vi.fn()} onDetach={vi.fn()} />)
-    expect(await screen.findByRole('status', { name: 'Loading recent history...' })).toBeVisible()
+    expect(await screen.findByRole('status', { name: 'Syncing history...' })).toBeVisible()
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
     expect(screen.queryByText(/50.0 \/ 100.0 MiB/)).not.toBeInTheDocument()
 
     setup.view.historyTransfer = { receivedBytes: 75 * 1024 * 1024, totalBytes: 100 * 1024 * 1024, resumed: true }
     act(() => setup.emit())
-    expect(screen.getByRole('status', { name: 'Loading recent history...' })).toBeVisible()
+    expect(screen.getByRole('status', { name: 'Resuming history...' })).toBeVisible()
     expect(screen.queryByText(/75.0 \/ 100.0 MiB/)).not.toBeInTheDocument()
 
     setup.view.chat = initialChat
@@ -686,8 +686,21 @@ describe('Agent Host chat UI', () => {
     setup.view.historyTransfer = { receivedBytes: 40 * 1024 * 1024, totalBytes: 100 * 1024 * 1024, resumed: true }
     act(() => setup.emit())
     expect(screen.getByText('Loaded over chunks')).toBeVisible()
-    expect(screen.getByRole('status', { name: 'Loading recent history...' })).toBeVisible()
+    expect(screen.getByRole('status', { name: 'Resuming history...' })).toBeVisible()
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+  })
+
+  it.each([
+    { kind: 'recent' as const, label: 'Loading recent history...' },
+    { kind: 'earlier' as const, label: 'Loading earlier history...' },
+  ])('labels a $kind transfer without confusing it with full history sync', async ({ kind, label }) => {
+    const setup = fixture()
+    setup.view.state = 'connecting'
+    setup.view.canSend = false
+    setup.view.historyTransfer = { receivedBytes: 1024, totalBytes: 4096, kind }
+    render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onClose={vi.fn()} onDetach={vi.fn()} />)
+    expect(await screen.findByRole('status', { name: label })).toBeVisible()
+    expect(screen.queryByRole('status', { name: 'Syncing history...' })).not.toBeInTheDocument()
   })
 
   it('loads an earlier page on upward browsing and anchors the existing turns without changing the draft', async () => {

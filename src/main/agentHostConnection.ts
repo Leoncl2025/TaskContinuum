@@ -17,7 +17,7 @@ import { agentHostKey, agentHostModelInfoSchema, agentHostModelSelectionSchema, 
 import { JsonFileSizeError, readJsonBounded, writeJsonAtomic, writeTextAtomic } from './shared/storage'
 import { AGENT_HOST_LIMITS, AgentHostSizeLimitError, agentHostSizeLimit } from './agentHostLimits'
 import {
-  AgentHostSnapshotSupersededError, SNAPSHOT_TRANSFER_LIMITS, SNAPSHOT_TRANSFER_METHODS, chunkedSnapshotCapabilitySchema,
+  AgentHostSnapshotSupersededError, SNAPSHOT_TRANSFER_LIMITS, SNAPSHOT_TRANSFER_METHODS, chatSnapshotCacheCapabilitySchema, chunkedSnapshotCapabilitySchema,
   historyContainsTurnResponseSchema, isAgentHostSnapshotSuperseded, pagedChatHistoryCapabilitySchema,
   receiveChunkedChatSnapshot, removePartialSnapshotFiles, snapshotHistoryPageSchema,
 } from './agentHostSnapshotTransfer'
@@ -491,6 +491,10 @@ export class AgentHostConnection {
         const subscription = active.client.attachSubscription(resource)
         let activatedOnServer = false
         try {
+          const cacheSupported = chatSnapshotCacheCapabilitySchema.safeParse(this.initialized?._meta?.taskcontinuumChatSnapshotCache).success
+          const cachedSnapshot = this.chat.loaded
+            ? this.pagedHistory ? this.chat.historySnapshot().snapshot : this.chat.toSnapshot()
+            : undefined
           const received = await receiveChunkedChatSnapshot({
             baseFilePath: this.file,
             target: this.target,
@@ -498,6 +502,8 @@ export class AgentHostConnection {
             signal: active.abort.signal,
             capability: chunkedCapability,
             ...(this.pagedHistory ? { history: {} } : {}),
+            ...(cachedSnapshot ? { cachedSnapshot } : {}),
+            cacheValidation: cacheSupported,
             request: (method, params) => this.requestExtension(active, method, params),
             onProgress: (progress) => {
               if (this.current !== active) return
@@ -513,6 +519,9 @@ export class AgentHostConnection {
             return
           }
           this.acceptSnapshot(received.snapshot, freshChat, received.history)
+          if (cachedSnapshot) this.diagnose('connection.cache', {
+            traceId: active.traceId, status: 'ok', step: 'cache', reason: received.fromCache ? 'cache-hit' : 'cache-miss',
+          })
           this.diagnose('connection.subscribe', {
             traceId: active.traceId, status: 'ok', channel, elapsedMs: performance.now() - started,
             bytes: received.totalBytes, count: received.chunksTransferred,
@@ -587,6 +596,7 @@ export class AgentHostConnection {
       this.chat = chat
       this.historyPage = history
       this.historyError = undefined
+      this.cacheError = undefined
       if (replaceChat || !wasLoaded) this.historyGeneration = randomUUID()
     } else this.snapshots.set(snapshot.resource, structuredClone(snapshot))
     if (snapshot.resource === this.target.chatId) this.refreshTerminals()

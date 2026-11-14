@@ -661,6 +661,30 @@ original owner's retained-turn membership when a turn is outside the loaded
 window: an unloaded turn is never treated as proof that a message was not sent.
 Gateways and clients without paging keep the existing full-snapshot path.
 
+Gateways advertise `taskcontinuumChatSnapshotCache` version 1 to avoid downloading
+unchanged history again after a completed transfer. A supporting client sends
+the SHA-256 of its locally loaded chat **state** in `chatSnapshotPrepare`: for
+paging this is the same recent window, not all previously loaded older pages.
+The gateway compares it with the currently authorized owner state and returns
+`mode: cached` only on an exact match. The client verifies the acknowledgement,
+uses the gateway's current `fromSeq` and paging metadata, and activates the live
+subscription without chunk downloads or a transfer-progress overlay. Sequence
+numbers alone are not cache validators because they can restart with the Host.
+
+New responses, owner drafts, history edits, and other state changes invalidate
+the digest and use the normal verified inline/chunked transfer. Older cached
+pages still require the same owner epoch and an overlapping fresh window before
+retention. Invalid cache files remain reported when offline; a successful verified
+owner refresh clears their stale warning. `connection.cache` diagnostics record
+`cache-hit` or `cache-miss` without exposing history content or hashes. Gateways
+without the advertised cache capability still support completed-cache reuse
+through their existing chunked manifests: the client rebases
+the cached snapshot to the manifest's `fromSeq`, verifies its exact byte length
+and full SHA-256, and activates the existing consumer lease without requesting
+any chunks. Small inline snapshots are still refreshed in one round trip.
+Gateways without chunked transfer retain standard `subscribe` behavior. This is
+completed-cache reuse, separate from interrupted `.snapshot.part` resumption.
+
 Private offline history uses compact JSON and a matching 1 GiB plus 64 KiB
 metadata-envelope limit, measured on the exact bytes written. Large histories
 are not silently skipped or truncated. A size failure is reported separately

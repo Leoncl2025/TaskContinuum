@@ -408,7 +408,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
                 ready.push({ resource: item, pending, snapshot })
               }
               result = request.method === 'initialize'
-                ? { ...connection.handshake, snapshots: ready.map((item) => item.snapshot), _meta: { taskcontinuumCanSend: initialAccess.canSend, taskcontinuumModelSelection: true, taskcontinuumModelConfig: true, taskcontinuumStreamedSendValidation: true, taskcontinuumChunkedChatSnapshot: snapshotStore.capability, taskcontinuumPagedChatHistory: { version: 1 } } }
+                ? { ...connection.handshake, snapshots: ready.map((item) => item.snapshot), _meta: { taskcontinuumCanSend: initialAccess.canSend, taskcontinuumModelSelection: true, taskcontinuumModelConfig: true, taskcontinuumStreamedSendValidation: true, taskcontinuumChunkedChatSnapshot: snapshotStore.capability, taskcontinuumPagedChatHistory: { version: 1 }, taskcontinuumChatSnapshotCache: { version: 1 } } }
                 : { type: 'snapshot', snapshots: ready.map((item) => item.snapshot) }
             } else if (request.method === 'ping') {
               z.object({ channel: z.literal('ahp-root://') }).strict().parse(request.params)
@@ -531,8 +531,8 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
             if (pendingSnapshotOp?.kind === 'prepare') {
               const prepared = snapshotStore.prepare(target, connection, pendingSnapshotOp.params, socket)
               result = prepared
-              if (prepared.mode === 'inline' && pendingSnapshotOp.params.subscribe) {
-                activatedSnapshot = { resource: pendingSnapshotOp.params.channel, fromSeq: prepared.snapshot.fromSeq, tailEvents: [], paged: prepared.history !== undefined }
+              if (prepared.mode !== 'chunked' && pendingSnapshotOp.params.subscribe) {
+                activatedSnapshot = { resource: pendingSnapshotOp.params.channel, fromSeq: prepared.mode === 'cached' ? prepared.fromSeq : prepared.snapshot.fromSeq, tailEvents: [], paged: prepared.history !== undefined }
               }
             } else if (pendingSnapshotOp?.kind === 'chunk') {
               result = snapshotStore.chunk(target, connection, pendingSnapshotOp.params, socket)

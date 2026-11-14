@@ -19,6 +19,27 @@ test.beforeAll(async () => {
 })
 test.afterAll(async () => { await server?.close() })
 
+test('session history transfer labels distinguish full sync, resume and recent paging', async ({ page }) => {
+  await page.goto(`${url}?workbench&panes&sessions&theme=dark`)
+  const header = page.getByLabel('Chat header')
+  await expect(header.getByRole('status', { name: 'Connected' })).toBeVisible()
+  await page.evaluate(() => {
+    window.compactChatFixture.setState('connecting')
+    window.compactChatFixture.setHistoryTransfer({ receivedBytes: 1024, totalBytes: 8192 })
+  })
+  await expect(header.getByRole('status', { name: 'Syncing history...' })).toBeVisible()
+  await expect(header.getByRole('status', { name: 'Loading recent history...' })).toHaveCount(0)
+  await page.evaluate(() => window.compactChatFixture.setHistoryTransfer({ receivedBytes: 4096, totalBytes: 8192, resumed: true }))
+  await expect(header.getByRole('status', { name: 'Resuming history...' })).toBeVisible()
+  await page.evaluate(() => window.compactChatFixture.setHistoryTransfer({ receivedBytes: 1024, totalBytes: 8192, kind: 'recent' }))
+  await expect(header.getByRole('status', { name: 'Loading recent history...' })).toBeVisible()
+  await page.evaluate(() => {
+    window.compactChatFixture.setHistoryTransfer(undefined)
+    window.compactChatFixture.setState('connected')
+  })
+  await expect(header.getByRole('status', { name: 'Connected' })).toBeVisible()
+})
+
 for (const scenario of [
   { name: 'wide-light', width: 1440, height: 900, theme: 'light', zoom: 1 },
   { name: 'wide-dark', width: 1440, height: 900, theme: 'dark', zoom: 1 },

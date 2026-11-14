@@ -49,6 +49,8 @@ export const chunkedSnapshotCapabilitySchema = z.object({
 }).strict()
 export type ChunkedSnapshotCapability = z.infer<typeof chunkedSnapshotCapabilitySchema>
 
+const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/)
+export const chatSnapshotCacheCapabilitySchema = z.object({ version: z.literal(1) }).strict()
 export const pagedChatHistoryCapabilitySchema = z.object({ version: z.literal(1) }).strict()
 export const snapshotHistoryRequestSchema = z.object({
   before: z.object({ epoch: z.uuid(), turnId: z.string().min(1).max(512) }).strict().optional(),
@@ -71,6 +73,7 @@ export const snapshotPrepareRequestSchema = z.object({
   channel: agentHostChatIdSchema,
   subscribe: z.boolean(),
   history: snapshotHistoryRequestSchema.optional(),
+  cachedStateSha256: sha256Schema.optional(),
   resumeTransferId: z.uuid().optional(),
   resumeLeaseId: z.uuid().optional(),
 }).strict().refine((request) => !request.subscribe || !request.history?.before, {
@@ -94,9 +97,13 @@ export const snapshotTransferLookupSchema = z.object({
 }).strict()
 export type SnapshotTransferLookup = z.infer<typeof snapshotTransferLookupSchema>
 
-const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/)
-
 const prepareResponseSchema = z.discriminatedUnion('mode', [
+  z.object({
+    mode: z.literal('cached'),
+    fromSeq: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    stateSha256: sha256Schema,
+    history: snapshotHistoryPageSchema.optional(),
+  }).strict(),
   z.object({
     mode: z.literal('inline'),
     snapshot: z.object({
@@ -120,6 +127,10 @@ const prepareResponseSchema = z.discriminatedUnion('mode', [
   }).strict(),
 ])
 export type SnapshotPrepareResponse = z.infer<typeof prepareResponseSchema>
+
+function snapshotStateSha256(snapshot: Snapshot): string {
+  return createHash('sha256').update(JSON.stringify(snapshot.state), 'utf8').digest('hex')
+}
 
 const chunkResponseSchema = z.object({
   transferId: z.uuid(),
@@ -399,6 +410,15 @@ export class AgentHostSnapshotStore {
       epoch: connection.historyEpoch, totalTurns: page.totalTurns,
       ...(page.beforeTurnId ? { beforeTurnId: page.beforeTurnId } : {}),
     } : undefined
+    if (request.cachedStateSha256 && snapshotStateSha256(snapshot) === request.cachedStateSha256) {
+      const bytes = Buffer.byteLength(JSON.stringify(snapshot), 'utf8')
+      if (bytes > AGENT_HOST_LIMITS.messageBytes) throw new AgentHostSizeLimitError('message', AGENT_HOST_LIMITS.messageBytes, bytes)
+      this.releaseOwnerTargetLeases(owner, targetKey)
+      return {
+        mode: 'cached', fromSeq: snapshot.fromSeq, stateSha256: request.cachedStateSha256,
+        ...(history ? { history } : {}),
+      }
+    }
     for (const existing of this.exports.values()) {
       if (existing.targetKey === targetKey && existing.connection === connection && !existing.superseded
         && existing.fromSeq === snapshot.fromSeq && existing.historyKey === historyKey && !this.isExpired(existing, now)) {
@@ -744,6 +764,8 @@ export interface ReceiveChunkedSnapshotOptions {
   signal: AbortSignal
   capability: ChunkedSnapshotCapability
   history?: SnapshotHistoryRequest
+  cachedSnapshot?: Snapshot
+  cacheValidation?: boolean
   request(method: string, params: Record<string, unknown>): Promise<unknown>
   onProgress?(progress: AgentHostHistoryTransfer | undefined): void
   onChunkSaved?(): void
@@ -762,9 +784,12 @@ function validateHistoryPage(snapshot: Snapshot, history: SnapshotHistoryPage | 
 }
 
 export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshotOptions): Promise<{
-  snapshot: Snapshot; history?: SnapshotHistoryPage; chunksTransferred: number; totalBytes: number; resumed: boolean
+  snapshot: Snapshot; history?: SnapshotHistoryPage; chunksTransferred: number; totalBytes: number; resumed: boolean; fromCache: boolean
 }> {
   const retentionMs = options.partRetentionMs ?? SNAPSHOT_TRANSFER_LIMITS.partRetentionMs
+  const cachedSnapshot = options.cachedSnapshot
+  if (cachedSnapshot) new AgentHostChatState(options.target.chatId).snapshot(cachedSnapshot)
+  const cachedStateSha256 = options.cacheValidation && cachedSnapshot ? snapshotStateSha256(cachedSnapshot) : undefined
   try {
     for (let attempt = 0; attempt < SNAPSHOT_TRANSFER_LIMITS.maxSupersedeRetries; attempt++) {
       options.signal.throwIfAborted()
@@ -774,12 +799,24 @@ export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshot
           channel: options.target.chatId,
           subscribe: options.subscribe,
           ...(options.history ? { history: options.history } : {}),
+          ...(cachedStateSha256 ? { cachedStateSha256 } : {}),
           ...(saved ? {
             resumeTransferId: saved.transferId,
             ...(saved.leaseId ? { resumeLeaseId: saved.leaseId } : {}),
           } : {}),
         }))
+        options.signal.throwIfAborted()
 
+        if (prepared.mode === 'cached') {
+          if (!cachedSnapshot || cachedStateSha256 !== prepared.stateSha256) {
+            throw new Error('Agent Host returned an unverified cached snapshot. Reconnect to restore history.')
+          }
+          const snapshot: Snapshot = { ...cachedSnapshot, fromSeq: prepared.fromSeq }
+          validateHistoryPage(snapshot, prepared.history, options.history)
+          await removePartialSnapshotFiles(options.baseFilePath)
+          options.onProgress?.(undefined)
+          return { snapshot, history: prepared.history, chunksTransferred: 0, totalBytes: 0, resumed: false, fromCache: true }
+        }
         if (prepared.mode === 'inline') {
           await removePartialSnapshotFiles(options.baseFilePath)
           const snapshot = prepared.snapshot as Snapshot
@@ -788,7 +825,7 @@ export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshot
           new AgentHostChatState(options.target.chatId).snapshot(snapshot)
           validateHistoryPage(snapshot, prepared.history, options.history)
           options.onProgress?.(undefined)
-          return { snapshot, history: prepared.history, chunksTransferred: 0, totalBytes: bytes, resumed: false }
+          return { snapshot, history: prepared.history, chunksTransferred: 0, totalBytes: bytes, resumed: false, fromCache: false }
         }
 
         const releaseRemoteLease = () => options.request(SNAPSHOT_TRANSFER_METHODS.release, {
@@ -797,10 +834,34 @@ export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshot
           leaseId: prepared.leaseId,
         }).catch(() => undefined)
 
+        const completeTransfer = async () => {
+          if (options.subscribe) {
+            const activated = activateResponseSchema.parse(await options.request(SNAPSHOT_TRANSFER_METHODS.activate, {
+              channel: options.target.chatId,
+              transferId: prepared.transferId,
+              leaseId: prepared.leaseId,
+            }))
+            if (activated.fromSeq !== prepared.fromSeq) throw new Error('Agent Host activated a different snapshot sequence.')
+          } else await releaseRemoteLease()
+        }
+
         if (prepared.totalBytes > AGENT_HOST_LIMITS.messageBytes) {
           await releaseRemoteLease()
           await removePartialSnapshotFiles(options.baseFilePath)
           throw new AgentHostSizeLimitError('message', AGENT_HOST_LIMITS.messageBytes, prepared.totalBytes)
+        }
+
+        if (cachedSnapshot) {
+          const snapshot: Snapshot = { ...cachedSnapshot, fromSeq: prepared.fromSeq }
+          const text = JSON.stringify(snapshot)
+          if (Buffer.byteLength(text, 'utf8') === prepared.totalBytes
+            && createHash('sha256').update(text, 'utf8').digest('hex') === prepared.sha256) {
+            validateHistoryPage(snapshot, prepared.history, options.history)
+            await completeTransfer()
+            await removePartialSnapshotFiles(options.baseFilePath)
+            options.onProgress?.(undefined)
+            return { snapshot, history: prepared.history, chunksTransferred: 0, totalBytes: 0, resumed: false, fromCache: true }
+          }
         }
 
         const { handle, hash, offset: initialOffset, resumed } = await openResumablePart(
@@ -915,22 +976,11 @@ export async function receiveChunkedChatSnapshot(options: ReceiveChunkedSnapshot
           throw error
         }
 
-        if (options.subscribe) {
-          const activated = activateResponseSchema.parse(await options.request(SNAPSHOT_TRANSFER_METHODS.activate, {
-            channel: options.target.chatId,
-            transferId: prepared.transferId,
-            leaseId: prepared.leaseId,
-          }))
-          if (activated.fromSeq !== prepared.fromSeq) {
-            throw new Error('Agent Host activated a different snapshot sequence.')
-          }
-        } else {
-          await releaseRemoteLease()
-        }
+        await completeTransfer()
 
         await removePartFilesSafe(options.baseFilePath)
         options.onProgress?.(undefined)
-        return { snapshot, history: prepared.history, chunksTransferred, totalBytes: prepared.totalBytes, resumed }
+        return { snapshot, history: prepared.history, chunksTransferred, totalBytes: prepared.totalBytes, resumed, fromCache: false }
       } catch (error) {
         if (!options.history?.before && isAgentHostSnapshotSuperseded(error) && attempt + 1 < SNAPSHOT_TRANSFER_LIMITS.maxSupersedeRetries) {
           await removePartFilesSafe(options.baseFilePath)
