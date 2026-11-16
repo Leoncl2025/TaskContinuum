@@ -743,9 +743,10 @@ The paired SSH forward allows 60 seconds of TCP inactivity, separate from the
 10-second login deadline, so the 15-second AHP heartbeat (plus scheduling jitter)
 does not race the forward's idle shutdown. Revocation, pairing expiry, connection
 limits and the client's heartbeat failure handling still close unavailable routes.
-The desktop keeps at most 32 cached remote chat connections (soft-trimmed to eight
-idle warm connections per remote owner so peer SSH forwards retain headroom) and
-64 cached local chat connections, evicting least-recently-used idle entries after
+The desktop keeps at most 128 cached remote chat connections (soft-trimmed to 32
+idle warm connections per remote owner so 64-socket peer SSH forwards retain headroom)
+and 256 cached local chat connections (with up to 64 active UI watches and 128
+gateway WebSockets), evicting least-recently-used idle entries after
 flushing their offline cache while protecting active views, in-flight requests,
 pending or uncertain deliveries, retained terminals and native empty sessions.
 

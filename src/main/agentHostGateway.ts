@@ -70,7 +70,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
     }
     logAgentHostDiagnostic('gateway.upgrade', { traceId, status: 'begin', step })
     void runOperation(async () => {
-      if (request.headers.origin || request.headers.host !== `127.0.0.1:${options.port()}` || (request.url?.length ?? 0) > 4096 || sockets.clients.size + pendingUpgrades >= 32) throw new Error('Denied.')
+      if (request.headers.origin || request.headers.host !== `127.0.0.1:${options.port()}` || (request.url?.length ?? 0) > 4096 || sockets.clients.size + pendingUpgrades >= 128) throw new Error('Denied.')
       pendingUpgrades++
       const abort = new AbortController()
       const abandoned = () => abort.abort(new DOMException('The connection handshake was abandoned.', 'AbortError'))

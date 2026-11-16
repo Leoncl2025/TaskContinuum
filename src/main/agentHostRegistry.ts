@@ -134,7 +134,7 @@ function creationConfig(value: unknown): Record<string, unknown> {
 }
 
 export const LOCAL_AGENT_HOST_LIMITS = {
-  maxConnections: 64,
+  maxConnections: 256,
 } as const
 
 export class AgentHostRegistry {

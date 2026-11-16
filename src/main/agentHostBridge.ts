@@ -177,7 +177,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     const window = requireWindow(event)
     const root = await currentRoot()
     const target = agentHostTargetSchema.parse(value)
-    if (watches.size >= 16) throw new Error('Too many active Agent Host views.')
+    if (watches.size >= 64) throw new Error('Too many active Agent Host views.')
     const { connection, release } = await acquire(event, window, root, target)
     const id = randomUUID()
     let timer: ReturnType<typeof setTimeout> | undefined

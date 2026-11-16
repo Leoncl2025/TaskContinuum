@@ -354,7 +354,7 @@ export class VSCodeDeviceHost {
       })
       server.requestTimeout = 15000
       server.headersTimeout = 10000
-      server.maxConnections = 64
+      server.maxConnections = 256
       this.server = server
       if (this.agentHosts) this.agentHostGateway = attachAgentHostGateway(server, { port: () => this.state?.port, operations: this.operations,
         authorize: (token, target, send) => this.authorizedAgentHost(token, target, send), connection: (target) => this.agentHosts!.registry.connection(target) })

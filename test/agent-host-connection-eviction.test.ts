@@ -153,14 +153,15 @@ afterEach(async () => {
 })
 
 describe('Agent Host connection pool LRU eviction', () => {
-  it('evicts idle remote connections across >32 chats, trims per-owner warm sockets, and preserves disk caches', async () => {
+  it('evicts idle remote connections across >128 chats, trims per-owner warm sockets, and preserves disk caches', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-remote-eviction-'))
     const workspace = await mkdtemp(join(tmpdir(), 'continuum-remote-workspace-'))
     const host = await startMultiSessionHost()
     const localOwner = { clientId: randomUUID(), machineName: 'Studio-Local' }
     const owners = Array.from({ length: 5 }, (_, index) => ({ clientId: randomUUID(), machineName: `Runner-${index + 1}` }))
+    const totalTargets = Math.max(REMOTE_AGENT_HOST_LIMITS.maxConnections + 8, owners.length * (REMOTE_AGENT_HOST_LIMITS.maxConnectionsPerOwner + 1))
     const targets: AgentHostTarget[] = []
-    for (let index = 0; index < 40; index++) {
+    for (let index = 0; index < totalTargets; index++) {
       const { sessionId, chatId } = host.register(index)
       targets.push({ sessionId, chatId, owner: owners[index % owners.length] })
     }
@@ -216,7 +217,7 @@ describe('Agent Host connection pool LRU eviction', () => {
       release()
     }
 
-    // Pinned target[0] remained live, while idle connections were evicted under the 32 global / 8 per-owner caps.
+    // Pinned target[0] remained live, while idle connections were evicted under the 128 global / 32 per-owner caps.
     expect(pinned.state).toBe('connected')
     await expect.poll(() => host.liveSocketCount()).toBeLessThanOrEqual(REMOTE_AGENT_HOST_LIMITS.maxConnections)
     for (const count of openByOwner.values()) {
@@ -229,7 +230,7 @@ describe('Agent Host connection pool LRU eviction', () => {
     await revisited.open()
     expect(revisited.view.chat?.turns[0]?.responseParts[0]).toMatchObject({ content: 'Answer 1' })
     unlistenPinned()
-  })
+  }, 30_000)
 
   it('protects active watches and uncertain deliveries while allowing unwatched remote-busy fallback eviction', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-remote-busy-'))
@@ -282,7 +283,7 @@ describe('Agent Host connection pool LRU eviction', () => {
       releases.push(connection.retain())
     }
 
-    // All 32 slots are genuinely non-evictable (1 uncertain delivery + 31 actively retained).
+    // All 128 slots are genuinely non-evictable (1 uncertain delivery + 127 actively retained).
     await expect(manager.connection(workspace, targets[REMOTE_AGENT_HOST_LIMITS.maxConnections])).rejects.toThrow('Remote Agent Host connection limit reached.')
 
     // Releasing one retainer leaves a remote-busy unwatched chat (activeTurn on remote Host), which Tier-2 safely evicts.
@@ -293,9 +294,9 @@ describe('Agent Host connection pool LRU eviction', () => {
     // Uncertain local delivery on target[0] remained protected in the pool.
     expect(await manager.connection(workspace, targets[0])).toBe(uncertainConnection)
     for (const release of releases) release()
-  })
+  }, 30_000)
 
-  it('evicts completed idle local connections beyond 64 while protecting native empty sessions', async () => {
+  it('evicts completed idle local connections beyond 256 while protecting native empty sessions', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-local-eviction-'))
     const discoveryDir = await mkdtemp(join(tmpdir(), 'continuum-local-discovery-'))
     const host = await startMultiSessionHost()
@@ -340,5 +341,5 @@ describe('Agent Host connection pool LRU eviction', () => {
     const cacheHash = createHash('sha256').update(agentHostKey(firstCompletedTarget)).digest('hex')
     const cached = JSON.parse(await readFile(join(directory, 'agent-host', `${cacheHash}.cache.json`), 'utf8')) as { target: AgentHostTarget }
     expect(cached.target).toEqual(firstCompletedTarget)
-  })
+  }, 30_000)
 })

@@ -14,6 +14,10 @@ type Access = { id: string; key: Buffer; port: number } & (
 )
 export type SshKeyPair = { publicKey: string; privateKey: string }
 const FORWARDED_SOCKET_IDLE_MS = 60_000
+export const SESSION_SSH_LIMITS = {
+  forwardsPerDeviceMultiplier: 8,
+  bridgeSockets: 64,
+} as const
 
 export function newSshKeyPair(): SshKeyPair {
   return encodeDeviceSshKey(generateKeyPairSync('ed25519').privateKey)
@@ -86,7 +90,7 @@ export async function startSessionSshHost(key: SshKeyPair, port = 0) {
     connection.on('tcpip', (accept, reject, info) => {
       const metadata = access?.kind === 'metadata'
       const count = metadata ? metadataSockets.size : sockets.size - metadataSockets.size
-      const limit = DEVICE_TRUST_LIMITS.devices * (metadata ? 1 : 2)
+      const limit = DEVICE_TRUST_LIMITS.devices * (metadata ? 1 : SESSION_SSH_LIMITS.forwardsPerDeviceMultiplier)
       if (!allowed() || info.destIP !== '127.0.0.1' || info.destPort !== access!.port || count >= limit) { reject(); return }
       const socket = createConnection({ host: '127.0.0.1', port: access!.port })
       sockets.add(socket)
@@ -166,7 +170,7 @@ export async function openSessionSshBridge(stream: Duplex, options: {
   const client = new ssh2.Client()
   const sockets = new Set<Socket>()
   const listener = createServer((socket) => {
-    if (sockets.size >= 16) { socket.destroy(); return }
+    if (sockets.size >= SESSION_SSH_LIMITS.bridgeSockets) { socket.destroy(); return }
     sockets.add(socket)
     socket.on('error', () => socket.destroy())
     socket.once('close', () => sockets.delete(socket))

@@ -125,7 +125,8 @@ SSH registration permits 32 private-device grants and, separately, up to
 retain separate 32-connection device and metadata budgets (64 combined), so
 private session traffic cannot consume every metadata slot. Registration is not
 a promise of unlimited simultaneous connections. Forwarding has separate
-64-device-channel and 32-metadata-channel budgets; saturated session forwards
+256-device-channel and 32-metadata-channel budgets (with 64 forwarded sockets per
+client SSH bridge); saturated session forwards
 cannot consume the control channel budget either.
 
 ### Rebuilding configuration and retaining baseline protection
@@ -204,13 +205,13 @@ zero at all three sizes. These are local fixtures, not remote deployment results
 | Public trust | Fixed: a stable relationship no longer periodically creates immutable Git records. |
 | SSH grant slots | Fixed: per-device private grants and per-workspace metadata grants no longer compete for one 32-entry registry. Separate live connection budgets protect the control path. |
 | Private credential lifecycle | Fixed: expiry can use current public trust to renew; renewal retains the pairing identity and other workspace scopes instead of revoking/recreating the pair. |
-| Local/remote chat connection caches | Fixed: [local](../src/main/agentHostRegistry.ts) 64 and [remote](../src/main/agentHostManager.ts) 32 connection pools (with an 8-connection soft warm limit per remote owner) evict least-recently-used idle connections instead of accumulating until manager shutdown, while protecting active views/retainers, running sends, uncertain delivery, terminals and native empty-session subscriptions. |
+| Local/remote chat connection caches | Fixed: [local](../src/main/agentHostRegistry.ts) 256 and [remote](../src/main/agentHostManager.ts) 128 connection pools (with a 32-connection soft warm limit per remote owner, 64 active UI watches and 128 gateway WebSockets) evict least-recently-used idle connections instead of accumulating until manager shutdown, while protecting active views/retainers, running sends, uncertain delivery, terminals and native empty-session subscriptions. |
 | Per-chat delivery ledger | Still a growth limit: [the ledger](../src/main/agentHostConnection.ts) retains up to 1,000 delivery IDs, including terminal states, and then refuses another send. It needs durable deduplication checkpoints/archival, not arbitrary deletion or a larger number. |
 | Session creation history | Still a growth limit: [worker operations](../src/main/agentHostCreationService.ts) and [caller history](../src/main/agentHostCreationClient.ts) retain up to 1,000 operations. Failed/abandoned entries also occupy capacity. Archival must preserve operation-ID replay protection and uncertain native outcomes. |
 | Device/workspace history | Still coarse accounting: [private client storage](../src/main/vscodeDeviceClient.ts) counts workspace/owner entries toward 32, not distinct physical devices. [Enrollment](../src/main/remoteConfig/enrollment.ts) counts paused workspaces toward 10 and revoked identity tombstones toward 32. Separate live capacity from retained revocation identity before adding removal/re-enrollment UX. |
 | Session bindings | Product/protocol constraints remain: 1,000 linked sessions/tasks, one owner/session claim even for distinct chat IDs, and a 32-KiB complete signed task-binding payload. Effective per-task capacity can be lower than the workspace session count. Parent/child and multi-chat linking need a separate explicit design. |
 | Retained configuration | Cold verification is history-sized; unchanged refresh still scans record metadata. A later compactor needs accepted-head commitments, signed ancestry, revocations, offline-peer policy and explicit cutover. Do not delete accepted history or merely raise the cap. |
-| Request/transfer guards | Retained intentionally: short signed request lifetime, replay TTL/capacity, bounded concurrent handlers, transport timeouts, 16 active UI watches and file-transfer byte/count quotas. Transfers expire and are cleaned after 24 hours; their 128 retained-item limit is not a permanent lifetime counter. |
+| Request/transfer guards | Retained intentionally: short signed request lifetime, replay TTL/capacity, bounded concurrent handlers, transport timeouts, 64 active UI watches and file-transfer byte/count quotas. Transfers expire and are cleaned after 24 hours; their 128 retained-item limit is not a permanent lifetime counter. |
 
 The audit identifies remaining work explicitly; this trust change does not
 silently redesign chat ownership, deduplication or all application resource limits.

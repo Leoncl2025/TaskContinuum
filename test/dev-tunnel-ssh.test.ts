@@ -6,7 +6,7 @@ import { createRequire } from 'node:module'
 import ssh2 from 'ssh2'
 import { TunnelRelayTunnelClient } from '@microsoft/dev-tunnels-connections'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { newSshKeyPair, openSessionSshBridge, startSessionSshHost } from '../src/main/devTunnel/sessionSsh'
+import { SESSION_SSH_LIMITS, newSshKeyPair, openSessionSshBridge, startSessionSshHost } from '../src/main/devTunnel/sessionSsh'
 import { sshFingerprint, sshPublicKeySchema } from '../src/main/devTunnel/protocol'
 import { DEVICE_TRUST_LIMITS, PRIVATE_DEVICE_LIFETIME_MS } from '../src/shared/deviceTrust'
 
@@ -68,13 +68,15 @@ describe('application-managed SSH', () => {
     let forwards = 0
     const errors: Error[] = []
     http.on('connection', () => { forwards++ })
-    for (const device of devices) for (let index = 0; index < 2; index++) {
-      const socket = createConnection(device.port, '127.0.0.1')
-      socket.on('error', (error) => { errors.push(error) })
-      socket.write('GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n')
-      cleanup.push(() => { socket.destroy() })
+    for (let index = 0; index < SESSION_SSH_LIMITS.forwardsPerDeviceMultiplier; index++) {
+      for (const device of devices) {
+        const socket = createConnection(device.port, '127.0.0.1')
+        socket.on('error', (error) => { errors.push(error) })
+        socket.write('GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n')
+        cleanup.push(() => { socket.destroy() })
+      }
+      await vi.waitFor(() => expect(forwards).toBe(DEVICE_TRUST_LIMITS.devices * (index + 1)), { timeout: 5000 })
     }
-    await vi.waitFor(() => expect(forwards).toBe(DEVICE_TRUST_LIMITS.devices * 2), { timeout: 5000 })
     const control = await openSessionSshBridge(createConnection(host.port, '127.0.0.1'), { ...options, grantId: metadata })
     cleanup.push(control.close)
     expect(await (await fetch(`http://127.0.0.1:${control.port}`)).text()).toBe('Original Bridge')

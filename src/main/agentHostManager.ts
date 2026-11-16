@@ -17,8 +17,8 @@ import type { LocalTaskAgentHostWorker } from './localTaskAgentHostWorker'
 import { AgentHostAuthorization } from './agentHostAuthorization'
 
 export const REMOTE_AGENT_HOST_LIMITS = {
-  maxConnections: 32,
-  maxConnectionsPerOwner: 8,
+  maxConnections: 128,
+  maxConnectionsPerOwner: 32,
 } as const
 
 export class AgentHostManager {
