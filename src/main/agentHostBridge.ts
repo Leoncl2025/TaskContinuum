@@ -18,17 +18,32 @@ import { handleDesktopOperation } from './desktopOperations'
 
 export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>, manager: AgentHostManager) {
   const watches = new Map<string, { window: BrowserWindow; root: string; target: AgentHostTarget; connection: AgentHostConnection; leases: Map<string, Set<string>>; close(): void }>()
-  const progressWatches = new Map<string, { schedule(): void; close(): void }>()
+  const progressWatches = new Map<string, { connection: AgentHostConnection; schedule(): void; close(): void }>()
   let consenting: Promise<void> | undefined
   async function current(event: IpcMainInvokeEvent, window: BrowserWindow, root: string, target?: AgentHostTarget): Promise<void> {
     if (window.isDestroyed() || window.webContents.isDestroyed() || requireWindow(event) !== window || await currentRoot() !== root) throw new Error('The workspace or window changed. No message was sent.')
     if (target) await manager.authorize(root, target)
     if (window.isDestroyed() || requireWindow(event) !== window || await currentRoot() !== root) throw new Error('The workspace changed while verifying the session.')
   }
+  async function acquire(event: IpcMainInvokeEvent, window: BrowserWindow, root: string, target: AgentHostTarget): Promise<{ connection: AgentHostConnection; release(): void }> {
+    const connection = await manager.connection(root, target)
+    const release = connection.retain?.() ?? (() => {})
+    try {
+      await current(event, window, root, target)
+      return { connection, release }
+    } catch (error) {
+      release()
+      throw error
+    }
+  }
   const progressKey = (window: BrowserWindow, root: string, target: AgentHostTarget) => JSON.stringify([window.id, root, agentHostKey(target)])
   function trackProgress(event: IpcMainInvokeEvent, window: BrowserWindow, root: string, target: AgentHostTarget, connection: AgentHostConnection): void {
     const key = progressKey(window, root, target)
-    if (progressWatches.has(key)) return
+    const existing = progressWatches.get(key)
+    if (existing) {
+      if (existing.connection === connection) return
+      existing.close()
+    }
     let timer: ReturnType<typeof setTimeout> | undefined
     let publishing = false
     let dirty = false
@@ -74,7 +89,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
       if (!publishing && !timer) timer = setTimeout(() => { void publish() }, 25)
     }
     const unlisten = connection.listen((event) => { if (event.type === 'state' || event.type === 'history-progress') schedule() })
-    progressWatches.set(key, { schedule, close })
+    progressWatches.set(key, { connection, schedule, close })
     schedule()
   }
   handleDesktopOperation(ipcMain, 'agent-host:list', async (event) => {
@@ -163,8 +178,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     const root = await currentRoot()
     const target = agentHostTargetSchema.parse(value)
     if (watches.size >= 16) throw new Error('Too many active Agent Host views.')
-    const connection = await manager.connection(root, target)
-    await current(event, window, root, target)
+    const { connection, release } = await acquire(event, window, root, target)
     const id = randomUUID()
     let timer: ReturnType<typeof setTimeout> | undefined
     let stopped = false
@@ -199,6 +213,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
       stopped = true
       clearTimeout(timer)
       unlisten()
+      release()
       watches.delete(id)
       progressWatches.get(progressKey(window, root, target))?.schedule()
       for (const [resource, owners] of leases) owners.forEach(() => connection.releaseTerminal(resource))
@@ -278,14 +293,15 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     let step: 'authorization' | 'root' = 'authorization'
     logAgentHostDiagnostic('ipc.models', { target, status: 'begin', step })
     try {
-      const connection = await manager.connection(root, target)
-      await current(event, window, root, target)
-      step = 'root'
-      const models = await connection.models()
-      step = 'authorization'
-      await current(event, window, root, target)
-      logAgentHostDiagnostic('ipc.models', { target, status: 'ok', step, elapsedMs: performance.now() - started, count: models.length })
-      return models
+      const { connection, release } = await acquire(event, window, root, target)
+      try {
+        step = 'root'
+        const models = await connection.models()
+        step = 'authorization'
+        await current(event, window, root, target)
+        logAgentHostDiagnostic('ipc.models', { target, status: 'ok', step, elapsedMs: performance.now() - started, count: models.length })
+        return models
+      } finally { release() }
     } catch (error) {
       logAgentHostDiagnostic('ipc.models', { target, status: 'error', step, elapsedMs: performance.now() - started, error })
       throw error
@@ -297,9 +313,10 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     const target = agentHostTargetSchema.parse(value)
     const command = chatSubmissionSchema.parse({ id, text, ...(images === undefined ? {} : { images }) })
     const selection = agentHostModelSelectionSchema.optional().parse(model)
-    const connection = await manager.connection(root, target)
-    await current(event, window, root, target)
-    return connection.send(command.id, command.text, command.images, () => current(event, window, root, target), await readClientIdentity(app.getPath('userData')), selection)
+    const { connection, release } = await acquire(event, window, root, target)
+    try {
+      return await connection.send(command.id, command.text, command.images, () => current(event, window, root, target), await readClientIdentity(app.getPath('userData')), selection)
+    } finally { release() }
   })
   handleDesktopOperation(ipcMain, 'agent-host:resolve-delivery', async (event, value: unknown, turnValue: unknown, actionValue: unknown, acknowledged: unknown) => {
     const window = requireWindow(event)
@@ -309,11 +326,12 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     const action = z.enum(['check', 'abandon']).parse(actionValue)
     if (action === 'abandon') z.literal(true).parse(acknowledged)
     else z.undefined().parse(acknowledged)
-    const connection = await manager.connection(root, target)
-    await current(event, window, root, target)
-    const result = await connection.resolveDelivery(turnId, action, () => current(event, window, root, target))
-    await current(event, window, root, target)
-    return result
+    const { connection, release } = await acquire(event, window, root, target)
+    try {
+      const result = await connection.resolveDelivery(turnId, action, () => current(event, window, root, target))
+      await current(event, window, root, target)
+      return result
+    } finally { release() }
   })
   handleDesktopOperation(ipcMain, 'agent-host:cancel', async (event, value: unknown, id: unknown) => {
     const window = requireWindow(event)
@@ -321,7 +339,10 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     const target = agentHostTargetSchema.parse(value)
     const turnId = z.string().min(1).max(200).parse(id)
     const connection = await manager.connection(root, target)
-    return connection.cancel(turnId, () => current(event, window, root, target))
+    const release = connection.retain?.() ?? (() => {})
+    try {
+      return await connection.cancel(turnId, () => current(event, window, root, target))
+    } finally { release() }
   })
   return { close: () => {
     for (const watch of watches.values()) watch.close()

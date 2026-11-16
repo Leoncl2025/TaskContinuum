@@ -55,6 +55,7 @@ export class AgentHostConnection {
   private chat: AgentHostChatState
   private readonly snapshots = new Map<string, Snapshot>()
   private readonly listeners = new Set<(event: AgentHostEvent) => void>()
+  private retainers = 0
   private readonly subscribing = new Set<string>()
   private readonly terminalSubscriptions = new Map<string, Subscription>()
   private readonly terminalRequests = new Map<string, Promise<Snapshot>>()
@@ -105,6 +106,31 @@ export class AgentHostConnection {
     const chat = this.chat.value
     return this.sending || this.reviewing || this.commands.some(command => command.state === 'pending' || command.state === 'uncertain')
       || !!chat?.activeTurn || !!chat?.draft?.text || !!chat?.draft?.attachments?.length || !!chat?.queuedMessages?.length
+  }
+
+  retain(): () => void {
+    if (this.closed) throw new Error('Agent Host view is closed.')
+    this.retainers++
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.retainers--
+    }
+  }
+
+  canEvict(options?: { allowRemoteChatActivity?: boolean; protectNativeEmptySession?: boolean }): boolean {
+    if (this.closed || this.retainers > 0 || this.listeners.size > 0) return false
+    if (this.opening !== undefined || this.historyLoading !== undefined || this.nativeHistoryLoading !== undefined) return false
+    if (this.modelCatalog?.pending !== undefined || this.terminalRequests.size > 0 || this.terminalLeases.size > 0) return false
+    if (this.sending || this.reviewing || this.commands.some((command) => command.state === 'pending' || command.state === 'uncertain')) return false
+    if (options?.protectNativeEmptySession && this.connected) {
+      const sessionState = this.snapshots.get(this.target.sessionId)?.state as SessionState | undefined
+      if (!this.chat.loaded || sessionState?.lifecycle === 'creating'
+        || (this.chat.completedTurns === 0 && !this.chat.nativeHistoryCursor && !this.chat.value?.activeTurn)) return false
+    }
+    if (!options?.allowRemoteChatActivity && (this.hasActiveWork || this.activeTerminals.size > 0 || this.terminalSubscriptions.size > 0)) return false
+    return true
   }
 
   get view(): AgentHostView {
@@ -963,7 +989,9 @@ export class AgentHostConnection {
     this.closed = true
     clearTimeout(this.retry)
     clearInterval(this.heartbeat)
-    if (this.current) this.offline(this.current, 'shutdown')
+    const active = this.current
+    if (active) this.offline(active, 'shutdown')
+    await active?.client.shutdown().catch(() => undefined)
     await this.opening?.catch(() => undefined)
     if (this.historyLoading) await Promise.allSettled([this.historyLoading.promise])
     if (this.nativeHistoryLoading) await Promise.allSettled([this.nativeHistoryLoading.promise])

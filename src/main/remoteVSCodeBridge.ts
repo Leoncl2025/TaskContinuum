@@ -59,10 +59,13 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     authorize: (root, target) => agentHosts.authorize(root, target),
     directories: async (root, target) => {
       const connection = await agentHosts.connection(root, target)
-      await connection.open()
-      const state = connection.snapshot(target.sessionId).state
-      const parsed = z.object({ workingDirectories: z.array(z.string().max(8192)).max(8).optional() }).parse(state)
-      return parsed.workingDirectories ?? []
+      const release = connection.retain()
+      try {
+        await connection.open()
+        const state = connection.snapshot(target.sessionId).state
+        const parsed = z.object({ workingDirectories: z.array(z.string().max(8192)).max(8).optional() }).parse(state)
+        return parsed.workingDirectories ?? []
+      } finally { release() }
     },
     openExternal: (url) => shell.openExternal(url),
   })

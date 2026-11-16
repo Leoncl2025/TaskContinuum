@@ -59,10 +59,12 @@ function terminalFixture() {
     historyProgress: undefined as AgentHostHistoryTransfer | undefined,
     open: vi.fn(async () => {}),
     listen: vi.fn<(listener: (event: AgentHostEvent) => void) => () => void>(() => () => {}),
+    retain: vi.fn(() => () => {}),
     retainTerminal: vi.fn(),
     terminal: vi.fn(async () => {}),
     releaseTerminal: vi.fn(),
     loadHistory: vi.fn(async () => {}),
+    models: vi.fn(async () => [{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }]),
     resolveDelivery: vi.fn(async (_id: string, _action: 'check' | 'abandon', authorize: () => Promise<void>) => { await authorize(); return 'not-found' as const }),
   }
   const manager = Object.assign(setup.manager, {
@@ -348,5 +350,29 @@ describe('local planning creation IPC', () => {
     if (channel === 'local-creations') setup.localCreations.list.mockImplementationOnce(async () => { setup.change('root'); return [] })
     if (channel === 'local-creation-status') setup.localCreations.status.mockImplementationOnce(async () => { setup.change('root'); return setup.result })
     await expect(setup.invoke(channel, setup.request.operationId)).rejects.toThrow('changed')
+  })
+
+  it('balances connection retainers across watch, unwatch, models, and authorization failures', async () => {
+    const setup = terminalFixture()
+    let activeRetainers = 0
+    setup.connection.retain.mockImplementation(() => {
+      activeRetainers++
+      let released = false
+      return () => { if (!released) { released = true; activeRetainers-- } }
+    })
+    try {
+      expect(await setup.invoke('models', setup.target)).toEqual([{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }])
+      expect(activeRetainers).toBe(0)
+      const id = await setup.invoke('watch', setup.target) as string
+      expect(activeRetainers).toBe(1)
+      await setup.invoke('unwatch', id)
+      expect(activeRetainers).toBe(0)
+
+      setup.manager.authorize.mockRejectedValueOnce(new Error('Access revoked.'))
+      await expect(setup.invoke('watch', setup.target)).rejects.toThrow('Access revoked.')
+      expect(activeRetainers).toBe(0)
+    } finally {
+      setup.close()
+    }
   })
 })

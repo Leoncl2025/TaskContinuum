@@ -133,8 +133,14 @@ function creationConfig(value: unknown): Record<string, unknown> {
   return forwarded
 }
 
+export const LOCAL_AGENT_HOST_LIMITS = {
+  maxConnections: 64,
+} as const
+
 export class AgentHostRegistry {
   private readonly connections = new Map<string, AgentHostConnection>()
+  private readonly closing = new Map<string, Promise<void>>()
+  private closed = false
   private readonly knownCreationHosts = new Map<string, AgentHostCreationHost>()
 
   constructor(private readonly directory: string, private readonly discovery: string[], private readonly owner: () => Promise<SessionOwner>) {}
@@ -299,7 +305,9 @@ export class AgentHostRegistry {
     if (chat.data.workingDirectories) await this.verifyCreationDirectory(chat.data.workingDirectories, root)
     const session = agentHostSessionSchema.parse({ sessionId, chatId, owner, title: 'New Copilot chat', provider: 'copilotcli', updatedAt: chat.data.modifiedAt, canSend: true })
     // Native empty drafts are GC'd after their last subscriber leaves. Hand off before closing this probe.
-    await (await this.connection({ sessionId, chatId, owner })).open()
+    const localConnection = await this.connection({ sessionId, chatId, owner })
+    const release = localConnection.retain()
+    try { await localConnection.open() } finally { release() }
     return { state: 'ready', nativeLifecycle: state.lifecycle, session }
   }
 
@@ -391,28 +399,58 @@ export class AgentHostRegistry {
   async connection(value: AgentHostTarget): Promise<AgentHostConnection> {
     const target = agentHostTargetSchema.parse(value)
     if (target.owner.clientId !== (await this.owner()).clientId) throw new Error('The Agent Host belongs to a different execution device.')
+    if (this.closed) throw new Error('Agent Host registry is closed.')
     const key = agentHostKey(target)
+    const pendingClose = this.closing.get(key)
+    if (pendingClose) await pendingClose
+    if (this.closed) throw new Error('Agent Host registry is closed.')
     let connection = this.connections.get(key)
-    if (!connection) {
-      if (this.connections.size >= 64) throw new Error('Agent Host connection limit reached.')
-      connection = new AgentHostConnection(target, this.directory, async (signal) => {
-        const endpoints = await discoverAgentHosts(this.discovery)
-        const endpoint = await this.resolveEndpoint(target, endpoints, signal)
-        return connectLocalAgentHost(endpoint, signal)
-      })
+    if (connection) {
+      this.connections.delete(key)
       this.connections.set(key, connection)
+      return connection
     }
+    if (this.connections.size >= LOCAL_AGENT_HOST_LIMITS.maxConnections && !this.evictConnection()) {
+      throw new Error('Agent Host connection limit reached.')
+    }
+    connection = new AgentHostConnection(target, this.directory, async (signal) => {
+      const endpoints = await discoverAgentHosts(this.discovery)
+      const endpoint = await this.resolveEndpoint(target, endpoints, signal)
+      return connectLocalAgentHost(endpoint, signal)
+    })
+    this.connections.set(key, connection)
     return connection
+  }
+
+  private evictConnection(): boolean {
+    for (const [key, existing] of this.connections) {
+      if (!existing.canEvict({ protectNativeEmptySession: true })) continue
+      this.connections.delete(key)
+      const operation = existing.close().catch(() => undefined).finally(() => {
+        if (this.closing.get(key) === operation) this.closing.delete(key)
+      })
+      this.closing.set(key, operation)
+      return true
+    }
+    return false
   }
 
   async describe(target: AgentHostTarget): Promise<AgentHostSession> {
     const connection = await this.connection(target)
-    await connection.open()
-    const state = connection.snapshot(target.sessionId).state as SessionState
-    if (state.provider !== 'copilotcli') throw new Error('This build supports Copilot Agent Host sessions only.')
-    const chat = connection.view.chat!
-    return agentHostSessionSchema.parse({ ...target, title: (chat.title || state.title || 'Untitled chat').slice(0, 2000), provider: state.provider, updatedAt: chat.modifiedAt, canSend: chat.interactivity !== 'read-only' && chat.interactivity !== 'hidden' })
+    const release = connection.retain()
+    try {
+      await connection.open()
+      const state = connection.snapshot(target.sessionId).state as SessionState
+      if (state.provider !== 'copilotcli') throw new Error('This build supports Copilot Agent Host sessions only.')
+      const chat = connection.view.chat!
+      return agentHostSessionSchema.parse({ ...target, title: (chat.title || state.title || 'Untitled chat').slice(0, 2000), provider: state.provider, updatedAt: chat.modifiedAt, canSend: chat.interactivity !== 'read-only' && chat.interactivity !== 'hidden' })
+    } finally { release() }
   }
 
-  async close(): Promise<void> { await Promise.all([...this.connections.values()].map((connection) => connection.close())); this.connections.clear() }
+  async close(): Promise<void> {
+    this.closed = true
+    const active = [...this.connections.values()]
+    this.connections.clear()
+    await Promise.all([...active.map((connection) => connection.close()), ...this.closing.values()])
+  }
 }

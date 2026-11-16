@@ -82,6 +82,8 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
       socket.once('error', abandoned)
       // Observe a peer's FIN while authorization is pending, before WebSocket takes over.
       socket.resume()
+      let releaseConnection: (() => void) | undefined
+      let handedOff = false
       try {
         const url = new URL(request.url ?? '/', 'http://127.0.0.1')
         if (url.pathname !== '/device/agent-host' || [...url.searchParams.keys()].join() !== 'target') throw new Error('Denied.')
@@ -94,6 +96,8 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
         abort.signal.throwIfAborted()
         advance('native')
         const connection = await abortable(options.connection(selectedTarget), abort.signal)
+        releaseConnection = connection.retain?.() ?? (() => {})
+        socket.once('close', releaseConnection)
         abort.signal.throwIfAborted()
         await abortable(connection.open(), abort.signal)
         abort.signal.throwIfAborted()
@@ -104,7 +108,9 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
           return
         }
         advance('websocket')
-        sockets.handleUpgrade(request, socket, head, (client) => serve(client, connection, token, selectedTarget, access, traceId))
+        handedOff = true
+        const releaseOwnerConnection = releaseConnection
+        sockets.handleUpgrade(request, socket, head, (client) => serve(client, connection, token, selectedTarget, access, traceId, releaseOwnerConnection))
         logAgentHostDiagnostic('gateway.upgrade', { target: selectedTarget, traceId, status: 'ok', step, elapsedMs: performance.now() - started })
       } catch (error) {
         const limit = agentHostSizeLimit(error)
@@ -114,6 +120,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
         abort.signal.throwIfAborted()
         if (!socket.destroyed) socket.end(`HTTP/1.1 413 Payload Too Large\r\n${AGENT_HOST_LIMIT_HEADER}: ${JSON.stringify(limit.toData())}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`)
       } finally {
+        if (!handedOff) releaseConnection?.()
         clearTimeout(timeout)
         socket.off('close', abandoned)
         socket.off('end', abandoned)
@@ -129,7 +136,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
     })
   })
 
-  function serve(socket: WebSocket, connection: AgentHostConnection, token: string, target: AgentHostTarget, initialAccess: AgentHostAccess, traceId: string): void {
+  function serve(socket: WebSocket, connection: AgentHostConnection, token: string, target: AgentHostTarget, initialAccess: AgentHostAccess, traceId: string, releaseConnection: () => void): void {
     const subscribed = new Set<string>()
     const pagedSubscriptions = new Set<string>()
     const retained = new Set<string>()
@@ -292,6 +299,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
       for (const resource of [...retained]) releaseTerminal(resource)
       rejectInitialization?.(new Error('Agent Host connection closed.'))
       unlisten()
+      releaseConnection()
     })
     socket.on('message', (data, binary) => {
       if (closed || binary) { if (binary) fail('invalid-frame'); return }

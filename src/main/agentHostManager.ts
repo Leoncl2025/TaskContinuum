@@ -16,8 +16,15 @@ import { routeAgentHostCreations } from './localTaskAgentHostWorker'
 import type { LocalTaskAgentHostWorker } from './localTaskAgentHostWorker'
 import { AgentHostAuthorization } from './agentHostAuthorization'
 
+export const REMOTE_AGENT_HOST_LIMITS = {
+  maxConnections: 32,
+  maxConnectionsPerOwner: 8,
+} as const
+
 export class AgentHostManager {
   private readonly remote = new Map<string, AgentHostConnection>()
+  private readonly closing = new Map<string, Promise<void>>()
+  private closed = false
   private consentWrite: Promise<void> = Promise.resolve()
   readonly creations: AgentHostCreationClient
   readonly localCreations: LocalAgentHostCreationService
@@ -88,25 +95,75 @@ export class AgentHostManager {
     await this.authorize(root, target)
     if (target.owner.clientId === (await this.owner()).clientId) return this.local.connection(target)
     const scope = createHash('sha256').update(await canonicalPolicyRoot(root)).digest('hex')
+    if (this.closed) throw new Error('Agent Host manager is closed.')
     const key = `${scope}:${agentHostKey(target)}`
+    const pendingClose = this.closing.get(key)
+    if (pendingClose) await pendingClose
+    if (this.closed) throw new Error('Agent Host manager is closed.')
     let connection = this.remote.get(key)
-    if (!connection) {
-      if (this.remote.size >= 32) throw new Error('Remote Agent Host connection limit reached.')
-      connection = new AgentHostConnection(target, join(this.directory, 'agent-host-remotes', scope), async (signal, traceId) => {
-        const started = performance.now()
-        try {
-          await this.authorize(root, target)
-          logAgentHostDiagnostic('device.transport', { target, traceId, status: 'ok', step: 'authorization', elapsedMs: performance.now() - started })
-        } catch (error) {
-          logAgentHostDiagnostic('device.transport', { target, traceId, status: 'error', step: 'authorization', elapsedMs: performance.now() - started, error })
-          throw error
-        }
-        return this.devices.agentHostTransport(root, target, signal, traceId)
-      })
+    if (connection) {
+      this.remote.delete(key)
       this.remote.set(key, connection)
+      return connection
     }
+    this.trimRemoteOwner(target.owner.clientId)
+    if (this.remote.size >= REMOTE_AGENT_HOST_LIMITS.maxConnections && !this.evictRemote(false) && !this.evictRemote(true)) {
+      throw new Error('Remote Agent Host connection limit reached.')
+    }
+    connection = new AgentHostConnection(target, join(this.directory, 'agent-host-remotes', scope), async (signal, traceId) => {
+      const started = performance.now()
+      try {
+        await this.authorize(root, target)
+        logAgentHostDiagnostic('device.transport', { target, traceId, status: 'ok', step: 'authorization', elapsedMs: performance.now() - started })
+      } catch (error) {
+        logAgentHostDiagnostic('device.transport', { target, traceId, status: 'error', step: 'authorization', elapsedMs: performance.now() - started, error })
+        throw error
+      }
+      return this.devices.agentHostTransport(root, target, signal, traceId)
+    })
+    this.remote.set(key, connection)
     return connection
   }
 
-  async close(): Promise<void> { this.access.close(); await this.localCreations.close(); await this.creations.close(); await Promise.all([...this.remote.values()].map((connection) => connection.close())); await this.local.close(); await this.consentWrite; this.remote.clear() }
+  private trimRemoteOwner(ownerClientId: string): void {
+    let ownerCount = 0
+    for (const existing of this.remote.values()) {
+      if (existing.target.owner.clientId === ownerClientId) ownerCount++
+    }
+    while (ownerCount >= REMOTE_AGENT_HOST_LIMITS.maxConnectionsPerOwner) {
+      const victim = [...this.remote.entries()].find(([, existing]) => existing.target.owner.clientId === ownerClientId && existing.canEvict())
+      if (!victim) break
+      this.evictEntry(victim[0], victim[1])
+      ownerCount--
+    }
+  }
+
+  private evictRemote(allowRemoteChatActivity: boolean): boolean {
+    for (const [key, existing] of this.remote) {
+      if (!existing.canEvict({ allowRemoteChatActivity })) continue
+      this.evictEntry(key, existing)
+      return true
+    }
+    return false
+  }
+
+  private evictEntry(key: string, connection: AgentHostConnection): void {
+    this.remote.delete(key)
+    const operation = connection.close().catch(() => undefined).finally(() => {
+      if (this.closing.get(key) === operation) this.closing.delete(key)
+    })
+    this.closing.set(key, operation)
+  }
+
+  async close(): Promise<void> {
+    this.closed = true
+    this.access.close()
+    await this.localCreations.close()
+    await this.creations.close()
+    const active = [...this.remote.values()]
+    this.remote.clear()
+    await Promise.all([...active.map((connection) => connection.close()), ...this.closing.values()])
+    await this.local.close()
+    await this.consentWrite
+  }
 }
