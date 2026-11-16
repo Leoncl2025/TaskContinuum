@@ -12,6 +12,7 @@ export interface AgentHostAuthorizationLease {
   owner: SessionOwner
   targets: AgentHostTarget[]
   localTargets: AgentHostTarget[]
+  localTaskLinks?: ReadonlyArray<{ taskId: string; target: AgentHostTarget }>
   current(): boolean
 }
 
@@ -63,10 +64,12 @@ export class AgentHostAuthorization {
       }
       const links = sessionLinkEntries(binding.snapshot.document.bindings)
       const targets = links.map(([, link]) => ({ sessionId: link.sessionId, chatId: link.chatId, owner: link.owner }))
-      const localTargets = links.flatMap(([taskId, link]) => link.owner.clientId === owner.clientId && receipts.some((receipt) =>
+      const localTaskLinks = links.flatMap(([taskId, link]) => link.owner.clientId === owner.clientId && receipts.some((receipt) =>
         receipt.root === canonical && receipt.taskId === taskId && receipt.owner.clientId === owner.clientId
-          && agentHostKey({ ...receipt.identity, owner: receipt.owner }) === agentHostKey(link)) ? [{ sessionId: link.sessionId, chatId: link.chatId, owner: link.owner }] : [])
-      return { owner, targets, localTargets, current: () => !this.closed && unchanged() && binding.current() }
+          && agentHostKey({ ...receipt.identity, owner: receipt.owner }) === agentHostKey(link))
+        ? [{ taskId, target: { sessionId: link.sessionId, chatId: link.chatId, owner: link.owner } }] : [])
+      const localTargets = localTaskLinks.map((entry) => entry.target)
+      return { owner, targets, localTargets, localTaskLinks, current: () => !this.closed && unchanged() && binding.current() }
     }
     throw new Error('Agent Host access changed while connecting. Retry after configuration settles.')
   }

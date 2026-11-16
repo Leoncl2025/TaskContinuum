@@ -28,6 +28,9 @@ import { machineDisplayName } from '../../shared/machineAliases'
 import { machineLabel, useMachineAliases } from '../machineAliases'
 import { resolveTurnActorName, useUserProfile } from '../userProfile'
 import type { TurnActorMetadata, UserProfileValue } from '../userProfile'
+import { describeMessageOrigin, summarizeCollaborationTool } from '../chat/messageOrigin'
+import type { LinkedSessionReference } from '../chat/messageOrigin'
+import type { SessionBinding } from '../chat/sessionBindings'
 
 function terminalText(state: TerminalState | undefined): string {
   return state ? stripAnsi(state.content.map((part) => part.type === 'command' ? part.output : part.value).join('')) : ''
@@ -97,6 +100,7 @@ function retainChatHistory(previous: AgentHostView | undefined, value: AgentHost
       && value.chat.modifiedAt === previous.chat.modifiedAt
       && value.chat.turnsNextCursor === previous.chat.turnsNextCursor
       && value.chat.draft?.text === previous.chat.draft?.text
+      && (value.chat.steeringMessage?.id ?? '') === (previous.chat.steeringMessage?.id ?? '')
       && (value.chat.queuedMessages?.length ?? 0) === (previous.chat.queuedMessages?.length ?? 0)) {
       return { ...value, chat: previous.chat }
     }
@@ -145,7 +149,10 @@ function toolFailed(tool: ToolPart['toolCall']): boolean {
 
 function toolDescription(tool: ToolPart['toolCall']): string {
   const message = 'pastTenseMessage' in tool ? tool.pastTenseMessage : 'invocationMessage' in tool ? tool.invocationMessage : undefined
-  return (typeof message === 'string' ? message : message?.markdown) || tool.intention || ''
+  const base = (typeof message === 'string' ? message : message?.markdown) || tool.intention || ''
+  const collabSummary = summarizeCollaborationTool(tool)
+  if (!collabSummary) return base
+  return base ? `${base} — ${collabSummary}` : collabSummary
 }
 
 function routineTool(tool: ToolPart['toolCall']): boolean {
@@ -284,11 +291,14 @@ function Responses({ parts, ...context }: ResponseContext & { parts: ResponsePar
 const ChatTurnItem = memo(function ChatTurnItem({
   turn,
   isResponding,
+  currentTarget,
   machineName,
   ownerDisplay,
   aliases,
   models,
   userProfile,
+  linkedSessions,
+  onSelectLinkedSession,
   terminals,
   terminalStatus,
   owner,
@@ -297,12 +307,19 @@ const ChatTurnItem = memo(function ChatTurnItem({
 }: ResponseContext & {
   turn: DisplayedTurn
   isResponding: boolean
+  currentTarget: AgentHostTarget
   machineName: string
   ownerDisplay: string
   aliases: Readonly<Record<string, string>>
   models: readonly Awaited<ReturnType<AgentHostBridge['models']>>[number][]
   userProfile: UserProfileValue
+  linkedSessions?: readonly LinkedSessionReference[]
+  onSelectLinkedSession?(taskId: string, binding: SessionBinding): void
 }) {
+  const origin = useMemo(
+    () => describeMessageOrigin(turn.message, currentTarget, aliases, linkedSessions),
+    [turn.message, currentTarget, aliases, linkedSessions],
+  )
   const actor = turn.message._meta?.taskcontinuumActor as TurnActorMetadata | undefined
   const resolvedActor = useMemo(() => resolveTurnActorName(actor, userProfile), [actor, userProfile])
   const actorMachineDisplay = typeof actor?.machineName === 'string' && actor.machineName
@@ -312,17 +329,49 @@ const ChatTurnItem = memo(function ChatTurnItem({
   const images = useMemo(() => imagesFor(turn), [turn])
   const times = useMemo(() => formatTurnTimestamps(turn, isResponding), [turn, isResponding])
   return <div data-turn-id={turn.id}>
-    <article className="message message-user">
-      <header className="turn-header turn-header-user">
-        <div className="turn-header-identity">
-          <span className="turn-actor-avatar is-user" aria-hidden="true">
-            {resolvedActor.initial ?? <Icon name="account" />}
-          </span>
-          <strong className="turn-actor-name" title={resolvedActor.rawUsername}>{resolvedActor.name}</strong>
-          {actorMachineDisplay && (
-            <span className="turn-machine-badge" title={actor?.machineName}>{actorMachineDisplay}</span>
+    <article className={`message message-user${origin.isNonUserOrigin ? ' message-agent-origin' : ''}`} data-message-origin={origin.kind}>
+      {origin.provenance && (
+        <div className="message-origin-row">
+          {origin.provenance.jumpTarget && onSelectLinkedSession ? (
+            <button
+              type="button"
+              className="message-origin-link"
+              onClick={() => onSelectLinkedSession(origin.provenance!.jumpTarget!.taskId, origin.provenance!.jumpTarget!.binding)}
+              title="Open source session"
+            >
+              <Icon name="reply" />
+              <span>{origin.provenance.label}</span>
+            </button>
+          ) : (
+            <span className="message-origin-label">
+              <Icon name="reply" />
+              <span>{origin.provenance.label}</span>
+            </span>
           )}
         </div>
+      )}
+      <header className="turn-header turn-header-user">
+        {origin.isNonUserOrigin ? (
+          <div className="turn-header-identity">
+            <span className="turn-actor-avatar" aria-hidden="true">
+              <Icon name={origin.icon} />
+            </span>
+            <strong className="turn-actor-name">{origin.senderLabel}</strong>
+            {origin.machineBadge && (
+              <span className="turn-machine-badge" title={origin.machineBadge.title}>{origin.machineBadge.label}</span>
+            )}
+          </div>
+        ) : (
+          <div className="turn-header-identity">
+            <span className="turn-actor-avatar is-user" aria-hidden="true">
+              {resolvedActor.initial ?? <Icon name="account" />}
+            </span>
+            <strong className="turn-actor-name" title={resolvedActor.rawUsername}>{resolvedActor.name}</strong>
+            {actorMachineDisplay && (
+              <span className="turn-machine-badge" title={actor?.machineName}>{actorMachineDisplay}</span>
+            )}
+          </div>
+        )}
         {modelSummary && (
           <span className="turn-model-pill" title={modelSummary.tooltip}>
             <span className="turn-model-name">{modelSummary.modelLabel}</span>
@@ -364,12 +413,15 @@ const ChatTurnItem = memo(function ChatTurnItem({
 }, (prev, next) => {
   if (prev.turn !== next.turn
     || prev.isResponding !== next.isResponding
+    || prev.currentTarget !== next.currentTarget
     || prev.owner !== next.owner
     || prev.ownerDisplay !== next.ownerDisplay
     || prev.machineName !== next.machineName
     || prev.aliases !== next.aliases
     || prev.models !== next.models
     || prev.userProfile !== next.userProfile
+    || prev.linkedSessions !== next.linkedSessions
+    || prev.onSelectLinkedSession !== next.onSelectLinkedSession
     || prev.bridge !== next.bridge) {
     return false
   }
@@ -379,35 +431,60 @@ const ChatTurnItem = memo(function ChatTurnItem({
     && prev.terminalStatus === next.terminalStatus
 })
 
-const ChatTranscript = memo(function ChatTranscript({ view, machineName, ownerDisplay, aliases, models, userProfile, ...context }: Pick<ResponseContext, 'owner' | 'bridge' | 'watchId'> & {
+const ChatTranscript = memo(function ChatTranscript({ view, currentTarget, machineName, ownerDisplay, aliases, models, userProfile, linkedSessions, onSelectLinkedSession, ...context }: Pick<ResponseContext, 'owner' | 'bridge' | 'watchId'> & {
   view: AgentHostView | undefined
+  currentTarget: AgentHostTarget
   machineName: string
   ownerDisplay: string
   aliases: Readonly<Record<string, string>>
   models: readonly Awaited<ReturnType<AgentHostBridge['models']>>[number][]
   userProfile: UserProfileValue
+  linkedSessions?: readonly LinkedSessionReference[]
+  onSelectLinkedSession?(taskId: string, binding: SessionBinding): void
 }) {
   const activeTurn = view?.chat?.activeTurn
   const turns = [...view?.chat?.turns ?? [], ...activeTurn ? [activeTurn] : []]
+  const steering = view?.chat?.steeringMessage
+  const queued = view?.chat?.queuedMessages ?? []
+  const hasPendingMessages = Boolean(steering || queued.length)
   const terminals = view?.terminals && Object.keys(view.terminals).length > 0 ? view.terminals : EMPTY_TERMINALS
   const terminalStatus = view?.terminalStatus && Object.keys(view.terminalStatus).length > 0 ? view.terminalStatus : EMPTY_TERMINAL_STATUS
   return <>
-    {!turns.length && <p className="ahp-chat-placeholder muted">{view?.state === 'connected' ? 'No messages.' : view?.historyTransfer ? historyTransferLabel(view.historyTransfer) : 'Waiting for original history...'}</p>}
+    {!turns.length && !hasPendingMessages && <p className="ahp-chat-placeholder muted">{view?.state === 'connected' ? 'No messages.' : view?.historyTransfer ? historyTransferLabel(view.historyTransfer) : 'Waiting for original history...'}</p>}
     {turns.map((turn) => (
       <ChatTurnItem
         key={turn.id}
         turn={turn}
         isResponding={activeTurn?.id === turn.id}
+        currentTarget={currentTarget}
         machineName={machineName}
         ownerDisplay={ownerDisplay}
         aliases={aliases}
         models={models}
         userProfile={userProfile}
+        linkedSessions={linkedSessions}
+        onSelectLinkedSession={onSelectLinkedSession}
         terminals={terminals}
         terminalStatus={terminalStatus}
         {...context}
       />
     ))}
+    {hasPendingMessages && <section className="ahp-pending-messages" aria-label="Pending session messages">
+      {steering && (() => {
+        const origin = describeMessageOrigin(steering.message, currentTarget, aliases, linkedSessions)
+        return <div key={`steer:${steering.id}`} className="ahp-pending-item" data-pending-kind="steering">
+          <header><Icon name="arrow-right" /><strong>Steering current turn</strong><span>{origin.provenance?.label ?? origin.senderLabel}</span></header>
+          <p>{steering.message.text}</p>
+        </div>
+      })()}
+      {queued.map((item) => {
+        const origin = describeMessageOrigin(item.message, currentTarget, aliases, linkedSessions)
+        return <div key={`queue:${item.id}`} className="ahp-pending-item" data-pending-kind="queued">
+          <header><Icon name="clock" /><strong>Queued for next turn</strong><span>{origin.provenance?.label ?? origin.senderLabel}</span></header>
+          <p>{item.message.text}</p>
+        </div>
+      })}
+    </section>}
   </>
 })
 
@@ -428,6 +505,8 @@ type AgentHostPanelProps = {
   sessionSwitcher?: ReactNode
   cachedTitle?: string
   customTitle?: string
+  linkedSessions?: readonly LinkedSessionReference[]
+  onSelectLinkedSession?(taskId: string, binding: SessionBinding): void
   onTitles?(sessions: readonly SessionTitleUpdate[]): void
   onRenameTitle?(nextName: string | null): void
   onDraftChange?(draft: string): void
@@ -484,7 +563,7 @@ function HeaderTitleInput({ value, onFinish }: { value: string; onFinish(next: s
   />
 }
 
-export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, visible = true, paneSlot, splitOrientation = 'horizontal', showTaskBadge = false, minimalHeader = false, closeLabel = 'Hide chat panel', hideClose = false, initialDraft, restoredDraft, headerTarget, sessionSwitcher, cachedTitle, customTitle, onTitles, onRenameTitle, onDraftChange, onActivatePane, onSplitRight, onSplitDown, onToggleSplitOrientation, onSwapSplit, onPopOut, onHeaderContextMenu, onDetach, onClose, onDevices, onSessions, onBusy, panelKey, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
+export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, visible = true, paneSlot, splitOrientation = 'horizontal', showTaskBadge = false, minimalHeader = false, closeLabel = 'Hide chat panel', hideClose = false, initialDraft, restoredDraft, headerTarget, sessionSwitcher, cachedTitle, customTitle, linkedSessions, onSelectLinkedSession, onTitles, onRenameTitle, onDraftChange, onActivatePane, onSplitRight, onSplitDown, onToggleSplitOrientation, onSwapSplit, onPopOut, onHeaderContextMenu, onDetach, onClose, onDevices, onSessions, onBusy, panelKey, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
   const bridge = window.agentHost
   const { sessionId, chatId } = target
   const { clientId, machineName } = target.owner
@@ -639,9 +718,24 @@ export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, ta
   const pending = Boolean(view?.pendingTurn)
   const historyBusy = Boolean(view?.historyTransfer || view?.history?.loading)
   const panelBusy = busy || pending || responding
+  const [unseenBelow, setUnseenBelow] = useState(false)
+  const lastTail = useRef<{ watchKey: string; signature: string } | undefined>(undefined)
+  const tailSignature = `${watchKey}:${activeTurn?.id ?? view?.chat?.turns.at(-1)?.id ?? ''}:${view?.chat?.steeringMessage?.id ?? ''}:${(view?.chat?.queuedMessages ?? []).map((item) => item.id).join(',')}`
   const notifyBusy = useEffectEvent((value: boolean) => { onBusy?.(value, panelKey) })
   useEffect(() => { notifyBusy(panelBusy) }, [panelBusy])
   useEffect(() => () => { notifyBusy(false) }, [])
+  useEffect(() => {
+    if (!view?.chat) return
+    if (!lastTail.current || lastTail.current.watchKey !== watchKey) {
+      lastTail.current = { watchKey, signature: tailSignature }
+      setUnseenBelow(false)
+      return
+    }
+    if (lastTail.current.signature !== tailSignature) {
+      lastTail.current = { watchKey, signature: tailSignature }
+      if (!following.current) setUnseenBelow(true)
+    }
+  }, [view?.chat, watchKey, tailSignature])
   useEffect(() => {
     if (following.current && log.current) {
       log.current.scrollTop = log.current.scrollHeight
@@ -731,6 +825,7 @@ export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, ta
     if (!canSend || !bridge || operating.current || imageInput.isReading() || !draft.trim() && !images.length) return
     operating.current = true
     following.current = true
+    setUnseenBelow(false)
     if (log.current) log.current.scrollTop = log.current.scrollHeight
     setBusy(true)
     setError(undefined)
@@ -900,7 +995,9 @@ export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, ta
       if (element.clientWidth !== logSize.current.width || element.clientHeight !== logSize.current.height) return
       const upward = element.scrollTop < lastScrollTop.current
       lastScrollTop.current = element.scrollTop
-      following.current = element.scrollHeight - element.scrollTop - element.clientHeight < 60
+      const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 60
+      following.current = atBottom
+      if (atBottom) setUnseenBelow(false)
       if (upward && element.scrollTop < 120) void loadEarlierHistory()
     }}>
       {(view?.history?.hasMore || historyFailure) && <div className="ahp-history-pagination">
@@ -911,7 +1008,15 @@ export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, ta
         {view?.state === 'offline' && <p className="muted">Only previously loaded history is available offline.</p>}
         {historyFailure && <p className="copilot-error" role="alert">{historyFailure}</p>}
       </div>}
-      <ChatTranscript view={view} machineName={machineName} ownerDisplay={ownerDisplay} aliases={aliases} models={models} userProfile={userProfile} owner={ownerLabel} bridge={bridge} watchId={watchId} />
+      <ChatTranscript view={view} currentTarget={stableTarget} machineName={machineName} ownerDisplay={ownerDisplay} aliases={aliases} models={models} userProfile={userProfile} linkedSessions={linkedSessions} onSelectLinkedSession={onSelectLinkedSession} owner={ownerLabel} bridge={bridge} watchId={watchId} />
+      {unseenBelow && <div className="ahp-new-activity-bar"><button type="button" className="ahp-new-activity-pill" onClick={() => {
+        following.current = true
+        setUnseenBelow(false)
+        if (log.current) {
+          log.current.scrollTop = log.current.scrollHeight
+          lastScrollTop.current = log.current.scrollTop
+        }
+      }}><Icon name="arrow-down" /><span>New activity below</span></button></div>}
     </div>
     <form className="composer-area" onSubmit={(event) => { event.preventDefault(); void send() }}>
       <ChatImageStatus input={imageInput} />

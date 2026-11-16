@@ -7,6 +7,8 @@ import { AhpErrorCodes } from '@microsoft/agent-host-protocol'
 import type { AgentHostTarget } from '../shared/agentHost'
 import { chatSubmissionSchema, MAX_CHAT_TEXT_LENGTH } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
+import { taskContinuumCollaborationMetaSchema } from '../shared/sessionCollaboration'
+import type { TaskContinuumCollaborationMeta } from '../shared/sessionCollaboration'
 import { AgentHostProtocolError, agentHostAdvertisedVersionSchema, agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminalIdSchema, requireAgentHostProtocolVersion } from './agentHostProtocol'
 import { AGENT_HOST_TRACE_HEADER, agentHostDiagnosticChannel, agentHostDiagnosticMethod, logAgentHostDiagnostic, withAgentHostDiagnosticTrace } from './agentHostDiagnostics'
 import type { AgentHostDiagnosticDetails } from './agentHostDiagnostics'
@@ -26,6 +28,7 @@ import { DesktopOperationUnavailableError } from './desktopOperations'
 export interface AgentHostAccess {
   canSend: boolean
   actor: { clientId: string; machineName: string; username?: string; displayName?: string }
+  taskIds?: readonly string[]
   current?(): boolean
 }
 export interface AgentHostGatewayOptions {
@@ -416,7 +419,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
                 ready.push({ resource: item, pending, snapshot })
               }
               result = request.method === 'initialize'
-                ? { ...connection.handshake, snapshots: ready.map((item) => item.snapshot), _meta: { taskcontinuumCanSend: initialAccess.canSend, taskcontinuumModelSelection: true, taskcontinuumModelConfig: true, taskcontinuumStreamedSendValidation: true, taskcontinuumChunkedChatSnapshot: snapshotStore.capability, taskcontinuumPagedChatHistory: { version: 1 }, taskcontinuumChatSnapshotCache: { version: 1 } } }
+                ? { ...connection.handshake, snapshots: ready.map((item) => item.snapshot), _meta: { taskcontinuumCanSend: initialAccess.canSend, taskcontinuumModelSelection: true, taskcontinuumModelConfig: true, taskcontinuumStreamedSendValidation: true, taskcontinuumChunkedChatSnapshot: snapshotStore.capability, taskcontinuumPagedChatHistory: { version: 1 }, taskcontinuumChatSnapshotCache: { version: 1 }, taskcontinuumCollaboration: { version: 1 } } }
                 : { type: 'snapshot', snapshots: ready.map((item) => item.snapshot) }
             } else if (request.method === 'ping') {
               z.object({ channel: z.literal('ahp-root://') }).strict().parse(request.params)
@@ -493,8 +496,30 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
                   const effectiveActor = senderDisplay
                     ? { ...access.actor, displayName: senderDisplay }
                     : access.actor
+                  let collaboration: TaskContinuumCollaborationMeta | undefined
+                  if (action.message._meta && typeof action.message._meta === 'object' && !Array.isArray(action.message._meta) && Object.prototype.hasOwnProperty.call(action.message._meta, 'taskcontinuumCollaboration')) {
+                    const parsedCollab = taskContinuumCollaborationMetaSchema.parse((action.message._meta as Record<string, unknown>).taskcontinuumCollaboration)
+                    if (parsedCollab.messageId !== command.id) throw new Error('Collaboration messageId does not match the turn ID.')
+                    if (access.taskIds && !access.taskIds.includes(parsedCollab.taskId)) throw new Error('The target chat is not linked to that task on its owner.')
+                    if (parsedCollab.sourceTarget && parsedCollab.sourceTarget.owner.clientId !== access.actor.clientId) {
+                      throw new Error('Collaboration source target must belong to the authenticated sender device.')
+                    }
+                    collaboration = {
+                      ...parsedCollab,
+                      senderDevice: {
+                        clientId: access.actor.clientId,
+                        machineName: access.actor.machineName,
+                        ...(access.actor.username ? { username: access.actor.username } : {}),
+                      },
+                    }
+                  }
                   step = 'native'
-                  await connection.send(command.id, command.text, command.images, async () => { await requestAuthorization(true) }, effectiveActor, model)
+                  await connection.send(command.id, command.text, command.images, async () => {
+                    const rechecked = await requestAuthorization(true)
+                    if (collaboration && rechecked.taskIds && !rechecked.taskIds.includes(collaboration.taskId)) {
+                      throw new Error('The target chat is no longer linked to that task on its owner.')
+                    }
+                  }, effectiveActor, model, collaboration)
                 } else if (params.action.type === 'chat/turnCancelled') {
                   const action = z.object({ type: z.literal('chat/turnCancelled'), turnId: z.string().min(1).max(200), duration: z.number().nonnegative() }).strict().parse(params.action)
                   await connection.cancel(action.turnId, async () => { await requestAuthorization(true) })

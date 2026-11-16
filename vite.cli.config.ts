@@ -6,20 +6,25 @@ const external = [...builtinModules, ...builtinModules.map((name) => `node:${nam
 
 export default defineConfig({
   plugins: [{
-    name: 'standalone-file-transfer-mcp',
+    name: 'standalone-mcp-entries',
     apply: 'build',
     async closeBundle() {
-      await build({
-        configFile: false,
-        build: {
-          target: 'node24', outDir: 'out/cli', emptyOutDir: false, minify: false,
-          lib: {
-            entry: fileURLToPath(new URL('./src/main/fileTransferMcp/entry.ts', import.meta.url)),
-            formats: ['cjs'], fileName: () => 'taskcontinuum-files-mcp.cjs',
+      for (const [entry, output] of [
+        ['./src/main/fileTransferMcp/entry.ts', 'taskcontinuum-files-mcp.cjs'],
+        ['./src/main/sessionCollaborationMcp/entry.ts', 'taskcontinuum-collab-mcp.cjs'],
+      ] as const) {
+        await build({
+          configFile: false,
+          build: {
+            target: 'node24', outDir: 'out/cli', emptyOutDir: false, minify: false,
+            lib: {
+              entry: fileURLToPath(new URL(entry, import.meta.url)),
+              formats: ['cjs'], fileName: () => output,
+            },
+            rollupOptions: { external },
           },
-          rollupOptions: { external },
-        },
-      })
+        })
+      }
     },
   }],
   build: {

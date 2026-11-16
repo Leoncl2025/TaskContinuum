@@ -6,6 +6,7 @@ import type { SessionWindowMode } from '../../shared/desktop'
 import type { TaskRecord } from '../../shared/tasks'
 import { sessionBindingKey, sessionBindingTitle } from '../chat/sessionBindings'
 import type { SessionBinding, SessionBindings } from '../chat/sessionBindings'
+import type { LinkedSessionReference } from '../chat/messageOrigin'
 import { SESSION_BINDING_DRAG_MIME } from './LinkedSessionTree'
 import type { SessionTitleUpdate } from '../chat/useSessionTitles'
 import type { SessionDraftStore } from '../chat/sessionDraftStore'
@@ -188,6 +189,16 @@ export function PaneWorkspaceGrid({
   const groups = useMemo(() => listPaneGroups(tree.root), [tree.root])
   const isMultiGroup = groups.length > 1
   const taskById = useMemo(() => new Map(tasks.map((item) => [item.id, item])), [tasks])
+  const linkedSessions = useMemo<readonly LinkedSessionReference[]>(
+    () => Object.entries(bindings).flatMap(([taskId, entries]) =>
+      entries.map((binding) => {
+        const targetKey = agentHostKey(binding.agentHost)
+        const label = customTitles?.[targetKey] || sessionBindingTitle(binding, cachedTitles)
+        return { taskId, binding, label }
+      }),
+    ),
+    [bindings, cachedTitles, customTitles],
+  )
   const [contextMenu, setContextMenu] = useState<SessionContextMenuTarget | null>(null)
 
   const getGroupHost = useCallback((groupId: string): HTMLDivElement => {
@@ -328,6 +339,7 @@ export function PaneWorkspaceGrid({
         connectionRevision={connectionRevision}
         cachedTitles={cachedTitles}
         customTitles={customTitles}
+        linkedSessions={linkedSessions}
         aliases={aliases}
         draftStore={draftStore}
         restoredDrafts={restoredDrafts}
@@ -337,6 +349,10 @@ export function PaneWorkspaceGrid({
         onBusyChange={onBusyChange}
         onActivateGroup={() => activateGroup(group.id)}
         onSelectSession={(taskId, sessionKey) => onTreeChange((current) => selectSessionInGroup(current, group.id, taskId, sessionKey))}
+        onSelectLinkedSession={(taskId, binding) => {
+          onTreeChange((current) => selectSessionInGroup(current, group.id, taskId, sessionBindingKey(binding)))
+          onTaskChatActivated?.()
+        }}
         onSplit={(direction, moveSource, taskId, sessionKey) => handleSplit(group.id, direction, moveSource, taskId, sessionKey)}
         onCloseGroup={() => {
           if (isMultiGroup) onTreeChange((current) => removePaneGroup(current, group.id))
@@ -799,6 +815,7 @@ const MountedChatPanel = memo(function MountedChatPanel({
   headerTarget,
   cachedTitle,
   customTitle,
+  linkedSessions,
   visible,
   active,
   connectionRevision,
@@ -806,6 +823,7 @@ const MountedChatPanel = memo(function MountedChatPanel({
   canSplitMore,
   onTitles,
   onRenameSession,
+  onSelectLinkedSession,
   onDraftSnapshot,
   onActivateGroup,
   onSplit,
@@ -832,6 +850,7 @@ const MountedChatPanel = memo(function MountedChatPanel({
   readonly headerTarget?: HTMLElement | null
   readonly cachedTitle?: string
   readonly customTitle?: string
+  readonly linkedSessions?: readonly LinkedSessionReference[]
   readonly visible: boolean
   readonly active: boolean
   readonly connectionRevision: number
@@ -839,6 +858,7 @@ const MountedChatPanel = memo(function MountedChatPanel({
   readonly canSplitMore: boolean
   readonly onTitles?: (sessions: readonly SessionTitleUpdate[]) => void
   readonly onRenameSession?: (target: SessionBinding['agentHost'], nextName: string | null) => void
+  readonly onSelectLinkedSession?: (taskId: string, binding: SessionBinding) => void
   readonly onDraftSnapshot?: (groupId: string, taskId: string, sessionKey: string, draft: string) => void
   readonly onActivateGroup: () => void
   readonly onSplit: (direction: SplitDirection, moveSource: boolean, taskId?: string, sessionKey?: string | null) => void
@@ -908,6 +928,8 @@ const MountedChatPanel = memo(function MountedChatPanel({
     headerTarget={headerTarget}
     cachedTitle={cachedTitle}
     customTitle={customTitle}
+    linkedSessions={linkedSessions}
+    onSelectLinkedSession={onSelectLinkedSession}
     onTitles={onTitles}
     onRenameTitle={onRenameSession ? handleRenameTitle : undefined}
     onDraftChange={onDraftSnapshot ? handleDraftChange : undefined}
@@ -948,6 +970,7 @@ function PaneGroupBody({
   connectionRevision,
   cachedTitles,
   customTitles,
+  linkedSessions,
   aliases,
   draftStore,
   restoredDrafts,
@@ -957,6 +980,7 @@ function PaneGroupBody({
   onBusyChange,
   onActivateGroup,
   onSelectSession,
+  onSelectLinkedSession,
   onSplit,
   onCloseGroup,
   onPopOut,
@@ -985,6 +1009,7 @@ function PaneGroupBody({
   readonly connectionRevision: number
   readonly cachedTitles: Readonly<Record<string, string>>
   readonly customTitles?: Readonly<Record<string, string>>
+  readonly linkedSessions?: readonly LinkedSessionReference[]
   readonly aliases: Readonly<Record<string, string>>
   readonly draftStore?: SessionDraftStore
   readonly restoredDrafts?: Readonly<Record<string, { readonly nonce: number; readonly text: string }>>
@@ -994,6 +1019,7 @@ function PaneGroupBody({
   readonly onBusyChange?: (busy: boolean, panelKey?: string) => void
   readonly onActivateGroup: () => void
   readonly onSelectSession: (taskId: string, sessionKey: string) => void
+  readonly onSelectLinkedSession?: (taskId: string, binding: SessionBinding) => void
   readonly onSplit: (direction: SplitDirection, moveSource: boolean, taskId?: string, sessionKey?: string | null) => void
   readonly onCloseGroup: () => void
   readonly onPopOut?: (taskId: string, binding: SessionBinding | undefined, draft: string | undefined, mode: SessionWindowMode) => Promise<boolean> | boolean
@@ -1073,6 +1099,7 @@ function PaneGroupBody({
           headerTarget={!isMultiGroup && unifiedHeaderTarget ? unifiedHeaderTarget : undefined}
           cachedTitle={cachedTitles[agentHostKey(panel.binding.agentHost)]}
           customTitle={customTitles?.[agentHostKey(panel.binding.agentHost)]}
+          linkedSessions={linkedSessions}
           visible={visible}
           active={visible && groupFocused}
           connectionRevision={connectionRevision}
@@ -1080,6 +1107,7 @@ function PaneGroupBody({
           canSplitMore={canSplitMore}
           onTitles={onTitles}
           onRenameSession={onRenameSession}
+          onSelectLinkedSession={onSelectLinkedSession}
           onDraftSnapshot={onDraftSnapshot}
           onActivateGroup={onActivateGroup}
           onSplit={onSplit}

@@ -338,10 +338,10 @@ void app.whenReady().then(async () => {
   }, () => {
     sessionWindows?.broadcast('remote-vscode:git-bindings-changed')
   })
-  await remoteVSCode.filesReady
+  await Promise.all([remoteVSCode.filesReady, remoteVSCode.collaborationReady])
   if (quitting || cleanupComplete) return
   registerChatLinkBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.chatLinks)
-  agentHost = registerAgentHostBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.agentHosts)
+  agentHost = registerAgentHostBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.agentHosts, remoteVSCode.collaboration)
   const installCoordinator = new MultiWindowInstallCoordinator(
     () => sessionWindows?.liveWindows() ?? [],
     (parentId, blockers) => updateRestart?.respond(parentId, blockers),

@@ -35,9 +35,12 @@ $ErrorActionPreference = 'Stop'
 $file = $env:TASKCONTINUUM_DESCRIPTOR_FILE
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 ${set ? `
-$acl = [System.Security.AccessControl.FileSecurity]::new()
-$acl.SetOwner($sid)
+$acl = [System.IO.File]::GetAccessControl($file)
+if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { $acl.SetOwner($sid) }
 $acl.SetAccessRuleProtection($true, $false)
+foreach ($existing in @($acl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))) {
+  [void]$acl.RemoveAccessRuleSpecific($existing)
+}
 $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'Allow')
 $acl.AddAccessRule($rule)
 [System.IO.File]::SetAccessControl($file, $acl)
@@ -69,10 +72,10 @@ async function checkDirectory(directory: string): Promise<void> {
   }
 }
 
-export async function readEndpoint(directory: string): Promise<LocalFileEndpoint> {
+export async function readEndpoint(directory: string, descriptorName: string = FILE_MCP_DESCRIPTOR): Promise<LocalFileEndpoint> {
   try {
     await checkDirectory(directory)
-    const file = join(directory, FILE_MCP_DESCRIPTOR)
+    const file = join(directory, descriptorName)
     const before = await lstat(file)
     privateFile(before)
     await windowsPermissions(file, false)
@@ -95,9 +98,9 @@ export async function readEndpoint(directory: string): Promise<LocalFileEndpoint
   }
 }
 
-export async function writeEndpoint(directory: string, endpoint: LocalFileEndpoint): Promise<void> {
-  const file = join(directory, FILE_MCP_DESCRIPTOR)
-  const pending = join(directory, `.${FILE_MCP_DESCRIPTOR}.${randomUUID()}`)
+export async function writeEndpoint(directory: string, endpoint: LocalFileEndpoint, descriptorName: string = FILE_MCP_DESCRIPTOR): Promise<void> {
+  const file = join(directory, descriptorName)
+  const pending = join(directory, `.${descriptorName}.${randomUUID()}`)
   try {
     const content = JSON.stringify(localFileEndpointSchema.parse(endpoint))
     await mkdir(directory, { recursive: true, mode: 0o700 })
@@ -120,9 +123,9 @@ export async function writeEndpoint(directory: string, endpoint: LocalFileEndpoi
   } finally { await unlink(pending).catch(() => {}) }
 }
 
-export async function removeEndpoint(directory: string, endpoint: LocalFileEndpoint): Promise<void> {
+export async function removeEndpoint(directory: string, endpoint: LocalFileEndpoint, descriptorName: string = FILE_MCP_DESCRIPTOR): Promise<void> {
   try {
-    const current = await readEndpoint(directory)
-    if (current.token === endpoint.token && current.port === endpoint.port) await unlink(join(directory, FILE_MCP_DESCRIPTOR))
+    const current = await readEndpoint(directory, descriptorName)
+    if (current.token === endpoint.token && current.port === endpoint.port) await unlink(join(directory, descriptorName))
   } catch { /* A replacement or inaccessible descriptor belongs to its current owner. */ }
 }
