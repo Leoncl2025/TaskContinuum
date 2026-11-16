@@ -354,4 +354,45 @@ describe('AgentHostSessionsSidebar', () => {
     expect(onSelect).not.toHaveBeenCalled()
     expect(window.agentHost.watch).not.toHaveBeenCalled()
   })
+
+  it('smart-sorts sessions by last response, creation time, and name, and switches back to manual on drag', async () => {
+    const s1 = binding('sort-1', 'Zeta session')
+    const s2 = binding('sort-2', 'Alpha session')
+    const s3 = binding('sort-3', 'Beta session')
+    window.agentHost = bridge([
+      { ...s1.agentHost, title: s1.title, provider: 'copilotcli', createdAt: '2026-11-10T10:00:00Z', updatedAt: '2026-11-12T10:00:00Z', canSend: true },
+      { ...s2.agentHost, title: s2.title, provider: 'copilotcli', createdAt: '2026-11-12T10:00:00Z', updatedAt: '2026-11-16T15:00:00Z', canSend: true },
+      { ...s3.agentHost, title: s3.title, provider: 'copilotcli', createdAt: '2026-11-15T10:00:00Z', updatedAt: '2026-11-15T12:00:00Z', canSend: true },
+    ])
+    const onReorder = vi.fn()
+    const user = userEvent.setup()
+    render(<AgentHostSessionsSidebar taskId="T-0002" taskTitle="Smart sort" taskReady
+      bindings={{ 'T-0002': [s1, s2, s3] }} onReorder={onReorder} onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} />)
+
+    const tree = await screen.findByRole('tree', { name: 'Sessions for T-0002' })
+    const sortSelect = screen.getByRole('combobox', { name: 'Sort sessions' })
+    const labels = () => within(tree).getAllByRole('treeitem').map((item) => item.getAttribute('aria-label'))
+    await screen.findByRole('treeitem', { name: 'Alpha session' })
+
+    await user.selectOptions(sortSelect, 'updated-desc')
+    expect(labels()).toEqual(['Alpha session', 'Beta session', 'Zeta session'])
+
+    await user.selectOptions(sortSelect, 'created-desc')
+    expect(labels()).toEqual(['Beta session', 'Alpha session', 'Zeta session'])
+
+    await user.selectOptions(sortSelect, 'created-asc')
+    expect(labels()).toEqual(['Zeta session', 'Alpha session', 'Beta session'])
+
+    await user.selectOptions(sortSelect, 'title-asc')
+    expect(labels()).toEqual(['Alpha session', 'Beta session', 'Zeta session'])
+
+    // Dragging Zeta to the top transitions sort mode back to manual.
+    const zetaRow = within(tree).getByRole('treeitem', { name: 'Zeta session' }).querySelector('.session-tree-row')!
+    const alphaItem = within(tree).getByRole('treeitem', { name: 'Alpha session' })
+    fireEvent.dragStart(zetaRow)
+    fireEvent.dragOver(alphaItem)
+    fireEvent.drop(alphaItem)
+    expect(sortSelect).toHaveValue('manual')
+    expect(onReorder).toHaveBeenCalledExactlyOnceWith([s1, s2, s3].map(sessionBindingKey))
+  })
 })

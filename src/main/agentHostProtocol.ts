@@ -12,7 +12,7 @@ export const agentHostChatIdSchema = z.string().max(512).regex(/^ahp-chat:\/[^\s
 export const agentHostTerminalIdSchema = z.string().max(1024).regex(/^(ahp-terminal|agenthost-terminal):\/[^\s?#]+$/)
 export const agentHostIdentitySchema = z.object({ sessionId: agentHostSessionIdSchema, chatId: agentHostChatIdSchema }).strict()
 export const agentHostTargetSchema = agentHostIdentitySchema.extend({ owner: z.object({ clientId: z.uuid(), machineName: remoteMachineSchema }).strict() }).strict()
-export const agentHostSessionSchema = agentHostTargetSchema.extend({ title: z.string().max(2000), provider: z.string().max(100), updatedAt: z.string().max(100), canSend: z.boolean() }).strict()
+export const agentHostSessionSchema = agentHostTargetSchema.extend({ title: z.string().max(2000), provider: z.string().max(100), updatedAt: z.string().max(100), createdAt: z.string().max(100).optional(), canSend: z.boolean() }).strict()
 export const agentHostCatalogSchema = z.object({ ownerId: z.uuid(), deviceId: z.uuid(), sessions: z.array(agentHostSessionSchema).max(1000) }).strict()
 
 export const agentHostAdvertisedVersionSchema = z.string().max(32).regex(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/)

@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { z } from 'zod'
+import { sessionSortModes } from './sessionBindings'
+import type { SessionSortMode } from './sessionBindings'
 
 const taskIdSchema = z.string().regex(/^T-[0-9]{4,}$/).max(128)
 const sessionLimit = 1000
 const sessionKeySchema = z.string().startsWith('ahp:').max(2048)
+const sessionSortSchema = z.enum(sessionSortModes)
 const sessionsSchema = z.unknown().refine((value) => value !== null && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).length <= sessionLimit && Object.keys(value).every((key) => taskIdSchema.safeParse(key).success), 'Invalid remembered task sessions.')
   .pipe(z.record(taskIdSchema, sessionKeySchema.nullable()))
@@ -12,6 +15,9 @@ const sessionOrderListSchema = z.array(sessionKeySchema).min(1).max(sessionLimit
 const sessionOrdersSchema = z.unknown().refine((value) => value !== null && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).length <= sessionLimit && Object.keys(value).every((key) => taskIdSchema.safeParse(key).success), 'Invalid remembered session orders.')
   .pipe(z.record(taskIdSchema, sessionOrderListSchema))
+const sessionSortsSchema = z.unknown().refine((value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+  && Object.keys(value).length <= sessionLimit && Object.keys(value).every((key) => taskIdSchema.safeParse(key).success), 'Invalid remembered session sort modes.')
+  .pipe(z.record(taskIdSchema, sessionSortSchema))
 const legacySelectionSchema = z.object({
   version: z.literal(1),
   taskId: taskIdSchema.nullable(),
@@ -21,11 +27,14 @@ const selectionSchema = legacySelectionSchema.extend({
   version: z.literal(2),
   openTaskIds: z.array(taskIdSchema).refine((ids) => new Set(ids).size === ids.length, 'Duplicate open tasks.'),
   sessionOrders: sessionOrdersSchema.optional(),
+  sessionSort: sessionSortSchema.optional(),
+  sessionSorts: sessionSortsSchema.optional(),
 }).refine((selection) => selection.taskId === null ? selection.openTaskIds.length === 0 : selection.openTaskIds.includes(selection.taskId), 'The active task must be open.')
 type Selection = z.infer<typeof selectionSchema>
 type State = { workspaceId?: string; selection?: Selection; persisted?: boolean; error?: string }
 const emptySessions: Readonly<Record<string, string | null>> = Object.freeze({})
 const emptySessionOrders: Readonly<Record<string, readonly string[]>> = Object.freeze({})
+const emptySessionSorts: Readonly<Record<string, SessionSortMode>> = Object.freeze({})
 
 function storageKey(workspaceId: string, version = 2): string { return `taskcontinuum:workbench-selection:v${version}:${workspaceId}` }
 
@@ -46,8 +55,18 @@ function rememberSessionOrder(selection: Selection | undefined, taskId: string, 
   return Object.fromEntries(entries.slice(-sessionLimit))
 }
 
-function preservedSessionOrders(selection: Selection | undefined): Pick<Selection, 'sessionOrders'> {
-  return selection?.sessionOrders && Object.keys(selection.sessionOrders).length ? { sessionOrders: selection.sessionOrders } : {}
+function rememberTaskSort(selection: Selection | undefined, taskId: string, mode: SessionSortMode | null, defaultSort: SessionSortMode): NonNullable<Selection['sessionSorts']> {
+  const entries = Object.entries(selection?.sessionSorts ?? {}).filter(([id, item]) => id !== taskId && item !== defaultSort)
+  if (mode !== null && mode !== defaultSort) entries.push([taskId, mode])
+  return Object.fromEntries(entries.slice(-sessionLimit))
+}
+
+function preservedSessionOrders(selection: Selection | undefined): Pick<Selection, 'sessionOrders' | 'sessionSort' | 'sessionSorts'> {
+  return {
+    ...(selection?.sessionOrders && Object.keys(selection.sessionOrders).length ? { sessionOrders: selection.sessionOrders } : {}),
+    ...(selection?.sessionSort && selection.sessionSort !== 'manual' ? { sessionSort: selection.sessionSort } : {}),
+    ...(selection?.sessionSorts && Object.keys(selection.sessionSorts).length ? { sessionSorts: selection.sessionSorts } : {}),
+  }
 }
 
 function read(workspaceId: string | undefined): State {
@@ -138,17 +157,42 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
 
   const reorderSessions = useCallback((taskId: string, orderedKeys: readonly string[], activeTaskId?: string | null, shown?: readonly string[]) => {
     update((selection) => {
+      const defaultSort = selection?.sessionSort ?? 'manual'
+      const currentSort = selection?.sessionSorts?.[taskId] ?? defaultSort
       const currentOrder = selection?.sessionOrders?.[taskId]
-      if (selection && currentOrder && currentOrder.length === orderedKeys.length && currentOrder.every((key, index) => key === orderedKeys[index])) {
+      if (selection && currentSort === 'manual' && currentOrder && currentOrder.length === orderedKeys.length
+        && currentOrder.every((key, index) => key === orderedKeys[index])) {
         return selection
       }
       const resolvedTaskId = activeTaskId !== undefined ? activeTaskId : selection ? selection.taskId : taskId
+      const nextSorts = rememberTaskSort(selection, taskId, 'manual', defaultSort)
       return {
         version: 2,
         taskId: resolvedTaskId,
         openTaskIds: openTasks(selection, resolvedTaskId, shown),
         sessions: selection?.sessions ?? {},
         sessionOrders: rememberSessionOrder(selection, taskId, orderedKeys),
+        ...(defaultSort !== 'manual' ? { sessionSort: defaultSort } : {}),
+        ...(Object.keys(nextSorts).length ? { sessionSorts: nextSorts } : {}),
+      }
+    })
+  }, [update])
+
+  const setSessionSort = useCallback((taskId: string, mode: SessionSortMode, activeTaskId?: string | null, shown?: readonly string[]) => {
+    update((selection) => {
+      const currentDefault = selection?.sessionSort ?? 'manual'
+      const currentTaskSort = selection?.sessionSorts?.[taskId] ?? currentDefault
+      if (selection && currentDefault === mode && currentTaskSort === mode) return selection
+      const resolvedTaskId = activeTaskId !== undefined ? activeTaskId : selection ? selection.taskId : taskId
+      const nextSorts = rememberTaskSort(selection, taskId, null, mode)
+      return {
+        version: 2,
+        taskId: resolvedTaskId,
+        openTaskIds: openTasks(selection, resolvedTaskId, shown),
+        sessions: selection?.sessions ?? {},
+        ...(selection?.sessionOrders && Object.keys(selection.sessionOrders).length ? { sessionOrders: selection.sessionOrders } : {}),
+        ...(mode !== 'manual' ? { sessionSort: mode } : {}),
+        ...(Object.keys(nextSorts).length ? { sessionSorts: nextSorts } : {}),
       }
     })
   }, [update])
@@ -162,10 +206,17 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
   }, [workspaceId])
 
   const saved = state.workspaceId === workspaceId ? state : undefined
+  const sessionSort: SessionSortMode = saved?.selection?.sessionSort ?? 'manual'
+  const sessionSorts = saved?.selection?.sessionSorts ?? emptySessionSorts
+  const taskSortMode = useCallback((taskId: string | null | undefined): SessionSortMode => {
+    return (taskId ? sessionSorts[taskId] : undefined) ?? sessionSort
+  }, [sessionSort, sessionSorts])
+
   return {
     taskId: saved?.selection?.taskId, openTaskIds: saved?.selection?.openTaskIds,
     sessions: saved?.selection?.sessions ?? emptySessions,
     sessionOrders: saved?.selection?.sessionOrders ?? emptySessionOrders,
-    error: saved?.error, selectTask, closeTask, selectSession, rememberDefaultSession, clearSession, reorderSessions, dismissError,
+    sessionSort, sessionSorts, taskSortMode,
+    error: saved?.error, selectTask, closeTask, selectSession, rememberDefaultSession, clearSession, reorderSessions, setSessionSort, dismissError,
   }
 }

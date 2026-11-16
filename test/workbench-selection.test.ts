@@ -1,7 +1,8 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useWorkbenchSelection } from '../src/renderer/chat/useWorkbenchSelection'
-import { moveSessionKey, orderSessionBindings, sessionBindingKey } from '../src/renderer/chat/sessionBindings'
+import { moveSessionKey, orderSessionBindings, sessionBindingKey, sortSessionBindings } from '../src/renderer/chat/sessionBindings'
+import { agentHostKey } from '../src/shared/agentHost'
 import { agentHostTargetFixture } from './immutable-bindings-fixture'
 
 afterEach(() => { vi.restoreAllMocks() })
@@ -272,10 +273,58 @@ describe('device-local workbench selection', () => {
     '{"version":2,"taskId":"T-0002","openTaskIds":["T-0002"],"sessions":{},"sessionOrders":{"T-0002":[]}}',
     `{"version":2,"taskId":"T-0002","openTaskIds":["T-0002"],"sessions":{},"sessionOrders":{"T-0002":[${JSON.stringify(first)},${JSON.stringify(first)}]}}`,
     '{"version":2,"taskId":"T-0002","openTaskIds":["T-0002"],"sessions":{},"sessionOrders":{"bad":["ahp:1"]}}',
+    '{"version":2,"taskId":"T-0002","openTaskIds":["T-0002"],"sessions":{},"sessionSort":"random"}',
+    '{"version":2,"taskId":"T-0002","openTaskIds":["T-0002"],"sessions":{},"sessionSorts":{"T-0002":"random"}}',
   ])('rejects invalid stored sessionOrders (%s)', (stored) => {
     localStorage.setItem(storageKey(), stored)
     const hook = renderHook(() => useWorkbenchSelection('workspace'))
     expect(hook.result.current.error).toContain('invalid')
     expect(hook.result.current.sessionOrders).toEqual({})
+  })
+
+  it('sorts sessions by last response, creation time, natural name, and machine, and switches a dragged task back to manual', () => {
+    const ownerA = { clientId: '00000000-0000-4000-8000-000000000011', machineName: 'HOST-Z' }
+    const ownerB = { clientId: '00000000-0000-4000-8000-000000000022', machineName: 'HOST-A' }
+    const make = (name: string, title: string, owner = ownerA) => {
+      const agentHost = agentHostTargetFixture(name, owner)
+      return { id: agentHost.sessionId, title, owner, agentHost }
+    }
+    const s1 = make('s1', 'Session 10', ownerA)
+    const s2 = make('s2', 'Session 2', ownerB)
+    const s3 = make('s3', 'Alpha review', ownerA)
+    const items = [s1, s2, s3]
+    const timestamps = {
+      [agentHostKey(s1.agentHost)]: { createdAt: 1000, updatedAt: 2000 },
+      [agentHostKey(s2.agentHost)]: { createdAt: 3000, updatedAt: 5000 },
+      [agentHostKey(s3.agentHost)]: { createdAt: 2000, updatedAt: 4000 },
+    }
+    const aliases = { [ownerA.clientId]: 'Studio', [ownerB.clientId]: 'Edge' }
+
+    expect(sortSessionBindings(items, { mode: 'updated-desc', timestamps }).map((i) => i.title)).toEqual(['Session 2', 'Alpha review', 'Session 10'])
+    expect(sortSessionBindings(items, { mode: 'created-desc', timestamps }).map((i) => i.title)).toEqual(['Session 2', 'Alpha review', 'Session 10'])
+    expect(sortSessionBindings(items, { mode: 'created-asc', timestamps }).map((i) => i.title)).toEqual(['Session 10', 'Alpha review', 'Session 2'])
+    expect(sortSessionBindings(items, { mode: 'title-asc' }).map((i) => i.title)).toEqual(['Alpha review', 'Session 2', 'Session 10'])
+    expect(sortSessionBindings(items, { mode: 'title-desc' }).map((i) => i.title)).toEqual(['Session 10', 'Session 2', 'Alpha review'])
+    expect(sortSessionBindings(items, { mode: 'machine-asc', timestamps, aliases }).map((i) => i.title)).toEqual(['Session 2', 'Alpha review', 'Session 10'])
+
+    // Fallback when createdAt is absent uses chronological binding link index.
+    expect(sortSessionBindings(items, { mode: 'created-desc' }).map((i) => i.title)).toEqual(['Alpha review', 'Session 2', 'Session 10'])
+    expect(sortSessionBindings(items, { mode: 'created-asc' }).map((i) => i.title)).toEqual(['Session 10', 'Session 2', 'Alpha review'])
+
+    const hook = renderHook(() => useWorkbenchSelection('workspace'))
+    act(() => hook.result.current.setSessionSort('T-0002', 'updated-desc', 'T-0002', ['T-0002', 'T-0003']))
+    expect(hook.result.current.taskSortMode('T-0002')).toBe('updated-desc')
+    expect(hook.result.current.taskSortMode('T-0003')).toBe('updated-desc')
+
+    // Dragging on T-0002 pins T-0002 to manual while keeping T-0003 on updated-desc.
+    act(() => hook.result.current.reorderSessions('T-0002', [second, first], 'T-0002', ['T-0002', 'T-0003']))
+    expect(hook.result.current.taskSortMode('T-0002')).toBe('manual')
+    expect(hook.result.current.taskSortMode('T-0003')).toBe('updated-desc')
+
+    hook.unmount()
+    const restored = renderHook(() => useWorkbenchSelection('workspace'))
+    expect(restored.result.current.taskSortMode('T-0002')).toBe('manual')
+    expect(restored.result.current.taskSortMode('T-0003')).toBe('updated-desc')
+    expect(restored.result.current.sessionOrders['T-0002']).toEqual([second, first])
   })
 })

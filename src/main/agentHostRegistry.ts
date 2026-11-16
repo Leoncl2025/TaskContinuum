@@ -347,7 +347,9 @@ export class AgentHostRegistry {
               for (const chat of state.chats) {
                 if (chat.interactivity === 'hidden') continue
                 const session = agentHostSessionSchema.parse({ sessionId: item.resource, chatId: chat.resource, owner,
-                  title: (chat.title || item.title || 'Untitled chat').slice(0, 2000), provider: item.provider, updatedAt: chat.modifiedAt, canSend: chat.interactivity !== 'read-only' })
+                  title: (chat.title || item.title || 'Untitled chat').slice(0, 2000), provider: item.provider, updatedAt: chat.modifiedAt,
+                  ...(typeof item.createdAt === 'string' && item.createdAt ? { createdAt: item.createdAt.slice(0, 100) } : {}),
+                  canSend: chat.interactivity !== 'read-only' })
                 if (sessions.length + converted.length < 1000) converted.push(session)
               }
               sessions.push(...converted)

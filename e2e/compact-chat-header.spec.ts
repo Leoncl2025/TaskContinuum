@@ -61,16 +61,55 @@ for (const theme of ['light', 'dark'] as const) {
       'A deliberately long conversation title that should remain on one compact line',
       'Investigate session creation',
     ])
+
+    // Smart sort: Last response, Created (newest), and Name (A–Z).
+    const sortPicker = sidebar.getByRole('combobox', { name: 'Sort sessions', exact: true })
+    await expect(sortPicker).toHaveValue('manual')
+    await sortPicker.selectOption('updated-desc')
+    await expect.poll(titles).toEqual([
+      'Investigate session creation',
+      'Verify the next release',
+      'A deliberately long conversation title that should remain on one compact line',
+      'A focused release plan',
+    ])
+    await sidebar.screenshot({ path: testInfo.outputPath(`session-smart-sort-${theme}.png`) })
+
+    await sortPicker.selectOption('created-desc')
+    await expect.poll(titles).toEqual([
+      'Verify the next release',
+      'A deliberately long conversation title that should remain on one compact line',
+      'Investigate session creation',
+      'A focused release plan',
+    ])
+
+    await sortPicker.selectOption('title-asc')
+    await expect.poll(titles).toEqual([
+      'A deliberately long conversation title that should remain on one compact line',
+      'A focused release plan',
+      'Investigate session creation',
+      'Verify the next release',
+    ])
+
+    // Dragging while smart-sorted transitions smoothly back to Manual with the dropped order.
+    await bottomButton.dragTo(tree.getByRole('treeitem').first())
+    await expect(sortPicker).toHaveValue('manual')
+    await expect.poll(titles).toEqual([
+      'Verify the next release',
+      'A deliberately long conversation title that should remain on one compact line',
+      'A focused release plan',
+      'Investigate session creation',
+    ])
     await sidebar.screenshot({ path: testInfo.outputPath(`session-drag-reordered-${theme}.png`) })
 
     // Reloading the workbench restores the exact manual order instead of creation order.
     await page.reload()
     await expect(page.getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
+    await expect(sortPicker).toHaveValue('manual')
     await expect.poll(titles).toEqual([
       'Verify the next release',
-      'A focused release plan',
       'A deliberately long conversation title that should remain on one compact line',
+      'A focused release plan',
       'Investigate session creation',
     ])
     expect(errors).toEqual([])

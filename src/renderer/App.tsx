@@ -5,7 +5,7 @@ import { filterTasks } from '../shared/tasks'
 import type { WorkspaceSnapshot } from '../shared/workspace'
 import { useSessionLinks } from './chat/useSessionLinks'
 import { useWorkbenchSelection } from './chat/useWorkbenchSelection'
-import { orderWorkspaceSessionBindings, sessionBindingKey } from './chat/sessionBindings'
+import { sessionBindingKey, sortSessionBindings } from './chat/sessionBindings'
 import type { SessionBinding } from './chat/sessionBindings'
 import { taskSessionLinks } from '../shared/sessionBindings'
 import { Dialog, Icon, IconButton } from './components/Primitives'
@@ -81,7 +81,6 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const [taskAgentOpen, setTaskAgentOpen] = useState(false)
   const links = useSessionLinks(!taskAgentOpen && workspace?.tasks.length ? workspace : null)
   const bindings = links.bindings
-  const orderedBindings = useMemo(() => orderWorkspaceSessionBindings(bindings, selection.sessionOrders), [bindings, selection.sessionOrders])
   const tasks = workspace?.tasks ?? []
   const requestedId = selection.taskId === undefined ? tasks[0]?.id ?? null : selection.taskId
   const selectedId = requestedId !== null && !tasks.some((item) => item.id === requestedId) ? tasks[0]?.id ?? null : requestedId
@@ -106,7 +105,18 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const compact = useSyncExternalStore(subscribeCompact, isCompact, () => false)
   const task = tasks.find((item) => item.id === selectedId)
   const primaryPanel = task || taskAgentOpen ? 'chat' : 'details'
-  const taskBindings = task ? orderedBindings[task.id] ?? [] : []
+  const activeSortMode = selection.taskSortMode(task?.id)
+  const activeOrderedKeys = task ? selection.sessionOrders[task.id] : undefined
+  const taskBindings = useMemo(() => {
+    if (!task) return []
+    return sortSessionBindings(bindings[task.id] ?? [], {
+      mode: activeSortMode,
+      orderedKeys: activeOrderedKeys,
+      titles: sessionTitles.titles,
+      timestamps: sessionTitles.timestamps,
+      aliases,
+    })
+  }, [task, bindings, activeSortMode, activeOrderedKeys, sessionTitles.titles, sessionTitles.timestamps, aliases])
   const activeKey = task ? Object.hasOwn(selectedSessions, task.id) ? selectedSessions[task.id]
     : taskBindings[0] ? sessionBindingKey(taskBindings[0]) : undefined : undefined
   const activeBinding = taskBindings.find((binding) => sessionBindingKey(binding) === activeKey)
@@ -407,7 +417,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
         <button type="button" className="activity" aria-label="Preferences" title="Preferences and integration status" onClick={() => setDialog('settings')}><Icon name="settings-gear" /></button>
       </nav>
 
-      {sidebarVisible && (sidebarView === 'sessions' ? <AgentHostSessionsSidebar key={task?.id ?? 'no-task'} taskId={task?.id} taskTitle={task?.title} taskReady={Boolean(task && links.ready)} bindings={orderedBindings} activeKey={activeBinding ? sessionBindingKey(activeBinding) : undefined} localOwnerId={links.localOwner?.clientId} cachedTitles={sessionTitles.titles} historyTransfers={historyTransfers} titleCacheError={sessionTitles.error} onTitles={sessionTitles.remember} busy={links.busy} onSelect={task ? (binding) => selectSession(task.id, binding) : undefined} onReorder={task ? (orderedKeys) => selection.reorderSessions(task.id, orderedKeys, selectedId, openTasks) : undefined} onDetach={task ? (binding) => detachSession(task.id, binding) : undefined} onLink={linkAgentHost} onCreated={agentHostCreated} onDevices={() => setDialog('remote-devices')} onClose={toggleSidebar} /> : <TaskSidebar key={createdTaskId ?? 'initial'} tasks={tasks} selectedId={selectedId} query={query} onQuery={setQuery} onSelect={selectTask} onCreate={onCreateRepository} onCreateTask={openTaskCreation} creationDisabled={!workspaces.available || workspaceLocked || workspaces.busy} onClose={toggleSidebar} workspace={workspace ?? undefined} workspaceControls={workspaceControls} />)}
+      {sidebarVisible && (sidebarView === 'sessions' ? <AgentHostSessionsSidebar key={task?.id ?? 'no-task'} taskId={task?.id} taskTitle={task?.title} taskReady={Boolean(task && links.ready)} bindings={bindings} orderedKeys={activeOrderedKeys} sortMode={activeSortMode} activeKey={activeBinding ? sessionBindingKey(activeBinding) : undefined} localOwnerId={links.localOwner?.clientId} cachedTitles={sessionTitles.titles} sessionTimestamps={sessionTitles.timestamps} historyTransfers={historyTransfers} titleCacheError={sessionTitles.error} onTitles={sessionTitles.remember} busy={links.busy} onSelect={task ? (binding) => selectSession(task.id, binding) : undefined} onReorder={task ? (orderedKeys) => selection.reorderSessions(task.id, orderedKeys, selectedId, openTasks) : undefined} onSortMode={task ? (mode) => selection.setSessionSort(task.id, mode, selectedId, openTasks) : undefined} onDetach={task ? (binding) => detachSession(task.id, binding) : undefined} onLink={linkAgentHost} onCreated={agentHostCreated} onDevices={() => setDialog('remote-devices')} onClose={toggleSidebar} /> : <TaskSidebar key={createdTaskId ?? 'initial'} tasks={tasks} selectedId={selectedId} query={query} onQuery={setQuery} onSelect={selectTask} onCreate={onCreateRepository} onCreateTask={openTaskCreation} creationDisabled={!workspaces.available || workspaceLocked || workspaces.busy} onClose={toggleSidebar} workspace={workspace ?? undefined} workspaceControls={workspaceControls} />)}
       {!compact && sidebarVisible && <WorkbenchSash layout={layout} panel="sidebar" onResize={(width) => changePanelWidth('sidebar', width)} onReset={() => changePanelWidth('sidebar', defaultLayout.sidebarWidth)} />}
 
       <Activity mode={compact && sidebarVisible ? 'hidden' : 'visible'}><main className="main-panel" aria-label="Task workspace" aria-keyshortcuts="Control+Shift+PageUp Control+Shift+PageDown">

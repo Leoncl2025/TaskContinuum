@@ -9,6 +9,10 @@
 .session-sidebar-content > p { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .session-sidebar input, .session-sidebar select { max-width: 100%; min-width: 0; background: var(--input); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px; }
 .session-sidebar .session-filter { padding: 0; }
+.session-sidebar .session-sort-bar { gap: 6px; margin-bottom: 6px; padding: 0 2px; }
+.session-sort-bar > .codicon { font-size: 13px; color: var(--subtle); }
+.session-sort-bar > span:not(.codicon) { flex-shrink: 0; }
+.session-sidebar .session-sort-bar select { flex: 1; height: 26px; padding: 2px 6px; font-size: 11px; color: var(--text); cursor: pointer; }
 .session-sidebar .ah-creation { margin: 0; padding: 0; border: 0; }
 .session-sidebar .ah-creation-pickers { grid-template-columns: minmax(0, 1fr); }
 .session-sidebar button { overflow-wrap: anywhere; }

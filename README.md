@@ -14,8 +14,9 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
   the Current/Link/Create tabs; use Link or Create rather than duplicate footer
   buttons, and the Tasks activity button to return to the task list.
 - Device-local restoration of open task tabs, the active task, each task's
-  selected chat, and manual drag-and-drop (or **Alt+Up / Alt+Down**) session
-  order in **Current**.
+  selected chat, and **Current** session ordering — supporting manual
+  drag-and-drop (**Alt+Up / Alt+Down**) or smart sorting by last response time,
+  creation time, name, or machine.
 - Searchable task trees, task tabs, and read-only planning documents.
 - **Ctrl+PageUp / Ctrl+PageDown** switches to the previous/next open task tab,
   wrapping at either end without clearing chat drafts.

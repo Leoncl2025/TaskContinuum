@@ -128,7 +128,8 @@ describe('AgentHostRegistry session listing', () => {
 
   it('retains the provider filter, hidden-chat filtering and read-only conversion', async () => {
     const unsupported = item('unsupported', 'another-provider')
-    const { registry, client, snapshots } = fixture([{ items: [unsupported, newer] }])
+    const createdItem = { ...newer, createdAt: '2026-09-19T08:30:00Z' }
+    const { registry, client, snapshots } = fixture([{ items: [unsupported, createdItem] }])
     snapshots.set(newer.resource, snapshot(newer.resource, [
       { resource: 'invalid-hidden-id', interactivity: 'hidden' },
       { ...chat('newer'), title: '', interactivity: 'read-only' },
@@ -136,7 +137,7 @@ describe('AgentHostRegistry session listing', () => {
     const result = await registry.list()
     expect(result.sessions).toEqual([{
       sessionId: newer.resource, chatId: 'ahp-chat:/newer', owner, provider: 'copilotcli',
-      title: newer.title, updatedAt: '2026-09-20T00:00:00Z', canSend: false,
+      title: newer.title, updatedAt: '2026-09-20T00:00:00Z', createdAt: '2026-09-19T08:30:00Z', canSend: false,
     }])
     expect(result.warnings).toEqual([])
     expect(client.request.mock.calls.filter(([method]) => method === 'subscribe').map(([, params]) => params.channel)).toEqual([newer.resource])

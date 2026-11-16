@@ -10,11 +10,23 @@ const cacheSchema = z.object({
     key: z.string().min(1).max(2048),
     title: z.string().min(1).max(2000),
     modifiedAt: z.number().finite().nonnegative().optional(),
+    createdAt: z.number().finite().nonnegative().optional(),
   }).strict()).max(limit),
 }).strict()
 type Entry = z.infer<typeof cacheSchema>['entries'][number]
-type Cache = { workspaceId?: string; entries: Entry[]; titles: Record<string, string>; error?: string }
-export type SessionTitleUpdate = Pick<AgentHostSession, 'sessionId' | 'chatId' | 'owner' | 'title' | 'updatedAt'>
+export interface SessionTimestamps {
+  updatedAt?: number
+  createdAt?: number
+}
+type Cache = {
+  workspaceId?: string
+  entries: Entry[]
+  titles: Record<string, string>
+  timestamps: Record<string, SessionTimestamps>
+  error?: string
+}
+export type SessionTitleUpdate = Pick<AgentHostSession, 'sessionId' | 'chatId' | 'owner' | 'title' | 'updatedAt'> & { createdAt?: string }
+const emptyTimestamps: Readonly<Record<string, SessionTimestamps>> = Object.freeze({})
 
 export function sessionTitle(target: Pick<AgentHostTarget, 'sessionId' | 'chatId'>, value: string | undefined): string | undefined {
   const title = value?.trim()
@@ -24,8 +36,21 @@ export function sessionTitle(target: Pick<AgentHostTarget, 'sessionId' | 'chatId
 
 function storageKey(workspaceId: string): string { return `taskcontinuum:session-titles:v1:${workspaceId}` }
 
+function entriesTimestamps(entries: readonly Entry[]): Record<string, SessionTimestamps> {
+  const result: Record<string, SessionTimestamps> = {}
+  for (const entry of entries) {
+    if (entry.modifiedAt !== undefined || entry.createdAt !== undefined) {
+      result[entry.key] = {
+        ...(entry.modifiedAt !== undefined ? { updatedAt: entry.modifiedAt } : {}),
+        ...(entry.createdAt !== undefined ? { createdAt: entry.createdAt } : {}),
+      }
+    }
+  }
+  return result
+}
+
 function read(workspaceId: string | undefined): Cache {
-  const empty: Cache = { workspaceId, entries: [], titles: {} }
+  const empty: Cache = { workspaceId, entries: [], titles: {}, timestamps: {} }
   if (!workspaceId) return empty
   let stored: string | null
   try { stored = localStorage.getItem(storageKey(workspaceId)) }
@@ -35,7 +60,12 @@ function read(workspaceId: string | undefined): Cache {
     if (stored.length > 2 * 1024 * 1024) throw new Error('Oversized title cache.')
     const { entries } = cacheSchema.parse(JSON.parse(stored))
     if (new Set(entries.map((entry) => entry.key)).size !== entries.length) throw new Error('Duplicate title cache entry.')
-    return { workspaceId, entries, titles: Object.fromEntries(entries.map((entry) => [entry.key, entry.title])) }
+    return {
+      workspaceId,
+      entries,
+      titles: Object.fromEntries(entries.map((entry) => [entry.key, entry.title])),
+      timestamps: entriesTimestamps(entries),
+    }
   } catch { return { ...empty, error: 'Saved chat titles are invalid. Titles will be refreshed from the Host; session access is unaffected.' } }
 }
 
@@ -52,26 +82,67 @@ export function useSessionTitles(workspaceId: string | undefined) {
   const remember = useCallback((updates: readonly SessionTitleUpdate[]) => {
     const before = current.current.workspaceId === workspaceId ? current.current : read(workspaceId)
     let entries = before.entries
+    let timestamps = before.timestamps
     for (const update of updates) {
-      const title = sessionTitle(update, update.title)
       const key = agentHostKey(update)
-      if (!title || key.length > 2048) continue
+      if (!key || key.length > 2048) continue
+      const parsedModified = Date.parse(update.updatedAt)
+      const modifiedAt = Number.isFinite(parsedModified) && parsedModified >= 0 ? parsedModified : undefined
+      const parsedCreated = update.createdAt ? Date.parse(update.createdAt) : Number.NaN
+      const createdAt = Number.isFinite(parsedCreated) && parsedCreated >= 0 ? parsedCreated : undefined
+
+      const priorTime = timestamps[key]
+      const nextUpdated = modifiedAt !== undefined && (priorTime?.updatedAt === undefined || modifiedAt > priorTime.updatedAt)
+        ? modifiedAt : priorTime?.updatedAt
+      const nextCreated = createdAt !== undefined && (priorTime?.createdAt === undefined || createdAt < priorTime.createdAt)
+        ? createdAt : priorTime?.createdAt
+      if (nextUpdated !== priorTime?.updatedAt || nextCreated !== priorTime?.createdAt) {
+        timestamps = {
+          ...timestamps,
+          [key]: {
+            ...(nextUpdated !== undefined ? { updatedAt: nextUpdated } : {}),
+            ...(nextCreated !== undefined ? { createdAt: nextCreated } : {}),
+          },
+        }
+      }
+
+      const title = sessionTitle(update, update.title)
+      if (!title) continue
       const previous = entries.find((entry) => entry.key === key)
-      const date = Date.parse(update.updatedAt)
-      const modifiedAt = Number.isFinite(date) && date >= 0 ? date : undefined
-      if (previous?.title === title || previous?.modifiedAt !== undefined && modifiedAt !== undefined && modifiedAt < previous.modifiedAt) continue
-      entries = [...entries.filter((entry) => entry.key !== key), { key, title, ...(modifiedAt !== undefined ? { modifiedAt } : {}) }].slice(-limit)
+      if (previous?.modifiedAt !== undefined && modifiedAt !== undefined && modifiedAt < previous.modifiedAt) continue
+      const savedCreated = previous?.createdAt ?? createdAt
+      if (previous?.title === title && previous.createdAt === savedCreated) continue
+      const savedModified = modifiedAt ?? previous?.modifiedAt
+      entries = [...entries.filter((entry) => entry.key !== key), {
+        key,
+        title,
+        ...(savedModified !== undefined ? { modifiedAt: savedModified } : {}),
+        ...(savedCreated !== undefined ? { createdAt: savedCreated } : {}),
+      }].slice(-limit)
     }
-    if (entries === before.entries) return
-    let error: string | undefined
-    if (workspaceId) {
+    if (entries === before.entries && timestamps === before.timestamps) return
+    let error = before.error
+    if (entries !== before.entries && workspaceId) {
+      error = undefined
       try { localStorage.setItem(storageKey(workspaceId), JSON.stringify({ version: 1, entries })) }
       catch { error = 'Chat titles could not be saved on this device. They will be remembered only until this workspace closes.' }
     }
-    const next: Cache = { workspaceId, entries, titles: Object.fromEntries(entries.map((entry) => [entry.key, entry.title])), error }
+    const next: Cache = {
+      workspaceId,
+      entries,
+      titles: entries === before.entries ? before.titles : Object.fromEntries(entries.map((entry) => [entry.key, entry.title])),
+      timestamps,
+      error,
+    }
     current.current = next
     setCache(next)
   }, [workspaceId])
 
-  return { titles: cache.workspaceId === workspaceId ? cache.titles : {}, error: cache.workspaceId === workspaceId ? cache.error : undefined, remember }
+  const active = cache.workspaceId === workspaceId
+  return {
+    titles: active ? cache.titles : {},
+    timestamps: active ? cache.timestamps : emptyTimestamps,
+    error: active ? cache.error : undefined,
+    remember,
+  }
 }

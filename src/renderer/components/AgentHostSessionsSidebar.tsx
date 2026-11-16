@@ -1,15 +1,24 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { DragEvent, KeyboardEvent } from 'react'
 import { agentHostKey } from '../../shared/agentHost'
 import type { AgentHostHistoryTransfer, AgentHostSession } from '../../shared/agentHost'
-import { moveSessionKey, sessionBindingKey } from '../chat/sessionBindings'
-import type { SessionBinding, SessionBindings } from '../chat/sessionBindings'
+import { moveSessionKey, sessionBindingKey, sessionSortModes, sortSessionBindings } from '../chat/sessionBindings'
+import type { SessionBinding, SessionBindings, SessionSortMode } from '../chat/sessionBindings'
 import { Icon, IconButton } from './Primitives'
 import { AgentHostCreationControls } from './AgentHostCreationControls'
-import type { SessionTitleUpdate } from '../chat/useSessionTitles'
+import type { SessionTimestamps, SessionTitleUpdate } from '../chat/useSessionTitles'
 import { machineLabel, useMachineAliases } from '../machineAliases'
 
 const SESSION_DRAG_MIME = 'application/x-taskcontinuum-session-key'
+const SORT_LABELS: Readonly<Record<SessionSortMode, string>> = {
+  'manual': 'Manual (drag)',
+  'updated-desc': 'Last response',
+  'created-desc': 'Created (newest)',
+  'created-asc': 'Created (oldest)',
+  'title-asc': 'Name (A–Z)',
+  'title-desc': 'Name (Z–A)',
+  'machine-asc': 'Machine',
+}
 
 type SessionView = 'current' | 'link' | 'create'
 interface Props {
@@ -17,16 +26,20 @@ interface Props {
   taskTitle?: string
   taskReady?: boolean
   bindings?: SessionBindings
+  orderedKeys?: readonly string[]
+  sortMode?: SessionSortMode
   activeKey?: string
   localOwnerId?: string
   busy?: boolean
   initialView?: SessionView
   cachedTitles?: Readonly<Record<string, string>>
+  sessionTimestamps?: Readonly<Record<string, SessionTimestamps>>
   historyTransfers?: Readonly<Record<string, AgentHostHistoryTransfer>>
   titleCacheError?: string
   onTitles?(sessions: readonly SessionTitleUpdate[]): void
   onSelect?(binding: SessionBinding): void
   onReorder?(orderedKeys: string[]): void
+  onSortMode?(mode: SessionSortMode): void
   onDetach?(binding: SessionBinding): Promise<void>
   onLink(session: AgentHostSession): Promise<void>
   onCreated?(taskId: string, session: AgentHostSession): Promise<void>
@@ -217,10 +230,11 @@ function SessionTree({ taskId, bindings, activeKey, sessions, cachedTitles, hist
   </ul>
 }
 
-export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, activeKey, localOwnerId, busy = false, initialView = 'current', cachedTitles, historyTransfers, titleCacheError, onTitles, onSelect, onReorder, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
+export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, orderedKeys, sortMode, activeKey, localOwnerId, busy = false, initialView = 'current', cachedTitles, sessionTimestamps, historyTransfers, titleCacheError, onTitles, onSelect, onReorder, onSortMode, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
   const bridge = window.agentHost
   const aliases = useMachineAliases()
   const [view, setView] = useState<SessionView>(initialView)
+  const [localSortMode, setLocalSortMode] = useState<SessionSortMode>('manual')
   const [sessions, setSessions] = useState<AgentHostSession[]>([])
   const [warnings, setWarnings] = useState<string[]>([])
   const [catalogueError, setCatalogueError] = useState<string>()
@@ -232,7 +246,45 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
   const [revision, setRevision] = useState(0)
   const [detach, setDetach] = useState<SessionBinding>()
   const running = useRef(false)
-  const linked = taskId ? bindings[taskId] ?? [] : []
+  const activeSortMode = sortMode ?? localSortMode
+  const mergedTitles = useMemo(() => {
+    const result: Record<string, string> = {}
+    for (const session of sessions) if (session.title) result[agentHostKey(session)] = session.title
+    if (cachedTitles) Object.assign(result, cachedTitles)
+    return result
+  }, [sessions, cachedTitles])
+  const mergedTimestamps = useMemo(() => {
+    const result: Record<string, SessionTimestamps> = { ...sessionTimestamps }
+    for (const session of sessions) {
+      const key = agentHostKey(session)
+      const updated = Date.parse(session.updatedAt)
+      const created = session.createdAt ? Date.parse(session.createdAt) : Number.NaN
+      const prior = result[key]
+      const updatedAt = Number.isFinite(updated) && updated >= 0
+        ? prior?.updatedAt !== undefined ? Math.max(prior.updatedAt, updated) : updated
+        : prior?.updatedAt
+      const createdAt = Number.isFinite(created) && created >= 0
+        ? prior?.createdAt !== undefined ? Math.min(prior.createdAt, created) : created
+        : prior?.createdAt
+      if (updatedAt !== undefined || createdAt !== undefined) {
+        result[key] = {
+          ...(updatedAt !== undefined ? { updatedAt } : {}),
+          ...(createdAt !== undefined ? { createdAt } : {}),
+        }
+      }
+    }
+    return result
+  }, [sessions, sessionTimestamps])
+  const linked = useMemo(() => {
+    if (!taskId) return []
+    return sortSessionBindings(bindings[taskId] ?? [], {
+      mode: activeSortMode,
+      orderedKeys,
+      titles: mergedTitles,
+      timestamps: mergedTimestamps,
+      aliases,
+    })
+  }, [taskId, bindings, activeSortMode, orderedKeys, mergedTitles, mergedTimestamps, aliases])
   const detachmentChanged = Boolean(detach && !linked.some((item) => sessionBindingKey(item) === sessionBindingKey(detach)))
   useEffect(() => {
     let active = true
@@ -275,7 +327,19 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
       {titleCacheError && <p className="muted" role="status">{titleCacheError}</p>}
       {!taskId && <p className="muted">Select a task to link or create a session.</p>}
       {view === 'current' && <>
-        {taskId && <SessionTree taskId={taskId} bindings={linked} activeKey={activeKey} sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} disabled={!taskReady || busy || operating} onSelect={onSelect} onReorder={onReorder} onUnlink={onDetach ? (binding) => { setDetach(binding); setError(undefined) } : undefined} />}
+        {taskId && linked.length > 1 && <label className="session-filter session-sort-bar">
+          <Icon name="sort-precedence" />
+          <span>Sort</span>
+          <select aria-label="Sort sessions" value={activeSortMode} onChange={(event) => {
+            const next = event.target.value as SessionSortMode
+            if (!sessionSortModes.includes(next)) return
+            if (sortMode === undefined) setLocalSortMode(next)
+            onSortMode?.(next)
+          }}>
+            {sessionSortModes.map((mode) => <option key={mode} value={mode}>{SORT_LABELS[mode]}</option>)}
+          </select>
+        </label>}
+        {taskId && <SessionTree taskId={taskId} bindings={linked} activeKey={activeKey} sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} disabled={!taskReady || busy || operating} onSelect={onSelect} onReorder={onReorder ? (nextKeys) => { if (sortMode === undefined) setLocalSortMode('manual'); onReorder(nextKeys) } : undefined} onUnlink={onDetach ? (binding) => { setDetach(binding); setError(undefined) } : undefined} />}
         {!linked.length && <p className="muted">{busy ? 'Loading task sessions...' : 'No sessions linked to this task.'}</p>}
         {detach && <section className="session-inline-confirm" aria-label="Detach conversation"><p>Detach {detach.id} from {taskId}? Conversation history stays on its Host.</p>{detachmentChanged && <p role="alert">The task binding changed. Cancel and review the current sessions.</p>}<div className="session-sidebar-actions"><button type="button" className="secondary-button" disabled={operating} onClick={() => setDetach(undefined)}>Keep conversation</button><button type="button" className="primary-button" disabled={!taskReady || busy || operating || detachmentChanged} onClick={() => { void run(async () => { if (onDetach) await onDetach(detach); setDetach(undefined) }) }}>Detach session</button></div></section>}
       </>}

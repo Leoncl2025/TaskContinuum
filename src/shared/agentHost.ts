@@ -19,6 +19,7 @@ export interface AgentHostSession extends AgentHostTarget {
   title: string
   provider: string
   updatedAt: string
+  createdAt?: string
   canSend: boolean
 }
 

@@ -44,10 +44,14 @@ const emit = () => {
 const unsupported = async (): Promise<never> => { throw new Error('This layout fixture does not perform native operations.') }
 const calls = { watch: 0, unwatch: 0, send: 0 }
 const sidebarSessions: AgentHostSession[] = [
-  { ...target, title: view.chat!.title, provider: 'copilotcli', updatedAt: '', canSend: true },
-  ...['Investigate session creation', 'A deliberately long conversation title that should remain on one compact line', 'Verify the next release'].map((title, index) => ({
+  { ...target, title: view.chat!.title, provider: 'copilotcli', createdAt: '2026-11-10T09:00:00.000Z', updatedAt: '2026-11-12T10:00:00.000Z', canSend: true },
+  ...[
+    { title: 'Investigate session creation', createdAt: '2026-11-11T09:00:00.000Z', updatedAt: '2026-11-16T14:30:00.000Z' },
+    { title: 'A deliberately long conversation title that should remain on one compact line', createdAt: '2026-11-13T09:00:00.000Z', updatedAt: '2026-11-14T11:00:00.000Z' },
+    { title: 'Verify the next release', createdAt: '2026-11-15T09:00:00.000Z', updatedAt: '2026-11-15T09:30:00.000Z' },
+  ].map((entry, index) => ({
     ...target, sessionId: `copilotcli:/compact-${index}`, chatId: `ahp-chat:/compact-${index}`,
-    title, provider: 'copilotcli', updatedAt: '', canSend: true,
+    title: entry.title, provider: 'copilotcli', createdAt: entry.createdAt, updatedAt: entry.updatedAt, canSend: true,
   })),
 ]
 window.agentHost = {

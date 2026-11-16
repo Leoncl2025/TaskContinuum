@@ -36,6 +36,23 @@ function historyTransferLabel(progress: AgentHostHistoryTransfer): string {
     : progress.resumed ? 'Resuming history...' : 'Syncing history...'
 }
 
+function chatActivityTimestamps(chat: NonNullable<AgentHostView['chat']>, hasMoreHistory?: boolean): { updatedAt: string; createdAt?: string } {
+  let latest = Date.parse(chat.modifiedAt)
+  if (!Number.isFinite(latest)) latest = -1
+  const activeStart = chat.activeTurn?.startedAt ? Date.parse(chat.activeTurn.startedAt) : -1
+  if (Number.isFinite(activeStart) && activeStart > latest) latest = activeStart
+  const lastTurn = chat.turns.at(-1)
+  if (lastTurn?.startedAt) {
+    const ended = Date.parse(lastTurn.startedAt) + (lastTurn.duration ?? 0)
+    if (Number.isFinite(ended) && ended > latest) latest = ended
+  }
+  const firstStart = !hasMoreHistory ? chat.turns[0]?.startedAt : undefined
+  return {
+    updatedAt: latest >= 0 && chat.modifiedAt !== '' || latest > 0 ? new Date(latest).toISOString() : chat.modifiedAt,
+    ...(firstStart && Number.isFinite(Date.parse(firstStart)) ? { createdAt: firstStart } : {}),
+  }
+}
+
 type TerminalStatus = NonNullable<AgentHostView['terminalStatus']>
 type ToolPart = Extract<ResponsePart, { kind: 'toolCall' }>
 type ResponseContext = {
@@ -317,7 +334,9 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
         key: viewKey,
         value: retainChatHistory(previous?.key === viewKey ? previous.value : undefined, value),
       }))
-      if (connected && value.chat?.resource === chatId) onTitles?.([{ ...selected, title: value.chat.title, updatedAt: value.chat.modifiedAt }])
+      if (connected && value.chat?.resource === chatId) {
+        onTitles?.([{ ...selected, title: value.chat.title, ...chatActivityTimestamps(value.chat, value.history?.hasMore) }])
+      }
       if (recovered) {
         setHistoryLoadError(undefined)
         connectionGeneration++
