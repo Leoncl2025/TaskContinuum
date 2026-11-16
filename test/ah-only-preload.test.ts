@@ -164,6 +164,17 @@ describe('native-only preload boundary', () => {
       ['agent-host:resolve-delivery', target, turnId, 'check', undefined],
       ['agent-host:resolve-delivery', target, turnId, 'abandon', true],
     ])
+  })
+
+  it('forwards per-task session collaboration policy queries and updates under agentHost without adding new preload globals', async () => {
+    const bridge = window.agentHost
+    if (!bridge?.collaborationPolicy || !bridge.setCollaborationPolicy) throw new Error('Collaboration policy preload API missing.')
+    await bridge.collaborationPolicy('T-0072')
+    await bridge.setCollaborationPolicy('T-0072', { enabled: true, paused: false })
+    expect(ipc.invoke.mock.calls).toEqual([
+      ['agent-host:collaboration-policy', 'T-0072'],
+      ['agent-host:set-collaboration-policy', 'T-0072', { enabled: true, paused: false }],
+    ])
     expect(ipc.invoke.mock.calls.some(([channel]) => channel === 'agent-host:send')).toBe(false)
   })
 

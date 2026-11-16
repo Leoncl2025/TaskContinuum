@@ -129,6 +129,13 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     const key = `${item.id}:${sessionBindingKey(binding)}`
     return panelKeys.has(key) ? [{ task: item, binding, key }] : []
   }))
+  const linkedSessions = useMemo(() => Object.entries(bindings).flatMap(([taskId, entries]) =>
+    entries.map((binding) => {
+      const cached = sessionTitles.titles[agentHostKey(binding.agentHost)]
+      const label = cached || (binding.title !== 'Agent Host' ? binding.title : binding.id)
+      return { taskId, binding, label }
+    }),
+  ), [bindings, sessionTitles.titles])
   const [agentHostBusy, setAgentHostBusy] = useState(false)
   const [agentHostRevision, setAgentHostRevision] = useState(0)
   const [historyTransfers, setHistoryTransfers] = useState<Record<string, AgentHostHistoryTransfer>>({})
@@ -448,7 +455,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
         </div>
         <div id="active-task" className="active-task" data-chat-visible={chatVisible}>
           <Activity mode={chatVisible ? 'visible' : 'hidden'}>
-            {chatPanels.map((panel) => <Activity key={panel.key} mode={!taskAgentOpen && panel.key === activePanelKey ? 'visible' : 'hidden'}><AgentHostPanel task={panel.task} target={panel.binding.agentHost} headerTarget={unifiedChatHeader ? chatHeaderTarget : undefined} cachedTitle={sessionTitles.titles[agentHostKey(panel.binding.agentHost)]} onTitles={sessionTitles.remember} active={!taskAgentOpen && panel.key === activePanelKey} connectionRevision={agentHostRevision} onDetach={() => openSessionDetach(panel.task.id, panel.binding)} onClose={toggleChat} onDevices={window.remoteVSCode ? () => setDialog('remote-devices') : undefined} onSessions={openAgentHostSessions} onBusy={setAgentHostBusy} /></Activity>)}
+            {chatPanels.map((panel) => <Activity key={panel.key} mode={!taskAgentOpen && panel.key === activePanelKey ? 'visible' : 'hidden'}><AgentHostPanel task={panel.task} target={panel.binding.agentHost} headerTarget={unifiedChatHeader ? chatHeaderTarget : undefined} cachedTitle={sessionTitles.titles[agentHostKey(panel.binding.agentHost)]} linkedSessions={linkedSessions} onSelectLinkedSession={selectSession} onTitles={sessionTitles.remember} active={!taskAgentOpen && panel.key === activePanelKey} connectionRevision={agentHostRevision} onDetach={() => openSessionDetach(panel.task.id, panel.binding)} onClose={toggleChat} onDevices={window.remoteVSCode ? () => setDialog('remote-devices') : undefined} onSessions={openAgentHostSessions} onBusy={setAgentHostBusy} /></Activity>)}
             {taskAgentOpen && workspace && <LocalTaskAgent workspace={workspace} workspaces={workspaces} onCreated={taskCreated} onReviewDraft={() => setTaskCreationMode('draft')} onTaskChat={task ? showTaskChat : undefined} onClose={toggleChat} onBusy={setTaskAgentBusy} />}
             {!taskAgentOpen && !agentHostBinding && <aside className="chat-panel empty-chat" aria-label="Task chat">
               <header className="panel-header"><span>AGENT HOST</span><IconButton icon="close" label="Hide chat panel" onClick={toggleChat} /></header>

@@ -3,6 +3,7 @@ import type { ChatImageAttachment } from './chatAttachments'
 import type { SessionOwner } from './sessionBindings'
 import type { AgentHostCreateRequest, AgentHostCreation, AgentHostCreationHost, AgentHostCreationLocation, AgentHostWorker } from './agentHostCreation'
 import type { LocalAgentHostCreateRequest, LocalAgentHostCreation } from './localAgentHostCreation'
+import type { TaskCollaborationPolicyUpdate, TaskCollaborationState } from './sessionCollaboration'
 
 // VS Code shipped the pre-1.0 wire version 0.10.0 without a matching npm release.
 export const agentHostProtocolVersions = ['1.0.0', '0.10.0', '0.9.0'] as const
@@ -80,6 +81,8 @@ export interface AgentHostBridge {
   send(target: AgentHostTarget, id: string, text: string, images?: ChatImageAttachment[], model?: ModelSelection): Promise<void>
   resolveDelivery(target: AgentHostTarget, turnId: string, action: 'check' | 'abandon', acknowledged?: boolean): Promise<'confirmed' | 'not-found' | 'abandoned'>
   cancel(target: AgentHostTarget, turnId: string): Promise<void>
+  collaborationPolicy?(taskId: string): Promise<TaskCollaborationState>
+  setCollaborationPolicy?(taskId: string, update: TaskCollaborationPolicyUpdate): Promise<TaskCollaborationState>
   onView(listener: (event: { id: string; view: AgentHostView }) => void): () => void
   onHistoryTransfer(listener: (event: AgentHostHistoryTransferEvent) => void): () => void
 }

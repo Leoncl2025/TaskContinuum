@@ -6,7 +6,9 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
 
 - **Smooth cross-device session switching:** move between local and remote
   conversations while preserving each session's draft in memory.
-- Multiple conversations per task.
+- Multiple conversations per task, with distinct provenance for native and
+  cross-device agent collaboration messages, pending queue indicators, and
+  opt-in per-task session collaboration MCP tools.
 - Compact session rows show only the conversation title, machine and unlink
   action, without repeating the task heading. Select the title or machine to
   open its chat; only the separate arrow button expands identities and access
@@ -219,6 +221,7 @@ Use `npm run check` for validation, `npm run test:e2e` for desktop tests, and
 
 - [Task documents and CLI](docs/task-documents.md)
 - [File transfer MCP](docs/file-transfer-mcp.md)
+- [Session collaboration MCP](docs/session-collaboration-mcp.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 An independent project, not affiliated with VS Code or GitHub Copilot.

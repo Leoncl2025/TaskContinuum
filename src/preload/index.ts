@@ -79,6 +79,8 @@ const agentHost: AgentHostBridge = {
   send: (target, id, text, images, model) => ipcRenderer.invoke('agent-host:send', target, id, text, images, model),
   resolveDelivery: (target, turnId, action, acknowledged) => ipcRenderer.invoke('agent-host:resolve-delivery', target, turnId, action, acknowledged),
   cancel: (target, turnId) => ipcRenderer.invoke('agent-host:cancel', target, turnId),
+  collaborationPolicy: (taskId) => ipcRenderer.invoke('agent-host:collaboration-policy', taskId),
+  setCollaborationPolicy: (taskId, update) => ipcRenderer.invoke('agent-host:set-collaboration-policy', taskId, update),
   onView: (listener) => {
     const receive = (_event: Electron.IpcRendererEvent, value: { id: string; view: AgentHostView }) => listener(value)
     ipcRenderer.on('agent-host:view', receive)

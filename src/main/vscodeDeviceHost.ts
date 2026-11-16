@@ -135,7 +135,10 @@ export class VSCodeDeviceHost {
       const actor = JSON.stringify(pair.participant)
       const authority = this.agentHosts
       const binding = lease
-      return { canSend: workspace.canSend, actor: pair.participant, ...(binding ? {
+      const taskIds = lease?.localTaskLinks
+        ?.filter((entry) => agentHostKey(entry.target) === agentHostKey(target))
+        .map((entry) => entry.taskId)
+      return { canSend: workspace.canSend, actor: pair.participant, ...(taskIds ? { taskIds } : {}), ...(binding ? {
         current: () => {
           const current = this.state?.pairs.find((item) => item.id === pair.id)
           return !this.closed && this.agentHosts === authority && !!current && current.token === token

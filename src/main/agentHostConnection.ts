@@ -9,6 +9,8 @@ import type { AgentHostHistoryTransfer, AgentHostProtocolVersion, AgentHostTarge
 import { agentHostProtocolVersions } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
+import { taskContinuumCollaborationMetaSchema } from '../shared/sessionCollaboration'
+import type { TaskContinuumCollaborationMeta } from '../shared/sessionCollaboration'
 import { modelConfigErrors } from '../shared/agentHostModelConfig'
 import { AgentHostChatState, AgentHostHistoryCursorError } from './agentHostState'
 import { agentHostDiagnosticChannel, logAgentHostDiagnostic } from './agentHostDiagnostics'
@@ -801,8 +803,14 @@ export class AgentHostConnection {
     if (errors.length) throw new Error(errors.join(' '))
   }
 
-  async send(id: string, text: string, images: ChatImageAttachment[] | undefined, authorize: () => Promise<void>, actor?: { clientId: string; machineName: string; username?: string }, model?: ModelSelection): Promise<void> {
-    const command = { ...chatSubmissionSchema.parse({ id, text, ...(images?.length ? { images } : {}) }), ...(model === undefined ? {} : { model: agentHostModelSelectionSchema.parse(model) }) }
+  async send(id: string, text: string, images: ChatImageAttachment[] | undefined, authorize: () => Promise<void>, actor?: { clientId: string; machineName: string; username?: string }, model?: ModelSelection, collaboration?: TaskContinuumCollaborationMeta): Promise<void> {
+    const validatedCollaboration = collaboration === undefined ? undefined : taskContinuumCollaborationMetaSchema.parse(collaboration)
+    if (validatedCollaboration && validatedCollaboration.messageId !== id) throw new Error('Collaboration messageId must match the turn ID.')
+    const command = {
+      ...chatSubmissionSchema.parse({ id, text, ...(images?.length ? { images } : {}) }),
+      ...(model === undefined ? {} : { model: agentHostModelSelectionSchema.parse(model) }),
+      ...(validatedCollaboration === undefined ? {} : { collaboration: validatedCollaboration }),
+    }
     if (this.sending || this.reviewing) {
       const error = new Error('Another delivery or review is in progress for this chat.')
       this.diagnose('connection.send', { traceId: this.current?.traceId, status: 'error', step: 'validation', dispatched: false, error })
@@ -866,7 +874,11 @@ export class AgentHostConnection {
       const selection = this.chat.selection
       const selectedModel = command.model ?? selection?.model
       const attachments: MessageEmbeddedResourceAttachment[] | undefined = command.images?.map((image) => ({ type: 'embeddedResource' as MessageEmbeddedResourceAttachment['type'], label: image.name, displayKind: 'image', contentType: image.mimeType, data: image.data, _meta: { taskcontinuumImageId: image.id } }))
-      const action: ChatTurnStartedAction = { type: 'chat/turnStarted' as ChatTurnStartedAction['type'], turnId: id, startedAt: new Date().toISOString(), message: { text: command.text, origin: { kind: MessageKind.User }, ...(attachments?.length ? { attachments } : {}), ...(selection?.agent ? { agent: selection.agent } : {}), ...(selectedModel ? { model: selectedModel } : {}), ...(actor ? { _meta: { taskcontinuumActor: actor } } : {}) } }
+      const messageMeta = actor || validatedCollaboration ? {
+        ...(actor ? { taskcontinuumActor: actor } : {}),
+        ...(validatedCollaboration ? { taskcontinuumCollaboration: validatedCollaboration } : {}),
+      } : undefined
+      const action: ChatTurnStartedAction = { type: 'chat/turnStarted' as ChatTurnStartedAction['type'], turnId: id, startedAt: new Date().toISOString(), message: { text: command.text, origin: { kind: MessageKind.User }, ...(attachments?.length ? { attachments } : {}), ...(selection?.agent ? { agent: selection.agent } : {}), ...(selectedModel ? { model: selectedModel } : {}), ...(messageMeta ? { _meta: messageMeta } : {}) } }
       phase('dispatch')
       dispatched = true
       active.client.dispatch(this.target.chatId, action)

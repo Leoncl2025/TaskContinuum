@@ -343,3 +343,23 @@ a.chat-image-reference { color: var(--link); }
   .dialog-actions { flex-wrap: wrap; }
   .import-transcript { height: 24dvh; }
 }
+.ahp-panel .message-user.message-agent-origin { background: var(--raised); border: 1px solid var(--border); }
+.message-origin-row { display: flex; align-items: center; margin-bottom: 6px; font-size: 11px; line-height: 1.4; }
+.message-origin-label, .message-origin-link { display: inline-flex; align-items: center; gap: 5px; min-width: 0; color: var(--muted); font-size: 11px; }
+.message-origin-link { padding: 2px 6px; margin-left: -6px; border-radius: var(--radius-sm); color: var(--link); }
+.message-origin-link:hover { background: var(--hover); text-decoration: underline; }
+.message-origin-label > span:last-child, .message-origin-link > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ahp-pending-messages { max-width: 800px; margin: 8px auto 14px; padding-inline: 18px; display: grid; gap: 8px; }
+.ahp-pending-item { padding: 10px 14px; border: 1px dashed var(--border); border-radius: var(--radius-md); background: var(--raised); font-size: 12px; }
+.ahp-pending-item > header { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin-bottom: 4px; font-size: 11px; }
+.ahp-pending-item > header > span:last-child { color: var(--muted); margin-left: auto; }
+.ahp-pending-item > p { margin: 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.ahp-new-activity-bar { position: sticky; bottom: 8px; display: flex; justify-content: center; padding-block: 4px; pointer-events: none; }
+.ahp-new-activity-pill { pointer-events: auto; display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel); color: var(--text); font-size: 11px; box-shadow: 0 4px 14px var(--shadow); }
+.ahp-new-activity-pill:hover { background: var(--hover); }
+.session-collab-controls { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 11px; }
+.session-collab-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 8px; margin-bottom: 8px; }
+.session-collab-header strong { font-size: 11px; font-weight: 600; }
+.session-collab-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.session-collab-actions .secondary-button { padding: 5px 10px; font-size: 11px; border-radius: var(--radius-sm); }
+.session-collab-actions .text-button { font-size: 11px; }

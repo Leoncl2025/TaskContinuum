@@ -14,9 +14,16 @@ import type { AgentHostEvent } from './agentHostConnection'
 import { readClientIdentity } from './clientIdentity'
 import { agentHostCreateRequestSchema, creationLocationSchema, creationTaskIdSchema } from './agentHostCreationProtocol'
 import { localAgentHostCreateRequestSchema } from './localAgentHostCreationService'
+import { collaborationTaskIdSchema, taskCollaborationPolicyUpdateSchema } from '../shared/sessionCollaboration'
+import type { SessionCollaborationService } from './sessionCollaborationService'
 import { handleDesktopOperation } from './desktopOperations'
 
-export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>, manager: AgentHostManager) {
+export function registerAgentHostBridge(
+  requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow,
+  currentRoot: () => Promise<string>,
+  manager: AgentHostManager,
+  collaboration?: Pick<SessionCollaborationService, 'getTaskPolicy' | 'setTaskPolicy'>,
+) {
   const watches = new Map<string, { window: BrowserWindow; root: string; target: AgentHostTarget; connection: AgentHostConnection; leases: Map<string, Set<string>>; close(): void }>()
   const progressWatches = new Map<string, { connection: AgentHostConnection; schedule(): void; close(): void }>()
   let consenting: Promise<void> | undefined
@@ -343,6 +350,27 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     try {
       return await connection.cancel(turnId, () => current(event, window, root, target))
     } finally { release() }
+  })
+  handleDesktopOperation(ipcMain, 'agent-host:collaboration-policy', async (event, taskValue: unknown) => {
+    const window = requireWindow(event)
+    const root = await currentRoot()
+    const taskId = collaborationTaskIdSchema.parse(taskValue)
+    if (!collaboration) throw new Error('Session collaboration is unavailable in this build.')
+    await current(event, window, root)
+    const result = await collaboration.getTaskPolicy(root, taskId)
+    await current(event, window, root)
+    return result
+  })
+  handleDesktopOperation(ipcMain, 'agent-host:set-collaboration-policy', async (event, taskValue: unknown, updateValue: unknown) => {
+    const window = requireWindow(event)
+    const root = await currentRoot()
+    const taskId = collaborationTaskIdSchema.parse(taskValue)
+    const update = taskCollaborationPolicyUpdateSchema.parse(updateValue)
+    if (!collaboration) throw new Error('Session collaboration is unavailable in this build.')
+    await current(event, window, root)
+    const result = await collaboration.setTaskPolicy(root, taskId, update)
+    await current(event, window, root)
+    return result
   })
   return { close: () => {
     for (const watch of watches.values()) watch.close()

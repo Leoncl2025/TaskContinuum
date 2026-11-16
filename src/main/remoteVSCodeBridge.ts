@@ -18,6 +18,8 @@ import { FileTransferService } from './fileTransferService'
 import { startFileTransferMcpBridge } from './fileTransferMcpBridge'
 import { FileTransferBudget } from './fileTransferBudget'
 import { ChatLinkService } from './chatLinkService'
+import { SessionCollaborationService } from './sessionCollaborationService'
+import { startSessionCollaborationMcpBridge } from './sessionCollaborationMcpBridge'
 import { desktopOperations, handleDesktopOperation } from './desktopOperations'
 
 export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>,
@@ -53,6 +55,18 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     const { clientId, machineName } = await clientIdentity()
     return { clientId, machineName }
   }, localTaskWorker)
+  const collaboration = new SessionCollaborationService({
+    directory: app.getPath('userData'),
+    agentHosts,
+    devices,
+    identity: clientIdentity,
+  })
+  const collaborationReady = startSessionCollaborationMcpBridge(
+    app.getPath('userData'),
+    (root) => collaboration.forWorkspace(root),
+    desktopOperations,
+  )
+  void collaborationReady.catch(() => console.error('The local session collaboration MCP bridge could not start.'))
   const chatLinks = new ChatLinkService({
     files, owner: clientIdentity,
     device: (root, owner) => devices.fileDeviceForOwner(root, owner),
@@ -129,9 +143,11 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     if (confirmation.response === 1) { await unchanged(root); await tunnels.stop() }
   })
   let closing: Promise<void> | undefined
-  return { agentHosts, gitSync, filesReady, chatLinks,
-    hasActiveWork: () => agentHosts.hasActiveWork || host.hasActiveWork || files.hasActiveWork || fileSource.hasActiveWork,
+  return { agentHosts, gitSync, filesReady, collaboration, collaborationReady, chatLinks,
+    hasActiveWork: () => agentHosts.hasActiveWork || host.hasActiveWork || files.hasActiveWork || fileSource.hasActiveWork || collaboration.hasActiveWork,
     close: () => closing ??= (async () => {
+    try { await (await collaborationReady).close() } catch { console.error('Closing after session collaboration MCP bridge failure.') }
+    await collaboration.close()
     try { await (await filesReady).close() } catch { console.error('Closing after file transfer MCP bridge failure.') }
     await files.close()
     await fileSource.close()

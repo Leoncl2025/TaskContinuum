@@ -1,0 +1,134 @@
+import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { createServer } from 'node:http'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import { CollaborationError } from '../shared/sessionCollaboration'
+import type { SessionCollaborationApi } from '../shared/sessionCollaboration'
+import type { DesktopOperations } from './desktopOperations'
+import { DesktopOperationUnavailableError } from './desktopOperations'
+import { removeCollaborationEndpoint, writeCollaborationEndpoint } from './sessionCollaborationMcp/descriptor'
+import {
+  MAX_COLLAB_BRIDGE_REQUEST_BYTES, MAX_COLLAB_BRIDGE_REQUESTS, MAX_COLLAB_BRIDGE_RESPONSE_BYTES,
+  collaborationBridgeRequestSchema, invokeCollaborationApi, safeCollaborationFailure, validateCollaborationResult,
+} from './sessionCollaborationMcp/protocol'
+
+function respond(response: ServerResponse, status: number, body: unknown): void {
+  if (response.destroyed) return
+  const json = JSON.stringify(body)
+  response.writeHead(status, {
+    'Content-Type': 'application/json',
+    'Content-Length': Buffer.byteLength(json),
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    Connection: 'close',
+  })
+  response.end(json)
+}
+
+function rejected(response: ServerResponse, status: number, code: 'ACCESS_DENIED' | 'INVALID_REQUEST' | 'BUSY'): void {
+  respond(response, status, { error: safeCollaborationFailure(new CollaborationError(code, '')) })
+}
+
+function body(request: IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let size = 0
+    const onData = (bytes: Buffer) => {
+      size += bytes.length
+      if (size > MAX_COLLAB_BRIDGE_REQUEST_BYTES) {
+        request.off('data', onData)
+        reject(new CollaborationError('INVALID_REQUEST', ''))
+        return
+      }
+      chunks.push(bytes)
+    }
+    request.on('data', onData)
+    request.once('error', () => reject(new CollaborationError('INVALID_REQUEST', '')))
+    request.once('end', () => {
+      request.off('data', onData)
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown) }
+      catch { reject(new CollaborationError('INVALID_REQUEST', '')) }
+    })
+  })
+}
+
+export async function startSessionCollaborationMcpBridge(
+  directory: string,
+  apiForWorkspace: (root: string) => SessionCollaborationApi,
+  operations?: DesktopOperations,
+): Promise<{ close(): Promise<void> }> {
+  const token = randomBytes(32).toString('base64url')
+  const expectedAuth = Buffer.from(['Bearer', token].join(' '))
+  let port = 0
+  let active = 0
+  const server = createServer({
+    maxHeaderSize: 4096,
+    headersTimeout: 5000,
+    requestTimeout: 30_000,
+    keepAliveTimeout: 1000,
+    connectionsCheckingInterval: 1000,
+  }, (request, response) => {
+    const auth = Buffer.from(request.headers.authorization ?? '')
+    const rawCount = (header: string) => request.rawHeaders.filter((_, index) => index % 2 === 0 && request.rawHeaders[index].toLowerCase() === header).length
+    if (request.headers.origin !== undefined || request.headers.host !== `127.0.0.1:${port}`
+      || rawCount('host') !== 1 || rawCount('authorization') !== 1
+      || auth.length !== expectedAuth.length || !timingSafeEqual(auth, expectedAuth)) {
+      rejected(response, 403, 'ACCESS_DENIED')
+      return
+    }
+    if (request.method !== 'POST' || request.url !== '/mcp/collab'
+      || !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(request.headers['content-type'] ?? '')
+      || request.headers['content-encoding'] !== undefined
+      || Number(request.headers['content-length'] ?? 0) > MAX_COLLAB_BRIDGE_REQUEST_BYTES) {
+      rejected(response, 400, 'INVALID_REQUEST')
+      return
+    }
+    if (active >= MAX_COLLAB_BRIDGE_REQUESTS) {
+      rejected(response, 503, 'BUSY')
+      return
+    }
+    active++
+    void (async () => {
+      try {
+        const operation = async () => {
+          const requestBody = collaborationBridgeRequestSchema.parse(await body(request))
+          const result = validateCollaborationResult(requestBody, await invokeCollaborationApi(apiForWorkspace(requestBody.workspace), requestBody))
+          const payload = { result }
+          if (Buffer.byteLength(JSON.stringify(payload)) > MAX_COLLAB_BRIDGE_RESPONSE_BYTES) throw new CollaborationError('UNAVAILABLE', '')
+          respond(response, 200, payload)
+        }
+        if (operations) await operations.runAsync(operation)
+        else await operation()
+      } catch (error) {
+        const failure = safeCollaborationFailure(error instanceof DesktopOperationUnavailableError ? new CollaborationError('BUSY', error.message) : error)
+        respond(response, failure.code === 'INVALID_REQUEST' ? 400 : 200, { error: failure })
+      } finally {
+        active--
+      }
+    })()
+  })
+  server.maxConnections = 32
+  server.on('clientError', (_error, socket) => { socket.destroy() })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => { server.off('error', reject); resolve() })
+  })
+  const address = server.address()
+  if (!address || typeof address === 'string') {
+    server.close()
+    throw new CollaborationError('UNAVAILABLE', '')
+  }
+  port = address.port
+  const endpoint = { schemaVersion: 1 as const, port, token }
+  async function closeServer(): Promise<void> {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve())
+      server.closeAllConnections()
+    })
+  }
+  try { await writeCollaborationEndpoint(directory, endpoint) }
+  catch (error) { await closeServer(); throw error }
+  let closing: Promise<void> | undefined
+  return {
+    close: () => closing ??= (async () => { await closeServer(); await removeCollaborationEndpoint(directory, endpoint) })(),
+  }
+}

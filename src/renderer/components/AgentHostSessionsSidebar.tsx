@@ -1,7 +1,8 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { DragEvent, KeyboardEvent } from 'react'
 import { agentHostKey } from '../../shared/agentHost'
-import type { AgentHostHistoryTransfer, AgentHostSession } from '../../shared/agentHost'
+import type { AgentHostBridge, AgentHostHistoryTransfer, AgentHostSession } from '../../shared/agentHost'
+import type { TaskCollaborationPolicyUpdate, TaskCollaborationState } from '../../shared/sessionCollaboration'
 import { moveSessionKey, sessionBindingKey, sessionSortModes, sortSessionBindings } from '../chat/sessionBindings'
 import type { SessionBinding, SessionBindings, SessionSortMode } from '../chat/sessionBindings'
 import { Icon, IconButton } from './Primitives'
@@ -311,6 +312,77 @@ function SessionTree({ taskId, bindings, activeKey, expandSession, sessions, cac
   </ul>
 }
 
+function TaskCollaborationControls({ taskId, bridge, revision, disabled }: {
+  taskId: string
+  bridge: AgentHostBridge
+  revision: number
+  disabled: boolean
+}) {
+  const policyKey = `${taskId}:${revision}`
+  const [policyState, setPolicyState] = useState<{ taskId: string; value: TaskCollaborationState }>()
+  const [updating, setUpdating] = useState(false)
+  const [policyError, setPolicyError] = useState<{ key: string; message: string }>()
+  const policy = policyState?.taskId === taskId ? policyState.value : undefined
+  const errorMessage = policyError?.key === policyKey ? policyError.message : undefined
+
+  useEffect(() => {
+    if (!bridge.collaborationPolicy) return
+    let active = true
+    void bridge.collaborationPolicy(taskId).then((value) => {
+      if (active) {
+        setPolicyState({ taskId, value })
+        setPolicyError(undefined)
+      }
+    }).catch((failure: unknown) => {
+      if (active) setPolicyError({ key: policyKey, message: failure instanceof Error ? failure.message : 'Could not read task collaboration policy.' })
+    })
+    return () => { active = false }
+  }, [bridge, taskId, policyKey])
+
+  if (!bridge.collaborationPolicy || !bridge.setCollaborationPolicy) return null
+
+  async function applyUpdate(update: TaskCollaborationPolicyUpdate): Promise<void> {
+    if (!bridge.setCollaborationPolicy || updating || disabled) return
+    setUpdating(true)
+    setPolicyError(undefined)
+    try {
+      const value = await bridge.setCollaborationPolicy(taskId, update)
+      setPolicyState({ taskId, value })
+    } catch (failure) {
+      setPolicyError({ key: policyKey, message: failure instanceof Error ? failure.message : 'Could not update task collaboration policy.' })
+    } finally {
+      setUpdating(false)
+    }
+  }
+
+  const statusText = !policy ? 'Loading...'
+    : !policy.enabled ? 'Off'
+      : policy.paused ? `Paused${policy.queuedCount ? ` · ${policy.queuedCount} queued` : ''}`
+        : `Enabled · ${policy.sentCount}/${policy.maxSentMessages} sent${policy.queuedCount ? ` · ${policy.queuedCount} queued` : ''}`
+
+  return <section className="session-collab-controls" aria-label="Task session collaboration">
+    <div className="session-collab-header">
+      <strong>Agent collaboration</strong>
+      <span className="muted" role="status">{statusText}</span>
+    </div>
+    {errorMessage && <p className="copilot-error" role="alert">{errorMessage}</p>}
+    {policy && <div className="session-collab-actions">
+      <button type="button" className="secondary-button" disabled={disabled || updating}
+        onClick={() => { void applyUpdate({ enabled: !policy.enabled }) }}>
+        {policy.enabled ? 'Disable collaboration' : 'Enable collaboration'}
+      </button>
+      {policy.enabled && <button type="button" className="secondary-button" disabled={disabled || updating}
+        onClick={() => { void applyUpdate({ paused: !policy.paused }) }}>
+        {policy.paused ? 'Resume collaboration' : 'Pause collaboration'}
+      </button>}
+      {policy.sentCount > 0 && <button type="button" className="text-button" disabled={disabled || updating}
+        onClick={() => { void applyUpdate({ resetBudget: true }) }}>
+        Reset quota
+      </button>}
+    </div>}
+  </section>
+}
+
 export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, orderedKeys, sortMode, activeKey, expandSession, localOwnerId, busy = false, initialView = 'current', cachedTitles, sessionTimestamps, historyTransfers, titleCacheError, onTitles, onSelect, onReorder, onSortMode, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
   const bridge = window.agentHost
   const aliases = useMachineAliases()
@@ -419,6 +491,7 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
         }} />}
         {taskId && <SessionTree taskId={taskId} bindings={linked} activeKey={activeKey} expandSession={expandSession} sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} disabled={!taskReady || busy || operating} onSelect={onSelect} onReorder={onReorder ? (nextKeys) => { if (sortMode === undefined) setLocalSortMode('manual'); onReorder(nextKeys) } : undefined} onUnlink={onDetach ? (binding) => { setDetach(binding); setError(undefined) } : undefined} />}
         {!linked.length && <p className="muted">{busy ? 'Loading task sessions...' : 'No sessions linked to this task.'}</p>}
+        {taskId && bridge?.collaborationPolicy && bridge.setCollaborationPolicy && <TaskCollaborationControls taskId={taskId} bridge={bridge} revision={revision} disabled={!taskReady || busy || operating} />}
         {detach && <section className="session-inline-confirm" aria-label="Detach conversation"><p>Detach {detach.id} from {taskId}? Conversation history stays on its Host.</p>{detachmentChanged && <p role="alert">The task binding changed. Cancel and review the current sessions.</p>}<div className="session-sidebar-actions"><button type="button" className="secondary-button" disabled={operating} onClick={() => setDetach(undefined)}>Keep conversation</button><button type="button" className="primary-button" disabled={!taskReady || busy || operating || detachmentChanged} onClick={() => { void run(async () => { if (onDetach) await onDetach(detach); setDetach(undefined) }) }}>Detach session</button></div></section>}
       </>}
       {view === 'link' && <>

@@ -193,10 +193,10 @@ void app.whenReady().then(async () => {
   }, () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('remote-vscode:git-bindings-changed')
   })
-  await remoteVSCode.filesReady
+  await Promise.all([remoteVSCode.filesReady, remoteVSCode.collaborationReady])
   if (quitting || cleanupComplete) return
   registerChatLinkBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.chatLinks)
-  agentHost = registerAgentHostBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.agentHosts)
+  agentHost = registerAgentHostBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.agentHosts, remoteVSCode.collaboration)
   updateRestart = new UpdateRestartGuard({
     operations: desktopOperations,
     rendererAvailable: () => Boolean(mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()),
