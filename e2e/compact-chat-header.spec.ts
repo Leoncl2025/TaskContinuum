@@ -19,6 +19,64 @@ test.beforeAll(async () => {
 })
 test.afterAll(async () => { await server?.close() })
 
+for (const theme of ['light', 'dark'] as const) {
+  test(`drags sessions to reorder manually and restores order on reload in ${theme} mode`, async ({ page }, testInfo) => {
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto(`${url}?workbench&panes&sessions&theme=${theme}`)
+    await expect(page.getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
+
+    const sidebar = page.getByRole('complementary', { name: 'Agent Host sessions', exact: true })
+    const tree = sidebar.getByRole('tree', { name: 'Sessions for T-0002' })
+    const titles = () => tree.getByRole('treeitem').evaluateAll((items) => items.map((item) => item.getAttribute('aria-label')))
+    await expect.poll(titles).toEqual([
+      'A focused release plan',
+      'Investigate session creation',
+      'A deliberately long conversation title that should remain on one compact line',
+      'Verify the next release',
+    ])
+
+    // Drag the bottom session row up to the top by dragging its title button directly.
+    const bottomButton = tree.getByRole('treeitem', { name: 'Verify the next release', exact: true }).getByRole('button', { name: 'Open Verify the next release', exact: true })
+    const topItem = tree.getByRole('treeitem', { name: 'A focused release plan', exact: true })
+    await bottomButton.dragTo(topItem)
+    await expect.poll(titles).toEqual([
+      'Verify the next release',
+      'A focused release plan',
+      'Investigate session creation',
+      'A deliberately long conversation title that should remain on one compact line',
+    ])
+    // Dragging did not switch the active conversation away from 'A focused release plan'.
+    await expect(topItem).toHaveAttribute('aria-selected', 'true')
+
+    // Drag 'Investigate session creation' down to the bottom via its drag grip.
+    const middleGrip = tree.getByRole('treeitem', { name: 'Investigate session creation', exact: true }).locator('.session-drag-grip')
+    const lastItem = tree.getByRole('treeitem', { name: 'A deliberately long conversation title that should remain on one compact line', exact: true })
+    await middleGrip.dragTo(lastItem)
+    await expect.poll(titles).toEqual([
+      'Verify the next release',
+      'A focused release plan',
+      'A deliberately long conversation title that should remain on one compact line',
+      'Investigate session creation',
+    ])
+    await sidebar.screenshot({ path: testInfo.outputPath(`session-drag-reordered-${theme}.png`) })
+
+    // Reloading the workbench restores the exact manual order instead of creation order.
+    await page.reload()
+    await expect(page.getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
+    await expect.poll(titles).toEqual([
+      'Verify the next release',
+      'A focused release plan',
+      'A deliberately long conversation title that should remain on one compact line',
+      'Investigate session creation',
+    ])
+    expect(errors).toEqual([])
+  })
+}
+
 test('session history transfer labels distinguish full sync, resume and recent paging', async ({ page }) => {
   await page.goto(`${url}?workbench&panes&sessions&theme=dark`)
   const header = page.getByLabel('Chat header')

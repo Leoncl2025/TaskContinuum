@@ -13,7 +13,9 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
   details. The sidebar retains just the task title and toolbar controls above
   the Current/Link/Create tabs; use Link or Create rather than duplicate footer
   buttons, and the Tasks activity button to return to the task list.
-- Device-local restoration of open task tabs, the active task and each task's selected chat.
+- Device-local restoration of open task tabs, the active task, each task's
+  selected chat, and manual drag-and-drop (or **Alt+Up / Alt+Down**) session
+  order in **Current**.
 - Searchable task trees, task tabs, and read-only planning documents.
 - **Ctrl+PageUp / Ctrl+PageDown** switches to the previous/next open task tab,
   wrapping at either end without clearing chat drafts.

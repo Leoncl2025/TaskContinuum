@@ -1,7 +1,7 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useWorkbenchSelection } from '../src/renderer/chat/useWorkbenchSelection'
-import { sessionBindingKey } from '../src/renderer/chat/sessionBindings'
+import { moveSessionKey, orderSessionBindings, sessionBindingKey } from '../src/renderer/chat/sessionBindings'
 import { agentHostTargetFixture } from './immutable-bindings-fixture'
 
 afterEach(() => { vi.restoreAllMocks() })
@@ -232,5 +232,50 @@ describe('device-local workbench selection', () => {
     expect(restored.result.current.error).toContain('invalid')
     expect(restored.result.current.taskId).toBeUndefined()
     expect(restored.result.current.openTaskIds).toBeUndefined()
+  })
+
+  it('persists manual session orders across task/session updates and remounts without leaking sensitive fields', () => {
+    const third = sessionBindingKey({ agentHost: agentHostTargetFixture('third') })
+    const hook = renderHook(() => useWorkbenchSelection('workspace'))
+    expect(hook.result.current.sessionOrders).toEqual({})
+    const writes = vi.spyOn(Storage.prototype, 'setItem')
+    act(() => hook.result.current.reorderSessions(taskId, [third, first, second], taskId, [taskId]))
+    act(() => hook.result.current.reorderSessions(taskId, [third, first, second], taskId, [taskId]))
+    expect(writes).toHaveBeenCalledOnce()
+    act(() => hook.result.current.selectSession(taskId, first))
+    act(() => hook.result.current.selectTask('T-0003'))
+    act(() => hook.result.current.closeTask('T-0003', [taskId, 'T-0003'], 'T-0003'))
+    hook.unmount()
+
+    const restored = renderHook(() => useWorkbenchSelection('workspace'))
+    expect(restored.result.current.sessionOrders).toEqual({ [taskId]: [third, first, second] })
+    expect(restored.result.current.sessions).toEqual({ [taskId]: first })
+    expect(restored.result.current.taskId).toBe(taskId)
+    const stored = localStorage.getItem(storageKey())!
+    for (const field of ['machineName', 'permissions', 'canSend', 'token', 'draft', 'root', 'hostId']) {
+      expect(stored).not.toContain(field)
+    }
+
+    const items = ['first', 'second', 'third', 'fourth'].map((name) => {
+      const agentHost = agentHostTargetFixture(name)
+      return { id: agentHost.sessionId, title: name, owner: agentHost.owner, agentHost }
+    })
+    expect(orderSessionBindings(items, [third, 'ahp:["gone","gone","gone"]', first]).map((item) => item.title))
+      .toEqual(['third', 'first', 'second', 'fourth'])
+    expect(moveSessionKey([first, second, third], third, 0)).toEqual([third, first, second])
+    expect(moveSessionKey([first, second, third], first, 3)).toEqual([second, third, first])
+    expect(moveSessionKey([first, second, third], second, 1)).toBeUndefined()
+    expect(moveSessionKey([first, second, third], second, 2)).toBeUndefined()
+  })
+
+  it.each([
+    '{"version":2,"taskId":"T-0002","openTaskIds":["T-0002"],"sessions":{},"sessionOrders":{"T-0002":[]}}',
+    `{"version":2,"taskId":"T-0002","openTaskIds":["T-0002"],"sessions":{},"sessionOrders":{"T-0002":[${JSON.stringify(first)},${JSON.stringify(first)}]}}`,
+    '{"version":2,"taskId":"T-0002","openTaskIds":["T-0002"],"sessions":{},"sessionOrders":{"bad":["ahp:1"]}}',
+  ])('rejects invalid stored sessionOrders (%s)', (stored) => {
+    localStorage.setItem(storageKey(), stored)
+    const hook = renderHook(() => useWorkbenchSelection('workspace'))
+    expect(hook.result.current.error).toContain('invalid')
+    expect(hook.result.current.sessionOrders).toEqual({})
   })
 })

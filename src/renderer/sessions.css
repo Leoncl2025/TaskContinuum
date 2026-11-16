@@ -13,13 +13,22 @@
 .session-sidebar .ah-creation-pickers { grid-template-columns: minmax(0, 1fr); }
 .session-sidebar button { overflow-wrap: anywhere; }
 .session-tree { display: grid; gap: 4px; padding: 0; }
-.session-tree > li { min-width: 0; border-radius: var(--radius-md); }
+.session-tree > li { position: relative; min-width: 0; border-radius: var(--radius-md); }
+.session-tree > li[data-drop="before"]::before,
+.session-tree > li[data-drop="after"]::after { content: ''; position: absolute; left: 6px; right: 6px; z-index: 2; height: 2px; border-radius: 999px; background: var(--link); pointer-events: none; }
+.session-tree > li[data-drop="before"]::before { top: -3px; }
+.session-tree > li[data-drop="after"]::after { bottom: -3px; }
 .session-tree .session-row { display: grid; gap: 2px; min-width: 0; padding: 0 2px; }
 .session-tree .session-row strong { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 500; line-height: 18px; }
 .session-machine { display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: 11px; line-height: 18px; }
 .session-tree-row { position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; padding: 6px; border-radius: var(--radius-md); }
 .session-tree-row:hover { background: var(--hover); }
 .session-tree-row.is-selected { background: var(--selected); }
+.session-tree-row[data-dragging="true"] { opacity: .55; }
+.session-drag-grip { position: relative; z-index: 1; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 12px; color: var(--subtle); opacity: .5; cursor: grab; }
+.session-drag-grip > .codicon { font-size: 13px; }
+.session-tree-row:hover .session-drag-grip, .session-tree > li:focus-visible .session-drag-grip, .session-tree-row[data-dragging="true"] .session-drag-grip { color: var(--muted); opacity: .95; }
+.session-tree-row[data-dragging="true"] .session-drag-grip { cursor: grabbing; }
 .session-tree-row .session-row { flex: 1; min-width: 0; border: 0; background: none; }
 .session-tree-row > .icon-button { flex-shrink: 0; }
 .session-tree-row > button { position: relative; z-index: 1; }

@@ -1,4 +1,5 @@
-import { act, render, screen, within } from '@testing-library/react'
+import { useState } from 'react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentHostSessionsSidebar } from '../src/renderer/components/AgentHostSessionsSidebar'
@@ -293,5 +294,64 @@ describe('AgentHostSessionsSidebar', () => {
     await userEvent.setup().click(screen.getByRole('button', { name: 'Hide session sidebar' }))
     expect(onClose).toHaveBeenCalledOnce()
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('reorders linked sessions via drag-and-drop and Alt+ArrowUp/Down without activating or rebinding', async () => {
+    const first = binding('drag-first', 'First session')
+    const second = binding('drag-second', 'Second session')
+    const third = binding('drag-third', 'Third session')
+    window.agentHost = bridge()
+    const onSelect = vi.fn()
+    const onReorder = vi.fn()
+    const user = userEvent.setup()
+
+    function StatefulSidebar() {
+      const [items, setItems] = useState([first, second, third])
+      return <AgentHostSessionsSidebar taskId="T-0002" taskTitle="Reorder task" taskReady
+        bindings={{ 'T-0002': items }} activeKey={sessionBindingKey(second)} onSelect={onSelect}
+        onReorder={(orderedKeys) => {
+          onReorder(orderedKeys)
+          setItems((current) => orderedKeys.map((key) => current.find((item) => sessionBindingKey(item) === key)!))
+        }}
+        onDetach={vi.fn(async () => {})} onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} />
+    }
+
+    render(<StatefulSidebar />)
+    const tree = screen.getByRole('tree', { name: 'Sessions for T-0002' })
+    const labels = () => within(tree).getAllByRole('treeitem').map((item) => item.getAttribute('aria-label'))
+    expect(labels()).toEqual(['First session', 'Second session', 'Third session'])
+
+    const thirdItem = within(tree).getByRole('treeitem', { name: 'Third session' })
+    await user.click(within(thirdItem).getByRole('button', { name: 'Show details for Third session' }))
+    expect(thirdItem).toHaveAttribute('aria-expanded', 'true')
+
+    // Dragging on an action icon button is prevented and does not reorder.
+    const unlinkButton = within(thirdItem).getByRole('button', { name: 'Unlink Third session' })
+    expect(fireEvent.dragStart(unlinkButton)).toBe(false)
+    expect(onReorder).not.toHaveBeenCalled()
+
+    // Dragging Third session onto First session moves it to the top and keeps its expansion attached.
+    const thirdRow = thirdItem.querySelector('.session-tree-row')!
+    const firstItem = within(tree).getByRole('treeitem', { name: 'First session' })
+    fireEvent.dragStart(thirdRow)
+    expect(thirdRow).toHaveAttribute('data-dragging', 'true')
+    fireEvent.dragOver(firstItem)
+    expect(firstItem).toHaveAttribute('data-drop', 'before')
+    fireEvent.drop(firstItem)
+    expect(labels()).toEqual(['Third session', 'First session', 'Second session'])
+    expect(onReorder).toHaveBeenLastCalledWith([first, second, third].length ? [third, first, second].map(sessionBindingKey) : [])
+    expect(within(tree).getByRole('treeitem', { name: 'Third session' })).toHaveAttribute('aria-expanded', 'true')
+    expect(within(tree).getByRole('treeitem', { name: 'Second session' })).toHaveAttribute('aria-selected', 'true')
+    expect(onSelect).not.toHaveBeenCalled()
+
+    // Keyboard Alt+ArrowDown moves the focused session down while preserving focus.
+    const movedThird = within(tree).getByRole('treeitem', { name: 'Third session' })
+    movedThird.focus()
+    await user.keyboard('{Alt>}{ArrowDown}{/Alt}')
+    expect(labels()).toEqual(['First session', 'Third session', 'Second session'])
+    await user.keyboard('{Alt>}{ArrowUp}{/Alt}')
+    expect(labels()).toEqual(['Third session', 'First session', 'Second session'])
+    expect(onSelect).not.toHaveBeenCalled()
+    expect(window.agentHost.watch).not.toHaveBeenCalled()
   })
 })

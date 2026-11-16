@@ -1326,4 +1326,39 @@ describe('workspace switching in the desktop workbench', () => {
     await user.click(screen.getByRole('button', { name: 'Tasks' }))
     expect(screen.getByRole('combobox', { name: 'Workspace' })).toBeEnabled()
   })
+
+  it('drags sessions into a custom order, cycles shortcuts in that order, and restores it across restart without rebinding', async () => {
+    const { bridge, sessions, agentHost } = sessionShortcutFixture()
+    const expectedKeys = [sessions[2], sessions[0], sessions[1]].map((target) => sessionBindingKey({ agentHost: target }))
+    const user = userEvent.setup()
+    await bridge.openFolder()
+    const mounted = render(<App />)
+    const composer = await screen.findByRole('textbox', { name: 'Message Agent Host' })
+    await user.type(composer, 'Keep first session draft')
+    await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
+    const tree = await screen.findByRole('tree', { name: 'Sessions for T-0002' })
+    const itemKeys = (container: HTMLElement) => within(container).getAllByRole('treeitem').map((item) => item.getAttribute('data-session-key'))
+    expect(itemKeys(tree)).toEqual(sessions.map((target) => sessionBindingKey({ agentHost: target })))
+
+    const items = within(tree).getAllByRole('treeitem')
+    const thirdRow = items[2].querySelector('.session-tree-row')!
+    fireEvent.dragStart(thirdRow)
+    fireEvent.dragOver(items[0])
+    fireEvent.drop(items[0])
+    expect(itemKeys(tree)).toEqual(expectedKeys)
+    expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Keep first session draft')
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+
+    // Ctrl+Shift+PageUp from sessions[0] (now at index 1) moves up to sessions[2] (now at index 0).
+    expect(fireEvent.keyDown(window, { key: 'PageUp', ctrlKey: true, shiftKey: true })).toBe(false)
+    await waitFor(() => expect(agentHost.watch).toHaveBeenLastCalledWith(sessions[2]))
+
+    mounted.unmount()
+    render(<App />)
+    await screen.findByRole('textbox', { name: 'Message Agent Host' })
+    await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
+    const restoredTree = await screen.findByRole('tree', { name: 'Sessions for T-0002' })
+    expect(itemKeys(restoredTree)).toEqual(expectedKeys)
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+  })
 })
