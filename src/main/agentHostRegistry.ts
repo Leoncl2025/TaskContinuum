@@ -43,14 +43,51 @@ const creationSessionSchema = z.object({
   workingDirectories: z.array(z.string()).max(1).optional(), chats: z.array(creationChatSchema).max(1000),
   defaultChat: agentHostChatIdSchema.optional(), creationError: z.unknown().optional(),
 })
+const configPropertyTypeSchema = z.enum(['string', 'number', 'boolean', 'array', 'object'])
+type ConfigPropertyType = z.infer<typeof configPropertyTypeSchema>
+interface ConfigProperty {
+  type: ConfigPropertyType
+  enum?: unknown[]
+  enumDynamic?: boolean
+  readOnly?: boolean
+  items?: ConfigProperty
+}
+const configPropertySchema: z.ZodType<ConfigProperty> = z.lazy(() => z.object({
+  type: configPropertyTypeSchema,
+  enum: z.array(z.unknown()).optional(),
+  enumDynamic: z.boolean().optional(),
+  readOnly: z.boolean().optional(),
+  items: configPropertySchema.optional(),
+}))
 const resolvedConfigSchema = z.object({
   schema: z.object({
     type: z.literal('object'),
-    properties: z.record(z.string().max(100), z.object({ type: z.enum(['string', 'number', 'boolean', 'array', 'object']), enum: z.array(z.unknown()).optional() })),
+    properties: z.record(z.string().max(100), configPropertySchema),
     required: z.array(z.string().max(100)).max(32).optional(),
   }),
   values: z.record(z.string().max(100), z.unknown()),
 })
+
+function matchesConfigType(value: unknown, property: ConfigProperty, depth = 0): boolean {
+  if (depth > 8) return false
+  if (property.type === 'string') return typeof value === 'string'
+  if (property.type === 'number') return typeof value === 'number' && Number.isFinite(value)
+  if (property.type === 'boolean') return typeof value === 'boolean'
+  if (property.type === 'array') {
+    return Array.isArray(value) && (!property.items || value.every((item) => matchesConfigType(item, property.items!, depth + 1)))
+  }
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+const emptyPermissionsSchema = z.object({
+  allow: z.array(z.string()).max(0),
+  deny: z.array(z.string()).max(0),
+}).strict()
+
+const sensitiveLocationSchema = z.object({
+  path: z.string().min(1).max(1024),
+  isDirectory: z.boolean(),
+}).strict()
 
 function creationConfig(value: unknown): Record<string, unknown> {
   const result = resolvedConfigSchema.safeParse(value)
@@ -58,7 +95,8 @@ function creationConfig(value: unknown): Record<string, unknown> {
   const { schema, values } = result.data
   if (Object.keys(values).length > 32 || Buffer.byteLength(JSON.stringify(values)) > 32768) throw new AgentHostCreationError('The Host session configuration exceeds the supported limit.')
   if (values.isolation !== 'folder') throw new AgentHostCreationError('The Host configuration did not honor explicit folder isolation. No native session was created outside the authorized folder.')
-  const supported = new Set(['isolation', 'target', 'branch', 'baseBranch', 'autoApprove', 'mode'])
+  const supported = new Set(['isolation', 'target', 'branch', 'baseBranch', 'autoApprove', 'mode', 'sandboxEnabled', 'permissions'])
+  const readOnlyMetadata = new Set(['availableApprovalModes', 'effectiveApprovalMode', 'sensitiveEditLocations'])
   const label = (name: string) => /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(name) ? ` (${name})` : ''
   for (const name of schema.required ?? []) {
     if (!supported.has(name) || !Object.hasOwn(values, name)) throw new AgentHostCreationError(`The Host requires session configuration${label(name)} that this creation flow cannot supply. Configure the Host explicitly before retrying.`)
@@ -66,18 +104,33 @@ function creationConfig(value: unknown): Record<string, unknown> {
   for (const name of ['isolation', 'target', 'autoApprove', 'mode']) {
     if (Object.hasOwn(schema.properties, name) && !Object.hasOwn(values, name)) throw new AgentHostCreationError(`The Host did not resolve its native ${name} configuration. No implicit isolation or approval default was selected.`)
   }
-  for (const [name, value] of Object.entries(values)) {
+  const forwarded: Record<string, unknown> = {}
+  for (const [name, entry] of Object.entries(values)) {
     const property = schema.properties[name]
-    if (!supported.has(name) || !property || typeof value !== property.type || property.enum && !property.enum.some((option) => JSON.stringify(option) === JSON.stringify(value))) {
+    const isMetadata = readOnlyMetadata.has(name)
+    if (!property || !matchesConfigType(entry, property)
+      || !supported.has(name) && !(isMetadata && property.readOnly === true)
+      || property.enum && !property.enumDynamic && !property.enum.some((option) => JSON.stringify(option) === JSON.stringify(entry))) {
       throw new AgentHostCreationError(`The Host resolved unsupported native session configuration${label(name)}. No configuration override was applied.`)
     }
-    if (name === 'target' && value !== 'workspace'
-      || name === 'autoApprove' && value !== false && value !== 'default' && value !== 'none'
-      || name === 'mode' && value !== 'interactive' && value !== 'default') {
+    if (isMetadata) {
+      if (name === 'availableApprovalModes' && (!Array.isArray(entry) || entry.length > 16 || !entry.every((item) => typeof item === 'string' && item.length > 0 && item.length <= 64))
+        || name === 'effectiveApprovalMode' && (typeof entry !== 'string' || !['default', 'assisted', 'autoApprove', 'none'].includes(entry))
+        || name === 'sensitiveEditLocations' && (!Array.isArray(entry) || entry.length > 128 || !entry.every((item) => sensitiveLocationSchema.safeParse(item).success))) {
+        throw new AgentHostCreationError(`The Host resolved unsupported native session configuration${label(name)}. No configuration override was applied.`)
+      }
+      continue
+    }
+    if (name === 'target' && entry !== 'workspace'
+      || name === 'autoApprove' && entry !== false && entry !== 'default' && entry !== 'none'
+      || name === 'mode' && entry !== 'interactive' && entry !== 'default'
+      || name === 'sandboxEnabled' && entry !== 'default'
+      || name === 'permissions' && !emptyPermissionsSchema.safeParse(entry).success) {
       throw new AgentHostCreationError('The Host resolved configuration with elevated approval settings or a different execution target. No permission override was applied.')
     }
+    forwarded[name] = entry
   }
-  return values
+  return forwarded
 }
 
 export class AgentHostRegistry {

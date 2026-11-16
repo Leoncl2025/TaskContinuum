@@ -280,9 +280,12 @@ The client supplies an opaque workspace ID, not a filesystem path. It does not
 provision a machine or start a replacement Host. This action explicitly selects
 native **Folder** isolation, not the Host's Git-workspace **Worktree** default,
 so execution stays in the chosen folder. Other supported native configuration
-defaults are preserved; creation does not send an initial prompt or bypass
-native tool approvals. After creation, use the existing Host panel to choose a
-model, send, watch live output, or cancel the exact active turn.
+defaults are preserved, while Host-computed `readOnly` policy metadata (such as
+`availableApprovalModes`, `effectiveApprovalMode`, and `sensitiveEditLocations`)
+is validated and omitted from `createSession` so creation never sends an initial
+prompt, configuration override, or bypass of native tool approvals. After
+creation, use the existing Host panel to choose a model, send, watch live output,
+or cancel the exact active turn.
 An acknowledged empty native chat can retain lifecycle `creating` until its
 first explicit send. A confirmed creation/binding is not a claim that the model
 runtime has initialized, and Task Continuum never sends a warm-up prompt.

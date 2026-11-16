@@ -779,6 +779,103 @@ describe('worker-authoritative native Agent Host creation', () => {
     expect(worker.native.calls.some((call) => call.method === 'dispatchAction')).toBe(false)
   })
 
+  it('accepts AHP 1.0 read-only approval metadata and dynamic branch enums without echoing read-only fields as overrides', async () => {
+    const worker = await fixture()
+    worker.native.setConfig({
+      schema: {
+        type: 'object',
+        properties: {
+          isolation: { type: 'string', title: 'Isolation', enum: ['folder', 'worktree'], default: 'worktree', readOnly: false, sessionMutable: false },
+          sandboxEnabled: { type: 'string', title: 'Sandbox', enum: ['default', 'on', 'off'], sessionMutable: true },
+          autoApprove: { type: 'string', title: 'Approvals', enum: ['default', 'assisted', 'autoApprove'], default: 'default', sessionMutable: true },
+          permissions: {
+            type: 'object', title: 'Permissions', sessionMutable: true,
+            properties: {
+              allow: { type: 'array', title: 'Allowed tools', items: { type: 'string', title: 'Tool name' } },
+              deny: { type: 'array', title: 'Denied tools', items: { type: 'string', title: 'Tool name' } },
+            },
+            default: { allow: [], deny: [] },
+          },
+          mode: { type: 'string', title: 'Agent Mode', enum: ['interactive', 'plan', 'autopilot'], default: 'interactive', sessionMutable: true },
+          shellInitScripts: { type: 'array', title: 'Shell Init Script', readOnly: true, sessionMutable: true },
+          sensitiveEditLocations: {
+            type: 'array', title: 'Sensitive Edit Locations', readOnly: true, sessionMutable: true,
+            items: { type: 'object', title: 'Location', properties: { path: { type: 'string', title: 'Path' }, isDirectory: { type: 'boolean', title: 'Directory' } }, required: ['path', 'isDirectory'] },
+          },
+          availableApprovalModes: { type: 'array', title: 'Available Permissions', readOnly: true, items: { type: 'string', title: 'Permission Mode' } },
+          effectiveApprovalMode: { type: 'string', title: 'Effective Permissions', readOnly: true },
+          branch: { type: 'string', title: 'Branch', enum: ['main'], default: 'main', enumDynamic: true, readOnly: false, sessionMutable: false },
+          worktreeBranchPrefix: { type: 'string', title: 'Worktree Branch Prefix', readOnly: true, sessionMutable: false },
+          worktreeIncludeFiles: { type: 'array', title: 'Worktree Include Files', readOnly: true, sessionMutable: false, items: { type: 'string', title: 'Pattern' } },
+          worktreeSymlinkFolders: { type: 'array', title: 'Worktree Symlink Folders', readOnly: true, sessionMutable: false, items: { type: 'string', title: 'Pattern' } },
+          pullRequestUrl: { type: 'string', title: 'Pull Request', readOnly: true, sessionMutable: false },
+        },
+      },
+      values: {
+        mode: 'interactive',
+        availableApprovalModes: ['default', 'assisted', 'autoApprove'],
+        autoApprove: 'default',
+        effectiveApprovalMode: 'autoApprove',
+        isolation: 'worktree',
+        branch: 'feature/current-checkout',
+        sandboxEnabled: 'default',
+        permissions: { allow: [], deny: [] },
+        sensitiveEditLocations: [{ path: '.github/instructions', isDirectory: true }],
+      },
+    }, true)
+    await worker.begin()
+    const session = await ready(worker)
+    expect(worker.native.creations).toEqual([{
+      channel: session.sessionId,
+      provider: 'copilotcli',
+      workingDirectories: [pathToFileURL(await canonicalPolicyRoot(worker.workspace)).href],
+      config: {
+        mode: 'interactive',
+        autoApprove: 'default',
+        isolation: 'folder',
+        branch: 'feature/current-checkout',
+        sandboxEnabled: 'default',
+        permissions: { allow: [], deny: [] },
+      },
+    }])
+  })
+
+  it.each([
+    'writable-approval-metadata',
+    'assisted-approval',
+    'sandbox-off',
+    'tool-permission-allow',
+    'shell-init-script',
+    'pull-request-url',
+  ] as const)('rejects %s session configuration without dispatching createSession', async (scenario) => {
+    const worker = await fixture()
+    const properties: Record<string, Record<string, unknown>> = {
+      isolation: { type: 'string', title: 'Isolation', enum: ['folder', 'worktree'] },
+      autoApprove: { type: 'string', title: 'Approvals', enum: ['default', 'assisted', 'autoApprove'] },
+      mode: { type: 'string', title: 'Mode', enum: ['interactive', 'plan', 'autopilot'] },
+      sandboxEnabled: { type: 'string', title: 'Sandbox', enum: ['default', 'on', 'off'] },
+      permissions: { type: 'object', title: 'Permissions' },
+      availableApprovalModes: { type: 'array', title: 'Available Permissions', readOnly: scenario !== 'writable-approval-metadata', items: { type: 'string', title: 'Mode' } },
+      shellInitScripts: { type: 'array', title: 'Shell Init Script', readOnly: true },
+      pullRequestUrl: { type: 'string', title: 'Pull Request', readOnly: true },
+    }
+    const values: Record<string, unknown> = {
+      isolation: 'folder',
+      autoApprove: scenario === 'assisted-approval' ? 'assisted' : 'default',
+      mode: 'interactive',
+      availableApprovalModes: ['default', 'assisted', 'autoApprove'],
+      ...(scenario === 'sandbox-off' ? { sandboxEnabled: 'off' } : {}),
+      ...(scenario === 'tool-permission-allow' ? { permissions: { allow: ['powershell'], deny: [] } } : {}),
+      ...(scenario === 'shell-init-script' ? { shellInitScripts: [{ shell: 'powershell', script: 'echo unsafe' }] } : {}),
+      ...(scenario === 'pull-request-url' ? { pullRequestUrl: 'https://example.com/pr/1' } : {}),
+    }
+    worker.native.setConfig({ schema: { type: 'object', properties: properties as never }, values })
+    await worker.begin()
+    await expect.poll(async () => (await worker.status()).state).toBe('failed')
+    expect((await worker.status()).error).toMatch(/configuration|approval/)
+    expect(worker.native.creations).toEqual([])
+  })
+
   it.each(['required', 'worktree', 'workspace', 'approval', 'autopilot', 'unknown-default', 'unresolved-default'] as const)('surfaces unsupported %s configuration without permission overrides or a create request', async (mode) => {
     const worker = await fixture()
     const values: Record<string, unknown> = { isolation: 'folder', autoApprove: 'default', mode: 'interactive' }
