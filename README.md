@@ -215,7 +215,7 @@ Use `npm run check` for validation, `npm run test:e2e` for desktop tests, and
 ## Documentation
 
 - [Task documents and CLI](docs/task-documents.md)
-- [File transfer MCP](docs/file-transfer-mcp.md)
+- [Runtime MCP file delivery, receive permissions and agent configuration](docs/file-transfer-mcp.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 An independent project, not affiliated with VS Code or GitHub Copilot.

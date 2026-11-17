@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { DeliveryApi } from './fileDelivery'
 
 export const FILE_TRANSFER_LIMITS = {
   chunkBytes: 256 * 1024,
@@ -15,7 +16,7 @@ export const FILE_TRANSFER_LIMITS = {
 export const transferErrorCodeSchema = z.enum([
   'INVALID_REQUEST', 'ACCESS_DENIED', 'NOT_FOUND', 'UNSUPPORTED', 'BUSY', 'QUOTA_EXCEEDED',
   'SOURCE_CHANGED', 'LOGS_DISABLED', 'LOGS_MISSING', 'NO_RECORDS', 'EXPIRED', 'CANCELLED',
-  'INTEGRITY_FAILED', 'IO_ERROR', 'UNAVAILABLE', 'NOT_TEXT',
+  'INTEGRITY_FAILED', 'IO_ERROR', 'UNAVAILABLE', 'NOT_TEXT', 'ALREADY_EXISTS',
 ])
 export type TransferErrorCode = z.infer<typeof transferErrorCodeSchema>
 export class FileTransferError extends Error {
@@ -91,6 +92,7 @@ export interface FilePage {
   truncated: boolean
 }
 export interface FileTransferApi {
+  delivery?: DeliveryApi
   devices(): Promise<TransferDevice[]>
   fetch(request: FetchRequest): Promise<TransferStatus>
   status(transferId: string): Promise<TransferStatus>

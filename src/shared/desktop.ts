@@ -1,4 +1,5 @@
 import type { ChatLinkBridge } from './chatLinks'
+import type { FileDeliveryBridge } from './fileDelivery'
 
 export interface DesktopInfo {
   name: string
@@ -8,6 +9,7 @@ export interface DesktopInfo {
 }
 
 export interface DesktopBridge {
+  files?: FileDeliveryBridge
   links?: ChatLinkBridge
   getInfo(): Promise<DesktopInfo>
   minimize(): Promise<void>

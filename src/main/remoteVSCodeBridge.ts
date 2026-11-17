@@ -17,6 +17,8 @@ import { FileTransferSource } from './fileTransferSource'
 import { FileTransferService } from './fileTransferService'
 import { startFileTransferMcpBridge } from './fileTransferMcpBridge'
 import { FileTransferBudget } from './fileTransferBudget'
+import { FileDeliveryService } from './fileDeliveryService'
+import { registerFileDeliveryBridge } from './fileDeliveryBridge'
 import { ChatLinkService } from './chatLinkService'
 import { desktopOperations, handleDesktopOperation } from './desktopOperations'
 
@@ -39,8 +41,16 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
       if (JSON.stringify(invitation.participant) !== JSON.stringify(await clientIdentity()) || invitation.devTunnel.clientPublicKey !== (await keys.get('client')).publicKey) throw new Error('This invitation belongs to a different device identity.')
     },
     (root, owner, signal): Promise<void> => gitSync.whenOwnerConnected(root, owner, signal))
-  const files = new FileTransferService(app.getPath('userData'), fileSource, devices, fileBudget)
-  const filesReady = startFileTransferMcpBridge(app.getPath('userData'), (root) => files.forWorkspace(root), desktopOperations)
+  const files: FileTransferService = new FileTransferService(app.getPath('userData'), fileSource, devices, fileBudget,
+    (root, sender): Promise<void> => delivery.authorizeIncoming(root, sender))
+  const delivery: FileDeliveryService = new FileDeliveryService(app.getPath('userData'), files, fileSource, devices, {
+    identity: clientIdentity,
+    senders: (root) => host.fileSenders(root),
+    authorizeSender: (root, pairId, clientId) => host.authorizeFileSender(root, pairId, clientId),
+  }, fileBudget)
+  host.setFileDeliveryService(delivery)
+  const filesReady = startFileTransferMcpBridge(app.getPath('userData'), (root) => delivery.forWorkspace(root), desktopOperations)
+  registerFileDeliveryBridge(requireWindow, currentRoot, delivery, filesReady)
   void filesReady.catch(() => console.error('The local file transfer MCP bridge could not start.'))
   const discovery = !app.isPackaged && process.env.TASKCONTINUUM_AGENT_HOST_DISCOVERY ? [process.env.TASKCONTINUUM_AGENT_HOST_DISCOVERY]
     : ['Code', 'Code - Insiders'].map((name) => join(app.getPath('appData'), name, 'agent-host', 'local-endpoint', 'entries'))
@@ -130,9 +140,10 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
   })
   let closing: Promise<void> | undefined
   return { agentHosts, gitSync, filesReady, chatLinks,
-    hasActiveWork: () => agentHosts.hasActiveWork || host.hasActiveWork || files.hasActiveWork || fileSource.hasActiveWork,
+    hasActiveWork: () => agentHosts.hasActiveWork || host.hasActiveWork || files.hasActiveWork || fileSource.hasActiveWork || delivery.hasActiveWork,
     close: () => closing ??= (async () => {
     try { await (await filesReady).close() } catch { console.error('Closing after file transfer MCP bridge failure.') }
+    await delivery.close()
     await files.close()
     await fileSource.close()
     try { await recovery } catch (error) { console.error('Closing after workspace recovery failure:', error instanceof Error ? error.message : 'Invalid saved state') }
