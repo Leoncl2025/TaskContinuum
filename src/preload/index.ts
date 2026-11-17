@@ -6,6 +6,14 @@ import type { AgentHostBridge, AgentHostView } from '../shared/agentHost'
 import type { UpdateBridge, UpdateState } from '../shared/updates'
 
 const bridge: DesktopBridge = {
+  files: {
+    settings: () => ipcRenderer.invoke('file-delivery:settings'),
+    setSender: (id, allowed) => ipcRenderer.invoke('file-delivery:sender', id, allowed),
+    addDestination: () => ipcRenderer.invoke('file-delivery:add-destination'),
+    removeDestination: (id) => ipcRenderer.invoke('file-delivery:remove-destination', id),
+    resume: (id) => ipcRenderer.invoke('file-delivery:resume', id),
+    cancel: (id) => ipcRenderer.invoke('file-delivery:cancel', id),
+  },
   links: {
     contextMenu: (href) => ipcRenderer.invoke('desktop:chat-link-menu', href),
     open: (request) => ipcRenderer.invoke('desktop:chat-link-open', request),

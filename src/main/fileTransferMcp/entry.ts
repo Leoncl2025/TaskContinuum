@@ -5,7 +5,9 @@ import { createFileTransferMcpServer } from './server'
 
 async function main(): Promise<void> {
   if (!process.env.TASKCONTINUUM_WORKSPACE || process.argv.length !== 2) throw new Error('Invalid MCP configuration')
-  const api = createBridgeApi(defaultDataDirectory(), process.env.TASKCONTINUUM_WORKSPACE)
+  const features = process.env.TASKCONTINUUM_MCP_FEATURES
+  if (features !== undefined && features !== 'delivery') throw new Error('Unsupported MCP feature configuration')
+  const api = createBridgeApi(defaultDataDirectory(), process.env.TASKCONTINUUM_WORKSPACE, features === 'delivery')
   const server = createFileTransferMcpServer(api)
   const transport = new StdioServerTransport(process.stdin, process.stdout, { maxBufferSize: 128 * 1024 })
   server.onerror = () => {}

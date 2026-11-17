@@ -1,7 +1,8 @@
 # File transfer MCP
 
 Task Continuum provides an **MCP stdio server** for explicitly requesting files and
-Agent Host diagnostic logs from the local device or an already paired device. It
+Agent Host diagnostic logs, and delivering local files to an authorized paired TC
+client. It
 uses the running desktop's file-transfer service, not a separate SSH account,
 public file URL, or model/chat send command. Nothing is transferred on MCP
 startup, initialization, or tool discovery.
@@ -91,6 +92,83 @@ arguments. Stdout is reserved for MCP protocol messages; startup failures emit
 only a fixed configuration hint to stderr.
 
 ## Tools and workflow
+
+### Runtime delivery (opt-in)
+
+Open **Preferences > MCP file delivery** in the running desktop. The section
+reports bridge availability and the Node executable on PATH, generates VS Code
+and `mcpServers` configurations for the actual workspace/profile, manages receive
+and local-save permissions, and shows incoming/outgoing progress, failures,
+explicit resume and cancellation. The external stdio adapter requires **Node 24**;
+replace the generated `node` command with an absolute Node 24 executable if
+necessary. This does not start another desktop or change an agent Host's
+configuration automatically.
+
+The generated configuration includes `TASKCONTINUUM_MCP_FEATURES=delivery`.
+Existing configurations without this environment variable retain exactly the
+original seven tools and bridge response shapes. Delivery adds four tools via
+the separately versioned local bridge route `/mcp/files/v2`:
+
+| Tool | Arguments and result |
+| --- | --- |
+| `tc_files_destinations` | `deviceId` from `tc_devices_list`. Returns authorized `inboxId`, display label and authenticated receiving `clientId`. An empty list means no receiving workspace has granted this sender access. |
+| `tc_files_send` | Stable UUID `requestId`, `targetDeviceId`, `targetInboxId`, and 1-10 explicitly selected local `paths`. Returns the same transfer-status envelope used by `tc_files_status`, `tc_files_resume` and `tc_files_cancel`. |
+| `tc_files_inbox_list` | Optional UUID `cursor` and `limit` (1-20, default 20). Returns `transfers`, optional `nextCursor`, and locally authorized save-directory IDs and labels in `destinations`. Restart listing without a cursor if that cursor has expired. |
+| `tc_files_save` | `transferId`, `fileId`, local `destinationRootId` from inbox listing, and `relativePath`. Returns the verified saved `path`, byte length and SHA-256. Parent directories must already exist. Existing files are never overwritten. |
+
+Typical A-to-B workflow:
+
+1. Pair A with B using existing TC pairing. On **B**, authorize A under
+   **Allow incoming files** for B's chosen workspace; this requires explicit
+   native confirmation and is off by default. Configure a local save directory
+   on B if its agent needs an ordinary filesystem file.
+2. The agent on A lists devices and then `tc_files_destinations` for the exact B
+   device ID. Machine names are labels: multiple profiles on one machine have
+   different client identities and must not be substituted for one another.
+3. Call `tc_files_send` on A with that inbox ID and the selected local paths.
+   An accepted request is not a completed delivery. Inspect its status until
+   `state: delivered`; reuse its request ID only for the identical selection and
+   target.
+4. The agent on B calls `tc_files_inbox_list`, then `tc_files_read` for small text
+   pages or `tc_files_save` for a byte-for-byte ordinary file. Only explicit text
+   reads place contents into MCP responses. File bytes, including binary files,
+   otherwise travel over the TC data channel, not through model context.
+
+The source captures an immutable snapshot, uploads bounded binary chunks over
+the existing **A-to-B** authenticated SSH/Dev Tunnel connection, and waits for B's
+verified persistent commit. B never needs a reverse pairing. File names, inbox
+labels and contents are untrusted data; receipt never executes a file, opens its
+viewer, starts a turn, or sends a message to another agent.
+
+Upload chunks start at 64 KiB. After a connection failure, their retained size
+halves down to 4 KiB for the next explicit resume. The per-request upload/commit
+deadline and device HTTP body deadline are 60 seconds; header deadlines remain
+unchanged. Confirmed chunks are flushed before acknowledgement. Duplicate chunks
+must match existing bytes, and completion requires every file's full SHA-256.
+After a disconnect, restart, or lost final acknowledgement, resume from A using
+the same transfer ID. Both sides retain interrupted state; neither startup nor
+listing automatically resumes transfers. A lost final acknowledgement is
+resolved against the same receiver record, not another delivered copy.
+
+Receiving authorization is local to B's workspace and the paired client identity,
+separate from native-chat `canSend`. It grants only private-inbox writes.
+Working-directory writes require a separate local directory grant and relative
+path; protected application storage, credentials, repository-control/policy paths
+such as `.git`, traversal and linked-directory
+escapes remain denied. Revocation is rechecked while transferring and saving.
+`ALREADY_EXISTS` explicitly reports a refused overwrite. Existing source/receiver
+storage quotas and global/per-peer data-operation budgets are shared with legacy
+fetches, not multiplied by agent or MCP-client count.
+Incoming delivery metadata uses a separate directory namespace so older desktop
+builds do not parse it as legacy fetch metadata; existing fetch records are not
+rewritten.
+
+An older receiving desktop reports `UNSUPPORTED` rather than silently dropping a
+send or downgrading it to a read operation. Runtime delivery does not add recursive
+directory sync, third-party remote-to-remote copying, arbitrary remote paths,
+automatic execution, or an unauthenticated/public MCP listener.
+
+### Original tools
 
 Every call uses the shared `FileTransferApi`. Successful tool results contain
 `structuredContent.result` and `isError: false`; failures contain
@@ -191,7 +269,8 @@ profile ownership/write permissions. A malformed descriptor cannot configure
 a remote hostname, URL, redirect or proxy. The MCP adapter uses only a literal
 loopback address and does not honor network proxy variables or HTTP redirects.
 
-The sole bridge route is authenticated `POST /mcp/files`. It rejects every
+The bridge routes are authenticated `POST /mcp/files` (legacy) and
+`POST /mcp/files/v2` (opt-in delivery). Both reject every
 `Origin`, any Host other than the exact bound `127.0.0.1:port`, missing/incorrect
 bearer authentication, and unrecognized fields/methods. JSON requests use strict
 shared schemas and are limited to 64 KiB, including chunked HTTP bodies.

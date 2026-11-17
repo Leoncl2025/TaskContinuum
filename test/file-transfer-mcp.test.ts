@@ -307,6 +307,16 @@ $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($ev
 })
 
 describe('file transfer MCP tools', () => {
+  it('exposes delivery tools only when explicitly enabled and reports unsupported desktops without changing legacy tools', async () => {
+    const setup = await fixture()
+    const client = await connectMemory(createBridgeApi(setup.data, setup.workspace, true))
+    expect((await client.listTools()).tools.map((tool) => tool.name)).toContain('tc_files_send')
+    expect(await client.callTool({ name: 'tc_files_destinations', arguments: { deviceId: randomUUID() } })).toMatchObject({
+      isError: true, structuredContent: { error: { code: 'UNSUPPORTED' } },
+    })
+    expect(await client.callTool({ name: 'tc_devices_list' })).toMatchObject({ isError: false })
+    expect(setup.api.fetch).not.toHaveBeenCalled()
+  })
   it('uses strict shared schemas, fixes the workspace outside tool inputs and marks paginated text untrusted', async () => {
     const { data, workspace, api, status, endpoint } = await fixture()
     const client = await connectMemory(createBridgeApi(data, workspace))

@@ -8,7 +8,7 @@ import { DesktopOperationUnavailableError } from './desktopOperations'
 import { removeEndpoint, writeEndpoint } from './fileTransferMcp/descriptor'
 import {
   MAX_BRIDGE_REQUEST_BYTES, MAX_BRIDGE_REQUESTS, MAX_BRIDGE_RESPONSE_BYTES,
-  bridgeRequestSchema, invokeApi, safeFailure, validateResult,
+  bridgeRequestSchema, deliveryBridgeRequestSchema, invokeApi, invokeDeliveryApi, safeFailure, validateResult,
 } from './fileTransferMcp/protocol'
 
 function respond(response: ServerResponse, status: number, body: unknown): void {
@@ -67,7 +67,7 @@ export async function startFileTransferMcpBridge(
       rejected(response, 403, 'ACCESS_DENIED')
       return
     }
-    if (request.method !== 'POST' || request.url !== '/mcp/files'
+    if (request.method !== 'POST' || !['/mcp/files', '/mcp/files/v2'].includes(request.url ?? '')
       || !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(request.headers['content-type'] ?? '')
       || request.headers['content-encoding'] !== undefined
       || Number(request.headers['content-length'] ?? 0) > MAX_BRIDGE_REQUEST_BYTES) {
@@ -79,8 +79,15 @@ export async function startFileTransferMcpBridge(
     void (async () => {
       try {
         const operation = async () => {
-          const requestBody = bridgeRequestSchema.parse(await body(request))
-          const result = validateResult(requestBody, await invokeApi(apiForWorkspace(requestBody.workspace), requestBody))
+          const raw = await body(request)
+          let result: unknown
+          if (request.url === '/mcp/files/v2') {
+            const parsed = deliveryBridgeRequestSchema.parse(raw)
+            result = await invokeDeliveryApi(apiForWorkspace(parsed.workspace), parsed)
+          } else {
+            const parsed = bridgeRequestSchema.parse(raw)
+            result = validateResult(parsed, await invokeApi(apiForWorkspace(parsed.workspace), parsed))
+          }
           const payload = { result }
           if (Buffer.byteLength(JSON.stringify(payload)) > MAX_BRIDGE_RESPONSE_BYTES) throw new FileTransferError('UNAVAILABLE', '')
           respond(response, 200, payload)

@@ -19,6 +19,10 @@ import type { AgentHostCreationWorkspace } from '../shared/agentHostCreation'
 import type { FileTransferSource } from './fileTransferSource'
 import { chunkRequestSchema, exportRequestSchema, FileTransferError, transferFailure, transferLookupSchema } from '../shared/fileTransfer'
 import { FileTransferBudget } from './fileTransferBudget'
+import { deliveryChunkSchema } from '../shared/fileDelivery'
+import { FILE_TRANSFER_LIMITS } from '../shared/fileTransfer'
+import type { FileDeliveryService } from './fileDeliveryService'
+import { readClientIdentity } from './clientIdentity'
 import { DEVICE_TRUST_LIMITS, PRIVATE_DEVICE_LIFETIME_MS, PRIVATE_DEVICE_RENEWAL_MS } from '../shared/deviceTrust'
 import type { AgentHostAuthorizationLease } from './agentHostAuthorization'
 import type { DesktopOperations } from './desktopOperations'
@@ -53,6 +57,7 @@ export class VSCodeDeviceHost {
   private agentHostCreations?: AgentHostCreationService
   private fileSource?: FileTransferSource
   private fileBudget = new FileTransferBudget()
+  private fileDelivery?: Pick<FileDeliveryService, 'targets' | 'receive'>
 
   constructor(private readonly directory: string, private readonly protector: DeviceProtector, private readonly operations?: DesktopOperations) {}
 
@@ -62,6 +67,29 @@ export class VSCodeDeviceHost {
     if (this.server) throw new Error('File transfers must be configured before device publication.')
     this.fileSource = source
     this.fileBudget = budget
+  }
+
+  setFileDeliveryService(service: Pick<FileDeliveryService, 'targets' | 'receive'>): void {
+    if (this.server) throw new Error('File delivery must be configured before publication.')
+    this.fileDelivery = service
+  }
+
+  async fileSenders(root: string): Promise<{ clientId: string; machineName: string }[]> {
+    const canonical = await canonicalPolicyRoot(root)
+    const peers = (await this.list()).filter((pair) => this.permitted(pair.id) && pair.workspaces.some((item) => item.root === canonical))
+    return [...new Map(peers.map((pair) => [pair.participant.clientId, {
+      clientId: pair.participant.clientId, machineName: pair.participant.machineName,
+    }])).values()]
+  }
+
+  async authorizeFileSender(root: string, pairId: string, clientId: string): Promise<void> {
+    await this.load()
+    await this.writing
+    const pair = this.state!.pairs.find((item) => item.id === pairId)
+    if (!pair || !this.permitted(pairId) || pair.participant.clientId !== clientId
+      || !pair.workspaces.some((item) => item.root === root)) {
+      throw new FileTransferError('ACCESS_DENIED', 'The sender is not paired for this inbox workspace.')
+    }
   }
 
   setAgentHostAccess(registry: AgentHostRegistry, linked: (root: string) => Promise<AgentHostTarget[]>,
@@ -256,11 +284,28 @@ export class VSCodeDeviceHost {
     }
     try {
       await authorize()
-      const body = await this.body(request, 64 * 1024)
+      const deliveryMethod = request.url?.startsWith('/device/files/delivery/') ? request.url.slice('/device/files/delivery/'.length) : undefined
+      let body: unknown
+      let upload: Buffer | undefined
+      if (deliveryMethod === 'chunk') {
+        const header = request.headers['x-taskcontinuum-chunk']
+        if (typeof header !== 'string' || header.length > 2048 || request.headers['content-type'] !== 'application/octet-stream') throw new FileTransferError('INVALID_REQUEST', 'Invalid upload headers.')
+        body = deliveryChunkSchema.parse(JSON.parse(Buffer.from(header, 'base64url').toString('utf8')))
+        upload = await this.bodyBytes(request, FILE_TRANSFER_LIMITS.chunkBytes)
+      } else body = await this.body(request, 64 * 1024)
       await authorize()
-      if (request.url === '/device/files/prepare' || request.url === '/device/files/chunk') release = this.fileBudget.acquire(pair.participant.clientId)
+      if (request.url === '/device/files/prepare' || request.url === '/device/files/chunk'
+        || deliveryMethod && ['prepare', 'chunk', 'commit'].includes(deliveryMethod)) release = this.fileBudget.acquire(pair.participant.clientId)
       let result: unknown
-      if (request.url === '/device/files/capabilities') {
+      if (deliveryMethod) {
+        if (!this.fileDelivery) throw new FileTransferError('UNSUPPORTED', 'Update the target desktop to support file delivery.')
+        if (deliveryMethod === 'targets') {
+          z.object({}).strict().parse(body)
+          result = { protocolVersion: 2, ownerId: this.state!.ownerId, pairId: pair.id,
+            clientId: (await readClientIdentity(this.directory)).clientId,
+            inboxes: await this.fileDelivery.targets(pair.id, pair.participant.clientId) }
+        } else result = await this.fileDelivery.receive(pair.id, pair.participant.clientId, deliveryMethod, body, upload)
+      } else if (request.url === '/device/files/capabilities') {
         z.object({}).strict().parse(body)
         result = { protocolVersion: 1, ownerId: this.state!.ownerId, pairId: pair.id }
       } else if (request.url === '/device/files/prepare') result = await source.prepare(pair.id, exportRequestSchema.parse(body), authorize, signal)
@@ -352,7 +397,7 @@ export class VSCodeDeviceHost {
           response.end()
         })
       })
-      server.requestTimeout = 15000
+      server.requestTimeout = 60000
       server.headersTimeout = 10000
       server.maxConnections = 256
       this.server = server
@@ -367,10 +412,14 @@ export class VSCodeDeviceHost {
     return this.starting
   }
   private async body(request: IncomingMessage, maximum = 32768): Promise<unknown> {
+    return JSON.parse((await this.bodyBytes(request, maximum)).toString('utf8'))
+  }
+
+  private async bodyBytes(request: IncomingMessage, maximum: number): Promise<Buffer> {
     const chunks: Buffer[] = []
     let size = 0
-    for await (const chunk of request) { size += chunk.length; if (size > maximum) throw new Error('Request too large.'); chunks.push(chunk) }
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    for await (const chunk of request) { size += chunk.length; if (size > maximum) throw new FileTransferError('INVALID_REQUEST', 'Request too large.'); chunks.push(chunk) }
+    return Buffer.concat(chunks)
   }
   async close(): Promise<void> {
     this.closed = true

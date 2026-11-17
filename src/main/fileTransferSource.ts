@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import type { BigIntStats } from 'node:fs'
-import { lstat, mkdir, open, readdir, realpath, rename, rmdir, unlink } from 'node:fs/promises'
+import { lstat, mkdir, open, readdir, rename, rmdir, unlink } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
-import { basename, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { z } from 'zod'
 import {
   chunkRequestSchema, exportManifestSchema, exportRequestSchema, FILE_TRANSFER_LIMITS as LIMITS,
@@ -11,6 +11,7 @@ import {
 } from '../shared/fileTransfer'
 import type { ExportManifest, ExportRequest, TransferErrorCode, TransferFile } from '../shared/fileTransfer'
 import { captureAgentHostDiagnostics } from './agentHostDiagnostics'
+import { assertPublicTransferPath, assertTransferAncestors as safeAncestors, localTransferPath as localPath } from './fileTransferPaths'
 
 const STORAGE = 'file-transfer-exports'
 const METADATA = 'manifest.json'
@@ -49,17 +50,10 @@ const messages: Record<TransferErrorCode, string> = {
   IO_ERROR: 'File transfer could not access its data.',
   UNAVAILABLE: 'File transfer is unavailable.',
   NOT_TEXT: 'The requested file is not text.',
+  ALREADY_EXISTS: 'The destination file already exists.',
 }
 function failure(code: TransferErrorCode): FileTransferError { return new FileTransferError(code, messages[code]) }
 function hash(value: string): string { return createHash('sha256').update(value).digest('hex') }
-function samePath(left: string, right: string): boolean {
-  return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
-}
-function within(parent: string, child: string): boolean {
-  const path = relative(process.platform === 'win32' ? parent.toLowerCase() : parent,
-    process.platform === 'win32' ? child.toLowerCase() : child)
-  return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path))
-}
 function regular(info: BigIntStats): void {
   if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1n) throw failure('ACCESS_DENIED')
 }
@@ -83,29 +77,6 @@ function sanitize(error: unknown): FileTransferError {
   if ((error as Error | undefined)?.name === 'AbortError') return failure('CANCELLED')
   return failure('IO_ERROR')
 }
-function localPath(path: string): string {
-  if (typeof path !== 'string' || !isAbsolute(path) || [...path].some((char) => char.charCodeAt(0) < 32)
-    || /^[\\/]{2}/.test(path)) throw failure('ACCESS_DENIED')
-  if (process.platform === 'win32') {
-    if (!/^[a-z]:[\\/]/i.test(path) || path.slice(2).includes(':')
-      || path.slice(3).split(/[\\/]/).some((part) => /[. ]$/.test(part) || /[<>"|?*]/.test(part)
-        || /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(?:\.|$)/i.test(part))) throw failure('ACCESS_DENIED')
-  } else if (path.includes('\\') || path.includes(':')) throw failure('ACCESS_DENIED')
-  return resolve(path)
-}
-
-async function safeAncestors(path: string): Promise<void> {
-  const root = parse(path).root
-  const parts = relative(root, path).split(sep).filter(Boolean)
-  let current = root
-  for (const part of parts) {
-    current = join(current, part)
-    const info = await lstat(current)
-    if (info.isSymbolicLink()) throw failure('ACCESS_DENIED')
-  }
-  if (!samePath(await realpath(path), path)) throw failure('ACCESS_DENIED')
-}
-
 async function readHandle(path: string, expected?: BigIntStats, privateFile = false): Promise<{ handle: FileHandle; info: BigIntStats }> {
   await safeAncestors(path)
   const before = await lstat(path, { bigint: true })
@@ -339,13 +310,7 @@ export class FileTransferSource {
 
   private async source(path: string): Promise<{ path: string; info: BigIntStats }> {
     const absolute = localPath(path)
-    const components = absolute.toLowerCase().split(/[\\/]/)
-    const discovery = process.env.TASKCONTINUUM_AGENT_HOST_DISCOVERY
-    if (within(this.directory, absolute) || components.includes('.ssh')
-      || (discovery && within(resolve(discovery), absolute))
-      || components.some((part, index) => part === 'local-endpoint' && components[index + 1] === 'entries')) {
-      throw failure('ACCESS_DENIED')
-    }
+    assertPublicTransferPath(this.directory, absolute)
     await safeAncestors(absolute)
     const info = await lstat(absolute, { bigint: true })
     regular(info)
@@ -488,7 +453,7 @@ export class FileTransferSource {
   }
 
   async chunk(
-    principal: string, transferId: string, fileId: string, offset: number, authorize: () => Promise<void>, signal: AbortSignal,
+    principal: string, transferId: string, fileId: string, offset: number, authorize: () => Promise<void>, signal: AbortSignal, maxBytes: number = LIMITS.chunkBytes,
   ): Promise<Buffer> {
     return this.operation(principal, transferId, authorize, signal, async (principalHash, check) => {
       chunkRequestSchema.parse({ transferId, fileId, offset })
@@ -505,7 +470,8 @@ export class FileTransferSource {
       if (offset > file.sizeBytes) throw failure('INVALID_REQUEST')
       const path = join(this.root, transferId, `${fileId}.blob`)
       const { handle, info } = await readHandle(path, stored.identities.get(fileId), true)
-      const buffer = Buffer.alloc(Math.min(LIMITS.chunkBytes, file.sizeBytes - offset))
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > LIMITS.chunkBytes) throw failure('INVALID_REQUEST')
+      const buffer = Buffer.alloc(Math.min(maxBytes, file.sizeBytes - offset))
       try {
         let read = 0
         while (read < buffer.length) {

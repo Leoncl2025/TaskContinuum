@@ -1,5 +1,6 @@
 import type { AgentHostTarget } from './agentHost'
 import type { ChatLinkBridge } from './chatLinks'
+import type { FileDeliveryBridge } from './fileDelivery'
 import type { PersistedPaneTreeState } from './paneTreeSchema'
 import type { TaskRecord } from './tasks'
 
@@ -121,6 +122,7 @@ export interface DesktopSessionWindowsBridge {
 }
 
 export interface DesktopBridge {
+  files?: FileDeliveryBridge
   links?: ChatLinkBridge
   windows?: DesktopSessionWindowsBridge
   getInfo(): Promise<DesktopInfo>

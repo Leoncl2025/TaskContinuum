@@ -5,6 +5,7 @@ import {
   transferDeviceSchema, transferErrorCodeSchema, transferFailure, transferLookupSchema, transferStatusSchema,
 } from '../../shared/fileTransfer'
 import type { FileTransferApi, TransferErrorCode } from '../../shared/fileTransfer'
+import { deliveryDestinationSchema, deliveryInboxRequestSchema, deliveryInboxSchema, savedReceivedFileSchema, saveReceivedFileSchema, sendFilesSchema } from '../../shared/fileDelivery'
 
 export const MAX_BRIDGE_REQUEST_BYTES = 64 * 1024
 export const MAX_BRIDGE_RESPONSE_BYTES = 256 * 1024
@@ -20,6 +21,13 @@ export const bridgeRequestSchema = z.discriminatedUnion('method', [
   z.object({ workspace, method: z.literal('read'), arguments: readFileRequestSchema }).strict(),
 ])
 export type BridgeRequest = z.infer<typeof bridgeRequestSchema>
+export const deliveryBridgeRequestSchema = z.discriminatedUnion('method', [
+  z.object({ workspace, method: z.literal('destinations'), arguments: z.object({ deviceId: z.uuid() }).strict() }).strict(),
+  z.object({ workspace, method: z.literal('send'), arguments: sendFilesSchema }).strict(),
+  z.object({ workspace, method: z.literal('inbox'), arguments: deliveryInboxRequestSchema }).strict(),
+  z.object({ workspace, method: z.literal('save'), arguments: saveReceivedFileSchema }).strict(),
+])
+export type DeliveryBridgeRequest = z.infer<typeof deliveryBridgeRequestSchema>
 export const bridgeErrorSchema = z.object({
   error: z.object({ code: transferErrorCodeSchema, message: z.string().max(512) }).strict(),
 }).strict()
@@ -41,6 +49,7 @@ const messages: Record<TransferErrorCode, string> = {
   IO_ERROR: 'File transfer could not access its data. Check permissions and available disk space.',
   UNAVAILABLE: 'Task Continuum or the source device is unavailable. Reconnect and explicitly resume the transfer.',
   NOT_TEXT: 'This file cannot be read as text.',
+  ALREADY_EXISTS: 'The destination file already exists. No file was overwritten; choose another name.',
 }
 
 export function safeFailure(error: unknown): { code: TransferErrorCode; message: string } {
@@ -85,5 +94,25 @@ export async function invokeApi(api: FileTransferApi, request: BridgeRequest) {
     case 'resume': return api.resume(request.arguments.transferId)
     case 'cancel': return api.cancel(request.arguments.transferId)
     case 'read': return api.read(request.arguments)
+  }
+
+}
+
+export async function invokeDeliveryApi(api: FileTransferApi, request: DeliveryBridgeRequest) {
+  if (!api.delivery) throw new FileTransferError('UNSUPPORTED', 'Update the running desktop to support file delivery.')
+  switch (request.method) {
+    case 'destinations': return z.array(deliveryDestinationSchema).max(100).parse(await api.delivery.destinations(request.arguments.deviceId))
+    case 'send': {
+      const status = transferStatusSchema.parse(await api.delivery.send(request.arguments))
+      if (status.transferId !== request.arguments.requestId || status.deviceId !== request.arguments.targetDeviceId) throw new FileTransferError('INTEGRITY_FAILED', 'Delivery identity changed.')
+      return { ...status, ...(status.error ? { error: safeFailure(new FileTransferError(status.error.code, '')) } : {}) }
+    }
+    case 'inbox': {
+      const inbox = deliveryInboxSchema.parse(await api.delivery.inbox(request.arguments))
+      return { ...inbox, transfers: inbox.transfers.map((status) => ({
+        ...status, ...(status.error ? { error: safeFailure(new FileTransferError(status.error.code, '')) } : {}),
+      })) }
+    }
+    case 'save': return savedReceivedFileSchema.parse(await api.delivery.save(request.arguments))
   }
 }

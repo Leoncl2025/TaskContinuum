@@ -1,18 +1,32 @@
 import { request } from 'node:http'
 import { z } from 'zod'
 import { FILE_TRANSFER_LIMITS, FileTransferError, transferErrorCodeSchema } from '../shared/fileTransfer'
+import { deliveryChunkSchema } from '../shared/fileDelivery'
 
 export type FileRoute = 'capabilities' | 'prepare' | 'chunk' | 'release'
+  | 'delivery/targets' | 'delivery/prepare' | 'delivery/chunk' | 'delivery/status' | 'delivery/commit' | 'delivery/cancel'
 const errorSchema = z.object({ error: z.object({ code: transferErrorCodeSchema, message: z.string().max(2000) }).strict() }).strict()
 
 export async function fileDeviceRequest(port: number, remotePort: number, token: string, route: FileRoute, value: unknown, signal: AbortSignal): Promise<unknown | Buffer> {
-  const body = JSON.stringify(value)
-  if (Buffer.byteLength(body) > 64 * 1024) throw new FileTransferError('INVALID_REQUEST', 'The file request is too large.')
-  const cancellation = AbortSignal.any([signal, AbortSignal.timeout(route === 'prepare' ? 60_000 : 15_000)])
+  let body: string | Buffer
+  let chunkHeader: string | undefined
+  if (route === 'delivery/chunk') {
+    const chunk = deliveryChunkSchema.extend({ data: z.instanceof(Buffer) }).strict().parse(value)
+    if (!chunk.data.length || chunk.data.length > FILE_TRANSFER_LIMITS.chunkBytes) throw new FileTransferError('INVALID_REQUEST', 'The upload chunk is too large.')
+    const { data, ...metadata } = chunk
+    body = data
+    chunkHeader = Buffer.from(JSON.stringify(metadata)).toString('base64url')
+  } else {
+    body = JSON.stringify(value)
+    if (Buffer.byteLength(body) > 64 * 1024) throw new FileTransferError('INVALID_REQUEST', 'The file request is too large.')
+  }
+  const cancellation = AbortSignal.any([signal, AbortSignal.timeout(route === 'prepare' || route.startsWith('delivery/') ? 60_000 : 15_000)])
   return new Promise((resolve, reject) => {
     const operation = request({
       hostname: '127.0.0.1', port, path: `/device/files/${route}`, method: 'POST', signal: cancellation,
-      headers: { Host: `127.0.0.1:${remotePort}`, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      headers: { Host: `127.0.0.1:${remotePort}`, Authorization: `Bearer ${token}`,
+        'Content-Type': chunkHeader ? 'application/octet-stream' : 'application/json', 'Content-Length': Buffer.byteLength(body),
+        ...(chunkHeader ? { 'X-TaskContinuum-Chunk': chunkHeader } : {}) },
     }, (response) => {
       const status = response.statusCode ?? 500
       const binary = route === 'chunk' && status === 200
@@ -42,7 +56,9 @@ export async function fileDeviceRequest(port: number, remotePort: number, token:
         }
         if (status !== 200) {
           const failure = errorSchema.safeParse(result)
-          reject(failure.success ? new FileTransferError(failure.data.error.code, failure.data.error.message)
+          reject(route === 'delivery/targets' && failure.success && failure.data.error.code === 'NOT_FOUND'
+            ? new FileTransferError('UNSUPPORTED', 'Update the receiving TC desktop to support file delivery.')
+            : failure.success ? new FileTransferError(failure.data.error.code, failure.data.error.message)
             : new FileTransferError('UNAVAILABLE', 'The source device could not complete the file request.'))
         } else resolve(result)
       })

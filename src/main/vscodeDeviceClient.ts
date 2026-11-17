@@ -10,6 +10,7 @@ import type { DeviceProtector } from './vscodeDeviceHost'
 import type { AgentHostSession, AgentHostTarget } from '../shared/agentHost'
 import { agentHostCatalogSchema, agentHostTargetSchema } from './agentHostProtocol'
 import { connectAgentHostWebSocket } from './agentHostTransport'
+import { deliveryCapabilitiesSchema } from '../shared/fileDelivery'
 import { AGENT_HOST_TRACE_HEADER, logAgentHostDiagnostic } from './agentHostDiagnostics'
 import type { AgentHostDiagnosticDetails } from './agentHostDiagnostics'
 import type { AgentHostCreateRequest, AgentHostCreation, AgentHostWorker } from '../shared/agentHostCreation'
@@ -320,6 +321,14 @@ export class VSCodeDeviceClient {
     if (route === 'capabilities') {
       const identity = z.object({ protocolVersion: z.literal(1), ownerId: z.uuid(), pairId: z.uuid() }).strict().parse(result)
       if (identity.ownerId !== peer.invitation.ownerId || identity.pairId !== peer.invitation.id) throw new FileTransferError('ACCESS_DENIED', 'The file source returned a different authenticated device identity.')
+    }
+    if (route === 'delivery/targets') {
+      const identity = deliveryCapabilitiesSchema.parse(result)
+      if (identity.ownerId !== peer.invitation.ownerId || identity.pairId !== peer.invitation.id
+        || identity.clientId !== peer.invitation.ownerClientId
+        || identity.inboxes.some((inbox) => inbox.clientId !== identity.clientId)) {
+        throw new FileTransferError('ACCESS_DENIED', 'The receiving TC client identity changed.')
+      }
     }
     return result
   }
