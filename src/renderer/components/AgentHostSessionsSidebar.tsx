@@ -21,6 +21,10 @@ const SORT_LABELS: Readonly<Record<SessionSortMode, string>> = {
 }
 
 type SessionView = 'current' | 'link' | 'create'
+export interface SessionExpandRequest {
+  readonly key: string
+  readonly id: number
+}
 interface Props {
   taskId?: string
   taskTitle?: string
@@ -29,6 +33,7 @@ interface Props {
   orderedKeys?: readonly string[]
   sortMode?: SessionSortMode
   activeKey?: string
+  expandSession?: SessionExpandRequest
   localOwnerId?: string
   busy?: boolean
   initialView?: SessionView
@@ -57,11 +62,16 @@ function transferProgress(progress: AgentHostHistoryTransfer) {
   return { value, percent, label, description }
 }
 
-function SessionTree({ taskId, bindings, activeKey, sessions, cachedTitles, historyTransfers, disabled, onSelect, onReorder, onUnlink }: {
-  taskId: string; bindings: SessionBinding[]; activeKey?: string; sessions: AgentHostSession[]; cachedTitles?: Readonly<Record<string, string>>; historyTransfers?: Readonly<Record<string, AgentHostHistoryTransfer>>; disabled: boolean; onSelect?(binding: SessionBinding): void; onReorder?(orderedKeys: string[]): void; onUnlink?(binding: SessionBinding): void
+function SessionTree({ taskId, bindings, activeKey, expandSession, sessions, cachedTitles, historyTransfers, disabled, onSelect, onReorder, onUnlink }: {
+  taskId: string; bindings: SessionBinding[]; activeKey?: string; expandSession?: SessionExpandRequest; sessions: AgentHostSession[]; cachedTitles?: Readonly<Record<string, string>>; historyTransfers?: Readonly<Record<string, AgentHostHistoryTransfer>>; disabled: boolean; onSelect?(binding: SessionBinding): void; onReorder?(orderedKeys: string[]): void; onUnlink?(binding: SessionBinding): void
 }) {
   const aliases = useMachineAliases()
-  const [expanded, setExpanded] = useState<string[]>([])
+  const [expanded, setExpanded] = useState<string[]>(() => expandSession ? [expandSession.key] : [])
+  const [seenExpandId, setSeenExpandId] = useState(expandSession?.id)
+  if (expandSession && expandSession.id !== seenExpandId) {
+    setSeenExpandId(expandSession.id)
+    if (!expanded.includes(expandSession.key)) setExpanded([...expanded, expandSession.key])
+  }
   const [focused, setFocused] = useState<string>()
   const [draggedKey, setDraggedKey] = useState<string>()
   const [dropIndicator, setDropIndicator] = useState<{ key: string; position: 'before' | 'after' }>()
@@ -214,26 +224,37 @@ function SessionTree({ taskId, bindings, activeKey, sessions, cachedTitles, hist
           </button>
           <IconButton icon={open ? 'chevron-up' : 'chevron-down'} label={`${open ? 'Hide' : 'Show'} details for ${label}`} tabIndex={-1} aria-expanded={open} aria-controls={detailsId}
             onClick={() => { focus(key); showDetails(key, !open) }} />
-          {onUnlink && <IconButton icon="debug-disconnect" label={`Unlink ${label}`} disabled={disabled} onClick={() => onUnlink(binding)} />}
         </div>
-        {open && <div id={detailsId} className="session-details" role="group" aria-label={`Details for ${label}`}><dl>
-          <dt>Title</dt><dd>{label}</dd>
-          <dt>Session</dt><dd>{binding.id}</dd>
-          <dt>Chat</dt><dd>{binding.agentHost.chatId}</dd>
-          <dt>Machine</dt><dd>{binding.owner.machineName}</dd>
-          <dt>Location</dt><dd>{binding.ownerIsRemote ? 'Remote' : 'Local'}</dd>
-          <dt>Access</dt><dd>{discovered ? discovered.canSend ? 'Read and send' : 'Read only' : 'Not in discovery list'}</dd>
-          {key === activeKey && <><dt>Selection</dt><dd>Current session</dd></>}
-        </dl></div>}
+        {open && <div id={detailsId} className="session-details" role="group" aria-label={`Details for ${label}`}>
+          <dl>
+            <dt>Title</dt><dd>{label}</dd>
+            <dt>Session</dt><dd>{binding.id}</dd>
+            <dt>Chat</dt><dd>{binding.agentHost.chatId}</dd>
+            <dt>Machine</dt><dd>{binding.owner.machineName}</dd>
+            <dt>Location</dt><dd>{binding.ownerIsRemote ? 'Remote' : 'Local'}</dd>
+            <dt>Access</dt><dd>{discovered ? discovered.canSend ? 'Read and send' : 'Read only' : 'Not in discovery list'}</dd>
+            {key === activeKey && <><dt>Selection</dt><dd>Current session</dd></>}
+          </dl>
+          {onUnlink && <div className="session-details-actions">
+            <button type="button" className="secondary-button session-unlink-button" aria-label={`Unlink ${label}`} disabled={disabled} onClick={() => onUnlink(binding)}>
+              <Icon name="debug-disconnect" /><span>Unlink</span>
+            </button>
+          </div>}
+        </div>}
       </li>
     })}
   </ul>
 }
 
-export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, orderedKeys, sortMode, activeKey, localOwnerId, busy = false, initialView = 'current', cachedTitles, sessionTimestamps, historyTransfers, titleCacheError, onTitles, onSelect, onReorder, onSortMode, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
+export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, orderedKeys, sortMode, activeKey, expandSession, localOwnerId, busy = false, initialView = 'current', cachedTitles, sessionTimestamps, historyTransfers, titleCacheError, onTitles, onSelect, onReorder, onSortMode, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
   const bridge = window.agentHost
   const aliases = useMachineAliases()
-  const [view, setView] = useState<SessionView>(initialView)
+  const [view, setView] = useState<SessionView>(() => expandSession ? 'current' : initialView)
+  const [seenExpandId, setSeenExpandId] = useState(expandSession?.id)
+  if (expandSession && expandSession.id !== seenExpandId) {
+    setSeenExpandId(expandSession.id)
+    if (view !== 'current') setView('current')
+  }
   const [localSortMode, setLocalSortMode] = useState<SessionSortMode>('manual')
   const [sessions, setSessions] = useState<AgentHostSession[]>([])
   const [warnings, setWarnings] = useState<string[]>([])
@@ -339,7 +360,7 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
             {sessionSortModes.map((mode) => <option key={mode} value={mode}>{SORT_LABELS[mode]}</option>)}
           </select>
         </label>}
-        {taskId && <SessionTree taskId={taskId} bindings={linked} activeKey={activeKey} sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} disabled={!taskReady || busy || operating} onSelect={onSelect} onReorder={onReorder ? (nextKeys) => { if (sortMode === undefined) setLocalSortMode('manual'); onReorder(nextKeys) } : undefined} onUnlink={onDetach ? (binding) => { setDetach(binding); setError(undefined) } : undefined} />}
+        {taskId && <SessionTree taskId={taskId} bindings={linked} activeKey={activeKey} expandSession={expandSession} sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} disabled={!taskReady || busy || operating} onSelect={onSelect} onReorder={onReorder ? (nextKeys) => { if (sortMode === undefined) setLocalSortMode('manual'); onReorder(nextKeys) } : undefined} onUnlink={onDetach ? (binding) => { setDetach(binding); setError(undefined) } : undefined} />}
         {!linked.length && <p className="muted">{busy ? 'Loading task sessions...' : 'No sessions linked to this task.'}</p>}
         {detach && <section className="session-inline-confirm" aria-label="Detach conversation"><p>Detach {detach.id} from {taskId}? Conversation history stays on its Host.</p>{detachmentChanged && <p role="alert">The task binding changed. Cancel and review the current sessions.</p>}<div className="session-sidebar-actions"><button type="button" className="secondary-button" disabled={operating} onClick={() => setDetach(undefined)}>Keep conversation</button><button type="button" className="primary-button" disabled={!taskReady || busy || operating || detachmentChanged} onClick={() => { void run(async () => { if (onDetach) await onDetach(detach); setDetach(undefined) }) }}>Detach session</button></div></section>}
       </>}

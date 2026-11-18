@@ -294,7 +294,8 @@ describe('workspace switching in the desktop workbench', () => {
     await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
     await waitFor(() => expect(agentHost.watch).toHaveBeenCalledExactlyOnceWith(target))
     await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
-    await user.click(await screen.findByRole('button', { name: 'Unlink Other chat' }))
+    await user.click(await screen.findByRole('button', { name: 'Show details for Other chat' }))
+    await user.click(screen.getByRole('button', { name: 'Unlink Other chat' }))
     await user.click(within(screen.getByRole('region', { name: 'Detach conversation' })).getByRole('button', { name: 'Detach session' }))
     await waitFor(() => expect(repository[first.id].document.bindings['T-0002']).toEqual([{ provider: 'agent-host', ...target }]))
     expect(screen.getByRole('complementary', { name: 'Agent Host task chat' })).toBeInTheDocument()
@@ -1072,11 +1073,13 @@ describe('workspace switching in the desktop workbench', () => {
     expect(screen.getByRole('tab', { name: 'Current' })).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByRole('complementary', { name: 'Agent Host sessions' })).toBeInTheDocument()
 
+    await user.click(screen.getByRole('button', { name: 'Show details for Session A' }))
     await user.click(screen.getByRole('button', { name: 'Unlink Session A' }))
     await user.click(within(screen.getByRole('region', { name: 'Detach conversation' })).getByRole('button', { name: 'Detach session' }))
     await waitFor(() => expect(taskSessionLinks(repository[first.id].document.bindings, 'T-0002').map((link) => link.sessionId)).toEqual([sessionB.sessionId, sessionC.sessionId]))
     expect(screen.getByRole('button', { name: 'Open Session B' })).toBeInTheDocument()
 
+    await user.click(screen.getByRole('button', { name: 'Show details for Session C' }))
     await user.click(screen.getByRole('button', { name: 'Unlink Session C' }))
     await user.click(within(screen.getByRole('region', { name: 'Detach conversation' })).getByRole('button', { name: 'Detach session' }))
     await waitFor(() => expect(screen.getByText(/Choose a linked session for T-0002/)).toBeInTheDocument())

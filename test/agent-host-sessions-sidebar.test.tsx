@@ -46,11 +46,13 @@ describe('AgentHostSessionsSidebar', () => {
     expect(within(row).getByText(first.title)).toBeVisible()
     expect(within(other).queryByRole('progressbar')).not.toBeInTheDocument()
     const user = userEvent.setup()
+    expect(within(row).queryByRole('button', { name: `Unlink ${first.title}` })).not.toBeInTheDocument()
     await user.click(within(row).getByRole('button', { name: `Open ${first.title}` }))
     expect(props.onSelect).toHaveBeenCalledExactlyOnceWith(first)
     await user.click(within(row).getByRole('button', { name: `Show details for ${first.title}` }))
-    expect(within(row).getByRole('group', { name: `Details for ${first.title}` })).toBeVisible()
-    expect(within(row).getByRole('button', { name: `Unlink ${first.title}` })).toBeEnabled()
+    const details = within(row).getByRole('group', { name: `Details for ${first.title}` })
+    expect(details).toBeVisible()
+    expect(within(details).getByRole('button', { name: `Unlink ${first.title}` })).toBeEnabled()
     rendered.rerender(<AgentHostSessionsSidebar {...props} historyTransfers={{}} />)
     expect(within(row).queryByRole('progressbar')).not.toBeInTheDocument()
     expect(within(row).getByRole('button', { name: `Open ${first.title}` })).toHaveTextContent(first.owner.machineName)
@@ -86,6 +88,7 @@ describe('AgentHostSessionsSidebar', () => {
     for (const tab of ['Current', 'Link', 'Create']) expect(screen.getByRole('tab', { name: tab })).toBeInTheDocument()
     expect(within(tree).queryByText(/Current task title/)).not.toBeInTheDocument()
     expect(within(tree).getAllByRole('treeitem')).toHaveLength(2)
+    expect(within(tree).queryByRole('button', { name: /^Unlink / })).not.toBeInTheDocument()
     for (const hidden of [first.id, second.id, 'Current session', 'Read only', 'Not in discovery list']) {
       expect(within(tree).queryByText(hidden, { exact: true })).not.toBeInTheDocument()
     }
@@ -104,14 +107,16 @@ describe('AgentHostSessionsSidebar', () => {
     expect(within(details).getByText('Read only')).toBeInTheDocument()
     expect(within(details).getByText('Remote')).toBeInTheDocument()
     expect(within(details).getByText('Current session')).toBeInTheDocument()
+    expect(within(details).getByRole('button', { name: `Unlink ${first.title}` })).toBeEnabled()
     expect(onSelect).not.toHaveBeenCalled()
     expect(window.agentHost.watch).not.toHaveBeenCalled()
     await user.click(within(row).getByRole('button', { name: `Hide details for ${first.title}` }))
     expect(within(row).queryByRole('group')).not.toBeInTheDocument()
-    await user.click(within(tree).getByRole('button', { name: `Unlink ${second.title}` }))
+    await user.click(within(secondRow).getByRole('button', { name: `Show details for ${second.title}` }))
+    const secondDetails = within(secondRow).getByRole('group', { name: `Details for ${second.title}` })
+    await user.click(within(secondDetails).getByRole('button', { name: `Unlink ${second.title}` }))
     expect(onSelect).not.toHaveBeenCalled()
     expect(onDetach).not.toHaveBeenCalled()
-    expect(within(tree).queryByRole('group')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Detach session' }))
     expect(onDetach).toHaveBeenCalledExactlyOnceWith(second)
     await user.click(within(row).getByRole('button', { name: `Open ${first.title}` }))
@@ -196,13 +201,14 @@ describe('AgentHostSessionsSidebar', () => {
     expect(onDetach).not.toHaveBeenCalled()
     await user.click(screen.getByRole('button', { name: `Open ${second.title}` }))
     expect(onSelect).toHaveBeenCalledExactlyOnceWith(second)
+    await user.click(screen.getByRole('button', { name: `Show details for ${first.title}` }))
     await user.click(screen.getByRole('button', { name: `Unlink ${first.title}` }))
     await user.click(screen.getByRole('button', { name: 'Detach session' }))
     expect(onDetach).toHaveBeenCalledExactlyOnceWith(first)
     git.setStatus({ ...git.getStatus(), machineAliases: {} })
     await act(async () => git.notify())
-    expect(within(screen.getByRole('treeitem', { name: first.title })).getByText(first.owner.machineName)).toBeInTheDocument()
-    expect(within(screen.getByRole('treeitem', { name: second.title })).getByText(second.owner.machineName)).toBeInTheDocument()
+    expect(within(screen.getByRole('button', { name: `Open ${first.title}` })).getByText(first.owner.machineName)).toBeInTheDocument()
+    expect(within(screen.getByRole('button', { name: `Open ${second.title}` })).getByText(second.owner.machineName)).toBeInTheDocument()
     expect(catalogue.list).toHaveBeenCalledOnce()
     expect(catalogue.create).not.toHaveBeenCalled()
     expect(catalogue.send).not.toHaveBeenCalled()
@@ -322,13 +328,16 @@ describe('AgentHostSessionsSidebar', () => {
     expect(labels()).toEqual(['First session', 'Second session', 'Third session'])
 
     const thirdItem = within(tree).getByRole('treeitem', { name: 'Third session' })
-    await user.click(within(thirdItem).getByRole('button', { name: 'Show details for Third session' }))
-    expect(thirdItem).toHaveAttribute('aria-expanded', 'true')
+    expect(within(thirdItem).queryByRole('button', { name: 'Unlink Third session' })).not.toBeInTheDocument()
 
-    // Dragging on an action icon button is prevented and does not reorder.
-    const unlinkButton = within(thirdItem).getByRole('button', { name: 'Unlink Third session' })
-    expect(fireEvent.dragStart(unlinkButton)).toBe(false)
+    // Dragging on an action icon button in the row header is prevented and does not reorder.
+    const showDetailsButton = within(thirdItem).getByRole('button', { name: 'Show details for Third session' })
+    expect(fireEvent.dragStart(showDetailsButton)).toBe(false)
     expect(onReorder).not.toHaveBeenCalled()
+
+    await user.click(showDetailsButton)
+    expect(thirdItem).toHaveAttribute('aria-expanded', 'true')
+    expect(within(within(thirdItem).getByRole('group', { name: 'Details for Third session' })).getByRole('button', { name: 'Unlink Third session' })).toBeEnabled()
 
     // Dragging Third session onto First session moves it to the top and keeps its expansion attached.
     const thirdRow = thirdItem.querySelector('.session-tree-row')!
@@ -394,5 +403,29 @@ describe('AgentHostSessionsSidebar', () => {
     fireEvent.drop(alphaItem)
     expect(sortSelect).toHaveValue('manual')
     expect(onReorder).toHaveBeenCalledExactlyOnceWith([s1, s2, s3].map(sessionBindingKey))
+  })
+
+  it('expands the requested session details and reveals Unlink when expandSession is triggered', async () => {
+    const first = binding('expand-first', 'First session')
+    const second = binding('expand-second', 'Second session')
+    window.agentHost = bridge()
+    const onDetach = vi.fn(async () => {})
+    const user = userEvent.setup()
+    const { rerender } = render(<AgentHostSessionsSidebar taskId="T-0002" taskReady initialView="link"
+      bindings={{ 'T-0002': [first, second] }} onDetach={onDetach} onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} />)
+
+    expect(screen.getByRole('tab', { name: 'Link' })).toHaveAttribute('aria-selected', 'true')
+    rerender(<AgentHostSessionsSidebar taskId="T-0002" taskReady initialView="link"
+      bindings={{ 'T-0002': [first, second] }} expandSession={{ key: sessionBindingKey(second), id: 1 }}
+      onDetach={onDetach} onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} />)
+
+    expect(screen.getByRole('tab', { name: 'Current' })).toHaveAttribute('aria-selected', 'true')
+    const tree = screen.getByRole('tree', { name: 'Sessions for T-0002' })
+    expect(within(tree).getByRole('treeitem', { name: 'First session' })).toHaveAttribute('aria-expanded', 'false')
+    const secondItem = within(tree).getByRole('treeitem', { name: 'Second session' })
+    expect(secondItem).toHaveAttribute('aria-expanded', 'true')
+    await user.click(within(secondItem).getByRole('button', { name: 'Unlink Second session' }))
+    await user.click(screen.getByRole('button', { name: 'Detach session' }))
+    expect(onDetach).toHaveBeenCalledExactlyOnceWith(second)
   })
 })
