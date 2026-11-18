@@ -379,21 +379,37 @@ describe('AgentHostSessionsSidebar', () => {
       bindings={{ 'T-0002': [s1, s2, s3] }} onReorder={onReorder} onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} />)
 
     const tree = await screen.findByRole('tree', { name: 'Sessions for T-0002' })
-    const sortSelect = screen.getByRole('combobox', { name: 'Sort sessions' })
+    const sortTrigger = screen.getByRole('button', { name: 'Sort sessions' })
     const labels = () => within(tree).getAllByRole('treeitem').map((item) => item.getAttribute('aria-label'))
     await screen.findByRole('treeitem', { name: 'Alpha session' })
+    expect(screen.getByText('3 sessions')).toBeInTheDocument()
+    expect(sortTrigger).toHaveTextContent('Manual')
 
-    await user.selectOptions(sortSelect, 'updated-desc')
+    async function chooseSort(optionName: RegExp | string) {
+      await user.click(sortTrigger)
+      const listbox = screen.getByRole('listbox', { name: 'Sort sessions by' })
+      await user.click(within(listbox).getByRole('option', { name: optionName }))
+    }
+
+    await chooseSort('Last response')
+    expect(sortTrigger).toHaveTextContent('Last response')
     expect(labels()).toEqual(['Alpha session', 'Beta session', 'Zeta session'])
 
-    await user.selectOptions(sortSelect, 'created-desc')
+    await chooseSort('Created (newest)')
     expect(labels()).toEqual(['Beta session', 'Alpha session', 'Zeta session'])
 
-    await user.selectOptions(sortSelect, 'created-asc')
+    await chooseSort('Created (oldest)')
     expect(labels()).toEqual(['Zeta session', 'Alpha session', 'Beta session'])
 
-    await user.selectOptions(sortSelect, 'title-asc')
+    await chooseSort('Name (A–Z)')
     expect(labels()).toEqual(['Alpha session', 'Beta session', 'Zeta session'])
+
+    // Escape closes the sort menu and returns focus to the trigger.
+    await user.click(sortTrigger)
+    expect(screen.getByRole('listbox', { name: 'Sort sessions by' })).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('listbox', { name: 'Sort sessions by' })).not.toBeInTheDocument()
+    expect(sortTrigger).toHaveFocus()
 
     // Dragging Zeta to the top transitions sort mode back to manual.
     const zetaRow = within(tree).getByRole('treeitem', { name: 'Zeta session' }).querySelector('.session-tree-row')!
@@ -401,7 +417,7 @@ describe('AgentHostSessionsSidebar', () => {
     fireEvent.dragStart(zetaRow)
     fireEvent.dragOver(alphaItem)
     fireEvent.drop(alphaItem)
-    expect(sortSelect).toHaveValue('manual')
+    expect(sortTrigger).toHaveTextContent('Manual')
     expect(onReorder).toHaveBeenCalledExactlyOnceWith([s1, s2, s3].map(sessionBindingKey))
   })
 

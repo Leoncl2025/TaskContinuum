@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { DragEvent, KeyboardEvent } from 'react'
 import { agentHostKey } from '../../shared/agentHost'
 import type { AgentHostHistoryTransfer, AgentHostSession } from '../../shared/agentHost'
@@ -11,7 +11,7 @@ import { machineLabel, useMachineAliases } from '../machineAliases'
 
 const SESSION_DRAG_MIME = 'application/x-taskcontinuum-session-key'
 const SORT_LABELS: Readonly<Record<SessionSortMode, string>> = {
-  'manual': 'Manual (drag)',
+  'manual': 'Manual',
   'updated-desc': 'Last response',
   'created-desc': 'Created (newest)',
   'created-asc': 'Created (oldest)',
@@ -60,6 +60,71 @@ function transferProgress(progress: AgentHostHistoryTransfer) {
   const label = progress.kind === 'earlier' ? 'Earlier history' : progress.kind === 'recent' ? 'Recent history' : progress.resumed ? 'Resuming history' : 'Syncing history'
   const description = `${label}: ${percent}% (${size})${progress.resumed ? ' - Resumed from saved progress' : ''}`
   return { value, percent, label, description }
+}
+
+function SessionSortMenu({ count, value, onChange }: { count: number; value: SessionSortMode; onChange(mode: SessionSortMode): void }) {
+  const [open, setOpen] = useState(false)
+  const listboxId = useId()
+  const root = useRef<HTMLDivElement>(null)
+  const trigger = useRef<HTMLButtonElement>(null)
+  const options = useRef(new Map<SessionSortMode, HTMLButtonElement>())
+
+  useEffect(() => {
+    if (!open) return
+    options.current.get(value)?.focus()
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false)
+    }
+    document.addEventListener('pointerdown', dismiss)
+    return () => document.removeEventListener('pointerdown', dismiss)
+  }, [open, value])
+
+  function close(): void {
+    setOpen(false)
+    trigger.current?.focus()
+  }
+
+  function moveFocus(offset: number): void {
+    const active = [...options.current.entries()].find(([, element]) => element === document.activeElement)?.[0] ?? value
+    const index = sessionSortModes.indexOf(active)
+    const next = sessionSortModes[(index + offset + sessionSortModes.length) % sessionSortModes.length]
+    options.current.get(next)?.focus()
+  }
+
+  return <div className="session-list-header">
+    <span className="session-list-count">{count} sessions</span>
+    <div className="session-sort" ref={root} onBlur={(event) => {
+      if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false)
+    }} onKeyDown={(event) => {
+      if (!open) return
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); return }
+      if (event.key === 'ArrowDown') { event.preventDefault(); moveFocus(1); return }
+      if (event.key === 'ArrowUp') { event.preventDefault(); moveFocus(-1); return }
+      if (event.key === 'Home') { event.preventDefault(); options.current.get(sessionSortModes[0])?.focus(); return }
+      if (event.key === 'End') { event.preventDefault(); options.current.get(sessionSortModes.at(-1)!)?.focus() }
+    }}>
+      <button ref={trigger} type="button" className="session-sort-trigger" aria-label="Sort sessions"
+        title={`Sort: ${SORT_LABELS[value]}`} data-sorted={value !== 'manual' || undefined}
+        aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? listboxId : undefined}
+        onClick={() => setOpen((current) => !current)}>
+        <Icon name="list-filter" />
+        <span>{SORT_LABELS[value]}</span>
+        <Icon name={open ? 'chevron-up' : 'chevron-down'} />
+      </button>
+      {open && <div id={listboxId} className="session-sort-menu" role="listbox" aria-label="Sort sessions by">
+        {sessionSortModes.map((mode) => <Fragment key={mode}>
+          <button type="button" role="option" aria-selected={mode === value} className="session-sort-option"
+            ref={(element) => { if (element) options.current.set(mode, element); else options.current.delete(mode) }}
+            onClick={() => { onChange(mode); close() }}>
+            <Icon name="check" className="session-sort-check" />
+            <span>{SORT_LABELS[mode]}</span>
+            {mode === 'manual' && <small>Drag</small>}
+          </button>
+          {mode === 'manual' && <div className="session-sort-divider" role="separator" />}
+        </Fragment>)}
+      </div>}
+    </div>
+  </div>
 }
 
 function SessionTree({ taskId, bindings, activeKey, expandSession, sessions, cachedTitles, historyTransfers, disabled, onSelect, onReorder, onUnlink }: {
@@ -348,18 +413,10 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
       {titleCacheError && <p className="muted" role="status">{titleCacheError}</p>}
       {!taskId && <p className="muted">Select a task to link or create a session.</p>}
       {view === 'current' && <>
-        {taskId && linked.length > 1 && <label className="session-filter session-sort-bar">
-          <Icon name="sort-precedence" />
-          <span>Sort</span>
-          <select aria-label="Sort sessions" value={activeSortMode} onChange={(event) => {
-            const next = event.target.value as SessionSortMode
-            if (!sessionSortModes.includes(next)) return
-            if (sortMode === undefined) setLocalSortMode(next)
-            onSortMode?.(next)
-          }}>
-            {sessionSortModes.map((mode) => <option key={mode} value={mode}>{SORT_LABELS[mode]}</option>)}
-          </select>
-        </label>}
+        {taskId && linked.length > 1 && <SessionSortMenu count={linked.length} value={activeSortMode} onChange={(next) => {
+          if (sortMode === undefined) setLocalSortMode(next)
+          onSortMode?.(next)
+        }} />}
         {taskId && <SessionTree taskId={taskId} bindings={linked} activeKey={activeKey} expandSession={expandSession} sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} disabled={!taskReady || busy || operating} onSelect={onSelect} onReorder={onReorder ? (nextKeys) => { if (sortMode === undefined) setLocalSortMode('manual'); onReorder(nextKeys) } : undefined} onUnlink={onDetach ? (binding) => { setDetach(binding); setError(undefined) } : undefined} />}
         {!linked.length && <p className="muted">{busy ? 'Loading task sessions...' : 'No sessions linked to this task.'}</p>}
         {detach && <section className="session-inline-confirm" aria-label="Detach conversation"><p>Detach {detach.id} from {taskId}? Conversation history stays on its Host.</p>{detachmentChanged && <p role="alert">The task binding changed. Cancel and review the current sessions.</p>}<div className="session-sidebar-actions"><button type="button" className="secondary-button" disabled={operating} onClick={() => setDetach(undefined)}>Keep conversation</button><button type="button" className="primary-button" disabled={!taskReady || busy || operating || detachmentChanged} onClick={() => { void run(async () => { if (onDetach) await onDetach(detach); setDetach(undefined) }) }}>Detach session</button></div></section>}

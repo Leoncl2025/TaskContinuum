@@ -63,9 +63,20 @@ for (const theme of ['light', 'dark'] as const) {
     ])
 
     // Smart sort: Last response, Created (newest), and Name (A–Z).
-    const sortPicker = sidebar.getByRole('combobox', { name: 'Sort sessions', exact: true })
-    await expect(sortPicker).toHaveValue('manual')
-    await sortPicker.selectOption('updated-desc')
+    const sortPicker = sidebar.getByRole('button', { name: 'Sort sessions', exact: true })
+    await expect(sortPicker).toHaveText('Manual')
+    await expect(sidebar.locator('.session-list-count')).toHaveText('4 sessions')
+
+    const chooseSort = async (label: string, screenshotOpen?: boolean) => {
+      await sortPicker.click()
+      const menu = sidebar.getByRole('listbox', { name: 'Sort sessions by', exact: true })
+      await expect(menu).toBeVisible()
+      if (screenshotOpen) await sidebar.screenshot({ path: testInfo.outputPath(`session-sort-menu-${theme}.png`) })
+      await menu.getByRole('option', { name: label }).click()
+    }
+
+    await chooseSort('Last response', true)
+    await expect(sortPicker).toHaveText('Last response')
     await expect.poll(titles).toEqual([
       'Investigate session creation',
       'Verify the next release',
@@ -74,7 +85,7 @@ for (const theme of ['light', 'dark'] as const) {
     ])
     await sidebar.screenshot({ path: testInfo.outputPath(`session-smart-sort-${theme}.png`) })
 
-    await sortPicker.selectOption('created-desc')
+    await chooseSort('Created (newest)')
     await expect.poll(titles).toEqual([
       'Verify the next release',
       'A deliberately long conversation title that should remain on one compact line',
@@ -82,7 +93,7 @@ for (const theme of ['light', 'dark'] as const) {
       'A focused release plan',
     ])
 
-    await sortPicker.selectOption('title-asc')
+    await chooseSort('Name (A–Z)')
     await expect.poll(titles).toEqual([
       'A deliberately long conversation title that should remain on one compact line',
       'A focused release plan',
@@ -92,7 +103,7 @@ for (const theme of ['light', 'dark'] as const) {
 
     // Dragging while smart-sorted transitions smoothly back to Manual with the dropped order.
     await bottomButton.dragTo(tree.getByRole('treeitem').first())
-    await expect(sortPicker).toHaveValue('manual')
+    await expect(sortPicker).toHaveText('Manual')
     await expect.poll(titles).toEqual([
       'Verify the next release',
       'A deliberately long conversation title that should remain on one compact line',
@@ -105,7 +116,7 @@ for (const theme of ['light', 'dark'] as const) {
     await page.reload()
     await expect(page.getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
-    await expect(sortPicker).toHaveValue('manual')
+    await expect(sortPicker).toHaveText('Manual')
     await expect.poll(titles).toEqual([
       'Verify the next release',
       'A deliberately long conversation title that should remain on one compact line',
