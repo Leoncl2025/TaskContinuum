@@ -14,15 +14,16 @@ import '../../src/renderer/styles.css'
 
 const parameters = new URLSearchParams(location.search)
 const long = parameters.has('long')
+const groupDemo = parameters.has('group-demo')
 const target = {
-  owner: { clientId: '11111111-1111-4111-8111-111111111111', machineName: 'BUILD-WORKSTATION' },
+  owner: { clientId: '11111111-1111-4111-8111-111111111111', machineName: groupDemo ? 'BUILD-01' : 'BUILD-WORKSTATION' },
   sessionId: `copilotcli:/${'s'.repeat(120)}`,
   chatId: `ahp-chat:/${'c'.repeat(120)}`,
 }
 const view: AgentHostView = {
   target, state: 'connected', canSend: true, readOnly: false, terminals: {},
   chat: {
-    resource: target.chatId, title: long ? 'A detailed release plan with a very long title '.repeat(8) : 'A focused release plan',
+    resource: target.chatId, title: groupDemo ? 'Performance lead' : long ? 'A detailed release plan with a very long title '.repeat(8) : 'A focused release plan',
     modifiedAt: '', status: 1,
     turns: Array.from({ length: parameters.has('markdown') ? 1 : 6 }, (_, index) => ({
       id: `turn-${index}`, state: 'complete' as Turn['state'],
@@ -43,14 +44,17 @@ const emit = () => {
 }
 const unsupported = async (): Promise<never> => { throw new Error('This layout fixture does not perform native operations.') }
 const calls = { watch: 0, unwatch: 0, send: 0 }
+const demoRunner = { clientId: '33333333-3333-4333-8333-333333333333', machineName: 'LAB-02' }
 const sidebarSessions: AgentHostSession[] = [
   { ...target, title: view.chat!.title, provider: 'copilotcli', createdAt: '2026-11-10T09:00:00.000Z', updatedAt: '2026-11-12T10:00:00.000Z', canSend: true },
-  ...[
+  ...(groupDemo ? ['Benchmark runner', 'Local tests', 'Local build', 'Migration analysis', 'Compatibility review', 'Release notes', 'Code review']
+    .map((title, index) => ({ title, createdAt: `2026-11-${11 + index}T09:00:00.000Z`, updatedAt: `2026-11-${11 + index}T12:00:00.000Z` })) : [
     { title: 'Investigate session creation', createdAt: '2026-11-11T09:00:00.000Z', updatedAt: '2026-11-16T14:30:00.000Z' },
     { title: 'A deliberately long conversation title that should remain on one compact line', createdAt: '2026-11-13T09:00:00.000Z', updatedAt: '2026-11-14T11:00:00.000Z' },
     { title: 'Verify the next release', createdAt: '2026-11-15T09:00:00.000Z', updatedAt: '2026-11-15T09:30:00.000Z' },
-  ].map((entry, index) => ({
+  ]).map((entry, index) => ({
     ...target, sessionId: `copilotcli:/compact-${index}`, chatId: `ahp-chat:/compact-${index}`,
+    owner: groupDemo && index >= 3 ? demoRunner : target.owner,
     title: entry.title, provider: 'copilotcli', createdAt: entry.createdAt, updatedAt: entry.updatedAt, canSend: true,
   })),
 ]
@@ -84,7 +88,7 @@ window.agentHost = {
 const status: WorkspaceGitSyncStatus = {
   enabled: true, workspaceId: 'fixture', intervalMs: 15000, state: 'idle', pending: 0,
   provisionalTasks: [], conflicts: [], peers: [], revision: 'a'.repeat(64),
-  machineAliases: { [target.owner.clientId]: long ? 'Studio build workstation '.repeat(3) : 'Studio' },
+  machineAliases: { [target.owner.clientId]: long ? 'Studio build workstation '.repeat(3) : 'Studio', ...(groupDemo ? { [demoRunner.clientId]: 'Runner' } : {}) },
 }
 declare global {
   interface Window {
@@ -120,7 +124,7 @@ if (parameters.has('workbench')) {
     id: 'fixture', name: 'Layout fixture', title: 'Layout fixture', root: 'C:\\layout-fixture',
     loadedAt: '', warnings: [],
     tasks: [
-      { ...fixtureTasks[1], id: 'T-0002', title: 'Fix Connection issues', parentId: undefined,
+      { ...fixtureTasks[1], id: 'T-0002', title: groupDemo ? 'Performance and release' : 'Fix Connection issues', parentId: undefined,
         documents: { requirements: '## Release requirements\n\n[**Documentation**](https://example.com/docs) / [`plan.md`](file:///C:/layout-fixture/plan.md)', plan: null, checklist: null } },
       { ...fixtureTasks[1], id: 'T-0003', title: 'Sept-2026 planning and release coordination', parentId: undefined },
     ],

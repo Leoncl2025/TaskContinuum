@@ -495,6 +495,29 @@ describe('workspace switching in the desktop workbench', () => {
     expect(bridge.updateSessionLink).not.toHaveBeenCalled()
   })
 
+  it('cycles in grouped order and reveals a collapsed group without writing a session link', async () => {
+    const { bridge, agentHost, first, sessions, selected } = sessionShortcutFixture()
+    const keys = sessions.map((agentHost) => sessionBindingKey({ agentHost }))
+    const group = { id: 'grp:00000000-0000-4000-8000-000000000033', title: 'Benchmarks', collapsed: true, memberKeys: [keys[2], keys[1]] }
+    localStorage.setItem(`taskcontinuum:workbench-selection:v2:${first.id}`, JSON.stringify({
+      version: 2, taskId: 'T-0002', openTaskIds: ['T-0002', 'T-0003'], sessions: { 'T-0002': keys[0] },
+      sessionGroups: { 'T-0002': { order: [keys[0], group.id], groups: [group] } },
+    }))
+    await bridge.openFolder()
+    render(<App />)
+    await screen.findByRole('textbox', { name: 'Message Agent Host' })
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Agent Host sessions' }))
+    const header = screen.getByRole('treeitem', { name: group.title })
+    expect(header).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.keyDown(window, { key: 'PageDown', ctrlKey: true, shiftKey: true })
+    expect(selected()).toBe(keys[2])
+    expect(header).toHaveAttribute('aria-expanded', 'true')
+    expect(within(header).getAllByRole('treeitem')[0]).toHaveAttribute('aria-selected', 'true')
+    await waitFor(() => expect(agentHost.watch).toHaveBeenLastCalledWith(sessions[2]))
+    expect(bridge.updateSessionLink).not.toHaveBeenCalled()
+    expect(agentHost.send).not.toHaveBeenCalled()
+  })
+
   it.each([false, true])('opens the current task chat when cycling sessions from a hidden pane (compact=%s)', async (compact) => {
     vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
       matches: compact, media: query, onchange: null,

@@ -70,8 +70,8 @@ To link an existing session:
   the separate arrow button expands session/chat IDs, the full machine name,
   location, access status and the Unlink action without opening or reconnecting
   the chat. In the list, Up/Down and Home/End move focus, Right/Left show/hide
-  details, and Enter/Space open the focused chat. Unlink confirmation is inline and never
-  deletes history. The header shows just the current task title and toolbar
+  details, and Enter/Space open the focused chat or toggle the focused group.
+  Unlink confirmation is inline and never deletes history. The header shows just the current task title and toolbar
   controls. Use the **Link**/**Create** tabs for session actions and the **Tasks**
   activity button to return to tasks; there are no duplicate footer buttons.
   No Host or chat is created automatically.
@@ -109,6 +109,25 @@ without widening the chat or task panel. Existing messages are rendered with
 this support when reopened; no task files, saved conversations or session
 bindings are migrated or edited.
 
+### Device-local session groups
+
+Drop a session onto the center of another session to start a group and name it
+inline. Drop on a group header to add to that group, or at an edge to reorder.
+Drop a member outside its group at a top-level row edge to take it out, or drag
+the group's grip to move all its members together. Groups are one level deep.
+Use **F2** or the rename button to change the group name; **Ungroup** only
+returns the members to the top level and never unlinks them.
+
+Smart sorting keeps groups intact. It sorts members within each group, and
+ranks groups by name or by their highest-ranked member for time and machine
+sorts. Dragging into a new arrangement switches that task back to Manual.
+**Ctrl+Shift+PageUp/PageDown** follows the grouped order and expands a collapsed
+group when moving to one of its members.
+
+Group names, membership, order and collapse state are stored in the local
+application profile, per workspace and task. They never sync through Git or
+modify the underlying session, its permissions, or its history.
+
 ### Last task and session selection
 
 The desktop remembers open task tabs in their original order, the active task,
@@ -119,7 +138,7 @@ workspace or restarting Task Continuum restores those tabs, the active task and 
 Discovery titles, aliases, hostname changes and the order of bindings do not
 change the selected identity.
 
-The preference contains only task/tab IDs and session selection keys. It never
+The preference contains task/tab IDs, session keys and local display settings. It never
 publishes to Git, creates a binding, grants permission, creates a native session,
 or sends a message. Normal owner authorization and read-only checks still apply.
 An offline Host does not erase the selection. If the selected chat was removed

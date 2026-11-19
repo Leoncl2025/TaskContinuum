@@ -26,6 +26,12 @@ export interface SessionSortOptions {
 
 const naturalCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
 
+export function compareSessionNames(left: string, right: string): number { return naturalCollator.compare(left, right) }
+
+export function sessionBindingTitle(binding: SessionBinding, titles?: SessionSortOptions['titles']): string {
+  return titles?.[agentHostKey(binding.agentHost)] || (binding.title !== 'Agent Host' ? binding.title : binding.id)
+}
+
 export function sessionBindingKey(binding: Pick<SessionBinding, 'agentHost'>): string {
   return `ahp:${agentHostKey(binding.agentHost)}`
 }
@@ -80,7 +86,7 @@ export function sortSessionBindings(bindings: readonly SessionBinding[], options
 
   const decorated = bindings.map((binding, index) => {
     const key = agentHostKey(binding.agentHost)
-    const label = options.titles?.[key] || (binding.title !== 'Agent Host' ? binding.title : binding.id)
+    const label = sessionBindingTitle(binding, options.titles)
     const machine = machineLabel(binding.owner, options.aliases ?? {})
     const time = options.timestamps?.[key]
     return { binding, index, label, machine, updatedAt: time?.updatedAt, createdAt: time?.createdAt }
@@ -119,11 +125,11 @@ export function sortSessionBindings(bindings: readonly SessionBinding[], options
         return left.index - right.index
       }
       case 'title-asc': {
-        const diff = naturalCollator.compare(left.label, right.label)
+        const diff = compareSessionNames(left.label, right.label)
         return diff !== 0 ? diff : left.index - right.index
       }
       case 'title-desc': {
-        const diff = naturalCollator.compare(right.label, left.label)
+        const diff = compareSessionNames(right.label, left.label)
         return diff !== 0 ? diff : left.index - right.index
       }
       case 'machine-asc': {

@@ -41,7 +41,7 @@ for (const theme of ['light', 'dark'] as const) {
     // Drag the bottom session row up to the top by dragging its title button directly.
     const bottomButton = tree.getByRole('treeitem', { name: 'Verify the next release', exact: true }).getByRole('button', { name: 'Open Verify the next release', exact: true })
     const topItem = tree.getByRole('treeitem', { name: 'A focused release plan', exact: true })
-    await bottomButton.dragTo(topItem)
+    await bottomButton.dragTo(topItem.locator('.session-tree-row'), { targetPosition: { x: 90, y: 4 } })
     await expect.poll(titles).toEqual([
       'Verify the next release',
       'A focused release plan',
@@ -54,7 +54,7 @@ for (const theme of ['light', 'dark'] as const) {
     // Drag 'Investigate session creation' down to the bottom via its drag grip.
     const middleGrip = tree.getByRole('treeitem', { name: 'Investigate session creation', exact: true }).locator('.session-drag-grip')
     const lastItem = tree.getByRole('treeitem', { name: 'A deliberately long conversation title that should remain on one compact line', exact: true })
-    await middleGrip.dragTo(lastItem)
+    await middleGrip.dragTo(lastItem.locator('.session-tree-row'), { targetPosition: { x: 90, y: 46 } })
     await expect.poll(titles).toEqual([
       'Verify the next release',
       'A focused release plan',
@@ -102,7 +102,7 @@ for (const theme of ['light', 'dark'] as const) {
     ])
 
     // Dragging while smart-sorted transitions smoothly back to Manual with the dropped order.
-    await bottomButton.dragTo(tree.getByRole('treeitem').first())
+    await bottomButton.dragTo(tree.getByRole('treeitem').first().locator('.session-tree-row'), { targetPosition: { x: 90, y: 4 } })
     await expect(sortPicker).toHaveText('Manual')
     await expect.poll(titles).toEqual([
       'Verify the next release',
@@ -126,6 +126,131 @@ for (const theme of ['light', 'dark'] as const) {
     expect(errors).toEqual([])
   })
 }
+
+test.describe('session grouping', () => {
+  test.use({ deviceScaleFactor: 2 })
+
+  for (const theme of ['light', 'dark'] as const) {
+    test(`groups linked sessions and restores the local layout in ${theme}`, async ({ page }, testInfo) => {
+      const errors: string[] = []
+      page.on('pageerror', (error) => errors.push(error.message))
+      await page.setViewportSize({ width: 1200, height: 850 })
+      await page.goto(`${url}?workbench&panes&sessions&group-demo&theme=${theme}`)
+      await expect(page.getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible()
+      await page.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
+      await page.evaluate(async () => { await document.fonts.ready })
+
+      const sidebar = page.getByRole('complementary', { name: 'Agent Host sessions', exact: true })
+      const tree = sidebar.getByRole('tree', { name: 'Sessions for T-0002' })
+      const item = (name: string) => tree.getByRole('treeitem', { name, exact: true })
+      const row = (name: string) => item(name).locator(':scope > :is(.session-tree-row, .session-group-row)')
+      const grip = (name: string) => row(name).locator('.session-drag-grip')
+      const captions = (group: string) => item(group).getByRole('treeitem').evaluateAll((items) => items.map((child) => child.getAttribute('aria-label')))
+      const performance = '性能优化'
+      const migration = '迁移调研'
+      const snapshot = () => page.evaluate(() => localStorage.getItem('taskcontinuum:workbench-selection:v2:fixture'))
+      const screenshot = async (scene: string) => {
+        const bounds = (await sidebar.boundingBox())!
+        const content = (await tree.boundingBox())!
+        const height = Math.min(bounds.height, content.y + content.height - bounds.y + 16)
+        await page.screenshot({ path: testInfo.outputPath(`${scene}-${theme}.png`), clip: { ...bounds, height }, animations: 'disabled' })
+      }
+      const dragOver = async (sourceName: string, targetName: string) => {
+        const source = (await grip(sourceName).boundingBox())!
+        const target = (await row(targetName).boundingBox())!
+        await page.mouse.move(source.x + 5, source.y + 7)
+        await page.mouse.down()
+        await page.mouse.move(source.x + 18, source.y + 7, { steps: 4 })
+        await page.mouse.move(target.x + 105, target.y + target.height / 2, { steps: 10 })
+        await page.mouse.move(target.x + 108, target.y + target.height / 2)
+      }
+
+      await expect(item('Performance lead')).toHaveAttribute('aria-selected', 'true')
+      const composer = page.getByRole('textbox', { name: 'Message Agent Host' })
+      await composer.fill('Draft stays in the original conversation')
+      const calls = await page.evaluate(() => ({ ...window.compactChatFixture.calls }))
+      const before = await snapshot()
+
+      await dragOver('Benchmark runner', 'Performance lead')
+      await expect(item('Performance lead')).toHaveAttribute('data-drop', 'group')
+      await expect(row('Performance lead').getByText('Create group')).toBeVisible()
+      expect(await snapshot()).toBe(before)
+      if (theme === 'light') await screenshot('drag-to-group')
+      await page.mouse.up()
+
+      const editor = sidebar.getByRole('textbox', { name: 'Group name', exact: true })
+      await expect(editor).toHaveValue('New group')
+      await expect(editor).toBeFocused()
+      await editor.fill(performance)
+      if (theme === 'light') await screenshot('rename-in-place')
+      await editor.press('Enter')
+      await expect(item(performance)).toHaveAttribute('aria-expanded', 'true')
+      const header = row(performance)
+      await grip('Local tests').dragTo(header, { targetPosition: { x: 100, y: 16 } })
+      await grip('Local build').dragTo(row('Local tests'), { targetPosition: { x: 100, y: 25 } })
+      await expect.poll(() => captions(performance)).toEqual(['Performance lead', 'Benchmark runner', 'Local tests', 'Local build'])
+      await expect(item('Local build')).toHaveAttribute('aria-level', '2')
+
+      await grip('Compatibility review').dragTo(row('Migration analysis'))
+      await editor.fill(migration)
+      await editor.press('Enter')
+      await row(migration).getByRole('button', { name: `Collapse ${migration}`, exact: true }).click()
+      await expect(sidebar.locator('.session-list-count')).toHaveText('8 sessions · 2 groups')
+      await page.mouse.move(1, 1)
+      await screenshot('groups-expanded')
+
+      await header.getByRole('button', { name: `Collapse ${performance}`, exact: true }).click()
+      await expect(item(performance)).toHaveAttribute('aria-description', /Contains current session/)
+      await page.mouse.move(1, 1)
+      if (theme === 'dark') await screenshot('groups-collapsed')
+      await page.evaluate(() => window.compactChatFixture.setHistoryTransfer({ receivedBytes: 100, totalBytes: 1000 }))
+      await expect(item(performance)).toHaveAttribute('aria-description', /1 syncing history/)
+      await page.evaluate(() => window.compactChatFixture.setHistoryTransfer(undefined))
+      await expect(composer).toHaveValue('Draft stays in the original conversation')
+      expect(await page.evaluate(() => window.compactChatFixture.calls)).toEqual(calls)
+
+      await page.reload()
+      await page.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
+      await expect(item(performance)).toHaveAttribute('aria-expanded', 'false')
+      await expect(item(migration)).toHaveAttribute('aria-expanded', 'false')
+      const collapsedLayout = await snapshot()
+      await dragOver('Release notes', migration)
+      await expect(item(migration)).toHaveAttribute('data-drop', 'into')
+      await expect(item(migration)).toHaveAttribute('aria-expanded', 'true')
+      expect(await snapshot()).toBe(collapsedLayout)
+      await page.mouse.move(1, 1)
+      await page.mouse.up()
+      await expect(item(migration)).toHaveAttribute('aria-expanded', 'false')
+      await header.getByRole('button', { name: `Expand ${performance}`, exact: true }).click()
+      await expect.poll(() => captions(performance)).toEqual(['Performance lead', 'Benchmark runner', 'Local tests', 'Local build'])
+
+      await grip('Local build').dragTo(row('Release notes'), { targetPosition: { x: 90, y: 4 } })
+      await expect(item('Local build')).toHaveAttribute('aria-level', '1')
+      await grip(migration).dragTo(header, { targetPosition: { x: 85, y: 4 } })
+      await expect(tree.locator(':scope > li').first()).toHaveAttribute('aria-label', migration)
+      await item(performance).focus()
+      await page.keyboard.press('F2')
+      await editor.fill('Discard this name')
+      await editor.press('Escape')
+      await expect(item(performance)).toBeFocused()
+      await row(migration).hover()
+      await row(migration).getByRole('button', { name: `Ungroup ${migration}`, exact: true }).click()
+      await expect(item(migration)).toHaveCount(0)
+      await expect(item('Migration analysis')).toHaveAttribute('aria-level', '1')
+      await expect(item('Compatibility review')).toHaveAttribute('aria-level', '1')
+      const sort = sidebar.getByRole('button', { name: 'Sort sessions', exact: true })
+      await sort.click()
+      await sidebar.getByRole('option', { name: 'Name (A–Z)', exact: true }).click()
+      await item(performance).focus()
+      await page.keyboard.press('F2')
+      await editor.fill('Benchmarks')
+      await editor.press('Enter')
+      await expect(sort).toHaveText('Name (A–Z)')
+      await expect.poll(() => captions('Benchmarks')).toEqual(['Benchmark runner', 'Local tests', 'Performance lead'])
+      expect(errors).toEqual([])
+    })
+  }
+})
 
 test('session history transfer labels distinguish full sync, resume and recent paging', async ({ page }) => {
   await page.goto(`${url}?workbench&panes&sessions&theme=dark`)

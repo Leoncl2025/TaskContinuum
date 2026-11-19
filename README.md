@@ -7,16 +7,21 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
 - **Smooth cross-device session switching:** move between local and remote
   conversations while preserving each session's draft in memory.
 - Multiple conversations per task.
-- Compact session rows show only the conversation title, machine and unlink
-  action, without repeating the task heading. Select the title or machine to
-  open its chat; only the separate arrow button expands identities and access
-  details. The sidebar retains just the task title and toolbar controls above
+- Compact session rows show the conversation title and machine without repeating
+  the task heading. Select the title or machine to open its chat; the separate
+  arrow expands identities, access details and the **Unlink** action.
+  The sidebar retains just the task title and toolbar controls above
   the Current/Link/Create tabs; use Link or Create rather than duplicate footer
   buttons, and the Tasks activity button to return to the task list.
 - Device-local restoration of open task tabs, the active task, each task's
   selected chat, and **Current** session ordering — supporting manual
   drag-and-drop (**Alt+Up / Alt+Down**) or smart sorting by last response time,
   creation time, name, or machine.
+- Organize linked sessions into named, collapsible groups in **Current**.
+  Drop a session on the middle of another row to create a group, or on a group
+  to join it. Drop at a row edge to reorder. Rename a whole group in place
+  (**F2**), and ungroup without unlinking or changing its chats. The layout is
+  stored on this device, separately for each workspace and task.
 - Searchable task trees, task tabs, and read-only planning documents.
 - **Ctrl+PageUp / Ctrl+PageDown** switches to the previous/next open task tab,
   wrapping at either end without clearing chat drafts.

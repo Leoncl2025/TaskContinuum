@@ -1,15 +1,17 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
-import type { DragEvent, KeyboardEvent } from 'react'
 import { agentHostKey } from '../../shared/agentHost'
 import type { AgentHostHistoryTransfer, AgentHostSession } from '../../shared/agentHost'
-import { moveSessionKey, sessionBindingKey, sessionSortModes, sortSessionBindings } from '../chat/sessionBindings'
+import { sessionBindingKey, sessionSortModes } from '../chat/sessionBindings'
 import type { SessionBinding, SessionBindings, SessionSortMode } from '../chat/sessionBindings'
+import { buildSessionTree } from '../chat/sessionGroups'
+import type { SessionGroupLayout } from '../chat/sessionGroups'
 import { Icon, IconButton } from './Primitives'
 import { AgentHostCreationControls } from './AgentHostCreationControls'
+import { LinkedSessionTree } from './LinkedSessionTree'
+import type { SessionExpandRequest } from './LinkedSessionTree'
 import type { SessionTimestamps, SessionTitleUpdate } from '../chat/useSessionTitles'
 import { machineLabel, useMachineAliases } from '../machineAliases'
 
-const SESSION_DRAG_MIME = 'application/x-taskcontinuum-session-key'
 const SORT_LABELS: Readonly<Record<SessionSortMode, string>> = {
   'manual': 'Manual',
   'updated-desc': 'Last response',
@@ -21,16 +23,13 @@ const SORT_LABELS: Readonly<Record<SessionSortMode, string>> = {
 }
 
 type SessionView = 'current' | 'link' | 'create'
-export interface SessionExpandRequest {
-  readonly key: string
-  readonly id: number
-}
 interface Props {
   taskId?: string
   taskTitle?: string
   taskReady?: boolean
   bindings?: SessionBindings
   orderedKeys?: readonly string[]
+  sessionLayout?: SessionGroupLayout
   sortMode?: SessionSortMode
   activeKey?: string
   expandSession?: SessionExpandRequest
@@ -43,7 +42,7 @@ interface Props {
   titleCacheError?: string
   onTitles?(sessions: readonly SessionTitleUpdate[]): void
   onSelect?(binding: SessionBinding): void
-  onReorder?(orderedKeys: string[]): void
+  onLayoutChange?(layout: SessionGroupLayout, makeManual: boolean): void
   onSortMode?(mode: SessionSortMode): void
   onDetach?(binding: SessionBinding): Promise<void>
   onLink(session: AgentHostSession): Promise<void>
@@ -52,17 +51,7 @@ interface Props {
   onClose(): void
 }
 
-function transferProgress(progress: AgentHostHistoryTransfer) {
-  const value = progress.totalBytes > 0 ? Math.max(0, Math.min(100, progress.receivedBytes / progress.totalBytes * 100)) : 0
-  const percent = value > 0 && value < 0.1 ? '<0.1' : `${Math.floor(value * 10) / 10}`
-  const divisor = progress.totalBytes >= 1024 * 1024 ? 1024 * 1024 : 1024
-  const size = `${(progress.receivedBytes / divisor).toFixed(1)} / ${(progress.totalBytes / divisor).toFixed(1)} ${divisor === 1024 ? 'KiB' : 'MiB'}`
-  const label = progress.kind === 'earlier' ? 'Earlier history' : progress.kind === 'recent' ? 'Recent history' : progress.resumed ? 'Resuming history' : 'Syncing history'
-  const description = `${label}: ${percent}% (${size})${progress.resumed ? ' - Resumed from saved progress' : ''}`
-  return { value, percent, label, description }
-}
-
-function SessionSortMenu({ count, value, onChange }: { count: number; value: SessionSortMode; onChange(mode: SessionSortMode): void }) {
+function SessionSortMenu({ count, groupCount, value, onChange }: { count: number; groupCount: number; value: SessionSortMode; onChange(mode: SessionSortMode): void }) {
   const [open, setOpen] = useState(false)
   const listboxId = useId()
   const root = useRef<HTMLDivElement>(null)
@@ -92,7 +81,7 @@ function SessionSortMenu({ count, value, onChange }: { count: number; value: Ses
   }
 
   return <div className="session-list-header">
-    <span className="session-list-count">{count} sessions</span>
+    <span className="session-list-count">{count} {count === 1 ? 'session' : 'sessions'}{groupCount > 0 && <span className="session-list-group-count"> · {groupCount} {groupCount === 1 ? 'group' : 'groups'}</span>}</span>
     <div className="session-sort" ref={root} onBlur={(event) => {
       if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false)
     }} onKeyDown={(event) => {
@@ -127,191 +116,7 @@ function SessionSortMenu({ count, value, onChange }: { count: number; value: Ses
   </div>
 }
 
-function SessionTree({ taskId, bindings, activeKey, expandSession, sessions, cachedTitles, historyTransfers, disabled, onSelect, onReorder, onUnlink }: {
-  taskId: string; bindings: SessionBinding[]; activeKey?: string; expandSession?: SessionExpandRequest; sessions: AgentHostSession[]; cachedTitles?: Readonly<Record<string, string>>; historyTransfers?: Readonly<Record<string, AgentHostHistoryTransfer>>; disabled: boolean; onSelect?(binding: SessionBinding): void; onReorder?(orderedKeys: string[]): void; onUnlink?(binding: SessionBinding): void
-}) {
-  const aliases = useMachineAliases()
-  const [expanded, setExpanded] = useState<string[]>(() => expandSession ? [expandSession.key] : [])
-  const [seenExpandId, setSeenExpandId] = useState(expandSession?.id)
-  if (expandSession && expandSession.id !== seenExpandId) {
-    setSeenExpandId(expandSession.id)
-    if (!expanded.includes(expandSession.key)) setExpanded([...expanded, expandSession.key])
-  }
-  const [focused, setFocused] = useState<string>()
-  const [draggedKey, setDraggedKey] = useState<string>()
-  const [dropIndicator, setDropIndicator] = useState<{ key: string; position: 'before' | 'after' }>()
-  const detailsPrefix = useId()
-  const elements = useRef(new Map<string, HTMLLIElement>())
-  const dragState = useRef<{ key: string; insertIndex?: number } | undefined>(undefined)
-  const suppressClick = useRef(false)
-  const keys = bindings.map(sessionBindingKey)
-  const canReorder = Boolean(onReorder && bindings.length > 1)
-  const tabStop = focused && keys.includes(focused) ? focused : activeKey && keys.includes(activeKey) ? activeKey : keys[0]
-  function clearDrag(): void {
-    dragState.current = undefined
-    setDraggedKey(undefined)
-    setDropIndicator(undefined)
-    if (suppressClick.current) setTimeout(() => { suppressClick.current = false }, 0)
-  }
-  function focus(key: string): void { setFocused(key); elements.current.get(key)?.focus() }
-  function showDetails(key: string, open: boolean): void {
-    setExpanded((current) => open ? current.includes(key) ? current : [...current, key] : current.filter((item) => item !== key))
-  }
-  function resolveInsertIndex(clientY: number, targetElement: Element | null, sourceIndex: number): number {
-    const rows = keys.map((key) => elements.current.get(key)?.querySelector<HTMLElement>('.session-tree-row') ?? elements.current.get(key))
-    if (rows.every((row) => row && row.getBoundingClientRect().height > 0)) {
-      for (let index = 0; index < rows.length; index++) {
-        const rect = rows[index]!.getBoundingClientRect()
-        const midpoint = rect.top + rect.height / 2
-        if (index < sourceIndex ? clientY <= midpoint : clientY < midpoint) return index
-      }
-      return keys.length
-    }
-    const targetKey = targetElement?.closest('li[role="treeitem"]')?.getAttribute('data-session-key')
-    const targetIndex = targetKey ? keys.indexOf(targetKey) : -1
-    if (targetIndex < 0) return keys.length
-    return targetIndex <= sourceIndex ? targetIndex : targetIndex + 1
-  }
-  function startDrag(event: DragEvent<HTMLDivElement>, key: string): void {
-    if (!canReorder || (event.target as Element | null)?.closest?.('.icon-button')) {
-      event.preventDefault()
-      return
-    }
-    dragState.current = { key }
-    suppressClick.current = true
-    setDraggedKey(key)
-    setDropIndicator(undefined)
-    if (event.dataTransfer) {
-      event.dataTransfer.effectAllowed = 'move'
-      try { event.dataTransfer.setData(SESSION_DRAG_MIME, key) } catch { /* synthetic DataTransfer may be read-only */ }
-      if (typeof event.dataTransfer.setDragImage === 'function') {
-        const rect = event.currentTarget.getBoundingClientRect()
-        if (rect.width > 0 && rect.height > 0) {
-          event.dataTransfer.setDragImage(
-            event.currentTarget,
-            Math.min(Math.max(0, event.clientX - rect.left), rect.width),
-            Math.min(Math.max(0, event.clientY - rect.top), rect.height),
-          )
-        }
-      }
-    }
-  }
-  function dragOver(event: DragEvent<HTMLUListElement>): void {
-    const current = dragState.current
-    if (!canReorder || !current) return
-    const sourceIndex = keys.indexOf(current.key)
-    if (sourceIndex < 0) return
-    event.preventDefault()
-    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
-    const insertIndex = resolveInsertIndex(event.clientY, event.target as Element | null, sourceIndex)
-    current.insertIndex = insertIndex
-    const noop = insertIndex === sourceIndex || insertIndex === sourceIndex + 1
-    const next = noop ? undefined : insertIndex >= keys.length
-      ? { key: keys[keys.length - 1], position: 'after' as const }
-      : { key: keys[insertIndex], position: 'before' as const }
-    setDropIndicator((prior) => prior?.key === next?.key && prior?.position === next?.position ? prior : next)
-  }
-  function dragLeave(event: DragEvent<HTMLUListElement>): void {
-    const related = event.relatedTarget as Node | null
-    if (related && event.currentTarget.contains(related)) return
-    if (dragState.current) dragState.current.insertIndex = undefined
-    setDropIndicator(undefined)
-  }
-  function drop(event: DragEvent<HTMLUListElement>): void {
-    const current = dragState.current
-    if (!canReorder || !current) return
-    const sourceIndex = keys.indexOf(current.key)
-    if (sourceIndex < 0) { clearDrag(); return }
-    event.preventDefault()
-    const insertIndex = current.insertIndex ?? resolveInsertIndex(event.clientY, event.target as Element | null, sourceIndex)
-    const movedKey = current.key
-    clearDrag()
-    const nextKeys = moveSessionKey(keys, movedKey, insertIndex)
-    if (nextKeys) onReorder?.(nextKeys)
-  }
-  function navigate(event: KeyboardEvent<HTMLLIElement>, key: string): void {
-    if (event.target !== event.currentTarget || event.ctrlKey || event.metaKey) return
-    const index = keys.indexOf(key)
-    if (event.altKey) {
-      if (!canReorder || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return
-      event.preventDefault()
-      event.stopPropagation()
-      const nextKeys = moveSessionKey(keys, key, event.key === 'ArrowUp' ? index - 1 : index + 2)
-      if (nextKeys) {
-        setFocused(key)
-        onReorder?.(nextKeys)
-        requestAnimationFrame(() => elements.current.get(key)?.focus())
-      }
-      return
-    }
-    let destination: string | undefined
-    switch (event.key) {
-      case 'ArrowDown': destination = keys[index + 1]; break
-      case 'ArrowUp': destination = keys[index - 1]; break
-      case 'Home': destination = keys[0]; break
-      case 'End': destination = keys.at(-1); break
-      case 'ArrowRight': showDetails(key, true); break
-      case 'ArrowLeft': showDetails(key, false); break
-      case 'Enter':
-      case ' ': { const binding = bindings.find((item) => sessionBindingKey(item) === key); if (binding) onSelect?.(binding) }; break
-      default: return
-    }
-    event.preventDefault()
-    event.stopPropagation()
-    if (destination) focus(destination)
-  }
-  return <ul role="tree" aria-label={`Sessions for ${taskId}`} aria-keyshortcuts={canReorder ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
-    className="task-list task-tree session-tree" onDragOver={dragOver} onDragLeave={dragLeave} onDrop={drop}>
-    {bindings.map((binding, index) => {
-      const key = sessionBindingKey(binding)
-      const discovered = sessions.find((session) => agentHostKey(session) === agentHostKey(binding.agentHost))
-      const cached = cachedTitles?.[agentHostKey(binding.agentHost)]
-      const label = cached || discovered?.title || (binding.title !== 'Agent Host' ? binding.title : binding.id)
-      const progress = historyTransfers?.[agentHostKey(binding.agentHost)]
-      const transfer = progress && transferProgress(progress)
-      const open = expanded.includes(key)
-      const detailsId = `${detailsPrefix}-${index}`
-      const dropPosition = draggedKey && keys.includes(draggedKey) && dropIndicator?.key === key ? dropIndicator.position : undefined
-      return <li key={key} role="treeitem" data-session-key={key} data-drop={dropPosition} aria-label={label} aria-description={binding.id} aria-selected={key === activeKey} aria-expanded={open} aria-level={1}
-        tabIndex={tabStop === key ? 0 : -1} ref={(element) => { if (element) elements.current.set(key, element); else elements.current.delete(key) }}
-        onFocus={(event) => { if (event.target === event.currentTarget) setFocused(key) }} onKeyDown={(event) => navigate(event, key)}>
-        <div className={`session-tree-row ${key === activeKey ? 'is-selected' : ''}`} data-transferring={Boolean(transfer)}
-          data-dragging={draggedKey === key && keys.includes(draggedKey) ? true : undefined}
-          draggable={canReorder || undefined} onDragStart={(event) => startDrag(event, key)} onDragEnd={clearDrag}>
-          {transfer && <progress className="session-transfer-mask" aria-label={`History transfer for ${label}`} max={100} value={transfer.value} aria-valuetext={transfer.description} />}
-          {canReorder && <span className="session-drag-grip" aria-hidden="true"><Icon name="gripper" /></span>}
-          <button type="button" tabIndex={-1} className="session-row" draggable={canReorder || undefined} aria-label={`Open ${label}`} title={label}
-            onClick={() => { if (suppressClick.current) return; focus(key); onSelect?.(binding) }}>
-            <strong title={cached && !discovered ? 'Last known title saved on this device' : undefined}>{label}</strong>
-            {transfer ? <span className="session-transfer-status" title={transfer.description}>
-              <Icon name="loading" className="codicon-modifier-spin" /><span>{transfer.label}</span><strong>{transfer.percent}%</strong>
-            </span> : <span className="session-machine" title={binding.owner.machineName}>{machineLabel(binding.owner, aliases)}</span>}
-          </button>
-          <IconButton icon={open ? 'chevron-up' : 'chevron-down'} label={`${open ? 'Hide' : 'Show'} details for ${label}`} tabIndex={-1} aria-expanded={open} aria-controls={detailsId}
-            onClick={() => { focus(key); showDetails(key, !open) }} />
-        </div>
-        {open && <div id={detailsId} className="session-details" role="group" aria-label={`Details for ${label}`}>
-          <dl>
-            <dt>Title</dt><dd>{label}</dd>
-            <dt>Session</dt><dd>{binding.id}</dd>
-            <dt>Chat</dt><dd>{binding.agentHost.chatId}</dd>
-            <dt>Machine</dt><dd>{binding.owner.machineName}</dd>
-            <dt>Location</dt><dd>{binding.ownerIsRemote ? 'Remote' : 'Local'}</dd>
-            <dt>Access</dt><dd>{discovered ? discovered.canSend ? 'Read and send' : 'Read only' : 'Not in discovery list'}</dd>
-            {key === activeKey && <><dt>Selection</dt><dd>Current session</dd></>}
-          </dl>
-          {onUnlink && <div className="session-details-actions">
-            <button type="button" className="secondary-button session-unlink-button" aria-label={`Unlink ${label}`} disabled={disabled} onClick={() => onUnlink(binding)}>
-              <Icon name="debug-disconnect" /><span>Unlink</span>
-            </button>
-          </div>}
-        </div>}
-      </li>
-    })}
-  </ul>
-}
-
-export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, orderedKeys, sortMode, activeKey, expandSession, localOwnerId, busy = false, initialView = 'current', cachedTitles, sessionTimestamps, historyTransfers, titleCacheError, onTitles, onSelect, onReorder, onSortMode, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
+export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, orderedKeys, sessionLayout, sortMode, activeKey, expandSession, localOwnerId, busy = false, initialView = 'current', cachedTitles, sessionTimestamps, historyTransfers, titleCacheError, onTitles, onSelect, onLayoutChange, onSortMode, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
   const bridge = window.agentHost
   const aliases = useMachineAliases()
   const [view, setView] = useState<SessionView>(() => expandSession ? 'current' : initialView)
@@ -361,16 +166,14 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
     }
     return result
   }, [sessions, sessionTimestamps])
-  const linked = useMemo(() => {
-    if (!taskId) return []
-    return sortSessionBindings(bindings[taskId] ?? [], {
+  const linked = useMemo(() => (taskId ? bindings[taskId] ?? [] : []), [bindings, taskId])
+  const { entries, manual } = useMemo(() => buildSessionTree(linked, {
       mode: activeSortMode,
       orderedKeys,
       titles: mergedTitles,
       timestamps: mergedTimestamps,
       aliases,
-    })
-  }, [taskId, bindings, activeSortMode, orderedKeys, mergedTitles, mergedTimestamps, aliases])
+  }, sessionLayout), [linked, activeSortMode, orderedKeys, mergedTitles, mergedTimestamps, aliases, sessionLayout])
   const detachmentChanged = Boolean(detach && !linked.some((item) => sessionBindingKey(item) === sessionBindingKey(detach)))
   useEffect(() => {
     let active = true
@@ -413,11 +216,17 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
       {titleCacheError && <p className="muted" role="status">{titleCacheError}</p>}
       {!taskId && <p className="muted">Select a task to link or create a session.</p>}
       {view === 'current' && <>
-        {taskId && linked.length > 1 && <SessionSortMenu count={linked.length} value={activeSortMode} onChange={(next) => {
+        {taskId && (linked.length > 1 || manual.groups.length > 0) && <SessionSortMenu count={linked.length} groupCount={manual.groups.length} value={activeSortMode} onChange={(next) => {
           if (sortMode === undefined) setLocalSortMode(next)
           onSortMode?.(next)
         }} />}
-        {taskId && <SessionTree taskId={taskId} bindings={linked} activeKey={activeKey} expandSession={expandSession} sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} disabled={!taskReady || busy || operating} onSelect={onSelect} onReorder={onReorder ? (nextKeys) => { if (sortMode === undefined) setLocalSortMode('manual'); onReorder(nextKeys) } : undefined} onUnlink={onDetach ? (binding) => { setDetach(binding); setError(undefined) } : undefined} />}
+        {taskId && <LinkedSessionTree taskId={taskId} entries={entries} manualLayout={manual} activeKey={activeKey} expandSession={expandSession}
+          sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} unlinkDisabled={!taskReady || busy || operating} onSelect={onSelect}
+          onLayoutChange={onLayoutChange ? (next, makeManual) => {
+            if (sortMode === undefined && makeManual) setLocalSortMode('manual')
+            onLayoutChange(next, makeManual)
+          } : undefined}
+          onUnlink={onDetach ? (binding) => { setDetach(binding); setError(undefined) } : undefined} />}
         {!linked.length && <p className="muted">{busy ? 'Loading task sessions...' : 'No sessions linked to this task.'}</p>}
         {detach && <section className="session-inline-confirm" aria-label="Detach conversation"><p>Detach {detach.id} from {taskId}? Conversation history stays on its Host.</p>{detachmentChanged && <p role="alert">The task binding changed. Cancel and review the current sessions.</p>}<div className="session-sidebar-actions"><button type="button" className="secondary-button" disabled={operating} onClick={() => setDetach(undefined)}>Keep conversation</button><button type="button" className="primary-button" disabled={!taskReady || busy || operating || detachmentChanged} onClick={() => { void run(async () => { if (onDetach) await onDetach(detach); setDetach(undefined) }) }}>Detach session</button></div></section>}
       </>}

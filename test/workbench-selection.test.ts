@@ -2,6 +2,8 @@ import { act, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useWorkbenchSelection } from '../src/renderer/chat/useWorkbenchSelection'
 import { moveSessionKey, orderSessionBindings, sessionBindingKey, sortSessionBindings } from '../src/renderer/chat/sessionBindings'
+import { buildSessionTree, moveSessionNode, treeSessionBindings, ungroupSessions } from '../src/renderer/chat/sessionGroups'
+import type { SessionGroupLayout } from '../src/renderer/chat/sessionGroups'
 import { agentHostKey } from '../src/shared/agentHost'
 import { agentHostTargetFixture } from './immutable-bindings-fixture'
 
@@ -240,8 +242,9 @@ describe('device-local workbench selection', () => {
     const hook = renderHook(() => useWorkbenchSelection('workspace'))
     expect(hook.result.current.sessionOrders).toEqual({})
     const writes = vi.spyOn(Storage.prototype, 'setItem')
-    act(() => hook.result.current.reorderSessions(taskId, [third, first, second], taskId, [taskId]))
-    act(() => hook.result.current.reorderSessions(taskId, [third, first, second], taskId, [taskId]))
+    const layout = { order: [third, first, second], groups: [] }
+    act(() => hook.result.current.setSessionLayout(taskId, layout, true, taskId, [taskId]))
+    act(() => hook.result.current.setSessionLayout(taskId, layout, true, taskId, [taskId]))
     expect(writes).toHaveBeenCalledOnce()
     act(() => hook.result.current.selectSession(taskId, first))
     act(() => hook.result.current.selectTask('T-0003'))
@@ -317,7 +320,7 @@ describe('device-local workbench selection', () => {
     expect(hook.result.current.taskSortMode('T-0003')).toBe('updated-desc')
 
     // Dragging on T-0002 pins T-0002 to manual while keeping T-0003 on updated-desc.
-    act(() => hook.result.current.reorderSessions('T-0002', [second, first], 'T-0002', ['T-0002', 'T-0003']))
+    act(() => hook.result.current.setSessionLayout('T-0002', { order: [second, first], groups: [] }, true, 'T-0002', ['T-0002', 'T-0003']))
     expect(hook.result.current.taskSortMode('T-0002')).toBe('manual')
     expect(hook.result.current.taskSortMode('T-0003')).toBe('updated-desc')
 
@@ -326,5 +329,94 @@ describe('device-local workbench selection', () => {
     expect(restored.result.current.taskSortMode('T-0002')).toBe('manual')
     expect(restored.result.current.taskSortMode('T-0003')).toBe('updated-desc')
     expect(restored.result.current.sessionOrders['T-0002']).toEqual([second, first])
+  })
+
+  it('remembers group names, member order and collapse per workspace without changing task selection or sort', () => {
+    const group = { id: 'grp:00000000-0000-4000-8000-000000000033', title: 'Performance', collapsed: true, memberKeys: [second, first] }
+    const layout = { order: [group.id], groups: [group] }
+    const hook = renderHook(({ workspace }) => useWorkbenchSelection(workspace), { initialProps: { workspace: 'one' } })
+    act(() => hook.result.current.selectSession(taskId, first))
+    act(() => hook.result.current.setSessionSort(taskId, 'title-asc'))
+    act(() => hook.result.current.setSessionLayout(taskId, layout, false))
+    expect(hook.result.current.sessions[taskId]).toBe(first)
+    expect(hook.result.current.taskSortMode(taskId)).toBe('title-asc')
+    act(() => hook.result.current.selectTask('T-0003'))
+    hook.rerender({ workspace: 'two' })
+    expect(hook.result.current.sessionGroups).toEqual({})
+    hook.rerender({ workspace: 'one' })
+    expect(hook.result.current.sessionGroups[taskId]).toEqual(layout)
+    act(() => hook.result.current.selectSession(taskId, second))
+    expect(hook.result.current.sessionGroups[taskId].groups[0].collapsed).toBe(false)
+    act(() => hook.result.current.clearSession(taskId, first, false))
+    expect(hook.result.current.sessions[taskId]).toBe(second)
+    expect(hook.result.current.sessionGroups[taskId].groups[0]).toMatchObject({ title: 'Performance', memberKeys: [second] })
+    act(() => hook.result.current.clearSession(taskId, second))
+    expect(hook.result.current.sessionGroups).toEqual({})
+    expect(hook.result.current.sessions[taskId]).toBeNull()
+  })
+
+  it('reports corrupt grouping without discarding the remembered task and active chat', () => {
+    const group = { id: 'grp:00000000-0000-4000-8000-000000000044', title: 'Performance', collapsed: false, memberKeys: [first, second] }
+    localStorage.setItem(storageKey(), JSON.stringify({
+      version: 2, taskId, openTaskIds: [taskId], sessions: { [taskId]: first },
+      sessionGroups: { [taskId]: { order: [first, group.id], groups: [group] } },
+    }))
+    const { result } = renderHook(() => useWorkbenchSelection('workspace'))
+    expect(result.current.error).toContain('Saved session groups are invalid')
+    expect(result.current.taskId).toBe(taskId)
+    expect(result.current.sessions[taskId]).toBe(first)
+    expect(result.current.sessionGroups).toEqual({})
+  })
+})
+
+describe('session group arrangement', () => {
+  const performance = 'grp:00000000-0000-4000-8000-000000000033'
+  const review = 'grp:00000000-0000-4000-8000-000000000044'
+
+  it('moves exact sessions and whole groups without duplicates, including promotion on ungroup', () => {
+    const linked: SessionGroupLayout = { order: ['A', 'B', 'C', 'D', 'E'], groups: [] }
+    const initial = moveSessionNode(linked, 'D', { key: 'B', position: 'group' }, performance)!
+    expect(initial.order).toEqual(['A', performance, 'C', 'E'])
+    expect(initial.groups[0].memberKeys).toEqual(['B', 'D'])
+    const two = moveSessionNode(initial, 'E', { key: 'C', position: 'group' }, review)!
+    expect(moveSessionNode(two, performance, { key: review, position: 'into' })).toBeUndefined()
+    const joined = moveSessionNode(two, 'D', { key: 'C', position: 'into' })!
+    expect(joined.order).toEqual(['A', 'B', review])
+    expect(joined.groups[0].memberKeys).toEqual(['C', 'D', 'E'])
+    const extracted = moveSessionNode(joined, 'D', { key: review, position: 'before' })!
+    const moved = moveSessionNode(extracted, review, { key: 'A', position: 'before' })!
+    expect(moved.order).toEqual([review, 'A', 'B', 'D'])
+    expect(ungroupSessions(moved, review)).toEqual({ order: ['C', 'E', 'A', 'B', 'D'], groups: [] })
+  })
+
+  it('smart-sorts by group name or newest member and ignores removed bindings without losing new ones', () => {
+    const make = (name: string, owner?: Parameters<typeof agentHostTargetFixture>[1]) => {
+      const agentHost = agentHostTargetFixture(name, owner)
+      return { id: agentHost.sessionId, title: name, owner: agentHost.owner, agentHost }
+    }
+    const a = make('Zebra')
+    const b = { ...a, title: 'Alpha', agentHost: { ...a.agentHost, chatId: 'ahp-chat:/other' } }
+    const c = make('Beta')
+    const d = make('Delta')
+    const key = sessionBindingKey
+    const group = { id: performance, title: 'Build', collapsed: true, memberKeys: [key(a), key(b)] }
+    const saved = { order: [key(c), performance], groups: [group] }
+    const bindings = [a, b, c]
+    const nameOrder = buildSessionTree(bindings, { mode: 'title-asc' }, saved)
+    expect(nameOrder.entries.map((entry) => entry.key)).toEqual([key(c), performance])
+    expect(treeSessionBindings(nameOrder.entries)).toEqual([c, b, a])
+    const mostRecent = buildSessionTree(bindings, {
+      mode: 'updated-desc', timestamps: {
+        [agentHostKey(a.agentHost)]: { updatedAt: 300 },
+        [agentHostKey(b.agentHost)]: { updatedAt: 100 },
+        [agentHostKey(c.agentHost)]: { updatedAt: 200 },
+      },
+    }, saved)
+    expect(mostRecent.entries.map((entry) => entry.key)).toEqual([performance, key(c)])
+    expect(treeSessionBindings(mostRecent.entries)).toEqual([a, b, c])
+    const reconciled = buildSessionTree([b, c, d], { mode: 'manual' }, saved)
+    expect(reconciled.manual.groups[0]).toEqual({ ...group, memberKeys: [key(b)] })
+    expect(treeSessionBindings(reconciled.entries)).toEqual([c, b, d])
+    expect(buildSessionTree([c, d], { mode: 'manual' }, saved).manual).toEqual({ order: [key(c), key(d)], groups: [] })
   })
 })

@@ -11,6 +11,7 @@
 .session-sidebar .session-filter { padding: 0; }
 .session-list-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; min-height: 24px; margin: 0 0 4px; padding: 0 4px 0 6px; }
 .session-list-count { flex-shrink: 0; color: var(--subtle); font-size: 11px; line-height: 16px; }
+.session-list-group-count { white-space: nowrap; }
 .session-sort { position: relative; min-width: 0; }
 .session-sort-trigger { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; height: 24px; padding: 0 7px; border-radius: var(--radius-sm); color: var(--muted); font-size: 11px; line-height: 16px; }
 .session-sort-trigger > .codicon:first-child { font-size: 12px; color: var(--subtle); }
@@ -34,23 +35,50 @@
 .session-sidebar .ah-creation { margin: 0; padding: 0; border: 0; }
 .session-sidebar .ah-creation-pickers { grid-template-columns: minmax(0, 1fr); }
 .session-sidebar button { overflow-wrap: anywhere; }
-.session-tree { display: grid; gap: 4px; padding: 0; }
-.session-tree > li { position: relative; min-width: 0; border-radius: var(--radius-md); }
-.session-tree > li[data-drop="before"]::before,
-.session-tree > li[data-drop="after"]::after { content: ''; position: absolute; left: 6px; right: 6px; z-index: 2; height: 2px; border-radius: 999px; background: var(--link); pointer-events: none; }
-.session-tree > li[data-drop="before"]::before { top: -3px; }
-.session-tree > li[data-drop="after"]::after { bottom: -3px; }
+.session-tree, .session-group-members { display: grid; gap: 4px; padding: 0; }
+.session-tree-item { position: relative; min-width: 0; border-radius: var(--radius-md); }
+.session-tree-item[data-drop="before"]::before,
+.session-tree-item[data-drop="after"]::after { content: ''; position: absolute; left: 6px; right: 6px; z-index: 2; height: 2px; border-radius: 999px; background: var(--link); pointer-events: none; }
+.session-tree-item[data-drop="before"]::before { top: -3px; }
+.session-tree-item[data-drop="after"]::after { bottom: -3px; }
+.session-group-item { margin-block: 3px; }
+.session-group-row { display: flex; align-items: center; gap: 4px; min-height: 32px; padding-inline: 5px 10px; border-radius: var(--radius-sm); }
+.session-group-row:hover, .session-group-row[data-current="true"] { background: var(--raised); }
+.session-group-toggle, .session-group-edit { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 32px; padding: 0; font-size: 12px; font-weight: 600; text-align: left; }
+:is(.session-group-toggle, .session-group-edit) > .codicon { color: var(--muted); font-size: 13px; }
+.session-group-toggle > span:last-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.session-group-count { flex-shrink: 0; min-width: 18px; padding: 0 5px; border-radius: 6px; background: var(--raised); color: var(--muted); font-size: 10px; line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; }
+.session-group-row:is(:hover, [data-current="true"]) .session-group-count { background: var(--selected); }
+.session-group-current-dot { flex-shrink: 0; width: 5px; height: 5px; border-radius: 50%; background: var(--link); }
+.session-group-sync { display: flex; color: var(--link); }
+.session-group-sync > .codicon { font-size: 12px; }
+.session-group-actions { display: flex; gap: 1px; opacity: 0; pointer-events: none; }
+.session-group-row:is(:hover, :focus-within) .session-group-actions,
+.session-group-item:focus-visible > .session-group-row .session-group-actions { opacity: 1; pointer-events: auto; }
+.session-group-actions .icon-button { width: 24px; height: 24px; padding: 0; border-radius: 6px; }
+.session-group-actions .icon-button:hover { background: var(--selected); }
+.session-group-actions .codicon { font-size: 13px; }
+.session-sidebar .session-group-name-input { flex: 1; width: 100%; min-width: 0; height: 26px; padding: 2px 6px; font-size: 12px; font-weight: 600; }
+.session-group-name-input:focus-visible { outline: 1px solid var(--link); outline-offset: -1px; }
+.session-group-members { margin: 2px 0 0 11px; padding-inline-start: 5px; border-inline-start: 1px solid var(--border); list-style: none; }
+.session-tree-item[data-drop="group"] > .session-tree-row,
+.session-tree-item[data-drop="into"] > :is(.session-tree-row, .session-group-row) { background: color-mix(in srgb, var(--link) 9%, var(--panel)); outline: 1px solid color-mix(in srgb, var(--link) 70%, var(--border)); outline-offset: -1px; }
+.session-drop-hint { display: flex; align-items: center; gap: 4px; min-width: 0; color: var(--link); font-size: 11px; font-weight: 500; line-height: 18px; white-space: nowrap; }
+.session-drop-hint > .codicon { font-size: 12px; }
+@media (hover: none) { .session-group-actions { opacity: 1; pointer-events: auto; } }
 .session-tree .session-row { display: grid; gap: 2px; min-width: 0; padding: 0 2px; }
 .session-tree .session-row strong { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 500; line-height: 18px; }
 .session-machine { display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: 11px; line-height: 18px; }
 .session-tree-row { position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; padding: 6px; border-radius: var(--radius-md); }
 .session-tree-row:hover { background: var(--hover); }
 .session-tree-row.is-selected { background: var(--selected); }
-.session-tree-row[data-dragging="true"] { opacity: .55; }
+:is(.session-tree-row, .session-group-row)[data-dragging="true"] { opacity: .55; }
 .session-drag-grip { position: relative; z-index: 1; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 12px; color: var(--subtle); opacity: .5; cursor: grab; }
 .session-drag-grip > .codicon { font-size: 13px; }
-.session-tree-row:hover .session-drag-grip, .session-tree > li:focus-visible .session-drag-grip, .session-tree-row[data-dragging="true"] .session-drag-grip { color: var(--muted); opacity: .95; }
-.session-tree-row[data-dragging="true"] .session-drag-grip { cursor: grabbing; }
+:is(.session-tree-row, .session-group-row):is(:hover, [data-dragging="true"]) .session-drag-grip,
+.session-tree-item:focus-visible > div > .session-drag-grip { color: var(--muted); opacity: .95; }
+:is(.session-tree-row, .session-group-row)[data-dragging="true"] .session-drag-grip { cursor: grabbing; }
+.session-group-row:not([draggable="true"]) > .session-drag-grip { visibility: hidden; }
 .session-tree-row .session-row { flex: 1; min-width: 0; border: 0; background: none; }
 .session-tree-row > .icon-button { flex-shrink: 0; }
 .session-tree-row > button { position: relative; z-index: 1; }
@@ -62,7 +90,9 @@
 .session-transfer-status > .codicon { font-size: 12px; }
 .session-transfer-status > span:not(.codicon) { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .session-tree .session-transfer-status > strong { flex-shrink: 0; color: var(--text); font-size: 11px; font-weight: 500; font-variant-numeric: tabular-nums; }
-.session-tree [role="treeitem"]:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.session-tree-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.session-group-item:focus-visible { outline: none; }
+.session-group-item:focus-visible > .session-group-row { outline: 1px solid var(--accent); outline-offset: -1px; }
 .session-details { margin: 4px 6px 8px; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--raised); font-size: 11px; line-height: 1.5; }
 .session-details dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 8px; margin: 0; }
 .session-details dt { color: var(--muted); }
@@ -190,7 +220,7 @@
 .ahp-activity-details { margin: 0 8px 8px; padding-left: 8px; border-left: 1px solid var(--border); }
 .ahp-activity-details .ahp-tool { margin-block: 0; }
 @media (prefers-reduced-motion: reduce) {
-  .ahp-activity .codicon-modifier-spin, .session-transfer-status .codicon-modifier-spin, .ahp-history-pagination .codicon-modifier-spin { animation: none; }
+  .ahp-activity .codicon-modifier-spin, .session-transfer-status .codicon-modifier-spin, .session-group-sync .codicon-modifier-spin, .ahp-history-pagination .codicon-modifier-spin { animation: none; }
   .session-transfer-mask::-webkit-progress-value { transition: none; }
 }
 .ahp-terminal { max-width: 100%; max-height: 240px; overflow: auto; margin-block: 8px; padding: 8px; border-radius: var(--radius-sm); font: 12px/1.5 Consolas, monospace; white-space: pre; background: var(--editor-bg); }

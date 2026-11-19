@@ -315,9 +315,9 @@ describe('AgentHostSessionsSidebar', () => {
       const [items, setItems] = useState([first, second, third])
       return <AgentHostSessionsSidebar taskId="T-0002" taskTitle="Reorder task" taskReady
         bindings={{ 'T-0002': items }} activeKey={sessionBindingKey(second)} onSelect={onSelect}
-        onReorder={(orderedKeys) => {
-          onReorder(orderedKeys)
-          setItems((current) => orderedKeys.map((key) => current.find((item) => sessionBindingKey(item) === key)!))
+        onLayoutChange={(layout, makeManual) => {
+          onReorder(layout, makeManual)
+          setItems((current) => layout.order.map((key) => current.find((item) => sessionBindingKey(item) === key)!))
         }}
         onDetach={vi.fn(async () => {})} onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} />
     }
@@ -348,7 +348,7 @@ describe('AgentHostSessionsSidebar', () => {
     expect(firstItem).toHaveAttribute('data-drop', 'before')
     fireEvent.drop(firstItem)
     expect(labels()).toEqual(['Third session', 'First session', 'Second session'])
-    expect(onReorder).toHaveBeenLastCalledWith([first, second, third].length ? [third, first, second].map(sessionBindingKey) : [])
+    expect(onReorder).toHaveBeenLastCalledWith({ order: [third, first, second].map(sessionBindingKey), groups: [] }, true)
     expect(within(tree).getByRole('treeitem', { name: 'Third session' })).toHaveAttribute('aria-expanded', 'true')
     expect(within(tree).getByRole('treeitem', { name: 'Second session' })).toHaveAttribute('aria-selected', 'true')
     expect(onSelect).not.toHaveBeenCalled()
@@ -376,7 +376,7 @@ describe('AgentHostSessionsSidebar', () => {
     const onReorder = vi.fn()
     const user = userEvent.setup()
     render(<AgentHostSessionsSidebar taskId="T-0002" taskTitle="Smart sort" taskReady
-      bindings={{ 'T-0002': [s1, s2, s3] }} onReorder={onReorder} onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} />)
+      bindings={{ 'T-0002': [s1, s2, s3] }} onLayoutChange={onReorder} onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} />)
 
     const tree = await screen.findByRole('tree', { name: 'Sessions for T-0002' })
     const sortTrigger = screen.getByRole('button', { name: 'Sort sessions' })
@@ -418,7 +418,7 @@ describe('AgentHostSessionsSidebar', () => {
     fireEvent.dragOver(alphaItem)
     fireEvent.drop(alphaItem)
     expect(sortTrigger).toHaveTextContent('Manual')
-    expect(onReorder).toHaveBeenCalledExactlyOnceWith([s1, s2, s3].map(sessionBindingKey))
+    expect(onReorder).toHaveBeenCalledExactlyOnceWith({ order: [s1, s2, s3].map(sessionBindingKey), groups: [] }, true)
   })
 
   it('expands the requested session details and reveals Unlink when expandSession is triggered', async () => {

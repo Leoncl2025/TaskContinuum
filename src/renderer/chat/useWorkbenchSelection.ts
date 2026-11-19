@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { z } from 'zod'
 import { sessionSortModes } from './sessionBindings'
 import type { SessionSortMode } from './sessionBindings'
+import { forgetSessionInLayout, layoutSessionKeys, MAX_SESSION_GROUP_NAME } from './sessionGroups'
+import type { SessionGroupLayout } from './sessionGroups'
 
 const taskIdSchema = z.string().regex(/^T-[0-9]{4,}$/).max(128)
 const sessionLimit = 1000
@@ -18,6 +20,25 @@ const sessionOrdersSchema = z.unknown().refine((value) => value !== null && type
 const sessionSortsSchema = z.unknown().refine((value) => value !== null && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).length <= sessionLimit && Object.keys(value).every((key) => taskIdSchema.safeParse(key).success), 'Invalid remembered session sort modes.')
   .pipe(z.record(taskIdSchema, sessionSortSchema))
+const groupIdSchema = z.templateLiteral(['grp:', z.uuid()])
+const sessionGroupLayoutSchema = z.object({
+  order: z.array(z.union([sessionKeySchema, groupIdSchema])).min(1).max(sessionLimit),
+  groups: z.array(z.object({
+    id: groupIdSchema, title: z.string().trim().min(1).max(MAX_SESSION_GROUP_NAME),
+    collapsed: z.boolean(), memberKeys: sessionOrderListSchema,
+  }).strict()).min(1).max(sessionLimit),
+}).strict().refine((layout) => {
+  const keys = new Set(layout.order)
+  const ids = new Set<string>(layout.groups.map((group) => group.id))
+  const sessionKeys = layoutSessionKeys(layout)
+  return keys.size === layout.order.length && ids.size === layout.groups.length
+    && layout.groups.every((group) => keys.has(group.id))
+    && layout.order.every((key) => !key.startsWith('grp:') || ids.has(key))
+    && sessionKeys.length <= sessionLimit && new Set(sessionKeys).size === sessionKeys.length
+}, 'Invalid session group membership or order.')
+const sessionGroupsSchema = z.unknown().refine((value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+  && Object.keys(value).length <= sessionLimit && Object.keys(value).every((key) => taskIdSchema.safeParse(key).success), 'Invalid remembered session groups.')
+  .pipe(z.record(taskIdSchema, sessionGroupLayoutSchema))
 const legacySelectionSchema = z.object({
   version: z.literal(1),
   taskId: taskIdSchema.nullable(),
@@ -29,12 +50,15 @@ const selectionSchema = legacySelectionSchema.extend({
   sessionOrders: sessionOrdersSchema.optional(),
   sessionSort: sessionSortSchema.optional(),
   sessionSorts: sessionSortsSchema.optional(),
+  sessionGroups: sessionGroupsSchema.optional(),
 }).refine((selection) => selection.taskId === null ? selection.openTaskIds.length === 0 : selection.openTaskIds.includes(selection.taskId), 'The active task must be open.')
 type Selection = z.infer<typeof selectionSchema>
+type SelectionInput = Omit<Selection, 'sessionGroups'> & { sessionGroups?: Record<string, SessionGroupLayout> }
 type State = { workspaceId?: string; selection?: Selection; persisted?: boolean; error?: string }
 const emptySessions: Readonly<Record<string, string | null>> = Object.freeze({})
 const emptySessionOrders: Readonly<Record<string, readonly string[]>> = Object.freeze({})
 const emptySessionSorts: Readonly<Record<string, SessionSortMode>> = Object.freeze({})
+const emptySessionGroups: Readonly<Record<string, SessionGroupLayout>> = Object.freeze({})
 
 function storageKey(workspaceId: string, version = 2): string { return `taskcontinuum:workbench-selection:v${version}:${workspaceId}` }
 
@@ -51,8 +75,18 @@ function rememberSession(selection: Selection | undefined, taskId: string, key: 
 
 function rememberSessionOrder(selection: Selection | undefined, taskId: string, orderedKeys: readonly string[]): NonNullable<Selection['sessionOrders']> {
   const entries = Object.entries(selection?.sessionOrders ?? {}).filter(([id]) => id !== taskId)
-  entries.push([taskId, [...orderedKeys]])
+  if (orderedKeys.length) entries.push([taskId, [...orderedKeys]])
   return Object.fromEntries(entries.slice(-sessionLimit))
+}
+
+function rememberSessionLayout(selection: Selection | undefined, taskId: string, layout: SessionGroupLayout): Pick<SelectionInput, 'sessionOrders' | 'sessionGroups'> {
+  const groupEntries: [string, SessionGroupLayout][] = Object.entries(selection?.sessionGroups ?? {}).filter(([id]) => id !== taskId)
+  if (layout.groups.length) groupEntries.push([taskId, layout])
+  const orders = rememberSessionOrder(selection, taskId, layoutSessionKeys(layout))
+  return {
+    sessionOrders: Object.keys(orders).length ? orders : undefined,
+    sessionGroups: groupEntries.length ? Object.fromEntries(groupEntries.slice(-sessionLimit)) : undefined,
+  }
 }
 
 function rememberTaskSort(selection: Selection | undefined, taskId: string, mode: SessionSortMode | null, defaultSort: SessionSortMode): NonNullable<Selection['sessionSorts']> {
@@ -61,12 +95,21 @@ function rememberTaskSort(selection: Selection | undefined, taskId: string, mode
   return Object.fromEntries(entries.slice(-sessionLimit))
 }
 
-function preservedSessionOrders(selection: Selection | undefined): Pick<Selection, 'sessionOrders' | 'sessionSort' | 'sessionSorts'> {
+function preservedSessionLayout(selection: Selection | undefined): Pick<Selection, 'sessionOrders' | 'sessionSort' | 'sessionSorts' | 'sessionGroups'> {
   return {
     ...(selection?.sessionOrders && Object.keys(selection.sessionOrders).length ? { sessionOrders: selection.sessionOrders } : {}),
     ...(selection?.sessionSort && selection.sessionSort !== 'manual' ? { sessionSort: selection.sessionSort } : {}),
     ...(selection?.sessionSorts && Object.keys(selection.sessionSorts).length ? { sessionSorts: selection.sessionSorts } : {}),
+    ...(selection?.sessionGroups && Object.keys(selection.sessionGroups).length ? { sessionGroups: selection.sessionGroups } : {}),
   }
+}
+
+function revealSession(selection: Selection | undefined, taskId: string, key: string): Selection['sessionGroups'] {
+  const groups = selection?.sessionGroups
+  const layout = groups?.[taskId]
+  const parent = layout?.groups.find((group) => group.collapsed && group.memberKeys.includes(key))
+  if (!parent || !layout) return groups
+  return { ...groups, [taskId]: { ...layout, groups: layout.groups.map((group) => group === parent ? { ...group, collapsed: false } : group) } }
 }
 
 function read(workspaceId: string | undefined): State {
@@ -86,7 +129,15 @@ function read(workspaceId: string | undefined): State {
       const selection = legacySelectionSchema.parse(value)
       return { workspaceId, selection: { ...selection, version: 2, openTaskIds: selection.taskId ? [selection.taskId] : [] }, persisted: false }
     }
-    return { workspaceId, selection: selectionSchema.parse(value), persisted: true }
+    const parsed = selectionSchema.safeParse(value)
+    if (parsed.success) return { workspaceId, selection: parsed.data, persisted: true }
+    if (value && typeof value === 'object' && 'sessionGroups' in value) {
+      const rest: Record<string, unknown> = { ...value }
+      delete rest.sessionGroups
+      const withoutGroups = selectionSchema.safeParse(rest)
+      if (withoutGroups.success) return { workspaceId, selection: withoutGroups.data, error: 'Saved session groups are invalid. Your task and conversation selections are unchanged.' }
+    }
+    throw parsed.error
   } catch {
     return { workspaceId, error: 'Saved task and session selections are invalid. Select a task or session to replace them; session access is unchanged.' }
   }
@@ -102,12 +153,12 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
     setState(next)
   }, [workspaceId])
 
-  const update = useCallback((change: (selection: Selection | undefined) => Selection, implicit = false) => {
+  const update = useCallback((change: (selection: Selection | undefined) => SelectionInput | undefined, implicit = false) => {
     if (!workspaceId) return
     const before = current.current.workspaceId === workspaceId ? current.current : read(workspaceId)
     if (implicit && before.error) return
     const candidate = change(before.selection)
-    if (candidate === before.selection) return
+    if (!candidate || candidate === before.selection) return
     const parsed = selectionSchema.safeParse(candidate)
     if (!parsed.success) {
       const next = { ...before, error: 'The task and session selection was not saved because its identifiers are invalid.' }
@@ -129,51 +180,64 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
   }, [workspaceId])
 
   const selectTask = useCallback((taskId: string | null, shown?: readonly string[]) => {
-    update((selection) => ({ version: 2, taskId, openTaskIds: openTasks(selection, taskId, shown), sessions: selection?.sessions ?? {}, ...preservedSessionOrders(selection) }))
+    update((selection) => ({ version: 2, taskId, openTaskIds: openTasks(selection, taskId, shown), sessions: selection?.sessions ?? {}, ...preservedSessionLayout(selection) }))
   }, [update])
 
   const closeTask = useCallback((taskId: string, shown: readonly string[], activeTaskId: string | null) => {
     const remaining = shown.filter((id) => id !== taskId)
     update((selection) => ({
       version: 2, taskId: activeTaskId === taskId ? remaining.at(-1) ?? null : activeTaskId,
-      openTaskIds: remaining, sessions: selection?.sessions ?? {}, ...preservedSessionOrders(selection),
+      openTaskIds: remaining, sessions: selection?.sessions ?? {}, ...preservedSessionLayout(selection),
     }))
   }, [update])
 
   const selectSession = useCallback((taskId: string, key: string, shown?: readonly string[]) => {
-    update((selection) => ({ version: 2, taskId, openTaskIds: openTasks(selection, taskId, shown), sessions: rememberSession(selection, taskId, key), ...preservedSessionOrders(selection) }))
+    update((selection) => ({
+      version: 2, taskId, openTaskIds: openTasks(selection, taskId, shown), sessions: rememberSession(selection, taskId, key),
+      ...preservedSessionLayout(selection), sessionGroups: revealSession(selection, taskId, key),
+    }))
+  }, [update])
+
+  const revealSessionGroup = useCallback((taskId: string, key: string) => {
+    update((selection) => {
+      const sessionGroups = revealSession(selection, taskId, key)
+      return selection && sessionGroups !== selection.sessionGroups ? { ...selection, sessionGroups } : selection
+    })
   }, [update])
 
   const rememberDefaultSession = useCallback((taskId: string, key: string) => {
     update((selection) => selection && Object.hasOwn(selection.sessions, taskId) ? selection : {
-      version: 2, taskId: selection ? selection.taskId : taskId, openTaskIds: selection?.openTaskIds ?? [taskId], sessions: rememberSession(selection, taskId, key), ...preservedSessionOrders(selection),
+      version: 2, taskId: selection ? selection.taskId : taskId, openTaskIds: selection?.openTaskIds ?? [taskId], sessions: rememberSession(selection, taskId, key), ...preservedSessionLayout(selection),
     }, true)
   }, [update])
 
-  const clearSession = useCallback((taskId: string, expectedKey: string) => {
-    update((selection) => selection && Object.hasOwn(selection.sessions, taskId) && selection.sessions[taskId] !== expectedKey
-      ? selection : { version: 2, taskId: selection ? selection.taskId : taskId, openTaskIds: selection?.openTaskIds ?? [taskId], sessions: rememberSession(selection, taskId, null), ...preservedSessionOrders(selection) })
+  const clearSession = useCallback((taskId: string, expectedKey: string, clearSelection = true) => {
+    update((selection) => {
+      const saved = selection?.sessionGroups?.[taskId]
+      const layout = saved && forgetSessionInLayout(saved, expectedKey)
+      const cleared = clearSelection && (!selection || !Object.hasOwn(selection.sessions, taskId) || selection.sessions[taskId] === expectedKey)
+      if (!cleared && layout === saved) return selection
+      return {
+        version: 2, taskId: selection ? selection.taskId : taskId, openTaskIds: selection?.openTaskIds ?? [taskId],
+        sessions: cleared ? rememberSession(selection, taskId, null) : selection?.sessions ?? {},
+        ...preservedSessionLayout(selection), ...(layout && layout !== saved ? rememberSessionLayout(selection, taskId, layout) : {}),
+      }
+    })
   }, [update])
 
-  const reorderSessions = useCallback((taskId: string, orderedKeys: readonly string[], activeTaskId?: string | null, shown?: readonly string[]) => {
+  const setSessionLayout = useCallback((taskId: string, layout: SessionGroupLayout, makeManual: boolean, activeTaskId?: string | null, shown?: readonly string[]) => {
     update((selection) => {
       const defaultSort = selection?.sessionSort ?? 'manual'
-      const currentSort = selection?.sessionSorts?.[taskId] ?? defaultSort
-      const currentOrder = selection?.sessionOrders?.[taskId]
-      if (selection && currentSort === 'manual' && currentOrder && currentOrder.length === orderedKeys.length
-        && currentOrder.every((key, index) => key === orderedKeys[index])) {
-        return selection
-      }
       const resolvedTaskId = activeTaskId !== undefined ? activeTaskId : selection ? selection.taskId : taskId
-      const nextSorts = rememberTaskSort(selection, taskId, 'manual', defaultSort)
+      const nextSorts = makeManual ? rememberTaskSort(selection, taskId, 'manual', defaultSort) : selection?.sessionSorts
       return {
         version: 2,
         taskId: resolvedTaskId,
         openTaskIds: openTasks(selection, resolvedTaskId, shown),
         sessions: selection?.sessions ?? {},
-        sessionOrders: rememberSessionOrder(selection, taskId, orderedKeys),
+        ...rememberSessionLayout(selection, taskId, layout),
         ...(defaultSort !== 'manual' ? { sessionSort: defaultSort } : {}),
-        ...(Object.keys(nextSorts).length ? { sessionSorts: nextSorts } : {}),
+        ...(nextSorts && Object.keys(nextSorts).length ? { sessionSorts: nextSorts } : {}),
       }
     })
   }, [update])
@@ -190,9 +254,9 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
         taskId: resolvedTaskId,
         openTaskIds: openTasks(selection, resolvedTaskId, shown),
         sessions: selection?.sessions ?? {},
-        ...(selection?.sessionOrders && Object.keys(selection.sessionOrders).length ? { sessionOrders: selection.sessionOrders } : {}),
-        ...(mode !== 'manual' ? { sessionSort: mode } : {}),
-        ...(Object.keys(nextSorts).length ? { sessionSorts: nextSorts } : {}),
+        ...preservedSessionLayout(selection),
+        sessionSort: mode !== 'manual' ? mode : undefined,
+        sessionSorts: Object.keys(nextSorts).length ? nextSorts : undefined,
       }
     })
   }, [update])
@@ -216,7 +280,8 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
     taskId: saved?.selection?.taskId, openTaskIds: saved?.selection?.openTaskIds,
     sessions: saved?.selection?.sessions ?? emptySessions,
     sessionOrders: saved?.selection?.sessionOrders ?? emptySessionOrders,
+    sessionGroups: saved?.selection?.sessionGroups ?? emptySessionGroups,
     sessionSort, sessionSorts, taskSortMode,
-    error: saved?.error, selectTask, closeTask, selectSession, rememberDefaultSession, clearSession, reorderSessions, setSessionSort, dismissError,
+    error: saved?.error, selectTask, closeTask, selectSession, rememberDefaultSession, clearSession, setSessionLayout, revealSessionGroup, setSessionSort, dismissError,
   }
 }
