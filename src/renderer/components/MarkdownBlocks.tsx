@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode, RefObject } from 'react'
 import type { ExtraProps } from 'react-markdown'
+import { cachedMermaidSvg, MAX_MERMAID_SOURCE_LENGTH, renderMermaidDiagram } from '../markdownMermaid'
+import type { MermaidTheme } from '../markdownMermaid'
 import { markdownCodeText } from '../markdownSyntax'
 import { Dialog, Icon, IconButton } from './Primitives'
 import '../sessions.css'
@@ -104,6 +106,142 @@ function useExpandableBlock(anchorRef: RefObject<HTMLDivElement | null>) {
   return { inlineExpanded, modalOpen, setModalOpen, toggle, style }
 }
 
+function detectMermaidTheme(element: HTMLElement | null): MermaidTheme {
+  const host = element?.closest<HTMLElement>('[data-theme]')
+    ?? document.querySelector<HTMLElement>('.workbench[data-theme], .repository-dialog-theme[data-theme]')
+  return host?.getAttribute('data-theme') === 'dark' ? 'dark' : 'light'
+}
+
+function MarkdownMermaidBlock({ source }: { source: string }) {
+  const anchorRef = useRef<HTMLDivElement>(null)
+  const [theme, setTheme] = useState<MermaidTheme>(() => detectMermaidTheme(null))
+  const trimmed = source.trim()
+  const oversized = trimmed.length > MAX_MERMAID_SOURCE_LENGTH
+  const [rendered, setRendered] = useState<{ key: string; svg?: string; failed?: boolean }>(() => {
+    const cached = !oversized && trimmed ? cachedMermaidSvg(trimmed, theme) : undefined
+    return cached ? { key: `${theme}:${trimmed}`, svg: cached } : { key: '' }
+  })
+  const [viewMode, setViewMode] = useState<'diagram' | 'source'>('diagram')
+  const [copying, setCopying] = useState(false)
+  const [copyResult, setCopyResult] = useState<{ source: string; copied: boolean }>()
+  const copied = copyResult?.source === source && copyResult.copied
+  const expand = useExpandableBlock(anchorRef)
+  const active = expand.inlineExpanded || expand.modalOpen
+
+  useEffect(() => {
+    const anchor = anchorRef.current
+    const host = anchor?.closest<HTMLElement>('[data-theme]')
+      ?? document.querySelector<HTMLElement>('.workbench[data-theme], .repository-dialog-theme[data-theme]')
+    let active = true
+    const syncTheme = () => {
+      if (!active) return
+      const next = detectMermaidTheme(anchor)
+      setTheme((prior) => prior === next ? prior : next)
+    }
+    queueMicrotask(syncTheme)
+    if (!host || typeof MutationObserver !== 'function') return () => { active = false }
+    const observer = new MutationObserver(syncTheme)
+    observer.observe(host, { attributes: true, attributeFilter: ['data-theme'] })
+    return () => {
+      active = false
+      observer.disconnect()
+    }
+  }, [])
+
+  const targetKey = `${theme}:${trimmed}`
+  const cachedSvg = !oversized && trimmed ? cachedMermaidSvg(trimmed, theme) : undefined
+  const activeSvg = cachedSvg ?? (rendered.key === targetKey ? rendered.svg : undefined)
+  const renderFailed = oversized || (rendered.key === targetKey && Boolean(rendered.failed))
+  const effectiveView = viewMode === 'source' || !activeSvg ? 'source' : 'diagram'
+
+  useEffect(() => {
+    if (!trimmed || oversized || cachedSvg) return
+    let cancelled = false
+    const delay = rendered.svg ? 90 : 0
+    const timer = setTimeout(() => {
+      void renderMermaidDiagram(trimmed, theme).then((svg) => {
+        if (!cancelled) setRendered({ key: targetKey, svg })
+      }).catch(() => {
+        if (!cancelled) setRendered({ key: targetKey, failed: true })
+      })
+    }, delay)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [trimmed, theme, oversized, cachedSvg, targetKey, rendered.svg])
+
+  async function copy(): Promise<void> {
+    setCopying(true)
+    try {
+      await writeClipboard(source)
+      setCopyResult({ source, copied: true })
+    } catch {
+      setCopyResult({ source, copied: false })
+    } finally {
+      setCopying(false)
+    }
+  }
+
+  return <div ref={anchorRef} className="markdown-block-anchor" data-expanded={expand.inlineExpanded || undefined}>
+    <div className={`message-code-block markdown-mermaid-card${expand.inlineExpanded ? ' is-expanded' : ''}`} style={expand.style}>
+      <div className="message-code-header markdown-card-header">
+        <span className="markdown-card-label"><Icon name="type-hierarchy-sub" /><span>Mermaid</span></span>
+        <div className="markdown-card-actions">
+          <div className="mermaid-view-switch" role="group" aria-label="Mermaid view">
+            <button type="button" aria-pressed={effectiveView === 'diagram'} disabled={!activeSvg} onClick={() => setViewMode('diagram')}>Diagram</button>
+            <button type="button" aria-pressed={effectiveView === 'source'} onClick={() => setViewMode('source')}>Source</button>
+          </div>
+          <button type="button" className="markdown-expand-button" data-active={copied || undefined}
+            aria-label={copied ? 'Mermaid source copied' : 'Copy Mermaid source'}
+            title={copied ? 'Mermaid source copied' : 'Copy Mermaid source'}
+            disabled={copying || !source}
+            onClick={() => { void copy() }}>
+            <Icon name={copied ? 'check' : 'copy'} />
+            <span>{copied ? 'Copied' : 'Copy source'}</span>
+          </button>
+          <button type="button" className="markdown-expand-button" data-active={active || undefined}
+            aria-label={active ? 'Restore diagram width' : 'Expand diagram width'}
+            title={active ? 'Restore default width' : 'Expand to full width'}
+            aria-pressed={expand.inlineExpanded}
+            onClick={expand.toggle}>
+            <Icon name={active ? 'screen-normal' : 'screen-full'} />
+            <span>{active ? 'Compact' : 'Full width'}</span>
+          </button>
+        </div>
+      </div>
+      {effectiveView === 'diagram' && activeSvg ? (
+        <div className="mermaid-diagram-stage" role="img" aria-label="Mermaid diagram" dangerouslySetInnerHTML={{ __html: activeSvg }} />
+      ) : (
+        <pre tabIndex={0} aria-label="Mermaid source"><code>{source}</code></pre>
+      )}
+      {oversized && <p className="message-code-error" role="status">Diagram rendering is disabled above {MAX_MERMAID_SOURCE_LENGTH.toLocaleString()} characters. Source remains available to read and copy.</p>}
+      {!oversized && renderFailed && trimmed && <p className="message-code-error" role="status">Diagram preview is unavailable until syntax is complete — showing Mermaid source.</p>}
+      {copyResult?.source === source && !copyResult.copied && <p className="message-code-error" role="status">Mermaid source could not be copied.</p>}
+    </div>
+    {expand.modalOpen && <Dialog title="Mermaid diagram" className="markdown-expand-dialog" onClose={() => expand.setModalOpen(false)}>
+      <div className="markdown-expand-dialog-toolbar">
+        {activeSvg && <div className="mermaid-view-switch" role="group" aria-label="Expanded Mermaid view">
+          <button type="button" aria-pressed={effectiveView === 'diagram'} onClick={() => setViewMode('diagram')}>Diagram</button>
+          <button type="button" aria-pressed={effectiveView === 'source'} onClick={() => setViewMode('source')}>Source</button>
+        </div>}
+        <button type="button" className="secondary-button" disabled={copying || !source} onClick={() => { void copy() }}>
+          <Icon name={copied ? 'check' : 'copy'} /><span>{copied ? 'Source copied' : 'Copy Mermaid source'}</span>
+        </button>
+      </div>
+      <div className="message-markdown markdown-expand-dialog-body">
+        <div className="message-code-block markdown-mermaid-card is-expanded">
+          {effectiveView === 'diagram' && activeSvg ? (
+            <div className="mermaid-diagram-stage" role="img" aria-label="Expanded Mermaid diagram" dangerouslySetInnerHTML={{ __html: activeSvg }} />
+          ) : (
+            <pre tabIndex={0} aria-label="Expanded Mermaid source"><code>{source}</code></pre>
+          )}
+        </div>
+      </div>
+    </Dialog>}
+  </div>
+}
+
 export function MarkdownCodeBlock({ children, node }: ExtraProps & { children?: ReactNode }) {
   const anchorRef = useRef<HTMLDivElement>(null)
   const code = node?.children[0]
@@ -111,11 +249,14 @@ export function MarkdownCodeBlock({ children, node }: ExtraProps & { children?: 
   const classNames = code?.type === 'element' ? code.properties.className : undefined
   const languageClass = Array.isArray(classNames) ? classNames.find((name) => typeof name === 'string' && name.startsWith('language-')) : undefined
   const language = typeof languageClass === 'string' ? languageClass.slice('language-'.length) : 'Code'
+  const isMermaid = language.toLowerCase() === 'mermaid'
   const [copying, setCopying] = useState(false)
   const [result, setResult] = useState<{ source: string; copied: boolean }>()
   const copied = result?.source === source && result.copied
   const expand = useExpandableBlock(anchorRef)
   const active = expand.inlineExpanded || expand.modalOpen
+
+  if (isMermaid) return <MarkdownMermaidBlock source={source} />
 
   async function copy(): Promise<void> {
     setCopying(true)

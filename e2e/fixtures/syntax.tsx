@@ -5,6 +5,7 @@ import { WorkspaceDocument } from '../../src/renderer/components/WorkspaceDocume
 import '@vscode/codicons/dist/codicon.css'
 import '../../src/renderer/styles.css'
 import '../../src/renderer/workspace.css'
+import '../../src/renderer/sessions.css'
 
 const source = [
   '## Highlighted code',
@@ -31,6 +32,7 @@ const source = [
   '```js',
   'const longLine = "' + 'x'.repeat(160) + '";',
   '```',
+  '```mermaid\ngraph LR\n  A["Task Plan<br/>(Markdown)"] -->|"1. <link rel=preload>"| B["Mermaid SVG"]\n```',
 ].join('\n\n')
 
 function SyntaxFixture() {

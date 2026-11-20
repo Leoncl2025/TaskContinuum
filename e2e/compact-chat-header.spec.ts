@@ -658,6 +658,96 @@ test.describe('expandable markdown blocks', () => {
       await expect(dialog).toHaveCount(0)
       expect(errors).toEqual([])
     })
+
+    test(`renders offline Mermaid diagrams with <br/> and HTML-tag labels, source copy, and full-width expand in ${theme} mode`, async ({ page }, testInfo) => {
+      const errors: string[] = []
+      page.on('pageerror', (error) => errors.push(error.message))
+      await page.setViewportSize({ width: 1440, height: 980 })
+      const mermaidSource = [
+        'graph TD',
+        '    HTML["HTML 直出: inline-body.js<br/>(写 weaMapRunMod & weaMapOwnedAssets)"] --> Entry["主入口: common.js + weather.js<br/>(页面初始化与资源调度)"]',
+        '    Entry -->|"1. 低优 <link rel=preload>"| ML["maplibre-gl.min.js (WebGL 引擎)"]',
+        '    Entry -->|"1. 低优 <link rel=preload>"| AT["atlas-core-bare-snr.min.js (依赖 MapLibre)"]',
+        '    Entry -->|"1. <link rel=preload as=style>"| CSS["weather-map-ltr/rtl.min.css (地图样式)"]',
+        '    Entry -->|"2. initializePage() 后并行 import()"| BMV9["bing-map-v9.js (地图适配门面 + 天气图层)"]',
+        '    Entry -->|"2. initializePage() 后并行 import()"| OMR["OwnedMapRuntime.js (自研运行时内核)"]',
+        '    Entry -->|"3. 配置返回 / 900ms 预热"| WMV2["weather-map-v2.js (地图周边 UI 组件)"]',
+        '    WMV2 --> BMV9',
+        '    BMV9 -->|"owned 模式"| OMR',
+        '    OMR -.->|"非 en-US 按需 import()"| LOC["MapRuntimeStrings.js (70 语言包)"]',
+        '    OMR -->|"读取全局变量 window.atlas / window.maplibregl"| AT',
+        '    AT -->|"继承扩展"| ML',
+      ].join('\n')
+      const doc = `### 资源加载与模块依赖图\n\n\`\`\`mermaid\n${mermaidSource}\n\`\`\``
+      await page.goto(`${url}?theme=${theme}&markdown=${encodeURIComponent(doc)}`)
+      await page.evaluate(async () => { await document.fonts.ready })
+      await page.evaluate(() => {
+        const turns = Array.from(document.querySelectorAll('[data-turn-id]'))
+        for (const extra of turns.slice(1)) extra.remove()
+      })
+
+      const log = page.getByRole('log')
+      const card = log.locator('.markdown-mermaid-card').first()
+      const diagram = card.getByRole('img', { name: 'Mermaid diagram', exact: true })
+      await expect(diagram).toBeVisible()
+      await expect(diagram.locator('svg')).toBeVisible()
+      // Verify literal <link rel=preload> label text survived sanitization and node labels never overflow <foreignObject>.
+      await expect(diagram).toContainText('<link rel=preload>')
+      await expect(diagram).toContainText('weaMapOwnedAssets)')
+      await expect(diagram).toContainText('OwnedMapRuntime.js')
+      expect(await diagram.locator('foreignObject').evaluateAll((nodes) =>
+        nodes.every((node) => {
+          const rect = node.getBoundingClientRect()
+          const child = node.firstElementChild?.getBoundingClientRect()
+          return !child || child.height <= rect.height + 2
+        }),
+      )).toBe(true)
+      expect(await card.evaluate((el) => el.querySelector('img, script, iframe, [src], [onerror]'))).toBeNull()
+
+      await page.mouse.move(1, 1)
+      const logBox = (await log.boundingBox())!
+      if (theme === 'light') {
+        await page.screenshot({
+          path: testInfo.outputPath(`mermaid-compact-${theme}.png`),
+          clip: { x: logBox.x, y: logBox.y, width: logBox.width, height: Math.min(logBox.height, 760) },
+          animations: 'disabled',
+        })
+      }
+
+      // Expand diagram card to full width and capture preview.
+      await card.getByRole('button', { name: 'Expand diagram width', exact: true }).click()
+      await expect(card.getByRole('button', { name: 'Restore diagram width', exact: true })).toHaveAttribute('aria-pressed', 'true')
+      const logClientWidth = await log.evaluate((el) => el.clientWidth)
+      const expandedBox = (await card.boundingBox())!
+      expect(expandedBox.width).toBeGreaterThanOrEqual(logClientWidth - 52)
+
+      await page.mouse.move(1, 1)
+      await page.screenshot({
+        path: testInfo.outputPath(`mermaid-expanded-${theme}.png`),
+        clip: { x: logBox.x, y: logBox.y, width: logBox.width, height: Math.min(logBox.height, 780) },
+        animations: 'disabled',
+      })
+
+      // Verify exact raw Mermaid source copy via desktop bridge.
+      await page.evaluate(() => {
+        window.desktop = {
+          getInfo: async () => ({ name: 'Task Continuum', version: 'test', platform: 'win32', security: { contextIsolated: true, sandboxed: true } }),
+          minimize: async () => {}, toggleMaximize: async () => {}, close: async () => {},
+          getFullScreen: async () => false, toggleFullScreen: async () => {}, onFullScreenChanged: () => () => {},
+          copyText: async (text: string) => { document.documentElement.dataset.copiedMermaid = text },
+        }
+      })
+      await card.getByRole('button', { name: 'Copy Mermaid source', exact: true }).click()
+      await expect.poll(() => page.evaluate(() => document.documentElement.dataset.copiedMermaid)).toBe(`${mermaidSource}\n`)
+      await expect(card.getByRole('button', { name: 'Mermaid source copied', exact: true })).toBeVisible()
+
+      // Switch to Source view and back to Diagram view.
+      await card.getByRole('button', { name: 'Source', exact: true }).click()
+      await expect(card.getByLabel('Mermaid source', { exact: true })).toContainText('graph TD')
+      await card.getByRole('button', { name: 'Diagram', exact: true }).click()
+      await expect(diagram).toBeVisible()
+      expect(errors).toEqual([])
+    })
   }
 })
 

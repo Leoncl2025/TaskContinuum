@@ -51,6 +51,9 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
   guidance in their first-message budget. Update both desktops to use the higher
   limit in remote chats.
 - Inline and block math in chats and task documents, rendered offline with KaTeX.
+- Offline Mermaid diagram rendering (` ```mermaid `) in chats and task documents,
+  with light/dark theme adaptation, **Diagram / Source** switching, one-click
+  raw Mermaid source copying, and **Full width** expansion.
 - Clickable web links and source-owned file links, with authenticated remote
   transfer, client-side previews, local document opening and copyable link addresses.
 - Collapsible tool activity keeps answers readable without losing execution details.

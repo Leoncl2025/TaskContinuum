@@ -66,6 +66,9 @@ product affiliation or grant permission to use hosted Copilot services.
   Copyright (c) 2013-2020 Khan Academy and other contributors.
   KaTeX styles and fonts are bundled locally; its license is retained in the package.
   The override keeps remark/rehype's older dependency ranges on this patched renderer.
+- `mermaid` 12.3.0: https://github.com/mermaid-js/mermaid (MIT).
+  Copyright (c) 2014-2026 Knut Sveidqvist and contributors.
+  Mermaid diagrams are rendered offline in strict sanitized SVG mode.
 - `zod` 4.3.6: https://github.com/colinhacks/zod (MIT).
 - Transitive dependencies retain their upstream notices in the dependency installation.
   Markdown parser modules are included in the main-process bundle for ESM compatibility.

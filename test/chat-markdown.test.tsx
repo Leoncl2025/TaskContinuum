@@ -3,6 +3,8 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ChatMarkdown } from '../src/renderer/components/ChatMarkdown'
 import { ChatLinkTargetContext } from '../src/renderer/chat/chatLinkContext'
+import * as markdownMermaid from '../src/renderer/markdownMermaid'
+import { normalizeMermaidLabels, sanitizeMermaidSvg } from '../src/renderer/markdownMermaid'
 import type { ChatLinkBridge, ChatLinkReply, OpenChatLinkResult } from '../src/shared/chatLinks'
 import type { TransferStatus } from '../src/shared/fileTransfer'
 import { agentHostTargetFixture } from './immutable-bindings-fixture'
@@ -305,6 +307,50 @@ describe('native chat Markdown presentation', () => {
     const restoreCode = screen.getByRole('button', { name: 'Restore code width' })
     expect(restoreCode).toHaveAttribute('aria-pressed', 'true')
     expect(restoreCode.closest('.message-code-block')).toHaveClass('is-expanded')
+  })
+
+  it('normalizes Mermaid labels, sanitizes rendered SVGs, toggles Diagram/Source, and copies exact raw Mermaid source', async () => {
+    expect(normalizeMermaidLabels('graph TD\n  A["Title<br/>(a & b)"] -->|"1. <link rel=preload>"| B["Map<string, T>"]'))
+      .toBe('graph TD\n  A["Title<br/>(a & b)"] -->|"1. &lt;link rel=preload&gt;"| B["Map&lt;string, T&gt;"]')
+
+    const sanitized = sanitizeMermaidSvg(
+      '<svg viewBox="0 0 640 320" style="max-width: 640px; background: url(https://evil.example/x)"><script>alert(1)</script><a href="javascript:alert(1)"><g onclick="evil()"><text>Safe node</text></g></a><img src="https://evil.example/p.png"></svg>',
+    )
+    expect(sanitized).toContain('--mermaid-natural-width: 640px')
+    expect(sanitized).toContain('Safe node')
+    expect(sanitized).not.toMatch(/<script|<img|onclick|javascript:|https:\/\/evil/i)
+
+    const renderSpy = vi.spyOn(markdownMermaid, 'renderMermaidDiagram').mockResolvedValue(
+      sanitizeMermaidSvg('<svg viewBox="0 0 500 200"><g><text>Rendered flowchart</text></g></svg>'),
+    )
+    const write = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue()
+    const user = userEvent.setup()
+    const rawMermaid = 'graph TD\n  HTML["inline-body.js<br/>init"] -->|"1. <link rel=preload>"| ML["maplibre-gl.min.js"]\n'
+    const view = render(<ChatMarkdown source={'```mermaid\n' + rawMermaid + '```'} />)
+
+    const diagram = await screen.findByRole('img', { name: 'Mermaid diagram' })
+    expect(diagram).toHaveTextContent('Rendered flowchart')
+    expect(renderSpy).toHaveBeenCalledWith(rawMermaid.trim(), 'light')
+
+    // Copy always copies the exact authored Mermaid source even while viewing the rendered diagram.
+    await user.click(screen.getByRole('button', { name: 'Copy Mermaid source' }))
+    expect(write).toHaveBeenCalledExactlyOnceWith(rawMermaid)
+    expect(screen.getByRole('button', { name: 'Mermaid source copied' })).toBeInTheDocument()
+
+    // Switch between Diagram and Source views, and expand width.
+    await user.click(screen.getByRole('button', { name: 'Source' }))
+    expect(screen.getByLabelText('Mermaid source')).toHaveTextContent('<link rel=preload>')
+    await user.click(screen.getByRole('button', { name: 'Diagram' }))
+    expect(screen.getByRole('img', { name: 'Mermaid diagram' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Expand diagram width' }))
+    expect(screen.getByRole('button', { name: 'Restore diagram width' })).toHaveAttribute('aria-pressed', 'true')
+
+    // Incomplete or invalid syntax falls back cleanly to raw Mermaid source.
+    renderSpy.mockRejectedValueOnce(new Error('Parse error'))
+    view.rerender(<ChatMarkdown source={'```mermaid\ngraph TD\n  A["streaming...\n```'} />)
+    expect(await screen.findByText(/Diagram preview is unavailable/)).toBeInTheDocument()
+    expect(screen.getByLabelText('Mermaid source')).toHaveTextContent('A["streaming...')
+    renderSpy.mockRestore()
   })
 
   function delivered(): TransferStatus {

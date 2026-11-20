@@ -38,6 +38,9 @@ for (const scenario of [
 
     for (const name of ['Chat code', 'Task document code']) {
       const section = page.getByRole('region', { name, exact: true })
+      const mermaidDiagram = section.getByRole('img', { name: 'Mermaid diagram', exact: true })
+      await expect(mermaidDiagram).toBeVisible()
+      await expect(mermaidDiagram).toContainText('<link rel=preload>')
       await expect(section.locator('pre code.hljs')).toHaveCount(4)
       await expect(section.locator('pre').first()).toHaveCSS(
         'background-color',
@@ -125,6 +128,12 @@ test('highlights code and copies its exact source through the actual Electron pr
     await chat.getByRole('button', { name: 'Copy code', exact: true }).first().click()
     await expect(chat.getByRole('button', { name: 'Code copied' })).toBeVisible()
     expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(source)
+    await expect(chat.getByRole('img', { name: 'Mermaid diagram', exact: true })).toContainText('<link rel=preload>')
+    await chat.getByRole('button', { name: 'Copy Mermaid source', exact: true }).click()
+    await expect(chat.getByRole('button', { name: 'Mermaid source copied', exact: true })).toBeVisible()
+    expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(
+      'graph LR\n  A["Task Plan<br/>(Markdown)"] -->|"1. <link rel=preload>"| B["Mermaid SVG"]\n',
+    )
     const beforeTheme = await code.locator('.hljs-keyword').evaluate((element) => getComputedStyle(element).color)
     await page.getByRole('button', { name: 'Toggle theme' }).click()
     await expect.poll(() => code.locator('.hljs-keyword').evaluate((element) => getComputedStyle(element).color)).not.toBe(beforeTheme)
