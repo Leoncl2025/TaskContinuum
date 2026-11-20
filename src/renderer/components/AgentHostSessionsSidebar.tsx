@@ -32,6 +32,8 @@ interface Props {
   sessionLayout?: SessionGroupLayout
   sortMode?: SessionSortMode
   activeKey?: string
+  secondaryKey?: string
+  popoutKeys?: ReadonlySet<string>
   provisional?: boolean
   awaitingSyncCount?: number
   expandSession?: SessionExpandRequest
@@ -44,6 +46,8 @@ interface Props {
   titleCacheError?: string
   onTitles?(sessions: readonly SessionTitleUpdate[]): void
   onSelect?(binding: SessionBinding): void
+  onSplit?(binding: SessionBinding): void
+  onPopOut?(binding: SessionBinding): void
   onLayoutChange?(layout: SessionGroupLayout, makeManual: boolean): void
   onSortMode?(mode: SessionSortMode): void
   onSyncNow?(): Promise<void>
@@ -119,7 +123,7 @@ function SessionSortMenu({ count, groupCount, value, onChange }: { count: number
   </div>
 }
 
-export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, orderedKeys, sessionLayout, sortMode, activeKey, provisional = false, awaitingSyncCount = 0, expandSession, localOwnerId, busy = false, initialView = 'current', cachedTitles, sessionTimestamps, historyTransfers, titleCacheError, onTitles, onSelect, onLayoutChange, onSortMode, onSyncNow, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
+export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, orderedKeys, sessionLayout, sortMode, activeKey, secondaryKey, popoutKeys, provisional = false, awaitingSyncCount = 0, expandSession, localOwnerId, busy = false, initialView = 'current', cachedTitles, sessionTimestamps, historyTransfers, titleCacheError, onTitles, onSelect, onSplit, onPopOut, onLayoutChange, onSortMode, onSyncNow, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
   const bridge = window.agentHost
   const aliases = useMachineAliases()
   const [view, setView] = useState<SessionView>(() => expandSession ? 'current' : initialView)
@@ -231,8 +235,8 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
           if (sortMode === undefined) setLocalSortMode(next)
           onSortMode?.(next)
         }} />}
-        {taskId && <LinkedSessionTree taskId={taskId} entries={entries} manualLayout={manual} activeKey={activeKey} expandSession={expandSession}
-          sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} unlinkDisabled={!taskReady || awaitingSyncCount > 0 || busy || operating} onSelect={onSelect}
+        {taskId && <LinkedSessionTree taskId={taskId} entries={entries} manualLayout={manual} activeKey={activeKey} secondaryKey={secondaryKey} popoutKeys={popoutKeys} expandSession={expandSession}
+          sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} unlinkDisabled={!taskReady || awaitingSyncCount > 0 || busy || operating} onSelect={onSelect} onSplit={onSplit} onPopOut={onPopOut}
           onLayoutChange={onLayoutChange ? (next, makeManual) => {
             if (sortMode === undefined && makeManual) setLocalSortMode('manual')
             onLayoutChange(next, makeManual)

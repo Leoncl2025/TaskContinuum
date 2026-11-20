@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { DesktopBridge, DesktopInfo } from '../shared/desktop'
+import type { DesktopBridge, DesktopInfo, SessionWindowActivatedEvent, SessionWindowSummary } from '../shared/desktop'
 import type { WorkspaceBridge } from '../shared/workspace'
 import type { RemoteVSCodeBridge } from '../shared/remoteVSCode'
 import type { AgentHostBridge, AgentHostView } from '../shared/agentHost'
@@ -13,6 +13,23 @@ const bridge: DesktopBridge = {
     preview: (request) => ipcRenderer.invoke('desktop:chat-link-preview', request),
     save: (request) => ipcRenderer.invoke('desktop:chat-link-save', request),
     cancel: (request) => ipcRenderer.invoke('desktop:chat-link-cancel', request),
+  },
+  windows: {
+    getContext: () => ipcRenderer.invoke('desktop:window-context'),
+    open: (request) => ipcRenderer.invoke('desktop:session-window-open', request),
+    focus: (request) => ipcRenderer.invoke('desktop:session-window-focus', request),
+    dock: (request) => request === undefined ? ipcRenderer.invoke('desktop:session-window-dock') : ipcRenderer.invoke('desktop:session-window-dock', request),
+    list: () => ipcRenderer.invoke('desktop:session-window-list'),
+    onChanged: (listener) => {
+      const receive = (_event: Electron.IpcRendererEvent, windows: SessionWindowSummary[]) => listener(windows)
+      ipcRenderer.on('desktop:session-windows-changed', receive)
+      return () => ipcRenderer.removeListener('desktop:session-windows-changed', receive)
+    },
+    onActivateSession: (listener) => {
+      const receive = (_event: Electron.IpcRendererEvent, event: SessionWindowActivatedEvent) => listener(event)
+      ipcRenderer.on('desktop:activate-session', receive)
+      return () => ipcRenderer.removeListener('desktop:activate-session', receive)
+    },
   },
   getInfo: async () => {
     const info: Omit<DesktopInfo, 'security'> = await ipcRenderer.invoke('desktop:info')

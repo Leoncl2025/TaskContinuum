@@ -68,7 +68,18 @@
 @media (hover: none) { .session-group-actions { opacity: 1; pointer-events: auto; } }
 .session-tree .session-row { display: grid; gap: 2px; min-width: 0; padding: 0 2px; }
 .session-tree .session-row strong { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 500; line-height: 18px; }
-.session-machine { display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: 11px; line-height: 18px; }
+.session-machine { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); font-size: 11px; line-height: 18px; }
+.session-machine > span:first-child { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.session-state-pill { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; height: 16px; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--link) 13%, var(--raised)); color: var(--link); font-size: 9.5px; font-weight: 600; line-height: 16px; }
+.session-state-pill > .codicon { font-size: 10px; }
+.session-row-actions { position: relative; z-index: 1; display: none; align-items: center; gap: 1px; flex-shrink: 0; }
+.session-row-actions .icon-button { width: 24px; height: 24px; border-radius: 6px; }
+.session-row-actions .icon-button:hover { background: var(--selected); }
+.session-row-actions .codicon { font-size: 13px; }
+.session-tree-row:is(:hover, :focus-within) .session-row-actions,
+.session-tree-item:focus-visible > .session-tree-row .session-row-actions { display: flex; }
+@media (max-width: 520px) { .session-row-actions { display: none !important; } }
+.session-tree-row.is-split-pane:not(.is-selected) { background: color-mix(in srgb, var(--link) 6%, transparent); box-shadow: inset 2px 0 0 color-mix(in srgb, var(--link) 65%, transparent); }
 .session-tree-row { position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; padding: 6px; border-radius: var(--radius-md); }
 .session-tree-row:hover { background: var(--hover); }
 .session-tree-row.is-selected { background: var(--selected); }
@@ -124,6 +135,7 @@
 .ahp-chat-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title actions" "meta meta"; align-items: center; gap: 0 10px; flex-shrink: 0; padding: 3px 10px 4px; border-bottom: 1px solid var(--border); }
 .ahp-chat-title { grid-area: title; display: flex; align-items: center; min-width: 0; gap: 8px; }
 .ahp-chat-title > .codicon { color: var(--accent); font-size: 16px; }
+.ahp-chat-task-badge { flex-shrink: 0; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--border); background: var(--feature-bg, var(--raised)); color: var(--feature-text, var(--text)); font-size: 10px; font-weight: 600; line-height: 16px; }
 .ahp-chat-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; line-height: 20px; }
 .ahp-chat-meta { grid-area: meta; display: flex; align-items: center; min-width: 0; gap: 12px; color: var(--muted); font-size: 11px; line-height: 16px; }
 .ahp-chat-status { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; white-space: nowrap; }
@@ -153,6 +165,19 @@
   .titlebar .ahp-chat-status { min-width: 0; flex-shrink: 1; }
   .titlebar .ahp-chat-state-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 }
+.titlebar.session-window-titlebar .app-brand.session-window-brand { width: auto; gap: 7px; }
+.titlebar.session-window-titlebar .app-brand.session-window-brand > .session-window-task-pill { display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 6px; border: 1px solid var(--border); background: var(--feature-bg, var(--raised)); color: var(--feature-text, var(--text)); font-size: 11px; font-weight: 600; line-height: 18px; }
+.session-window-dock-button { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 9px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--raised); color: var(--text); font-size: 11px; font-weight: 500; line-height: 16px; }
+.session-window-dock-button:hover:not(:disabled) { background: var(--hover); border-color: color-mix(in srgb, var(--link) 45%, var(--border)); color: var(--link); }
+.session-window-dock-button > .codicon { font-size: 13px; }
+.session-window-status-task { min-width: 0; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.popped-out-header { min-height: 36px; }
+.split-picker-candidates { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 100%; max-width: 480px; margin-top: 8px; }
+.split-picker-heading { color: var(--subtle); font-size: 11px; font-weight: 500; }
+.split-picker-list { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; width: 100%; }
+.split-picker-chip { max-width: 100%; min-height: 32px; gap: 7px; padding: 6px 12px; border-radius: var(--radius-md); font-size: 12px; }
+.split-picker-chip > span { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.split-picker-chip > small { color: var(--muted); font-size: 10.5px; }
 .ahp-panel .composer { position: relative; overflow: visible; }
 .ahp-panel .composer-area > .vscode-chat-notice { padding: 0 4px 8px; }
 .ahp-panel .composer-area > .message-notice { margin: 0 0 8px; padding-inline: 4px; }

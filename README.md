@@ -6,6 +6,13 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
 
 - **Smooth cross-device session switching:** move between local and remote
   conversations while preserving each session's draft in memory.
+- **VS Code-style split screen and pop-out session windows:** view two Agent
+  Host conversations side by side with a resizable split divider (**Split chat
+  right** / **Ctrl+\**, **Ctrl+Shift+\** to close split, **Swap split panes**,
+  or drag any session from **Current** onto the left/right half of the chat
+  area), or pop any conversation out into its own standalone desktop window
+  (**Open session in new window**) and **Dock** it back into the main workbench
+  at any time with unsent drafts preserved.
 - Multiple conversations per task.
 - Compact session rows show the conversation title and machine without repeating
   the task heading. Select the title or machine to open its chat; the separate

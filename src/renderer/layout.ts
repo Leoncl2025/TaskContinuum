@@ -5,13 +5,21 @@ export interface LayoutPreferences {
   theme: 'dark' | 'light'
   sidebarWidth: number
   detailsWidth: number
+  splitRatio: number
 }
 
 export type LayoutPanel = 'sidebar' | 'details'
 export const panelLimits = { sidebar: { min: 220, max: 600 }, details: { min: 320, max: 960 } }
+export const splitRatioLimits = { min: 0.25, max: 0.75 }
 const key = 'taskcontinuum:layout:v2'
 const legacyKey = 'taskcontinuum:layout:v1'
-export const defaultLayout: LayoutPreferences = { sidebar: true, chat: true, details: true, theme: 'light', sidebarWidth: 258, detailsWidth: 380 }
+export const defaultLayout: LayoutPreferences = { sidebar: true, chat: true, details: true, theme: 'light', sidebarWidth: 258, detailsWidth: 380, splitRatio: 0.5 }
+
+export function clampSplitRatio(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return defaultLayout.splitRatio
+  const clamped = Math.min(splitRatioLimits.max, Math.max(splitRatioLimits.min, value))
+  return Math.round(clamped * 1000) / 1000
+}
 
 function panelWidth(value: unknown, panel: LayoutPanel): number {
   const { min, max } = panelLimits[panel]
@@ -66,6 +74,7 @@ export function readLayout(): LayoutPreferences {
       theme: saved.theme === 'dark' || saved.theme === 'light' ? saved.theme : defaultLayout.theme,
       sidebarWidth: panelWidth(saved.sidebarWidth, 'sidebar'),
       detailsWidth: panelWidth(stored === null ? saved.chatWidth : saved.detailsWidth, 'details'),
+      splitRatio: clampSplitRatio(saved.splitRatio),
     }
   } catch {
     return { ...defaultLayout }

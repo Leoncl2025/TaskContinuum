@@ -65,6 +65,33 @@ describe('native-only preload boundary', () => {
     expect(ipc.removeListener).toHaveBeenCalledExactlyOnceWith('desktop:full-screen-changed', receive)
   })
 
+  it('exposes scoped session pop-out window actions without arbitrary URLs or filesystem paths', async () => {
+    const windows = window.desktop?.windows
+    if (!windows) throw new Error('Session windows preload API missing.')
+    const target = agentHostTargetFixture('popout')
+    await windows.getContext()
+    await windows.open({ taskId: 'T-0001', target, draft: 'Hello' })
+    await windows.focus({ taskId: 'T-0001', target })
+    await windows.dock()
+    await windows.dock({ taskId: 'T-0001', target, draft: 'Back' })
+    await windows.list()
+    expect(ipc.invoke.mock.calls).toEqual([
+      ['desktop:window-context'],
+      ['desktop:session-window-open', { taskId: 'T-0001', target, draft: 'Hello' }],
+      ['desktop:session-window-focus', { taskId: 'T-0001', target }],
+      ['desktop:session-window-dock'],
+      ['desktop:session-window-dock', { taskId: 'T-0001', target, draft: 'Back' }],
+      ['desktop:session-window-list'],
+    ])
+    const onChanged = vi.fn()
+    const onActivate = vi.fn()
+    const disposeChanged = windows.onChanged(onChanged)
+    const disposeActivate = windows.onActivateSession(onActivate)
+    disposeChanged()
+    disposeActivate()
+    expect(ipc.removeListener).toHaveBeenCalledTimes(2)
+  })
+
   it('exposes only native sessions, workspace metadata and retained desktop/device APIs', () => {
     expect(ipc.expose.mock.calls.map(([name]) => name).sort()).toEqual(['agentHost', 'desktop', 'remoteVSCode', 'updates', 'workspace'])
     for (const name of ['copilot', 'vscodeChat', 'sharedSessions']) expect(Reflect.has(window, name)).toBe(false)

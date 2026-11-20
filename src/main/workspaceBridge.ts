@@ -6,13 +6,19 @@ import { WorkspaceStore } from './workspaceStore'
 import type { AgentHostTarget } from '../shared/agentHost'
 import { handleDesktopOperation } from './desktopOperations'
 
-export function registerWorkspaceBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, verifyAgentHost?: (root: string, target: AgentHostTarget) => Promise<AgentHostTarget>, onOpen?: (root: string) => Promise<void>) {
+export function registerWorkspaceBridge(
+  requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow,
+  verifyAgentHost?: (root: string, target: AgentHostTarget) => Promise<AgentHostTarget>,
+  onOpen?: (root: string) => Promise<void>,
+  onWorkspaceRootChanged?: (root: string | undefined) => void,
+) {
   const store = new WorkspaceStore(app.getPath('userData'), process.env.TASKCONTINUUM_WORKSPACE, verifyAgentHost)
   const taskCli = app.isPackaged
     ? join(dirname(app.getAppPath()), 'cli', 'task-documents.cjs')
     : join(app.getAppPath(), 'scripts', 'task-documents.mjs')
   async function authorize(state: WorkspaceState): Promise<WorkspaceState> {
     if (state.current) await onOpen?.(state.current.root)
+    onWorkspaceRootChanged?.(state.current?.root)
     return state
   }
   function handle<Result>(channel: string, action: (window: BrowserWindow, value: unknown) => Promise<Result>): void {
@@ -44,8 +50,8 @@ export function registerWorkspaceBridge(requireWindow: (event: IpcMainInvokeEven
   handle('verify-repository-publication', async (_window, request) => store.verifyRepositoryPublication(request))
   handle('open-recent', async (_window, id) => authorize(await store.openRecent(id)))
   handle('refresh', async () => authorize(await store.refresh()))
-  handle('close', () => store.closeWorkspace())
+  handle('close', async () => { const state = await store.closeWorkspace(); onWorkspaceRootChanged?.(undefined); return state })
   handle('session-links', async (_window, id) => { await authorize(await store.getState()); return store.getSessionLinks(id) })
   handle('update-session-link', async (_window, request) => { await authorize(await store.getState()); return store.updateSessionLink(request) })
-  return { currentRoot: () => store.getCurrentRoot() }
+  return { currentRoot: () => store.getCurrentRoot(), getState: () => store.getState() }
 }

@@ -36,10 +36,49 @@ const view: AgentHostView = {
 if (parameters.has('lazy')) view.history = { hasMore: true, loadedTurns: 6, totalTurns: 8, loading: false }
 let historyLoads = 0
 let releaseHistory: (() => void) | undefined
+let watchCounter = 0
+const activeWatches = new Map<string, typeof target>()
 const listeners = new Set<Parameters<AgentHostBridge['onView']>[0]>()
 const historyListeners = new Set<Parameters<AgentHostBridge['onHistoryTransfer']>[0]>()
+function viewForTarget(requested: typeof target): AgentHostView {
+  if (requested.chatId === target.chatId) return structuredClone(view)
+  const matched = sidebarSessions.find((item) => item.chatId === requested.chatId)
+  return {
+    target: requested,
+    state: view.state,
+    canSend: view.canSend,
+    readOnly: view.readOnly,
+    terminals: {},
+    chat: {
+      resource: requested.chatId,
+      title: matched?.title ?? 'Secondary session',
+      modifiedAt: matched?.updatedAt ?? '',
+      status: 1,
+      turns: [
+        {
+          id: `${requested.chatId}-turn-0`,
+          state: 'complete' as Turn['state'],
+          message: { text: `Verify side-by-side workflow for "${matched?.title ?? 'Secondary session'}".`, origin: { kind: MessageKind.User } },
+          responseParts: [{
+            kind: 'markdown' as ResponsePartKind.Markdown,
+            id: `${requested.chatId}-resp-0`,
+            content: `### ${matched?.title ?? 'Secondary session'}\n\nRunning independently in its own pane while sharing the single underlying Agent Host transport.\n\n- Zero remount on split or swap\n- Independent scroll & draft state\n- Instant pop-out to a dedicated desktop window`,
+          }],
+          usage: undefined,
+        },
+      ],
+    },
+  }
+}
 const emit = () => {
-  for (const listener of listeners) listener({ id: 'fixture-watch', view: structuredClone(view) })
+  if (!activeWatches.size) {
+    for (const listener of listeners) listener({ id: 'fixture-watch', view: structuredClone(view) })
+  } else {
+    for (const [id, watchedTarget] of activeWatches) {
+      const payload = viewForTarget(watchedTarget)
+      for (const listener of listeners) listener({ id, view: payload })
+    }
+  }
   for (const listener of historyListeners) listener({ root: 'C:\\layout-fixture', target, progress: view.historyTransfer })
 }
 const unsupported = async (): Promise<never> => { throw new Error('This layout fixture does not perform native operations.') }
@@ -61,8 +100,17 @@ const sidebarSessions: AgentHostSession[] = [
 window.agentHost = {
   list: async () => ({ sessions: parameters.has('sessions') ? sidebarSessions : [], warnings: [] }),
   models: async () => [{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }],
-  watch: async () => { calls.watch++; emit(); return 'fixture-watch' },
-  unwatch: async () => { calls.unwatch++ }, terminal: async () => {}, releaseTerminal: async () => {},
+  watch: async (requestedTarget) => {
+    calls.watch++
+    const id = `fixture-watch-${++watchCounter}`
+    const resolved = requestedTarget ?? target
+    activeWatches.set(id, resolved)
+    const payload = viewForTarget(resolved)
+    for (const listener of listeners) listener({ id, view: payload })
+    for (const listener of historyListeners) listener({ root: 'C:\\layout-fixture', target: resolved, progress: payload.historyTransfer })
+    return id
+  },
+  unwatch: async (id) => { calls.unwatch++; activeWatches.delete(id) }, terminal: async () => {}, releaseTerminal: async () => {},
   loadHistory: async () => {
     if (!view.history?.hasMore || !view.chat) throw new Error('No earlier history is available in this fixture.')
     historyLoads++

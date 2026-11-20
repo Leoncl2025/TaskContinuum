@@ -1,9 +1,9 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, net, protocol, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, net, protocol, screen, shell } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
-import { APP_URL, PRODUCTION_CSP, isTrustedRendererUrl, rendererSecurityPreferences, resolveRendererAsset, validateDevUrl } from './security'
+import { APP_URL, PRODUCTION_CSP, rendererSecurityPreferences, resolveRendererAsset, validateDevUrl } from './security'
 import { registerWorkspaceBridge } from './workspaceBridge'
 import { registerRemoteVSCodeBridge } from './remoteVSCodeBridge'
 import { registerWindowZoom, WindowZoomPreferences } from './windowZoom'
@@ -12,9 +12,10 @@ import { registerAgentHostBridge } from './agentHostBridge'
 import { registerChatLinkBridge } from './chatLinkBridge'
 import { startAgentHostDiagnostics, stopAgentHostDiagnostics } from './agentHostDiagnostics'
 import { UpdateRestartGuard } from './updateRestartGuard'
-import { desktopOperations } from './desktopOperations'
+import { desktopOperations, handleDesktopOperation } from './desktopOperations'
 import { createDesktopUpdateService } from './updates'
 import { registerUpdateBridge } from './updateBridge'
+import { MultiWindowInstallCoordinator, SessionWindowManager } from './sessionWindows'
 
 app.setName('Task Continuum')
 if (process.platform === 'win32') app.setAppUserModelId('com.leoncl2025.taskcontinuum')
@@ -30,9 +31,11 @@ protocol.registerSchemesAsPrivileged([
 
 const devUrl = app.isPackaged ? undefined : validateDevUrl(process.env.ELECTRON_RENDERER_URL)
 let mainWindow: BrowserWindow | undefined
+let sessionWindows: SessionWindowManager | undefined
 let agentHost: ReturnType<typeof registerAgentHostBridge> | undefined
 let remoteVSCode: ReturnType<typeof registerRemoteVSCodeBridge> | undefined
 let windowZoom: WindowZoomPreferences | undefined
+let rendererSessionConfigured = false
 let quitting = false
 let cleanupComplete = false
 let cleanupPromise: Promise<void> | undefined
@@ -50,6 +53,7 @@ else app.on('second-instance', () => {
 
 function cleanupDesktop(): Promise<void> {
   return cleanupPromise ??= (async () => {
+    sessionWindows?.closeAllPopouts()
     const results = await Promise.allSettled([
       Promise.resolve().then(() => agentHost?.close()),
       Promise.resolve().then(() => remoteVSCode?.close()),
@@ -75,13 +79,13 @@ async function recoverAfterUpdateFailure(): Promise<void> {
 }
 
 function requireTrustedWindow(event: IpcMainInvokeEvent): BrowserWindow {
-  if (!mainWindow || mainWindow.isDestroyed()
-    || event.sender !== mainWindow.webContents
-    || event.senderFrame !== mainWindow.webContents.mainFrame
-    || !isTrustedRendererUrl(event.senderFrame.url, devUrl)) {
-    throw new Error('Untrusted desktop IPC request.')
-  }
-  return mainWindow
+  if (!sessionWindows) throw new Error('Untrusted desktop IPC request.')
+  return sessionWindows.requireTrustedWindow(event)
+}
+
+function requireMainWindow(event: IpcMainInvokeEvent): BrowserWindow {
+  if (!sessionWindows) throw new Error('Untrusted desktop IPC request.')
+  return sessionWindows.requireMainWindow(event)
 }
 
 function registerDesktopBridge(): void {
@@ -103,6 +107,100 @@ function registerDesktopBridge(): void {
     if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > 1024 * 1024) throw new Error('Clipboard text must be a string no larger than 1 MiB.')
     return clipboard.writeText(value)
   })
+  ipcMain.handle('desktop:window-context', (event) => {
+    const window = requireTrustedWindow(event)
+    return sessionWindows?.getContext(window) ?? { kind: 'main' }
+  })
+  ipcMain.handle('desktop:session-window-list', (event) => {
+    requireTrustedWindow(event)
+    return sessionWindows?.list() ?? []
+  })
+  handleDesktopOperation(ipcMain, 'desktop:session-window-open', (event, request: unknown) => {
+    requireMainWindow(event)
+    if (!sessionWindows) throw new Error('Session windows are unavailable.')
+    return sessionWindows.open(request)
+  })
+  handleDesktopOperation(ipcMain, 'desktop:session-window-focus', (event, request: unknown) => {
+    requireMainWindow(event)
+    if (!sessionWindows) return Promise.resolve(false)
+    return sessionWindows.focus(request)
+  })
+  handleDesktopOperation(ipcMain, 'desktop:session-window-dock', (event, request?: unknown) => {
+    const window = requireTrustedWindow(event)
+    if (!sessionWindows) return Promise.resolve()
+    return sessionWindows.dock(window, request)
+  })
+}
+
+function configureRendererSession(webSession: Electron.Session): void {
+  if (rendererSessionConfigured) return
+  rendererSessionConfigured = true
+  webSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
+  webSession.setPermissionCheckHandler(() => false)
+  if (devUrl) {
+    const origin = new URL(devUrl).origin
+    const policy = PRODUCTION_CSP
+      .replace("script-src 'self'", "script-src 'self' 'unsafe-inline'")
+      .replace("connect-src 'none'", `connect-src 'self' ${origin.replace('http:', 'ws:')}`)
+    webSession.webRequest.onHeadersReceived({ urls: [`${origin}/*`] }, (details, callback) => {
+      callback({ responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [policy] } })
+    })
+  }
+}
+
+function hardenWindow(window: BrowserWindow, zoom: WindowZoomPreferences, onUnexpectedNavigation: () => void): void {
+  registerWindowZoom(window, zoom, devUrl)
+  registerWindowFullscreen(window, devUrl)
+  let initialNavigation = true
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  window.webContents.on('will-navigate', (event) => event.preventDefault())
+  window.webContents.on('will-frame-navigate', (event) => event.preventDefault())
+  window.webContents.on('will-redirect', (event) => event.preventDefault())
+  window.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
+    if (isMainFrame) {
+      if (initialNavigation) { initialNavigation = false; return }
+      onUnexpectedNavigation()
+    }
+  })
+  configureRendererSession(window.webContents.session)
+  window.on('close', (event) => {
+    if (updateRestart?.preparing && !cleanupComplete) event.preventDefault()
+  })
+}
+
+function createSessionBrowserWindow(title: string, cascadeIndex: number): BrowserWindow {
+  const zoom = windowZoom ??= new WindowZoomPreferences(app.getPath('userData'))
+  const width = 920
+  const height = 780
+  let x: number | undefined
+  let y: number | undefined
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    const base = mainWindow.getBounds()
+    const workArea = screen.getDisplayMatching(base).workArea
+    const step = (cascadeIndex % 6) * 28
+    x = Math.max(workArea.x, Math.min(workArea.x + workArea.width - width, base.x + Math.round((base.width - width) / 2) + step))
+    y = Math.max(workArea.y, Math.min(workArea.y + workArea.height - height, base.y + Math.round((base.height - height) / 2) + step))
+  }
+  const window = new BrowserWindow({
+    title,
+    icon: app.isPackaged ? join(process.resourcesPath, 'icon.png') : join(app.getAppPath(), 'build', 'icon.png'),
+    width,
+    height,
+    minWidth: 480,
+    minHeight: 420,
+    ...(x !== undefined && y !== undefined ? { x, y } : {}),
+    show: false,
+    frame: false,
+    backgroundColor: '#1f1f1f',
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.cjs'),
+      ...rendererSecurityPreferences,
+      spellcheck: false,
+      zoomFactor: 1.2 ** zoom.getLevel(),
+    },
+  })
+  hardenWindow(window, zoom, () => agentHost?.closeWindow(window))
+  return window
 }
 
 async function createWindow(): Promise<void> {
@@ -127,14 +225,8 @@ async function createWindow(): Promise<void> {
     },
   })
   mainWindow = window
-  registerWindowZoom(window, zoom, devUrl)
-  registerWindowFullscreen(window, devUrl)
-  let initialNavigation = true
-  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-  window.webContents.on('will-navigate', (event) => event.preventDefault())
-  window.webContents.on('will-frame-navigate', (event) => event.preventDefault())
-  window.webContents.on('will-redirect', (event) => event.preventDefault())
-  window.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { if (initialNavigation) { initialNavigation = false; return }; agentHost?.close() } })
+  sessionWindows?.registerMainWindow(window)
+  hardenWindow(window, zoom, () => agentHost?.close())
   const closeConnections = () => {
     updateRestart?.abort()
     agentHost?.close()
@@ -142,21 +234,10 @@ async function createWindow(): Promise<void> {
   }
   window.webContents.on('render-process-gone', closeConnections)
   window.webContents.on('destroyed', closeConnections)
-  window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
-  window.webContents.session.setPermissionCheckHandler(() => false)
-  if (devUrl) {
-    const origin = new URL(devUrl).origin
-    const policy = PRODUCTION_CSP
-      .replace("script-src 'self'", "script-src 'self' 'unsafe-inline'")
-      .replace("connect-src 'none'", `connect-src 'self' ${origin.replace('http:', 'ws:')}`)
-    window.webContents.session.webRequest.onHeadersReceived({ urls: [`${origin}/*`] }, (details, callback) => {
-      callback({ responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [policy] } })
-    })
-  }
-  window.on('close', (event) => {
-    if (updateRestart?.preparing && !cleanupComplete) event.preventDefault()
+  window.on('closed', () => {
+    sessionWindows?.unregisterMainWindow(window)
+    mainWindow = undefined
   })
-  window.on('closed', () => { mainWindow = undefined })
   await window.loadURL(devUrl ?? APP_URL)
   if (!window.isDestroyed()) window.show()
 }
@@ -184,29 +265,45 @@ void app.whenReady().then(async () => {
     }
   })
   registerDesktopBridge()
-  const workspaces = registerWorkspaceBridge(requireTrustedWindow, async (root, target) => {
+  const workspaces = registerWorkspaceBridge(requireMainWindow, async (root, target) => {
     if (!remoteVSCode) throw new Error('Agent Host access is not ready.')
     return remoteVSCode.agentHosts.verifyLink(root, target)
-  }, async (root) => { await remoteVSCode?.gitSync.open(root) })
+  }, async (root) => { await remoteVSCode?.gitSync.open(root) }, (root) => {
+    sessionWindows?.syncWorkspace(root)
+  })
+  sessionWindows = new SessionWindowManager({
+    devUrl,
+    getWorkspaceState: workspaces.getState,
+    authorizeSession: async (root, target) => {
+      if (!remoteVSCode) throw new Error('Agent Host access is not ready.')
+      await remoteVSCode.agentHosts.authorize(root, target)
+    },
+    createBrowserWindow: (context, cascadeIndex) => createSessionBrowserWindow(`${context.task.id} · Task Continuum`, cascadeIndex),
+    loadWindow: (window) => window.loadURL(devUrl ?? APP_URL),
+    onSessionWindowClosed: (window) => agentHost?.closeWindow(window),
+    onAnyWindowClosedDuringInstall: () => { if (updateRestart?.preparing) updateRestart.abort() },
+  })
   remoteVSCode = registerRemoteVSCodeBridge(requireTrustedWindow, workspaces.currentRoot, () => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('remote-vscode:git-status-changed')
+    sessionWindows?.broadcast('remote-vscode:git-status-changed')
   }, () => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('remote-vscode:git-bindings-changed')
+    sessionWindows?.broadcast('remote-vscode:git-bindings-changed')
   })
   await remoteVSCode.filesReady
   if (quitting || cleanupComplete) return
   registerChatLinkBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.chatLinks)
   agentHost = registerAgentHostBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.agentHosts)
+  const installCoordinator = new MultiWindowInstallCoordinator(
+    () => sessionWindows?.liveWindows() ?? [],
+    (parentId, blockers) => updateRestart?.respond(parentId, blockers),
+  )
   updateRestart = new UpdateRestartGuard({
     operations: desktopOperations,
     rendererAvailable: () => Boolean(mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()),
     hasActiveWork: () => remoteVSCode?.hasActiveWork() ?? false,
-    requestRenderer: (requestId) => {
-      if (!mainWindow || mainWindow.isDestroyed()) throw new Error('The application window is unavailable.')
-      mainWindow.webContents.send('updates:prepare-install', requestId)
-    },
+    requestRenderer: (requestId) => installCoordinator.request(requestId),
     resumeRenderer: (restartRequired) => {
-      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send('updates:install-aborted')
+      installCoordinator.clear()
+      sessionWindows?.broadcast('updates:install-aborted')
       if (restartRequired) void recoverAfterUpdateFailure().catch((error: unknown) => console.error('Update restart recovery failed:', error))
     },
     cleanup: cleanupDesktop,
@@ -219,12 +316,12 @@ void app.whenReady().then(async () => {
     openExternal: (url) => shell.openExternal(url),
     install: (installer) => restart.install(installer),
   })
-  registerUpdateBridge(requireTrustedWindow, updatesReady, restart)
+  registerUpdateBridge(requireTrustedWindow, updatesReady, { respond: (id, blockers) => installCoordinator.respond(id, blockers) } as UpdateRestartGuard)
   void updatesReady.then((service) => {
     updates = service
     if (quitting || cleanupComplete) { service.close(); return }
     service.listen((state) => {
-      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send('updates:state', state)
+      sessionWindows?.broadcast('updates:state', state)
     })
     if (windowLoaded) service.start()
   }).catch((error: unknown) => console.error('Application updates could not initialize:', error))

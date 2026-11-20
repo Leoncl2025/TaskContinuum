@@ -10,6 +10,7 @@ import { machineLabel, useMachineAliases } from '../machineAliases'
 import { Icon, IconButton } from './Primitives'
 
 const SESSION_DRAG_MIME = 'application/x-taskcontinuum-session-key'
+export const SESSION_BINDING_DRAG_MIME = 'application/x-taskcontinuum-session-binding'
 
 export interface SessionExpandRequest {
   readonly key: string
@@ -21,12 +22,16 @@ interface Props {
   entries: readonly SessionListEntry[]
   manualLayout: SessionGroupLayout
   activeKey?: string
+  secondaryKey?: string
+  popoutKeys?: ReadonlySet<string>
   expandSession?: SessionExpandRequest
   sessions: readonly AgentHostSession[]
   cachedTitles?: Readonly<Record<string, string>>
   historyTransfers?: Readonly<Record<string, AgentHostHistoryTransfer>>
   unlinkDisabled: boolean
   onSelect?(binding: SessionBinding): void
+  onSplit?(binding: SessionBinding): void
+  onPopOut?(binding: SessionBinding): void
   onLayoutChange?(layout: SessionGroupLayout, makeManual: boolean): void
   onUnlink?(binding: SessionBinding): void
 }
@@ -64,7 +69,7 @@ function GroupNameEditor({ title, onFinish }: { title: string; onFinish(value: s
     }} />
 }
 
-export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, expandSession, sessions, cachedTitles, historyTransfers, unlinkDisabled, onSelect, onLayoutChange, onUnlink }: Props) {
+export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, secondaryKey, popoutKeys, expandSession, sessions, cachedTitles, historyTransfers, unlinkDisabled, onSelect, onSplit, onPopOut, onLayoutChange, onUnlink }: Props) {
   const aliases = useMachineAliases()
   const [expansion, setExpansion] = useState(() => ({ keys: new Set(expandSession ? [expandSession.key] : []), request: expandSession?.id }))
   if (expandSession && expandSession.id !== expansion.request) {
@@ -131,7 +136,8 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, ex
     if (suppressClick.current) setTimeout(() => { if (!drag.current) suppressClick.current = false }, 0)
   }
   function startDrag(event: DragEvent<HTMLDivElement>, entry: SessionListEntry): void {
-    if (!canArrange || editing || !(event.target instanceof Element) || event.target.closest('.icon-button, input')) {
+    const canDragSessionToSplit = entry.kind === 'session' && Boolean(onSplit)
+    if ((!canArrange && !canDragSessionToSplit) || editing || !(event.target instanceof Element) || event.target.closest('.icon-button, input')) {
       event.preventDefault()
       return
     }
@@ -142,7 +148,10 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, ex
     setMarker(undefined)
     if (event.dataTransfer) {
       event.dataTransfer.effectAllowed = 'move'
-      event.dataTransfer.setData(SESSION_DRAG_MIME, key)
+      if (canArrange) event.dataTransfer.setData(SESSION_DRAG_MIME, key)
+      if (entry.kind === 'session') {
+        event.dataTransfer.setData(SESSION_BINDING_DRAG_MIME, JSON.stringify({ taskId, key }))
+      }
       const rect = event.currentTarget.getBoundingClientRect()
       if (typeof event.dataTransfer.setDragImage === 'function' && rect.width && rect.height) {
         event.dataTransfer.setDragImage(event.currentTarget,
@@ -275,23 +284,34 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, ex
     const detailsId = `${detailsPrefix}-${rowIndices.get(key)}`
     const position = dropPosition(key)
     const dropHint = position === 'group' ? 'Create group' : position === 'into' ? 'Add to group' : undefined
+    const isPoppedOut = Boolean(popoutKeys?.has(key))
+    const isSplit = !isPoppedOut && key === secondaryKey
+    const canDragRow = canArrange || Boolean(onSplit)
     return <li key={key} role="treeitem" className="session-tree-item" data-session-key={key} data-drop={position}
       aria-label={label} aria-description={binding.id} aria-selected={key === activeKey} aria-expanded={open} aria-level={parent ? 2 : 1}
       tabIndex={tabStop === key ? 0 : -1} ref={refFor(key)}
       onFocus={(event) => { if (event.target === event.currentTarget) setFocused(key) }} onKeyDown={(event) => navigate(event, byKey.get(key)!)}>
-      <div className={`session-tree-row ${key === activeKey ? 'is-selected' : ''}`} data-transferring={Boolean(transfer)}
-        data-dragging={dragged === key || undefined} draggable={canArrange || undefined}
+      <div className={`session-tree-row ${key === activeKey ? 'is-selected' : ''}${isSplit ? ' is-split-pane' : ''}`} data-transferring={Boolean(transfer)}
+        data-dragging={dragged === key || undefined} draggable={canDragRow || undefined}
         onDragStart={(event) => startDrag(event, node)} onDragEnd={clearDrag}>
         {transfer && <progress className="session-transfer-mask" aria-label={`History transfer for ${label}`} max={100} value={transfer.value} aria-valuetext={transfer.description} />}
         {canArrange && <span className="session-drag-grip" aria-hidden="true"><Icon name="gripper" /></span>}
-        <button type="button" tabIndex={-1} className="session-row" draggable={canArrange || undefined} aria-label={`Open ${label}`} title={label}
+        <button type="button" tabIndex={-1} className="session-row" draggable={canDragRow || undefined} aria-label={`Open ${label}`} title={label}
           onClick={() => { if (suppressClick.current) return; focus(key); onSelect?.(binding) }}>
           <strong title={cached && !discovered ? 'Last known title saved on this device' : undefined}>{label}</strong>
           {dropHint ? <span className="session-drop-hint"><Icon name="add" />{dropHint}</span>
             : transfer ? <span className="session-transfer-status" title={transfer.description}>
               <Icon name="loading" className="codicon-modifier-spin" /><span>{transfer.label}</span><strong>{transfer.percent}%</strong>
-            </span> : <span className="session-machine" title={binding.owner.machineName}>{machineLabel(binding.owner, aliases)}</span>}
+            </span> : <span className="session-machine" title={binding.owner.machineName}>
+              <span title={binding.owner.machineName}>{machineLabel(binding.owner, aliases)}</span>
+              {isPoppedOut && <span className="session-state-pill" title="Open in separate window"><Icon name="multiple-windows" />Window</span>}
+              {isSplit && <span className="session-state-pill" title="Open in right split pane"><Icon name="split-horizontal" />Split</span>}
+            </span>}
         </button>
+        {(onSplit || onPopOut) && <div className="session-row-actions">
+          {onSplit && <IconButton icon="split-horizontal" label={`Split ${label} right`} title="Split right" tabIndex={-1} onClick={() => { focus(key); onSplit(binding) }} />}
+          {onPopOut && <IconButton icon={isPoppedOut ? 'multiple-windows' : 'empty-window'} label={isPoppedOut ? `Focus ${label} window` : `Pop out ${label}`} title={isPoppedOut ? 'Focus session window' : 'Open in new window'} tabIndex={-1} onClick={() => { focus(key); onPopOut(binding) }} />}
+        </div>}
         <IconButton icon={open ? 'chevron-up' : 'chevron-down'} label={`${open ? 'Hide' : 'Show'} details for ${label}`} tabIndex={-1} aria-expanded={open} aria-controls={open ? detailsId : undefined}
           onClick={() => { focus(key); showDetails(key, !open) }} />
       </div>
@@ -304,6 +324,8 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, ex
           <dt>Location</dt><dd>{binding.ownerIsRemote ? 'Remote' : 'Local'}</dd>
           <dt>Access</dt><dd>{discovered ? discovered.canSend ? 'Read and send' : 'Read only' : 'Not in discovery list'}</dd>
           {key === activeKey && <><dt>Selection</dt><dd>Current session</dd></>}
+          {isSplit && <><dt>Split</dt><dd>Right split pane</dd></>}
+          {isPoppedOut && <><dt>Window</dt><dd>Separate window</dd></>}
         </dl>
         {onUnlink && <div className="session-details-actions">
           <button type="button" className="secondary-button session-unlink-button" aria-label={`Unlink ${label}`} disabled={unlinkDisabled} onClick={() => onUnlink(binding)}>

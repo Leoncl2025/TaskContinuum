@@ -18,7 +18,7 @@ import { handleDesktopOperation } from './desktopOperations'
 
 export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow, currentRoot: () => Promise<string>, manager: AgentHostManager) {
   const watches = new Map<string, { window: BrowserWindow; root: string; target: AgentHostTarget; connection: AgentHostConnection; leases: Map<string, Set<string>>; close(): void }>()
-  const progressWatches = new Map<string, { connection: AgentHostConnection; schedule(): void; close(): void }>()
+  const progressWatches = new Map<string, { window: BrowserWindow; connection: AgentHostConnection; schedule(): void; close(): void }>()
   let consenting: Promise<void> | undefined
   async function current(event: IpcMainInvokeEvent, window: BrowserWindow, root: string, target?: AgentHostTarget): Promise<void> {
     if (window.isDestroyed() || window.webContents.isDestroyed() || requireWindow(event) !== window || await currentRoot() !== root) throw new Error('The workspace or window changed. No message was sent.')
@@ -89,7 +89,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
       if (!publishing && !timer) timer = setTimeout(() => { void publish() }, 25)
     }
     const unlisten = connection.listen((event) => { if (event.type === 'state' || event.type === 'history-progress') schedule() })
-    progressWatches.set(key, { connection, schedule, close })
+    progressWatches.set(key, { window, connection, schedule, close })
     schedule()
   }
   handleDesktopOperation(ipcMain, 'agent-host:list', async (event) => {
@@ -344,8 +344,14 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
       return await connection.cancel(turnId, () => current(event, window, root, target))
     } finally { release() }
   })
-  return { close: () => {
-    for (const watch of watches.values()) watch.close()
-    for (const progress of progressWatches.values()) progress.close()
-  } }
+  return {
+    close: () => {
+      for (const watch of watches.values()) watch.close()
+      for (const progress of progressWatches.values()) progress.close()
+    },
+    closeWindow: (window: BrowserWindow) => {
+      for (const watch of watches.values()) if (watch.window === window) watch.close()
+      for (const progress of progressWatches.values()) if (progress.window === window) progress.close()
+    },
+  }
 }

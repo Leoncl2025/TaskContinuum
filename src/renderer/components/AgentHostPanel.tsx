@@ -225,18 +225,29 @@ type AgentHostPanelProps = {
   target: AgentHostTarget
   connectionRevision?: number
   active?: boolean
+  paneSlot?: 'single' | 'primary' | 'secondary'
+  showTaskBadge?: boolean
+  closeLabel?: string
+  hideClose?: boolean
+  restoredDraft?: { readonly nonce: number; readonly text: string }
   headerTarget?: HTMLElement | null
   cachedTitle?: string
   onTitles?(sessions: readonly SessionTitleUpdate[]): void
+  onDraftChange?(draft: string): void
+  onActivatePane?(): void
+  onSplitRight?(): void
+  onSwapSplit?(): void
+  onPopOut?(draft: string): Promise<boolean> | boolean | void
   onClose(): void
   onDevices?(): void
   onSessions?(): void
-  onBusy?(busy: boolean): void
+  onBusy?(busy: boolean, panelKey?: string): void
+  panelKey?: string
   beforeReconnect?(): Promise<void>
   prepareFirstMessage?(text: string): Promise<string>
 } & ({ task: TaskRecord; workspace?: never; onDetach(): void } | { task?: never; workspace: Pick<WorkspaceSnapshot, 'id' | 'name'>; onDetach?: never })
 
-export function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, headerTarget, cachedTitle, onTitles, onDetach, onClose, onDevices, onSessions, onBusy, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
+export function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, paneSlot, showTaskBadge = false, closeLabel = 'Hide chat panel', hideClose = false, restoredDraft, headerTarget, cachedTitle, onTitles, onDraftChange, onActivatePane, onSplitRight, onSwapSplit, onPopOut, onDetach, onClose, onDevices, onSessions, onBusy, panelKey, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
   const bridge = window.agentHost
   const { sessionId, chatId } = target
   const { clientId, machineName } = target.owner
@@ -253,7 +264,12 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const [error, setError] = useState<string>()
   const [historyLoadError, setHistoryLoadError] = useState<{ key: string; message: string }>()
   const [deliveryReview, setDeliveryReview] = useState<{ id: string; status: 'checking' | 'not-found' | 'abandoning' | 'failed'; acknowledged: boolean; error?: string }>()
-  const [draft, setDraft] = useState('')
+  const [draft, setDraft] = useState(() => restoredDraft?.text ?? '')
+  const [seenDraftNonce, setSeenDraftNonce] = useState(restoredDraft?.nonce)
+  if (restoredDraft && restoredDraft.nonce !== seenDraftNonce) {
+    setSeenDraftNonce(restoredDraft.nonce)
+    setDraft(restoredDraft.text)
+  }
   const [images, setImages] = useState<ChatImageAttachment[]>([])
   const [busy, setBusy] = useState(false)
   const [detailsKey, setDetailsKey] = useState<string>()
@@ -284,6 +300,8 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const attempted = useRef<{ id: string; text: string; draft: string; images: ChatImageAttachment[] } | undefined>(undefined)
   const firstMessageSent = useRef(false)
   const imageInput = useChatImageInput(`${contextId}:${key}`, images, setImages, busy)
+  const notifyDraftChange = useEffectEvent((value: string) => { onDraftChange?.(value) })
+  useEffect(() => { notifyDraftChange(draft) }, [draft])
   useEffect(() => {
     mounted.current = true
     return () => { mounted.current = false }
@@ -372,7 +390,10 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const responding = Boolean(activeTurn)
   const pending = Boolean(view?.pendingTurn)
   const historyBusy = Boolean(view?.historyTransfer || view?.history?.loading)
-  useEffect(() => { onBusy?.(busy || pending || responding); return () => onBusy?.(false) }, [busy, pending, responding, onBusy])
+  const panelBusy = busy || pending || responding
+  const notifyBusy = useEffectEvent((value: boolean) => { onBusy?.(value, panelKey) })
+  useEffect(() => { notifyBusy(panelBusy) }, [panelBusy])
+  useEffect(() => () => { notifyBusy(false) }, [])
   useEffect(() => {
     if (following.current && log.current) {
       log.current.scrollTop = log.current.scrollHeight
@@ -542,14 +563,23 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     ? 'Wait for Agent Host work and image processing to finish before updating.'
     : draft.length || images.length ? 'Send or clear unsent chat text and images before updating. Drafts are not discarded by an update.' : undefined
   const chatActions = <>
+    {onSplitRight && <IconButton icon="split-horizontal" label="Split chat right" title="Split chat right (Ctrl+\)" aria-keyshortcuts="Control+Backslash" onClick={() => { setDetailsKey(undefined); onSplitRight() }} />}
+    {onSwapSplit && <IconButton icon="arrow-swap" label="Swap split panes" title="Swap left and right split panes" onClick={() => { setDetailsKey(undefined); onSwapSplit() }} />}
+    {onPopOut && <IconButton icon="empty-window" label="Open session in new window" title="Open session in new window" onClick={() => {
+      setDetailsKey(undefined)
+      const snapshot = draft
+      void Promise.resolve(onPopOut(snapshot)).then((transferred) => {
+        if (transferred) setDraft((current) => current === snapshot ? '' : current)
+      })
+    }} />}
     {onDevices && <IconButton icon="remote" label="Manage devices" onClick={() => { setDetailsKey(undefined); onDevices() }} />}
     <IconButton icon="refresh" label="Reconnect Agent Host" title="Reconnect Agent Host (F5)" aria-keyshortcuts="F5" disabled={busy} onClick={() => { setDetailsKey(undefined); void reconnect() }} />
     {onDetach && <IconButton icon="debug-disconnect" label="Detach conversation" disabled={busy || pending} onClick={() => { setDetailsKey(undefined); onDetach() }} />}
-    {!workspace && <IconButton icon="close" label="Hide chat panel" onClick={() => { setDetailsKey(undefined); onClose() }} />}
+    {!workspace && !hideClose && <IconButton icon="close" label={closeLabel} onClick={() => { setDetailsKey(undefined); onClose() }} />}
   </>
   const HeaderTag = headerTarget ? 'div' : 'header'
   const header = <HeaderTag className="ahp-chat-header" aria-label="Chat header" role={headerTarget ? 'group' : undefined}>
-    <div className="ahp-chat-title"><Icon name="copilot" /><strong title={displayTitle}>{displayTitle}</strong></div>
+    <div className="ahp-chat-title"><Icon name="copilot" />{showTaskBadge && task && <span className="ahp-chat-task-badge" title={task.title}>{task.id}</span>}<strong title={displayTitle}>{displayTitle}</strong></div>
     <div className="ahp-chat-meta">
       <span className="ahp-chat-status" role="status" data-state={stateLabel} title={stateLabel}><span aria-hidden="true" /><span className="ahp-chat-state-label">{stateLabel}</span></span>
       <span className="ahp-chat-machine" title={ownerLabel}><Icon name="server" /><span>Copilot @ {ownerLabel}</span></span>
@@ -559,7 +589,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       <div className="ahp-chat-secondary-actions">{chatActions}</div>
     </div>
   </HeaderTag>
-  return <ChatLinkTargetContext.Provider value={linkTarget}><aside ref={panel} className="chat-panel ahp-panel" aria-label={workspace ? 'Agent Host task creation chat' : 'Agent Host task chat'} aria-keyshortcuts="F5" data-update-blocker={updateBlocker}>
+  return <ChatLinkTargetContext.Provider value={linkTarget}><aside ref={panel} className="chat-panel ahp-panel" data-pane-slot={paneSlot} data-pane-focused={paneSlot && paneSlot !== 'single' ? active || undefined : undefined} aria-label={workspace ? 'Agent Host task creation chat' : paneSlot === 'secondary' ? 'Secondary split Agent Host task chat' : 'Agent Host task chat'} aria-keyshortcuts="F5" data-update-blocker={updateBlocker} onPointerDownCapture={onActivatePane ? () => onActivatePane() : undefined} onFocusCapture={onActivatePane ? () => onActivatePane() : undefined}>
     {headerTarget ? active && createPortal(header, headerTarget) : header}
     {detailsOpen && <Dialog title="Chat details" className="ahp-chat-details" onClose={() => setDetailsKey(undefined)}>
       <dl>
