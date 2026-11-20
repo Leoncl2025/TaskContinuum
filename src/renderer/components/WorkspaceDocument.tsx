@@ -5,6 +5,7 @@ import remarkFrontmatter from 'remark-frontmatter'
 import { mathRehypePlugins, prepareMarkdownMath } from '../markdownMath'
 import { highlightMarkdownCode } from '../markdownSyntax'
 import { parseChatLink } from '../../shared/chatLinks'
+import { MarkdownCodeBlock, MarkdownTableBlock } from './MarkdownBlocks'
 import { MarkdownLink, MarkdownLinks } from './MarkdownLinks'
 
 const rehypePlugins = [...mathRehypePlugins, highlightMarkdownCode]
@@ -16,7 +17,8 @@ export function WorkspaceDocument({ source }: { source: string | null }) {
       a: ({ children, href }) => <MarkdownLink href={href} className="document-link">{children}</MarkdownLink>,
       img: ({ alt }) => <span className="muted">{alt ?? 'Image'}</span>,
       h1: ({ children }) => <h2>{children}</h2>,
-      table: ({ children }) => <div className="document-table"><table>{children}</table></div>,
+      pre: MarkdownCodeBlock,
+      table: ({ children }) => <MarkdownTableBlock variant="document">{children}</MarkdownTableBlock>,
     }}>{math.source}</Markdown>}
   </div></MarkdownLinks>
 }

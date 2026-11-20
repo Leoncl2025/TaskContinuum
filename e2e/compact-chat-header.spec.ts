@@ -559,6 +559,108 @@ for (const scenario of [
   })
 }
 
+test.describe('expandable markdown blocks', () => {
+  test.use({ deviceScaleFactor: 2 })
+
+  const sampleMarkdown = [
+    '如果你们同时还想保护 `TTOL` (Time To OnLoad) 指标不被 `WeatherMapV2` 推迟，直接复用同一个 `afterWindowLoad` 门控即可。',
+    '',
+    '### 三种方案怎么选？',
+    '',
+    '| 候选方案 | 触发时机 | 最适合的目标 |',
+    '| --- | --- | --- |',
+    '| **方案 1** (`renderRootElement` + 双 `rAF`) | 首屏 React 外壳真正画上屏幕后的下一帧 | 代码最少（5 行），不改架构，自动适配快慢网。 |',
+    '| **方案 2** (`PerformanceObserver` 监听 FCP) | 浏览器记录 `first-contentful-paint` 的精确瞬间 | 改动完全封装在 `earlyLoadWeatherMapBundle` 内，与 PAS 的 **FCP** 指标严格对齐，且最大化提前量保 **TTVR**。 |',
+    '| **方案 3** (`window.load` 之后) | 文档 `load` 事件完成后 | 如果除了 FCP 还严格卡 **TTOL** 指标，选这个最稳。 |',
+    '',
+    '```ts',
+    'export function scheduleAfterFirstPaint(loadBundle: () => Promise<void>, options = { protectTtol: false }): void {',
+    '  if (options.protectTtol && document.readyState !== "complete") {',
+    '    window.addEventListener("load", () => requestAnimationFrame(() => void loadBundle()), { once: true });',
+    '    return;',
+    '  }',
+    '  requestAnimationFrame(() => requestAnimationFrame(() => void loadBundle()));',
+    '}',
+    '```',
+  ].join('\n')
+
+  for (const theme of ['light', 'dark'] as const) {
+    test(`expands Markdown tables and code blocks to full width cleanly in ${theme} mode`, async ({ page }, testInfo) => {
+      const errors: string[] = []
+      page.on('pageerror', (error) => errors.push(error.message))
+      await page.setViewportSize({ width: 1440, height: 920 })
+      await page.goto(`${url}?theme=${theme}&markdown=${encodeURIComponent(sampleMarkdown)}`)
+      await page.evaluate(async () => { await document.fonts.ready })
+
+      const log = page.getByRole('log')
+      const turn = log.locator('[data-turn-id]').first()
+      await expect(turn).toBeVisible()
+      // Keep a single clean turn on screen for exact layout and visual verification.
+      await page.evaluate(() => {
+        const turns = Array.from(document.querySelectorAll('[data-turn-id]'))
+        for (const extra of turns.slice(1)) extra.remove()
+      })
+
+      const tableCard = turn.locator('.markdown-table-card')
+      const codeCard = turn.locator('.message-code-block')
+      const heading = turn.getByRole('heading', { name: '三种方案怎么选？' })
+
+      const compactTableBox = (await tableCard.boundingBox())!
+      const compactCodeBox = (await codeCard.boundingBox())!
+      expect(compactTableBox.width).toBeLessThanOrEqual(770)
+      expect(compactCodeBox.width).toBeLessThanOrEqual(770)
+
+      await page.mouse.move(1, 1)
+      const logBox = (await log.boundingBox())!
+      await page.screenshot({
+        path: testInfo.outputPath(`markdown-blocks-compact-${theme}.png`),
+        clip: { x: logBox.x, y: logBox.y, width: logBox.width, height: Math.min(logBox.height, 640) },
+        animations: 'disabled',
+      })
+
+      await tableCard.getByRole('button', { name: 'Expand table width', exact: true }).click()
+      await codeCard.getByRole('button', { name: 'Expand code width', exact: true }).click()
+
+      await expect(tableCard.getByRole('button', { name: 'Restore table width', exact: true })).toHaveAttribute('aria-pressed', 'true')
+      await expect(codeCard.getByRole('button', { name: 'Restore code width', exact: true })).toHaveAttribute('aria-pressed', 'true')
+
+      const expandedTableBox = (await tableCard.boundingBox())!
+      const expandedCodeBox = (await codeCard.boundingBox())!
+      const headingBox = (await heading.boundingBox())!
+      const logClientWidth = await log.evaluate((el) => el.clientWidth)
+
+      expect(expandedTableBox.width).toBeGreaterThanOrEqual(logClientWidth - 52)
+      expect(expandedCodeBox.width).toBeGreaterThanOrEqual(logClientWidth - 52)
+      // Surrounding prose heading stays comfortably at the 800px reading column.
+      expect(headingBox.width).toBeLessThanOrEqual(770)
+      // All 3 columns fit horizontally without clipping once expanded.
+      expect(await tableCard.locator('.markdown-table-scroll').evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
+      expect(await log.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+
+      await page.mouse.move(1, 1)
+      await page.screenshot({
+        path: testInfo.outputPath(`markdown-blocks-expanded-${theme}.png`),
+        clip: { x: logBox.x, y: logBox.y, width: logBox.width, height: Math.min(logBox.height, 640) },
+        animations: 'disabled',
+      })
+
+      // Restoring returns to compact width, and on a narrow viewport the expand button opens the full-window dialog.
+      await tableCard.getByRole('button', { name: 'Restore table width', exact: true }).click()
+      await codeCard.getByRole('button', { name: 'Restore code width', exact: true }).click()
+      await page.setViewportSize({ width: 720, height: 820 })
+      await tableCard.getByRole('button', { name: 'Expand table width', exact: true }).click()
+      const dialog = page.getByRole('dialog', { name: 'Table', exact: true })
+      await expect(dialog).toBeVisible()
+      const dialogBox = (await dialog.boundingBox())!
+      expect(dialogBox.width).toBeGreaterThanOrEqual(720 - 52)
+      await page.keyboard.press('Escape')
+      await expect(dialog).toHaveCount(0)
+      expect(errors).toEqual([])
+    })
+  }
+})
+
 for (const theme of ['light', 'dark'] as const) {
   test(`uses soft neutral surfaces and readable rounded controls in ${theme} mode`, async ({ page }, testInfo) => {
     const errors: string[] = []

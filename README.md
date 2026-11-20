@@ -40,8 +40,10 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
 - Task creation through the UI, a local agent, or CLI.
 - Streaming Markdown, model options, image attachments, and terminal output.
 - Offline syntax highlighting for language-tagged Markdown code blocks in chats
-  and task documents, with light/dark theme colors and exact-source code copying
-  in chats. Unlabeled or unknown languages remain plain text. Blocks above
+  and task documents, with light/dark theme colors, exact-source code/table
+  copying, and one-click **Full width** expansion for wide Markdown tables and
+  code/text blocks (stretching inline across wide panes or opening a full-window
+  view in narrow panes). Unlabeled or unknown languages remain plain text. Blocks above
   65,536 characters stay fully readable/copyable without highlighting to bound
   rendering work.
 - Message text supports up to **12,000 characters** (UTF-16 code units), with the

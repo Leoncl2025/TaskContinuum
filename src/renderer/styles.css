@@ -318,6 +318,7 @@ kbd { font-family: inherit; font-size: 10px; color: var(--muted); border: 1px so
 .chat-log > [data-turn-id], .chat-log > .message { max-width: 800px; margin-inline: auto; }
 /* Keep the newest turn laid out; off-screen history retains its DOM and measured height. */
 .chat-log > [data-turn-id]:not(:last-child) { content-visibility: auto; contain-intrinsic-block-size: auto 400px; }
+.chat-log > [data-turn-id]:has(.markdown-block-anchor[data-expanded='true']) { content-visibility: visible; }
 .chat-welcome { padding: 55px 25px 25px; }
 .chat-welcome-icon { display: inline-flex; justify-content: center; align-items: center; width: 40px; height: 40px; color: var(--muted); border: 1px solid var(--border); background: var(--raised); border-radius: var(--radius-md); }
 .chat-welcome-icon .codicon { font-size: 22px; }

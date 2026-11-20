@@ -266,14 +266,29 @@
 .message-markdown .contains-task-list { padding-left: 0; list-style: none; }
 .message-markdown .task-list-item input { margin-right: 7px; }
 .message-markdown code { font-family: Consolas, 'Cascadia Code', monospace; font-size: 11px; background: var(--raised); padding: 2px 4px; border-radius: 3px; }
-.message-markdown pre { max-width: 100%; overflow: auto; padding: 12px; margin: 12px 0; background: var(--code-bg, var(--input)); border: 1px solid var(--border); border-radius: var(--radius-md); white-space: pre; overflow-wrap: normal; }
+.message-markdown pre { max-width: 100%; overflow: auto; padding: 13px 14px; margin: 12px 0; background: var(--code-bg, var(--input)); border: 1px solid var(--border); border-radius: var(--radius-md); white-space: pre; overflow-wrap: normal; }
 .message-markdown pre code { padding: 0; background: none; border-radius: 0; white-space: pre; }
-.message-code-block { min-width: 0; margin: 12px 0; background: var(--code-bg, var(--input)); border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
-.message-code-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; padding: 2px 8px 2px 12px; background: var(--raised); color: var(--muted); font-size: 11px; }
-.message-code-header > span { min-width: 0; overflow-wrap: anywhere; }
-.message-code-header .icon-button { flex-shrink: 0; }
-.message-code-block pre { border: 0; border-top: 1px solid var(--border); border-radius: 0; margin: 0; }
-.message-code-block .message-code-error { margin: 0; padding: 6px 12px; color: var(--muted); font-size: 11px; }
+.markdown-block-anchor { container: markdown-block / inline-size; min-width: 0; margin: 14px 0; }
+.message-code-block, .markdown-table-card { min-width: 0; margin: 0; background: var(--code-bg, var(--input)); border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; transition: box-shadow 160ms ease, border-color 160ms ease; }
+:is(.message-code-block, .markdown-table-card).is-expanded { position: relative; z-index: 2; border-color: color-mix(in srgb, var(--link) 32%, var(--border)); box-shadow: 0 10px 30px var(--shadow); }
+.markdown-card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 34px; padding: 3px 8px 3px 12px; background: color-mix(in srgb, var(--raised) 76%, var(--bg)); border-bottom: 1px solid var(--border); color: var(--muted); font-size: 11px; }
+.markdown-card-label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-weight: 500; color: var(--muted); }
+.markdown-card-label > .codicon { font-size: 13px; color: var(--subtle); }
+.markdown-card-label > span:not(.codicon) { min-width: 0; overflow-wrap: anywhere; }
+.markdown-card-actions { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+.markdown-card-actions .icon-button { width: 26px; height: 26px; }
+.markdown-expand-button { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 8px; border: 1px solid transparent; border-radius: var(--radius-sm); color: var(--muted); font-size: 11px; font-weight: 500; line-height: 16px; white-space: nowrap; }
+.markdown-expand-button > .codicon { font-size: 13px; }
+.markdown-expand-button:hover { background: var(--hover); border-color: var(--border); color: var(--text); }
+.markdown-expand-button[data-active='true'] { background: color-mix(in srgb, var(--link) 12%, var(--bg)); border-color: color-mix(in srgb, var(--link) 35%, var(--border)); color: var(--link); }
+.markdown-expand-button[data-active='true']:hover { background: color-mix(in srgb, var(--link) 18%, var(--bg)); }
+@container markdown-block (max-width: 440px) {
+  .markdown-expand-button { width: 26px; padding: 0; justify-content: center; }
+  .markdown-expand-button > span:not(.codicon) { display: none; }
+}
+.message-code-block pre { border: 0; border-radius: 0; margin: 0; }
+.message-code-block.is-expanded pre { padding: 14px 18px; }
+.message-code-error { margin: 0; padding: 6px 12px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; }
 .message-markdown blockquote { margin: 12px 0; padding-left: 12px; border-left: 3px solid var(--border); color: var(--muted); }
 .message-markdown hr { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
 .message-markdown a.message-link { color: var(--link); }
@@ -289,10 +304,21 @@
 .chat-file-line-target { background: var(--selected); outline: 1px solid var(--accent); }
 .chat-file-image { display: block; max-width: 100%; max-height: 60dvh; margin: auto; object-fit: contain; }
 .chat-file-dialog .dialog-actions { flex-wrap: wrap; }
-.message-markdown .message-table { max-width: 100%; overflow-x: auto; margin: 12px 0; }
-.message-markdown table { width: max-content; min-width: 100%; border-collapse: collapse; text-align: left; }
-.message-markdown th, .message-markdown td { min-width: 80px; max-width: 320px; padding: 6px 10px; border: 1px solid var(--border); vertical-align: top; }
-.message-markdown th { background: var(--raised); font-weight: 600; }
+.markdown-table-scroll { max-width: 100%; overflow-x: auto; }
+:is(.message-markdown, .workspace-markdown) table { width: max-content; min-width: 100%; border-collapse: collapse; text-align: left; }
+.markdown-table-card.is-expanded table { width: 100%; }
+:is(.message-markdown, .workspace-markdown) :is(th, td) { min-width: 88px; max-width: 340px; padding: 9px 14px; border: 0; border-bottom: 1px solid var(--border); border-right: 1px solid color-mix(in srgb, var(--border) 72%, transparent); vertical-align: top; line-height: 1.6; }
+:is(.message-markdown, .workspace-markdown) :is(th, td):last-child { border-right: 0; }
+:is(.message-markdown, .workspace-markdown) tbody tr:last-child td { border-bottom: 0; }
+:is(.message-markdown, .workspace-markdown) tbody tr:hover td { background: color-mix(in srgb, var(--hover) 50%, transparent); }
+:is(.message-markdown, .workspace-markdown) th { background: color-mix(in srgb, var(--raised) 55%, var(--bg)); color: var(--text); font-weight: 600; }
+.markdown-table-card.is-expanded :is(th, td) { max-width: none; padding: 11px 16px; }
+.dialog.markdown-expand-dialog { width: calc(100vw - 48px); max-width: none; max-height: calc(100dvh - 48px); }
+.markdown-expand-dialog .dialog-header { margin-bottom: 12px; }
+.markdown-expand-dialog-toolbar { display: flex; justify-content: flex-end; margin-bottom: 10px; }
+.markdown-expand-dialog-toolbar .secondary-button { min-height: 28px; gap: 6px; padding: 4px 10px; border-radius: var(--radius-sm); font-size: 11.5px; }
+.markdown-expand-dialog-body { min-width: 0; max-height: calc(100dvh - 170px); overflow: auto; }
+.markdown-expand-dialog-body :is(.message-code-block, .markdown-table-card).is-expanded { box-shadow: none; border-color: var(--border); }
 .remote-vscode-dialog { width: min(620px, calc(100vw - 24px)); }
 .remote-vscode-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .workspace-links-controls { min-width: 0; margin-bottom: 16px; padding-block: 4px 20px; border-bottom: 1px solid var(--border); }

@@ -1,48 +1,20 @@
-import { memo, useMemo, useState } from 'react'
-import type { ReactNode } from 'react'
+import { memo, useMemo } from 'react'
 import Markdown from 'react-markdown'
-import type { Components, ExtraProps } from 'react-markdown'
+import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkBreaks from 'remark-breaks'
-import { IconButton } from './Primitives'
 import { mathRehypePlugins, prepareMarkdownMath } from '../markdownMath'
-import { highlightMarkdownCode, markdownCodeText } from '../markdownSyntax'
+import { highlightMarkdownCode } from '../markdownSyntax'
 import { parseChatLink } from '../../shared/chatLinks'
+import { MarkdownCodeBlock, MarkdownTableBlock } from './MarkdownBlocks'
 import { MarkdownLink, MarkdownLinks } from './MarkdownLinks'
 import '../sessions.css'
-
-function ChatCodeBlock({ children, node }: ExtraProps & { children?: ReactNode }) {
-  const code = node?.children[0]
-  const source = code?.type === 'element' ? markdownCodeText(code) : ''
-  const classNames = code?.type === 'element' ? code.properties.className : undefined
-  const languageClass = Array.isArray(classNames) ? classNames.find((name) => typeof name === 'string' && name.startsWith('language-')) : undefined
-  const language = typeof languageClass === 'string' ? languageClass.slice('language-'.length) : 'Code'
-  const [copying, setCopying] = useState(false)
-  const [result, setResult] = useState<{ source: string; copied: boolean }>()
-  const copied = result?.source === source && result.copied
-  async function copy(): Promise<void> {
-    setCopying(true)
-    try {
-      if (window.desktop) await window.desktop.copyText(source)
-      else {
-        if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable.')
-        await navigator.clipboard.writeText(source)
-      }
-      setResult({ source, copied: true })
-    } catch { setResult({ source, copied: false }) } finally { setCopying(false) }
-  }
-  return <div className="message-code-block">
-    <div className="message-code-header"><span>{language}</span><IconButton icon={copied ? 'check' : 'copy'} label={copied ? 'Code copied' : 'Copy code'} disabled={copying || !source} onClick={() => { void copy() }} /></div>
-    <pre tabIndex={0} aria-label="Code block">{children}</pre>
-    {result?.source === source && !result.copied && <p className="message-code-error" role="status">Code could not be copied.</p>}
-  </div>
-}
 
 const markdownComponents: Components = {
   a: MarkdownLink,
   img: ({ alt, src }) => <MarkdownLink href={src}>{alt || 'Image'}</MarkdownLink>,
-  pre: ChatCodeBlock,
-  table: ({ children }) => <div className="message-table" role="region" aria-label="Message table" tabIndex={0}><table>{children}</table></div>,
+  pre: MarkdownCodeBlock,
+  table: ({ children }) => <MarkdownTableBlock>{children}</MarkdownTableBlock>,
 }
 const rehypePlugins = [...mathRehypePlugins, highlightMarkdownCode]
 

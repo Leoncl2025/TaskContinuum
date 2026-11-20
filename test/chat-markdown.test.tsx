@@ -272,6 +272,41 @@ describe('native chat Markdown presentation', () => {
     expect(write).toHaveBeenCalledTimes(2)
   })
 
+  it('toggles full-width expansion and copies table contents for Markdown tables and code blocks', async () => {
+    const user = userEvent.setup()
+    const write = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue()
+    const source = [
+      '| Plan | Trigger | Goal |',
+      '| --- | --- | --- |',
+      '| Option A | Double rAF | Minimal diff |',
+      '',
+      '```ts',
+      'export const wideConfiguration = { mode: "full-width", preserveContext: true };',
+      '```',
+    ].join('\n')
+    render(<ChatMarkdown source={source} />)
+
+    const expandTable = screen.getByRole('button', { name: 'Expand table width' })
+    expect(expandTable).toHaveAttribute('aria-pressed', 'false')
+    await user.click(expandTable)
+    const restoreTable = screen.getByRole('button', { name: 'Restore table width' })
+    expect(restoreTable).toHaveAttribute('aria-pressed', 'true')
+    expect(restoreTable.closest('.markdown-table-card')).toHaveClass('is-expanded')
+    await user.click(restoreTable)
+    expect(screen.getByRole('button', { name: 'Expand table width' })).toHaveAttribute('aria-pressed', 'false')
+
+    await user.click(screen.getByRole('button', { name: 'Copy table' }))
+    expect(write).toHaveBeenCalledExactlyOnceWith('Plan\tTrigger\tGoal\nOption A\tDouble rAF\tMinimal diff')
+    expect(screen.getByRole('button', { name: 'Table copied' })).toBeInTheDocument()
+
+    const expandCode = screen.getByRole('button', { name: 'Expand code width' })
+    expect(expandCode).toHaveAttribute('aria-pressed', 'false')
+    await user.click(expandCode)
+    const restoreCode = screen.getByRole('button', { name: 'Restore code width' })
+    expect(restoreCode).toHaveAttribute('aria-pressed', 'true')
+    expect(restoreCode.closest('.message-code-block')).toHaveClass('is-expanded')
+  })
+
   function delivered(): TransferStatus {
     return {
       transferId: crypto.randomUUID(), deviceId: crypto.randomUUID(), state: 'delivered', receivedBytes: 40,

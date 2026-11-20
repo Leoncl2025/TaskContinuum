@@ -18,13 +18,13 @@
 .workspace-markdown p { margin: 12px 0; }
 .workspace-markdown ul, .workspace-markdown ol { padding-left: 23px; }
 .workspace-markdown li { padding: 3px 0; }
-.workspace-markdown pre { max-width: 100%; overflow: auto; background: var(--code-bg, var(--raised)); border: 1px solid var(--border); padding: 12px; border-radius: var(--radius-md); }
+.workspace-markdown pre { max-width: 100%; overflow: auto; background: var(--code-bg, var(--raised)); border: 1px solid var(--border); padding: 12px; border-radius: var(--radius-md); white-space: pre; overflow-wrap: normal; }
+.workspace-markdown .message-code-block { background: var(--code-bg, var(--raised)); }
+.workspace-markdown .message-code-block pre { border: 0; border-radius: 0; margin: 0; }
+.workspace-markdown .message-code-block pre code { padding: 0; background: none; border-radius: 0; white-space: pre; }
 .workspace-markdown code { font-family: Consolas, 'Cascadia Code', monospace; font-size: 11px; }
 .workspace-markdown blockquote { border-left: 2px solid var(--border); padding-left: 14px; margin-left: 0; color: var(--muted); }
-.workspace-markdown .document-table { overflow-x: auto; margin: 16px 0; }
-.workspace-markdown table { width: 100%; border-collapse: collapse; text-align: left; }
-.workspace-markdown th, .workspace-markdown td { padding: 8px 10px; border: 1px solid var(--border); min-width: 70px; vertical-align: top; }
-.workspace-markdown th { background: var(--raised); font-weight: 500; }
+.workspace-markdown .document-table { margin: 0; }
 .workspace-markdown a.document-link { color: var(--link); }
 .status-select select:disabled { opacity: 1; color: inherit; }
 .workspace-empty { min-height: 0; }
