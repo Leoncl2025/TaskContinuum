@@ -23,9 +23,13 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
   the Current/Link/Create tabs; use Link or Create rather than duplicate footer
   buttons, and the Tasks activity button to return to the task list.
 - Device-local restoration of open task tabs, the active task, each task's
-  selected chat, and **Current** session ordering — supporting manual
-  drag-and-drop (**Alt+Up / Alt+Down**) or smart sorting by last response time,
-  creation time, name, or machine.
+  selected chat, and **Current** / **Link** session ordering — defaulting to
+  **Last response** (latest updated first), with support for manual
+  drag-and-drop (**Alt+Up / Alt+Down**) or smart sorting by creation time,
+  name, or machine. **Local sessions** discovery reads lightweight AHP 1.0
+  session summaries directly without cold-loading historical session channels or
+  waiting on remote Dev Tunnels; **All available sessions** queries remote peers
+  concurrently with a bounded discovery deadline.
 - Organize linked sessions into named, collapsible groups in **Current**.
   Drop a session on the middle of another row to create a group, or on a group
   to join it. Drop at a row edge to reorder. Rename a whole group in place

@@ -59,8 +59,10 @@ export interface AgentHostView {
   pendingTurn?: { id: string; state: 'pending' | 'uncertain' }
 }
 
+export type AgentHostSessionScope = 'local' | 'all'
+
 export interface AgentHostBridge {
-  list(): Promise<{ sessions: AgentHostSession[]; warnings: string[] }>
+  list(scope?: AgentHostSessionScope): Promise<{ sessions: AgentHostSession[]; warnings: string[] }>
   localCreationHosts(): Promise<AgentHostCreationHost[]>
   localCreations(): Promise<LocalAgentHostCreation[]>
   createLocal(request: LocalAgentHostCreateRequest): Promise<LocalAgentHostCreation>

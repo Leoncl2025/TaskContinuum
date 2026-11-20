@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { agentHostKey } from '../../shared/agentHost'
 import type { AgentHostHistoryTransfer, AgentHostSession } from '../../shared/agentHost'
-import { sessionBindingKey, sessionSortModes } from '../chat/sessionBindings'
+import { compareSessionNames, DEFAULT_SESSION_SORT_MODE, sessionBindingKey, sessionSortModes } from '../chat/sessionBindings'
 import type { SessionBinding, SessionBindings, SessionSortMode } from '../chat/sessionBindings'
 import { buildSessionTree } from '../chat/sessionGroups'
 import type { SessionGroupLayout } from '../chat/sessionGroups'
@@ -59,7 +59,16 @@ interface Props {
   onClose(): void
 }
 
-function SessionSortMenu({ count, groupCount, value, onChange }: { count: number; groupCount: number; value: SessionSortMode; onChange(mode: SessionSortMode): void }) {
+const LINK_SORT_MODES = sessionSortModes.filter((mode): mode is Exclude<SessionSortMode, 'manual'> => mode !== 'manual')
+const naturalMachineCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+
+function SessionSortMenu({ count, groupCount = 0, modes = sessionSortModes, value, onChange }: {
+  count: number
+  groupCount?: number
+  modes?: readonly SessionSortMode[]
+  value: SessionSortMode
+  onChange(mode: SessionSortMode): void
+}) {
   const [open, setOpen] = useState(false)
   const listboxId = useId()
   const root = useRef<HTMLDivElement>(null)
@@ -83,8 +92,9 @@ function SessionSortMenu({ count, groupCount, value, onChange }: { count: number
 
   function moveFocus(offset: number): void {
     const active = [...options.current.entries()].find(([, element]) => element === document.activeElement)?.[0] ?? value
-    const index = sessionSortModes.indexOf(active)
-    const next = sessionSortModes[(index + offset + sessionSortModes.length) % sessionSortModes.length]
+    const currentIndex = modes.indexOf(active)
+    const index = currentIndex >= 0 ? currentIndex : 0
+    const next = modes[(index + offset + modes.length) % modes.length]
     options.current.get(next)?.focus()
   }
 
@@ -97,8 +107,8 @@ function SessionSortMenu({ count, groupCount, value, onChange }: { count: number
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); return }
       if (event.key === 'ArrowDown') { event.preventDefault(); moveFocus(1); return }
       if (event.key === 'ArrowUp') { event.preventDefault(); moveFocus(-1); return }
-      if (event.key === 'Home') { event.preventDefault(); options.current.get(sessionSortModes[0])?.focus(); return }
-      if (event.key === 'End') { event.preventDefault(); options.current.get(sessionSortModes.at(-1)!)?.focus() }
+      if (event.key === 'Home') { event.preventDefault(); options.current.get(modes[0])?.focus(); return }
+      if (event.key === 'End') { event.preventDefault(); options.current.get(modes.at(-1)!)?.focus() }
     }}>
       <button ref={trigger} type="button" className="session-sort-trigger" aria-label="Sort sessions"
         title={`Sort: ${SORT_LABELS[value]}`} data-sorted={value !== 'manual' || undefined}
@@ -109,7 +119,7 @@ function SessionSortMenu({ count, groupCount, value, onChange }: { count: number
         <Icon name={open ? 'chevron-up' : 'chevron-down'} />
       </button>
       {open && <div id={listboxId} className="session-sort-menu" role="listbox" aria-label="Sort sessions by">
-        {sessionSortModes.map((mode) => <Fragment key={mode}>
+        {modes.map((mode) => <Fragment key={mode}>
           <button type="button" role="option" aria-selected={mode === value} className="session-sort-option"
             ref={(element) => { if (element) options.current.set(mode, element); else options.current.delete(mode) }}
             onClick={() => { onChange(mode); close() }}>
@@ -133,7 +143,9 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
     setSeenExpandId(expandSession.id)
     if (view !== 'current') setView('current')
   }
-  const [localSortMode, setLocalSortMode] = useState<SessionSortMode>('manual')
+  const [seenTaskId, setSeenTaskId] = useState(taskId)
+  const [localSortMode, setLocalSortMode] = useState<SessionSortMode>(DEFAULT_SESSION_SORT_MODE)
+  const [linkSortMode, setLinkSortMode] = useState<Exclude<SessionSortMode, 'manual'>>('updated-desc')
   const [sessions, setSessions] = useState<AgentHostSession[]>([])
   const [warnings, setWarnings] = useState<string[]>([])
   const [catalogueError, setCatalogueError] = useState<string>()
@@ -144,7 +156,14 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
   const [operating, setOperating] = useState(false)
   const [revision, setRevision] = useState(0)
   const [detach, setDetach] = useState<SessionBinding>()
+  if (taskId !== seenTaskId) {
+    setSeenTaskId(taskId)
+    if (detach) setDetach(undefined)
+    if (error) setError(undefined)
+  }
   const running = useRef(false)
+  const localOwnerIdRef = useRef(localOwnerId)
+  useEffect(() => { localOwnerIdRef.current = localOwnerId }, [localOwnerId])
   const activeSortMode = sortMode ?? localSortMode
   const mergedTitles = useMemo(() => {
     const result: Record<string, string> = {}
@@ -185,12 +204,21 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
   const detachmentChanged = Boolean(detach && !linked.some((item) => sessionBindingKey(item) === sessionBindingKey(detach)))
   useEffect(() => {
     let active = true
-    void (bridge?.list() ?? Promise.reject(new Error('The Agent Host desktop API is unavailable.'))).then((result) => {
-      if (active) { onTitles?.(result.sessions); setSessions(result.sessions); setWarnings(result.warnings); setCatalogueError(undefined) }
+    void (bridge?.list(location) ?? Promise.reject(new Error('The Agent Host desktop API is unavailable.'))).then((result) => {
+      if (active) {
+        onTitles?.(result.sessions)
+        setSessions((prior) => {
+          if (location !== 'local' || !localOwnerIdRef.current) return result.sessions
+          const retainedRemote = prior.filter((item) => item.owner.clientId !== localOwnerIdRef.current)
+          return retainedRemote.length ? [...result.sessions, ...retainedRemote] : result.sessions
+        })
+        setWarnings(result.warnings)
+        setCatalogueError(undefined)
+      }
     }).catch((failure: unknown) => { if (active) setCatalogueError(failure instanceof Error ? failure.message : 'Agent Host sessions could not be read.') })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [bridge, revision, onTitles])
+  }, [bridge, location, revision, onTitles])
   async function run(action: () => Promise<void>): Promise<void> {
     if (running.current || busy) return
     running.current = true
@@ -205,8 +233,70 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
     setSessions((current) => [...current.filter((item) => agentHostKey(item) !== agentHostKey(session)), session])
     setView('current')
   }
-  const filtered = sessions.filter((session) => (location === 'all' || !localOwnerId || session.owner.clientId === localOwnerId)
-    && `${cachedTitles?.[agentHostKey(session)] ?? session.title} ${session.sessionId} ${machineLabel(session.owner, aliases)}`.toLowerCase().includes(query.toLowerCase()))
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    const decorated = sessions
+      .filter((session) => (location === 'all' || !localOwnerId || session.owner.clientId === localOwnerId)
+        && (!needle || `${cachedTitles?.[agentHostKey(session)] ?? session.title} ${session.sessionId} ${machineLabel(session.owner, aliases)}`.toLowerCase().includes(needle)))
+      .map((session, index) => {
+        const key = agentHostKey(session)
+        const label = cachedTitles?.[key] ?? session.title
+        const machine = machineLabel(session.owner, aliases)
+        const times = mergedTimestamps[key]
+        return { session, index, label, machine, updatedAt: times?.updatedAt, createdAt: times?.createdAt }
+      })
+
+    const compareUpdatedDesc = (left: typeof decorated[number], right: typeof decorated[number]): number => {
+      const leftMissing = left.updatedAt === undefined ? 1 : 0
+      const rightMissing = right.updatedAt === undefined ? 1 : 0
+      if (leftMissing !== rightMissing) return leftMissing - rightMissing
+      if (left.updatedAt !== undefined && right.updatedAt !== undefined && left.updatedAt !== right.updatedAt) {
+        return right.updatedAt - left.updatedAt
+      }
+      if (left.createdAt !== undefined && right.createdAt !== undefined && left.createdAt !== right.createdAt) {
+        return right.createdAt - left.createdAt
+      }
+      return left.index - right.index
+    }
+
+    decorated.sort((left, right) => {
+      switch (linkSortMode) {
+        case 'updated-desc':
+          return compareUpdatedDesc(left, right)
+        case 'created-desc': {
+          const leftTime = left.createdAt ?? left.updatedAt
+          const rightTime = right.createdAt ?? right.updatedAt
+          const leftMissing = leftTime === undefined ? 1 : 0
+          const rightMissing = rightTime === undefined ? 1 : 0
+          if (leftMissing !== rightMissing) return leftMissing - rightMissing
+          if (leftTime !== undefined && rightTime !== undefined && leftTime !== rightTime) return rightTime - leftTime
+          return left.index - right.index
+        }
+        case 'created-asc': {
+          const leftTime = left.createdAt ?? left.updatedAt
+          const rightTime = right.createdAt ?? right.updatedAt
+          const leftMissing = leftTime === undefined ? 1 : 0
+          const rightMissing = rightTime === undefined ? 1 : 0
+          if (leftMissing !== rightMissing) return leftMissing - rightMissing
+          if (leftTime !== undefined && rightTime !== undefined && leftTime !== rightTime) return leftTime - rightTime
+          return left.index - right.index
+        }
+        case 'title-asc': {
+          const diff = compareSessionNames(left.label, right.label)
+          return diff !== 0 ? diff : compareUpdatedDesc(left, right)
+        }
+        case 'title-desc': {
+          const diff = compareSessionNames(right.label, left.label)
+          return diff !== 0 ? diff : compareUpdatedDesc(left, right)
+        }
+        case 'machine-asc': {
+          const diff = naturalMachineCollator.compare(left.machine, right.machine)
+          return diff !== 0 ? diff : compareUpdatedDesc(left, right)
+        }
+      }
+    })
+    return decorated.map((item) => item.session)
+  }, [sessions, location, localOwnerId, query, cachedTitles, aliases, mergedTimestamps, linkSortMode])
   return <aside className="sidebar session-sidebar" aria-label="Agent Host sessions">
     <header className="panel-header"><div className="header-actions"><IconButton icon="refresh" label="Refresh Agent Host sessions" disabled={loading || operating} onClick={() => { setLoading(true); setRevision((value) => value + 1) }} /><IconButton icon="layout-sidebar-left-off" label="Hide session sidebar" onClick={onClose} /></div></header>
     <div className="session-task-context"><strong>{taskId ? `${taskId} - ${taskTitle ?? taskId}` : 'No task selected'}</strong></div>
@@ -248,7 +338,15 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
       </>}
       {view === 'link' && <>
         <div className="ahp-catalog-toolbar"><input aria-label="Find Agent Host session" placeholder="Find session" value={query} onChange={(event) => setQuery(event.target.value)} /><IconButton icon="remote" label="Manage devices" disabled={operating} onClick={onDevices} /></div>
-        <label className="session-filter">Show<select aria-label="Session location" value={location} onChange={(event) => setLocation(event.target.value === 'all' ? 'all' : 'local')}><option value="local">Local sessions</option><option value="all">All available sessions</option></select></label>
+        <label className="session-filter">Show<select aria-label="Session location" value={location} onChange={(event) => {
+          const next = event.target.value === 'all' ? 'all' : 'local'
+          if (next !== location) {
+            setLoading(true)
+            setWarnings([])
+            setLocation(next)
+          }
+        }}><option value="local">Local sessions</option><option value="all">All available sessions</option></select></label>
+        {filtered.length > 1 && <SessionSortMenu count={filtered.length} modes={LINK_SORT_MODES} value={linkSortMode} onChange={(mode) => { if (mode !== 'manual') setLinkSortMode(mode) }} />}
         {loading && <p className="muted" role="status">Loading sessions...</p>}
         {catalogueError && <p className="copilot-error" role="alert">{catalogueError}</p>}
         {warnings.map((warning, index) => <p key={index} className="muted" role="status">{warning}</p>)}

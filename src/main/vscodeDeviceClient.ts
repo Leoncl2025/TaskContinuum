@@ -30,6 +30,8 @@ export { peerSchema as devicePeerSchema }
 type Connection = { port: number; close(): void }
 type Active = { tunnel: Connection; abort: AbortController; refreshed: number }
 
+export const REMOTE_SESSION_DISCOVERY_TIMEOUT_MS = 3500
+
 export class VSCodeDeviceClient {
   private peers: Peer[] = []
   private loading?: Promise<void>
@@ -253,22 +255,36 @@ export class VSCodeDeviceClient {
   async agentHostSessions(root: string): Promise<{ sessions: AgentHostSession[]; warnings: string[] }> {
     await this.load()
     const canonical = await this.root(root)
-    const sessions: AgentHostSession[] = []
-    const warnings: string[] = []
-    for (const peer of this.peers.filter((item) => item.root === canonical && item.enabled)) {
+    const enabledPeers = this.peers.filter((item) => item.root === canonical && item.enabled)
+    if (!enabledPeers.length) return { sessions: [], warnings: [] }
+    const results = await Promise.all(enabledPeers.map(async (peer) => {
+      const deadline = AbortSignal.timeout(REMOTE_SESSION_DISCOVERY_TIMEOUT_MS)
       try {
         if (!peer.invitation.ownerClientId) throw new Error('This device invitation does not identify an Agent Host owner.')
-        await this.connecting.get(peer.id)
-        if (!this.active.has(peer.id)) await this.ensure(peer)
+        const pending = this.connecting.get(peer.id)
+        if (pending) await abortable(pending, deadline)
+        if (!this.active.has(peer.id)) {
+          const warming = this.ensure(peer)
+          void warming.catch(() => undefined)
+          await abortable(warming, deadline)
+        }
         const active = this.active.get(peer.id)!
         this.currentPeer(peer, active)
-        const catalog = agentHostCatalogSchema.parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/agent-host/sessions', {}, active.abort.signal))
+        const signal = AbortSignal.any([active.abort.signal, deadline])
+        const catalog = agentHostCatalogSchema.parse(await deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/agent-host/sessions', {}, signal))
         this.currentPeer(peer, active)
         if (catalog.ownerId !== peer.invitation.ownerId || catalog.deviceId !== peer.invitation.id || catalog.sessions.some((item) => item.owner.clientId !== peer.invitation.ownerClientId || item.owner.machineName.toLowerCase() !== peer.invitation.machineName.toLowerCase())) throw new Error('Device identity changed.')
-        sessions.push(...catalog.sessions)
-      } catch { warnings.push(`Agent Host sessions on ${peer.invitation.machineName} are unavailable or not shared.`) }
+        return { sessions: catalog.sessions, warning: undefined }
+      } catch {
+        return { sessions: [] as AgentHostSession[], warning: `Agent Host sessions on ${peer.invitation.machineName} are unavailable or not shared.` }
+      }
+    }))
+    const sessions: AgentHostSession[] = []
+    const warnings: string[] = []
+    for (const result of results) {
+      sessions.push(...result.sessions)
+      if (result.warning) warnings.push(result.warning)
     }
-
     return { sessions, warnings }
   }
 

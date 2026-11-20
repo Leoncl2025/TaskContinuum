@@ -177,4 +177,43 @@ describe('AgentHostRegistry session listing', () => {
     expect(result.warnings).toEqual([hostWarning])
     expect(client.shutdown).toHaveBeenCalledOnce()
   })
+
+  it('reads AHP 1.0 SessionSummary.chats directly from listSessions without per-session subscribe RPCs', async () => {
+    const summaryItems = [
+      {
+        resource: 'copilotcli:/fast-1',
+        title: 'Fast summary session',
+        provider: 'copilotcli',
+        createdAt: '2026-11-18T09:00:00Z',
+        modifiedAt: '2026-11-20T12:30:00Z',
+        chats: [
+          { resource: 'ahp-chat:/fast-1/hidden', title: 'Hidden', interactivity: 'hidden' },
+          { resource: 'ahp-chat:/fast-1/main', title: 'Review latest PR', interactivity: 'full' },
+        ],
+      },
+      {
+        resource: 'copilotcli:/fast-corrupt',
+        title: 'Corrupt summary',
+        provider: 'copilotcli',
+        modifiedAt: '2026-11-20T12:00:00Z',
+        chats: [{ resource: 'not-valid-chat', title: 'Bad' }],
+      },
+    ]
+    const { registry, client } = fixture([{ items: summaryItems as unknown as ReturnType<typeof item>[] }])
+    const result = await registry.list()
+    expect(result.sessions).toEqual([{
+      sessionId: 'copilotcli:/fast-1',
+      chatId: 'ahp-chat:/fast-1/main',
+      owner,
+      title: 'Review latest PR',
+      provider: 'copilotcli',
+      createdAt: '2026-11-18T09:00:00Z',
+      updatedAt: '2026-11-20T12:30:00Z',
+      canSend: true,
+    }])
+    expect(result.warnings).toEqual([skipWarning])
+    // Zero per-session subscribe or unsubscribe round-trips!
+    expect(client.request.mock.calls.filter(([method]) => method === 'subscribe')).toEqual([])
+    expect(client.unsubscribe).not.toHaveBeenCalled()
+  })
 })

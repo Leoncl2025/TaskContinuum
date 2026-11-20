@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { z } from 'zod'
-import { sessionSortModes } from './sessionBindings'
+import { DEFAULT_SESSION_SORT_MODE, sessionSortModes } from './sessionBindings'
 import type { SessionSortMode } from './sessionBindings'
 import { forgetSessionInLayout, layoutSessionKeys, MAX_SESSION_GROUP_NAME } from './sessionGroups'
 import type { SessionGroupLayout } from './sessionGroups'
@@ -98,7 +98,7 @@ function rememberTaskSort(selection: Selection | undefined, taskId: string, mode
 function preservedSessionLayout(selection: Selection | undefined): Pick<Selection, 'sessionOrders' | 'sessionSort' | 'sessionSorts' | 'sessionGroups'> {
   return {
     ...(selection?.sessionOrders && Object.keys(selection.sessionOrders).length ? { sessionOrders: selection.sessionOrders } : {}),
-    ...(selection?.sessionSort && selection.sessionSort !== 'manual' ? { sessionSort: selection.sessionSort } : {}),
+    ...(selection?.sessionSort && selection.sessionSort !== DEFAULT_SESSION_SORT_MODE ? { sessionSort: selection.sessionSort } : {}),
     ...(selection?.sessionSorts && Object.keys(selection.sessionSorts).length ? { sessionSorts: selection.sessionSorts } : {}),
     ...(selection?.sessionGroups && Object.keys(selection.sessionGroups).length ? { sessionGroups: selection.sessionGroups } : {}),
   }
@@ -227,7 +227,7 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
 
   const setSessionLayout = useCallback((taskId: string, layout: SessionGroupLayout, makeManual: boolean, activeTaskId?: string | null, shown?: readonly string[]) => {
     update((selection) => {
-      const defaultSort = selection?.sessionSort ?? 'manual'
+      const defaultSort = selection?.sessionSort ?? DEFAULT_SESSION_SORT_MODE
       const resolvedTaskId = activeTaskId !== undefined ? activeTaskId : selection ? selection.taskId : taskId
       const nextSorts = makeManual ? rememberTaskSort(selection, taskId, 'manual', defaultSort) : selection?.sessionSorts
       return {
@@ -236,7 +236,7 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
         openTaskIds: openTasks(selection, resolvedTaskId, shown),
         sessions: selection?.sessions ?? {},
         ...rememberSessionLayout(selection, taskId, layout),
-        ...(defaultSort !== 'manual' ? { sessionSort: defaultSort } : {}),
+        ...(defaultSort !== DEFAULT_SESSION_SORT_MODE ? { sessionSort: defaultSort } : {}),
         ...(nextSorts && Object.keys(nextSorts).length ? { sessionSorts: nextSorts } : {}),
       }
     })
@@ -244,7 +244,7 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
 
   const setSessionSort = useCallback((taskId: string, mode: SessionSortMode, activeTaskId?: string | null, shown?: readonly string[]) => {
     update((selection) => {
-      const currentDefault = selection?.sessionSort ?? 'manual'
+      const currentDefault = selection?.sessionSort ?? DEFAULT_SESSION_SORT_MODE
       const currentTaskSort = selection?.sessionSorts?.[taskId] ?? currentDefault
       if (selection && currentDefault === mode && currentTaskSort === mode) return selection
       const resolvedTaskId = activeTaskId !== undefined ? activeTaskId : selection ? selection.taskId : taskId
@@ -255,7 +255,7 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
         openTaskIds: openTasks(selection, resolvedTaskId, shown),
         sessions: selection?.sessions ?? {},
         ...preservedSessionLayout(selection),
-        sessionSort: mode !== 'manual' ? mode : undefined,
+        sessionSort: mode !== DEFAULT_SESSION_SORT_MODE ? mode : undefined,
         sessionSorts: Object.keys(nextSorts).length ? nextSorts : undefined,
       }
     })
@@ -270,7 +270,7 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
   }, [workspaceId])
 
   const saved = state.workspaceId === workspaceId ? state : undefined
-  const sessionSort: SessionSortMode = saved?.selection?.sessionSort ?? 'manual'
+  const sessionSort: SessionSortMode = saved?.selection?.sessionSort ?? DEFAULT_SESSION_SORT_MODE
   const sessionSorts = saved?.selection?.sessionSorts ?? emptySessionSorts
   const taskSortMode = useCallback((taskId: string | null | undefined): SessionSortMode => {
     return (taskId ? sessionSorts[taskId] : undefined) ?? sessionSort

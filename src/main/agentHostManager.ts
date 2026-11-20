@@ -57,9 +57,12 @@ export class AgentHostManager {
     await operation
   }
 
-  async list(root: string) {
-    const local = await this.hasConsent(root) ? await this.local.list() : { sessions: [], warnings: ['Local Agent Host access is not enabled for this workspace.'] }
-    const remote = await this.devices.agentHostSessions(root)
+  async list(root: string, scope: 'local' | 'all' = 'all') {
+    const localPromise = this.hasConsent(root).then((allowed) =>
+      allowed ? this.local.list() : { sessions: [], warnings: ['Local Agent Host access is not enabled for this workspace.'] },
+    )
+    if (scope === 'local') return localPromise
+    const [local, remote] = await Promise.all([localPromise, this.devices.agentHostSessions(root)])
     return { sessions: [...local.sessions, ...remote.sessions], warnings: [...local.warnings, ...remote.warnings] }
   }
 

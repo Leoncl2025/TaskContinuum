@@ -985,7 +985,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
         <button type="button" className="activity" aria-label="Preferences" title="Preferences and integration status" onClick={() => setDialog('settings')}><Icon name="settings-gear" /></button>
       </nav>
 
-      {sidebarVisible && (sidebarView === 'sessions' ? <AgentHostSessionsSidebar key={sidebarTask?.id ?? 'no-task'} taskId={sidebarTask?.id} taskTitle={sidebarTask?.title}
+      {sidebarVisible && (sidebarView === 'sessions' ? <AgentHostSessionsSidebar taskId={sidebarTask?.id} taskTitle={sidebarTask?.title}
         taskReady={Boolean(sidebarTask && links.ready)} bindings={bindings} orderedKeys={sidebarOrderedKeys} sessionLayout={sidebarSessionLayout}
         sortMode={sidebarSortMode} activeKey={sidebarActiveKey} secondaryKey={sidebarSecondaryKey} popoutKeys={sidebarPopoutKeys}
         provisional={sidebarProvisional} awaitingSyncCount={sidebarAwaitingSyncCount}

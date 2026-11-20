@@ -76,7 +76,7 @@ const updates: UpdateBridge = {
 contextBridge.exposeInMainWorld('updates', updates)
 
 const agentHost: AgentHostBridge = {
-  list: () => ipcRenderer.invoke('agent-host:list'),
+  list: (scope) => scope === undefined ? ipcRenderer.invoke('agent-host:list') : ipcRenderer.invoke('agent-host:list', scope),
   localCreationHosts: () => ipcRenderer.invoke('agent-host:local-creation-hosts'),
   localCreations: () => ipcRenderer.invoke('agent-host:local-creations'),
   createLocal: (request) => ipcRenderer.invoke('agent-host:create-local', request),

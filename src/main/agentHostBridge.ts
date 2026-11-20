@@ -92,9 +92,10 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     progressWatches.set(key, { window, connection, schedule, close })
     schedule()
   }
-  handleDesktopOperation(ipcMain, 'agent-host:list', async (event) => {
+  handleDesktopOperation(ipcMain, 'agent-host:list', async (event, scopeValue?: unknown) => {
     const window = requireWindow(event)
     const root = await currentRoot()
+    const scope = z.enum(['local', 'all']).optional().parse(scopeValue) ?? 'all'
     if (!await manager.hasConsent(root)) {
       consenting ??= (async () => {
         const choice = await dialog.showMessageBox(window, { type: 'warning', message: 'Allow Agent Host access for this task workspace?', detail: `Workspace: ${root}\nList and link existing local Host sessions without a Companion extension. Linked sessions follow your existing paired-device workspace sharing policy. This does not migrate Local chats, create sessions, or change native tool approvals.`, buttons: ['Cancel', 'Allow'], defaultId: 0, cancelId: 0 })
@@ -103,7 +104,7 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
       })().finally(() => { consenting = undefined })
       await consenting
     }
-    const result = await manager.list(root)
+    const result = await manager.list(root, scope)
     await current(event, window, root)
     return result
   })

@@ -383,13 +383,19 @@ describe('AgentHostSessionsSidebar', () => {
     const labels = () => within(tree).getAllByRole('treeitem').map((item) => item.getAttribute('aria-label'))
     await screen.findByRole('treeitem', { name: 'Alpha session' })
     expect(screen.getByText('3 sessions')).toBeInTheDocument()
-    expect(sortTrigger).toHaveTextContent('Manual')
+    // Defaults to Latest ("Last response" / updated-desc) out of the box.
+    expect(sortTrigger).toHaveTextContent('Last response')
+    expect(labels()).toEqual(['Alpha session', 'Beta session', 'Zeta session'])
 
     async function chooseSort(optionName: RegExp | string) {
       await user.click(sortTrigger)
       const listbox = screen.getByRole('listbox', { name: 'Sort sessions by' })
       await user.click(within(listbox).getByRole('option', { name: optionName }))
     }
+
+    await chooseSort(/^Manual/)
+    expect(sortTrigger).toHaveTextContent('Manual')
+    expect(labels()).toEqual(['Zeta session', 'Alpha session', 'Beta session'])
 
     await chooseSort('Last response')
     expect(sortTrigger).toHaveTextContent('Last response')
@@ -443,5 +449,38 @@ describe('AgentHostSessionsSidebar', () => {
     await user.click(within(secondItem).getByRole('button', { name: 'Unlink Second session' }))
     await user.click(screen.getByRole('button', { name: 'Detach session' }))
     expect(onDetach).toHaveBeenCalledExactlyOnceWith(second)
+  })
+
+  it('queries local scope first in Link tab and sorts available sessions by latest updatedAt descending by default', async () => {
+    const owner = { clientId: '00000000-0000-4000-8000-000000000099', machineName: 'Local-PC' }
+    const makeSession = (id: string, title: string, updatedAt: string): AgentHostSession => ({
+      ...agentHostTargetFixture(id, owner),
+      title,
+      provider: 'copilotcli',
+      updatedAt,
+      canSend: true,
+    })
+    const older = makeSession('old', 'Old review chat', '2026-11-01T08:00:00Z')
+    const newest = makeSession('new', 'Latest review chat', '2026-11-20T12:00:00Z')
+    const middle = makeSession('mid', 'Mid review chat', '2026-11-15T10:00:00Z')
+    const catalogue = bridge([older, newest, middle])
+    window.agentHost = catalogue
+    const user = userEvent.setup()
+
+    render(<AgentHostSessionsSidebar taskId="T-0002" taskReady initialView="link" localOwnerId={owner.clientId}
+      onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} />)
+
+    await screen.findByRole('region', { name: 'Host session Latest review chat' })
+    expect(catalogue.list).toHaveBeenCalledExactlyOnceWith('local')
+    const regions = screen.getAllByRole('region', { name: /^Host session / })
+    expect(regions.map((el) => el.getAttribute('aria-label'))).toEqual([
+      'Host session Latest review chat',
+      'Host session Mid review chat',
+      'Host session Old review chat',
+    ])
+
+    // Switching location to 'all' triggers a scoped 'all' fetch.
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Session location' }), 'all')
+    expect(catalogue.list).toHaveBeenLastCalledWith('all')
   })
 })

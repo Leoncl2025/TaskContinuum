@@ -30,40 +30,44 @@ for (const theme of ['light', 'dark'] as const) {
 
     const sidebar = page.getByRole('complementary', { name: 'Agent Host sessions', exact: true })
     const tree = sidebar.getByRole('tree', { name: 'Sessions for T-0002' })
+    const sortPicker = sidebar.getByRole('button', { name: 'Sort sessions', exact: true })
     const titles = () => tree.getByRole('treeitem').evaluateAll((items) => items.map((item) => item.getAttribute('aria-label')))
+
+    // Defaults to Latest ("Last response" / updated-desc) out of the box.
+    await expect(sortPicker).toHaveText('Last response')
     await expect.poll(titles).toEqual([
-      'A focused release plan',
       'Investigate session creation',
-      'A deliberately long conversation title that should remain on one compact line',
       'Verify the next release',
+      'A deliberately long conversation title that should remain on one compact line',
+      'A focused release plan',
     ])
 
-    // Drag the bottom session row up to the top by dragging its title button directly.
+    // Drag 'Verify the next release' up to the top -> pins task to Manual.
     const bottomButton = tree.getByRole('treeitem', { name: 'Verify the next release', exact: true }).getByRole('button', { name: 'Open Verify the next release', exact: true })
-    const topItem = tree.getByRole('treeitem', { name: 'A focused release plan', exact: true })
-    await bottomButton.dragTo(topItem.locator('.session-tree-row'), { targetPosition: { x: 90, y: 4 } })
+    const activeItem = tree.getByRole('treeitem', { name: 'A focused release plan', exact: true })
+    const firstSmartItem = tree.getByRole('treeitem', { name: 'Investigate session creation', exact: true })
+    await bottomButton.dragTo(firstSmartItem.locator('.session-tree-row'), { targetPosition: { x: 90, y: 4 } })
+    await expect(sortPicker).toHaveText('Manual')
     await expect.poll(titles).toEqual([
       'Verify the next release',
-      'A focused release plan',
       'Investigate session creation',
       'A deliberately long conversation title that should remain on one compact line',
+      'A focused release plan',
     ])
     // Dragging did not switch the active conversation away from 'A focused release plan'.
-    await expect(topItem).toHaveAttribute('aria-selected', 'true')
+    await expect(activeItem).toHaveAttribute('aria-selected', 'true')
 
     // Drag 'Investigate session creation' down to the bottom via its drag grip.
     const middleGrip = tree.getByRole('treeitem', { name: 'Investigate session creation', exact: true }).locator('.session-drag-grip')
-    const lastItem = tree.getByRole('treeitem', { name: 'A deliberately long conversation title that should remain on one compact line', exact: true })
-    await middleGrip.dragTo(lastItem.locator('.session-tree-row'), { targetPosition: { x: 90, y: 46 } })
+    await middleGrip.dragTo(activeItem.locator('.session-tree-row'), { targetPosition: { x: 90, y: 46 } })
     await expect.poll(titles).toEqual([
       'Verify the next release',
-      'A focused release plan',
       'A deliberately long conversation title that should remain on one compact line',
+      'A focused release plan',
       'Investigate session creation',
     ])
 
     // Smart sort: Last response, Created (newest), and Name (A–Z).
-    const sortPicker = sidebar.getByRole('button', { name: 'Sort sessions', exact: true })
     await expect(sortPicker).toHaveText('Manual')
     await expect(sidebar.locator('.session-list-count')).toHaveText('4 sessions')
 
@@ -226,7 +230,7 @@ test.describe('session grouping', () => {
 
       await grip('Local build').dragTo(row('Release notes'), { targetPosition: { x: 90, y: 4 } })
       await expect(item('Local build')).toHaveAttribute('aria-level', '1')
-      await grip(migration).dragTo(header, { targetPosition: { x: 85, y: 4 } })
+      await grip(migration).dragTo(tree.locator(':scope > li > :is(.session-tree-row, .session-group-row)').first(), { targetPosition: { x: 85, y: 4 } })
       await expect(tree.locator(':scope > li').first()).toHaveAttribute('aria-label', migration)
       await item(performance).focus()
       await page.keyboard.press('F2')

@@ -15,6 +15,7 @@ export type SessionBindings = Record<string, SessionBinding[]>
 
 export const sessionSortModes = ['manual', 'updated-desc', 'created-desc', 'created-asc', 'title-asc', 'title-desc', 'machine-asc'] as const
 export type SessionSortMode = typeof sessionSortModes[number]
+export const DEFAULT_SESSION_SORT_MODE: SessionSortMode = 'updated-desc'
 
 export interface SessionSortOptions {
   mode: SessionSortMode
@@ -99,7 +100,7 @@ export function sortSessionBindings(bindings: readonly SessionBinding[], options
     if (left.updatedAt !== undefined && right.updatedAt !== undefined && left.updatedAt !== right.updatedAt) {
       return right.updatedAt - left.updatedAt
     }
-    return right.index - left.index
+    return left.index - right.index
   }
 
   decorated.sort((left, right) => {

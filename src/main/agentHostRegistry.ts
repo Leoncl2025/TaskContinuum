@@ -319,54 +319,119 @@ export class AgentHostRegistry {
 
   async list(): Promise<{ sessions: AgentHostSession[]; warnings: string[] }> {
     const owner = await this.owner()
-    const sessions: AgentHostSession[] = []
-    const warnings = new Set<string>()
-    for (const endpoint of await discoverAgentHosts(this.discovery)) {
+    const skipMessage = 'Some local Agent Host sessions could not be read and were skipped.'
+    const cleanupMessage = 'Some local Agent Host session subscriptions could not be released.'
+    const hostMessage = `A local Agent Host could not be read. Check that it is running and supports ${agentHostProtocolDescription}.`
+    const endpoints = await discoverAgentHosts(this.discovery)
+    const hostResults = await Promise.all(endpoints.map(async (endpoint) => {
+      const hostSessions: AgentHostSession[] = []
+      const hostWarnings = new Set<string>()
       const abort = new AbortController()
       let client: AhpClient | undefined
       try {
-        client = new AhpClient(await connectLocalAgentHost(endpoint, abort.signal), { requestTimeoutMs: 5000 })
+        client = new AhpClient(await connectLocalAgentHost(endpoint, abort.signal), { requestTimeoutMs: 2500 })
         client.connect()
-        const initialized = await client.initialize({ clientId: randomUUID(), protocolVersions: [...agentHostProtocolVersions] })
+        const activeClient = client
+        const initialized = await activeClient.initialize({ clientId: randomUUID(), protocolVersions: [...agentHostProtocolVersions] })
         requireAgentHostProtocolVersion(initialized.protocolVersion)
         let cursor: string | undefined
         do {
-          const catalog = await client.request('listSessions', { channel: 'ahp-root://', limit: 100, ...(cursor ? { cursor } : {}) })
-          for (const item of catalog.items) {
-            if (sessions.length >= 1000) break
-            if (item.provider !== 'copilotcli') continue
-            let subscribed = false
-            try {
-              const result = await client.request('subscribe', { channel: item.resource })
-              subscribed = true
-              const state = result.snapshot?.state as SessionState | undefined
-              if (result.snapshot?.resource !== item.resource || state?.provider !== 'copilotcli' || !Array.isArray(state.chats)) {
-                throw new Error('The catalog session snapshot could not be verified.')
+          const catalog = await activeClient.request('listSessions', { channel: 'ahp-root://', limit: 100, ...(cursor ? { cursor } : {}) })
+          const copilotItems = catalog.items.filter((item) => item.provider === 'copilotcli')
+          const batchSize = 16
+          for (let offset = 0; offset < copilotItems.length && hostSessions.length < 1000; offset += batchSize) {
+            const remainingBudget = 1000 - hostSessions.length
+            const batch = copilotItems.slice(offset, offset + Math.min(batchSize, remainingBudget))
+            const inspected = await Promise.all(batch.map(async (item) => {
+              const summaryChats = (item as { chats?: unknown; modifiedAt?: unknown; createdAt?: unknown }).chats
+              const summaryModifiedAt = (item as { modifiedAt?: unknown }).modifiedAt
+              const summaryCreatedAt = (item as { createdAt?: unknown }).createdAt
+              if (Array.isArray(summaryChats) && typeof summaryModifiedAt === 'string' && summaryModifiedAt) {
+                try {
+                  const converted: AgentHostSession[] = []
+                  for (const rawChat of summaryChats) {
+                    if (!rawChat || typeof rawChat !== 'object') throw new Error('Invalid summary chat entry.')
+                    const chat = rawChat as { resource?: unknown; title?: unknown; interactivity?: unknown; modifiedAt?: unknown }
+                    if (chat.interactivity === 'hidden') continue
+                    const updatedAt = typeof chat.modifiedAt === 'string' && chat.modifiedAt ? chat.modifiedAt : summaryModifiedAt
+                    converted.push(agentHostSessionSchema.parse({
+                      sessionId: item.resource,
+                      chatId: chat.resource,
+                      owner,
+                      title: ((typeof chat.title === 'string' && chat.title) || item.title || 'Untitled chat').slice(0, 2000),
+                      provider: item.provider,
+                      updatedAt,
+                      ...(typeof summaryCreatedAt === 'string' && summaryCreatedAt ? { createdAt: summaryCreatedAt.slice(0, 100) } : {}),
+                      canSend: chat.interactivity !== 'read-only',
+                    }))
+                  }
+                  return { converted, skipped: false, cleanupFailed: false }
+                } catch {
+                  return { converted: [] as AgentHostSession[], skipped: true, cleanupFailed: false }
+                }
               }
+              let subscribed = false
+              let skipped = false
+              let cleanupFailed = false
               const converted: AgentHostSession[] = []
-              for (const chat of state.chats) {
-                if (chat.interactivity === 'hidden') continue
-                const session = agentHostSessionSchema.parse({ sessionId: item.resource, chatId: chat.resource, owner,
-                  title: (chat.title || item.title || 'Untitled chat').slice(0, 2000), provider: item.provider, updatedAt: chat.modifiedAt,
-                  ...(typeof item.createdAt === 'string' && item.createdAt ? { createdAt: item.createdAt.slice(0, 100) } : {}),
-                  canSend: chat.interactivity !== 'read-only' })
-                if (sessions.length + converted.length < 1000) converted.push(session)
+              try {
+                const result = await activeClient.request('subscribe', { channel: item.resource })
+                subscribed = true
+                const state = result.snapshot?.state as SessionState | undefined
+                if (result.snapshot?.resource !== item.resource || state?.provider !== 'copilotcli' || !Array.isArray(state.chats)) {
+                  throw new Error('The catalog session snapshot could not be verified.')
+                }
+                for (const chat of state.chats) {
+                  if (chat.interactivity === 'hidden') continue
+                  converted.push(agentHostSessionSchema.parse({
+                    sessionId: item.resource,
+                    chatId: chat.resource,
+                    owner,
+                    title: (chat.title || item.title || 'Untitled chat').slice(0, 2000),
+                    provider: item.provider,
+                    updatedAt: chat.modifiedAt,
+                    ...(typeof summaryCreatedAt === 'string' && summaryCreatedAt ? { createdAt: summaryCreatedAt.slice(0, 100) } : {}),
+                    canSend: chat.interactivity !== 'read-only',
+                  }))
+                }
+              } catch {
+                skipped = true
+                converted.length = 0
+              } finally {
+                if (subscribed) {
+                  try { await activeClient.unsubscribe(item.resource) }
+                  catch { cleanupFailed = true }
+                }
               }
-              sessions.push(...converted)
-            } catch {
-              warnings.add('Some local Agent Host sessions could not be read and were skipped.')
-            } finally {
-              if (subscribed) {
-                try { await client.unsubscribe(item.resource) }
-                catch { warnings.add('Some local Agent Host session subscriptions could not be released.') }
+              return { converted, skipped, cleanupFailed }
+            }))
+            for (const entry of inspected) {
+              if (entry.skipped) hostWarnings.add(skipMessage)
+              if (entry.cleanupFailed) hostWarnings.add(cleanupMessage)
+              for (const session of entry.converted) {
+                if (hostSessions.length < 1000) hostSessions.push(session)
               }
             }
           }
           if (catalog.nextCursor === cursor) break
           cursor = catalog.nextCursor
-        } while (cursor && sessions.length < 1000)
-      } catch { warnings.add(`A local Agent Host could not be read. Check that it is running and supports ${agentHostProtocolDescription}.`) }
-      finally { abort.abort(); await client?.shutdown() }
+        } while (cursor && hostSessions.length < 1000)
+      } catch {
+        hostWarnings.add(hostMessage)
+      } finally {
+        abort.abort()
+        await client?.shutdown()
+      }
+      return { hostSessions, hostWarnings }
+    }))
+
+    const sessions: AgentHostSession[] = []
+    const warnings = new Set<string>()
+    for (const { hostSessions, hostWarnings } of hostResults) {
+      for (const warning of hostWarnings) warnings.add(warning)
+      for (const session of hostSessions) {
+        if (sessions.length < 1000) sessions.push(session)
+      }
     }
     const counts = new Map<string, number>()
     for (const session of sessions) counts.set(agentHostKey(session), (counts.get(agentHostKey(session)) ?? 0) + 1)
