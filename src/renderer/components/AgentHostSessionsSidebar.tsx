@@ -32,6 +32,8 @@ interface Props {
   sessionLayout?: SessionGroupLayout
   sortMode?: SessionSortMode
   activeKey?: string
+  provisional?: boolean
+  awaitingSyncCount?: number
   expandSession?: SessionExpandRequest
   localOwnerId?: string
   busy?: boolean
@@ -44,6 +46,7 @@ interface Props {
   onSelect?(binding: SessionBinding): void
   onLayoutChange?(layout: SessionGroupLayout, makeManual: boolean): void
   onSortMode?(mode: SessionSortMode): void
+  onSyncNow?(): Promise<void>
   onDetach?(binding: SessionBinding): Promise<void>
   onLink(session: AgentHostSession): Promise<void>
   onCreated?(taskId: string, session: AgentHostSession): Promise<void>
@@ -116,7 +119,7 @@ function SessionSortMenu({ count, groupCount, value, onChange }: { count: number
   </div>
 }
 
-export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, orderedKeys, sessionLayout, sortMode, activeKey, expandSession, localOwnerId, busy = false, initialView = 'current', cachedTitles, sessionTimestamps, historyTransfers, titleCacheError, onTitles, onSelect, onLayoutChange, onSortMode, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
+export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, orderedKeys, sessionLayout, sortMode, activeKey, provisional = false, awaitingSyncCount = 0, expandSession, localOwnerId, busy = false, initialView = 'current', cachedTitles, sessionTimestamps, historyTransfers, titleCacheError, onTitles, onSelect, onLayoutChange, onSortMode, onSyncNow, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
   const bridge = window.agentHost
   const aliases = useMachineAliases()
   const [view, setView] = useState<SessionView>(() => expandSession ? 'current' : initialView)
@@ -215,20 +218,28 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
       {error && <p className="copilot-error" role="alert">{error}</p>}
       {titleCacheError && <p className="muted" role="status">{titleCacheError}</p>}
       {!taskId && <p className="muted">Select a task to link or create a session.</p>}
+      {taskId && awaitingSyncCount > 0 && <section className="session-sync-notice" role="status" aria-label="Pending binding synchronization">
+        <p><Icon name="sync" /><span>{awaitingSyncCount === 1 ? '1 remote binding change is' : `${awaitingSyncCount} remote binding changes are`} waiting for the publishing device to finish Git synchronization.</span></p>
+        <div className="session-sidebar-actions">
+          {onSyncNow && <button type="button" className="secondary-button" disabled={busy || operating} onClick={() => { void run(onSyncNow) }}><Icon name="sync" /><span>Sync now</span></button>}
+          <button type="button" className="secondary-button" disabled={operating} onClick={onDevices}><Icon name="remote" /><span>Remote devices</span></button>
+        </div>
+      </section>}
       {view === 'current' && <>
+        {taskId && !awaitingSyncCount && provisional && <p className="muted session-provisional-note" role="status"><Icon name="sync" /><span>Provisional session link — waiting for Git confirmation.</span></p>}
         {taskId && (linked.length > 1 || manual.groups.length > 0) && <SessionSortMenu count={linked.length} groupCount={manual.groups.length} value={activeSortMode} onChange={(next) => {
           if (sortMode === undefined) setLocalSortMode(next)
           onSortMode?.(next)
         }} />}
         {taskId && <LinkedSessionTree taskId={taskId} entries={entries} manualLayout={manual} activeKey={activeKey} expandSession={expandSession}
-          sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} unlinkDisabled={!taskReady || busy || operating} onSelect={onSelect}
+          sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} unlinkDisabled={!taskReady || awaitingSyncCount > 0 || busy || operating} onSelect={onSelect}
           onLayoutChange={onLayoutChange ? (next, makeManual) => {
             if (sortMode === undefined && makeManual) setLocalSortMode('manual')
             onLayoutChange(next, makeManual)
           } : undefined}
           onUnlink={onDetach ? (binding) => { setDetach(binding); setError(undefined) } : undefined} />}
-        {!linked.length && <p className="muted">{busy ? 'Loading task sessions...' : 'No sessions linked to this task.'}</p>}
-        {detach && <section className="session-inline-confirm" aria-label="Detach conversation"><p>Detach {detach.id} from {taskId}? Conversation history stays on its Host.</p>{detachmentChanged && <p role="alert">The task binding changed. Cancel and review the current sessions.</p>}<div className="session-sidebar-actions"><button type="button" className="secondary-button" disabled={operating} onClick={() => setDetach(undefined)}>Keep conversation</button><button type="button" className="primary-button" disabled={!taskReady || busy || operating || detachmentChanged} onClick={() => { void run(async () => { if (onDetach) await onDetach(detach); setDetach(undefined) }) }}>Detach session</button></div></section>}
+        {!linked.length && !awaitingSyncCount && <p className="muted">{busy ? 'Loading task sessions...' : 'No sessions linked to this task.'}</p>}
+        {detach && <section className="session-inline-confirm" aria-label="Detach conversation"><p>Detach {detach.id} from {taskId}? Conversation history stays on its Host.</p>{detachmentChanged && <p role="alert">The task binding changed. Cancel and review the current sessions.</p>}<div className="session-sidebar-actions"><button type="button" className="secondary-button" disabled={operating} onClick={() => setDetach(undefined)}>Keep conversation</button><button type="button" className="primary-button" disabled={!taskReady || awaitingSyncCount > 0 || busy || operating || detachmentChanged} onClick={() => { void run(async () => { if (onDetach) await onDetach(detach); setDetach(undefined) }) }}>Detach session</button></div></section>}
       </>}
       {view === 'link' && <>
         <div className="ahp-catalog-toolbar"><input aria-label="Find Agent Host session" placeholder="Find session" value={query} onChange={(event) => setQuery(event.target.value)} /><IconButton icon="remote" label="Manage devices" disabled={operating} onClick={onDevices} /></div>
@@ -240,10 +251,10 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
         {filtered.map((session) => {
           const label = cachedTitles?.[agentHostKey(session)] ?? session.title
           const assigned = Object.entries(bindings).find(([, members]) => members.some((member) => member.owner.clientId === session.owner.clientId && member.id === session.sessionId))?.[0]
-          return <section key={agentHostKey(session)} className="ahp-catalog-item" aria-label={`Host session ${label}`}><div><strong><Icon name="copilot" />{label}</strong><p className="muted" title={session.owner.machineName}>{machineLabel(session.owner, aliases)} / {session.canSend ? 'Read and send' : 'Read only'}</p><span className="muted ahp-session-id">{session.sessionId}</span>{assigned && <p className="muted">Linked to {assigned}</p>}</div><IconButton icon="link" label={`Link ${label} to ${taskId ?? 'task'}`} disabled={loading || operating || busy || !taskReady || !taskId || Boolean(assigned && assigned !== taskId)} onClick={() => { void run(async () => { await onLink(session); setView('current') }) }} /></section>
+          return <section key={agentHostKey(session)} className="ahp-catalog-item" aria-label={`Host session ${label}`}><div><strong><Icon name="copilot" />{label}</strong><p className="muted" title={session.owner.machineName}>{machineLabel(session.owner, aliases)} / {session.canSend ? 'Read and send' : 'Read only'}</p><span className="muted ahp-session-id">{session.sessionId}</span>{assigned && <p className="muted">Linked to {assigned}</p>}</div><IconButton icon="link" label={`Link ${label} to ${taskId ?? 'task'}`} disabled={loading || operating || busy || !taskReady || awaitingSyncCount > 0 || !taskId || Boolean(assigned && assigned !== taskId)} onClick={() => { void run(async () => { await onLink(session); setView('current') }) }} /></section>
         })}
       </>}
-      {view === 'create' && <AgentHostCreationControls taskId={taskId} taskReady={taskReady} disabled={operating || busy} onCreated={created} />}
+      {view === 'create' && <AgentHostCreationControls taskId={taskId} taskReady={taskReady && awaitingSyncCount === 0} disabled={operating || busy} onCreated={created} />}
     </div>
   </aside>
 }

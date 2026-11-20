@@ -78,7 +78,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const sessionTitles = useSessionTitles(workspace?.id)
   const selection = useWorkbenchSelection(workspace?.id)
   const aliases = useMachineAliases()
-  const { error: machineAliasesError, refresh: refreshMachineAliases } = useWorkspaceGitSync()
+  const { status: gitSyncStatus, error: machineAliasesError, refresh: refreshMachineAliases } = useWorkspaceGitSync()
   const [taskAgentOpen, setTaskAgentOpen] = useState(false)
   const links = useSessionLinks(!taskAgentOpen && workspace?.tasks.length ? workspace : null)
   const bindings = links.bindings
@@ -123,7 +123,9 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const activeKey = task ? Object.hasOwn(selectedSessions, task.id) ? selectedSessions[task.id]
     : taskBindings[0] ? sessionBindingKey(taskBindings[0]) : undefined : undefined
   const activeBinding = taskBindings.find((binding) => sessionBindingKey(binding) === activeKey)
-  const missingSelectedSession = links.ready && typeof activeKey === 'string' && !activeBinding
+  const taskAwaitingSyncCount = task ? (gitSyncStatus?.awaitingSync ?? []).filter((marker) => marker.taskId === task.id).length : 0
+  const taskProvisional = Boolean(task && gitSyncStatus?.provisionalTasks.includes(task.id))
+  const missingSelectedSession = links.ready && !taskAwaitingSyncCount && typeof activeKey === 'string' && !activeBinding
   const agentHostBinding = activeBinding?.agentHost
   const activePanelKey = task && activeBinding ? `${task.id}:${sessionBindingKey(activeBinding)}` : undefined
   const panelKeys = new Set([...visitedSessions, ...activePanelKey ? [activePanelKey] : []])
@@ -132,6 +134,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     return panelKeys.has(key) ? [{ task: item, binding, key }] : []
   }))
   const [agentHostBusy, setAgentHostBusy] = useState(false)
+  const [syncingLinks, setSyncingLinks] = useState(false)
   const [agentHostRevision, setAgentHostRevision] = useState(0)
   const [historyTransfers, setHistoryTransfers] = useState<Record<string, AgentHostHistoryTransfer>>({})
   const reportHistoryTransfer = useCallback((target: AgentHostTarget, progress: AgentHostHistoryTransfer | undefined) => {
@@ -380,6 +383,21 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     selection.clearSession(taskId, key, selectedSessions[taskId] === key || taskId === selectedId && key === activeKey)
   }
 
+  async function syncLinksNow(): Promise<void> {
+    const api = window.remoteVSCode?.gitSync
+    if (!api || syncingLinks) return
+    setSyncingLinks(true)
+    setActionError(null)
+    try {
+      await api.syncNow()
+    } catch (failure) {
+      setActionError(failure instanceof Error ? failure.message : 'Git synchronization failed.')
+    } finally {
+      await Promise.allSettled([refreshMachineAliases(), links.reload()])
+      setSyncingLinks(false)
+    }
+  }
+
   function openWorkspace(): void {
     if (!workspaceLocked) { setActionError(null); void workspaces.openFolder() }
   }
@@ -432,9 +450,11 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
       {sidebarVisible && (sidebarView === 'sessions' ? <AgentHostSessionsSidebar key={task?.id ?? 'no-task'} taskId={task?.id} taskTitle={task?.title}
         taskReady={Boolean(task && links.ready)} bindings={bindings} orderedKeys={activeOrderedKeys} sessionLayout={activeSessionLayout}
         sortMode={activeSortMode} activeKey={activeBinding ? sessionBindingKey(activeBinding) : undefined}
+        provisional={taskProvisional} awaitingSyncCount={taskAwaitingSyncCount}
+        onSyncNow={window.remoteVSCode?.gitSync ? syncLinksNow : undefined}
         expandSession={expandSessionRequest?.active && expandSessionRequest.taskId === task?.id ? expandSessionRequest : undefined}
         localOwnerId={links.localOwner?.clientId} cachedTitles={sessionTitles.titles} sessionTimestamps={sessionTitles.timestamps} historyTransfers={historyTransfers}
-        titleCacheError={sessionTitles.error} onTitles={sessionTitles.remember} busy={links.busy} onSelect={task ? (binding) => selectSession(task.id, binding) : undefined}
+        titleCacheError={sessionTitles.error} onTitles={sessionTitles.remember} busy={links.busy || syncingLinks} onSelect={task ? (binding) => selectSession(task.id, binding) : undefined}
         onLayoutChange={task ? (next, makeManual) => selection.setSessionLayout(task.id, next, makeManual, selectedId, openTasks) : undefined}
         onSortMode={task ? (mode) => selection.setSessionSort(task.id, mode, selectedId, openTasks) : undefined}
         onDetach={task ? (binding) => detachSession(task.id, binding) : undefined} onLink={linkAgentHost} onCreated={agentHostCreated}
@@ -467,12 +487,25 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
               <header className="panel-header"><span>AGENT HOST</span><IconButton icon="close" label="Hide chat panel" onClick={toggleChat} /></header>
               <div className="chat-context"><Icon name="server-environment" /><div><strong>{task?.title ?? 'Native Agent Host chats'}</strong><span>{task?.id ?? 'No task selected'}</span></div></div>
               <div className="empty-workbench">
-                <span className="chat-welcome-icon"><Icon name="comment-discussion" /></span>
-                <h2>{task ? 'Keep the conversation moving' : 'Your task conversations, front and center'}</h2>
-                <p>{!task ? 'Select a task to open its Agent Host chat.' : taskBindings.length ? `Choose a linked session for ${task.id} in the Agent Host sessions sidebar.` : `No Agent Host chat is linked to ${task.id}. Link an existing chat or create one from the Agent Host sessions sidebar.`}</p>
-                {missingSelectedSession && <p role="status">The last selected session is no longer linked to this task. Choose a current session; no replacement was opened.</p>}
-                <p className="muted">Local SDK and Companion sessions are not supported. Existing session data is left untouched.</p>
-                {task && workspace && <button type="button" className="primary-button" disabled={links.busy} onClick={openAgentHostSessions}>Browse Agent Host sessions</button>}
+                <span className="chat-welcome-icon"><Icon name={task && taskAwaitingSyncCount > 0 ? 'sync' : 'comment-discussion'} /></span>
+                {task && taskAwaitingSyncCount > 0 ? <>
+                  <h2>Session links waiting for Git sync</h2>
+                  <p role="status">{taskBindings.length
+                    ? `A remote session binding change for ${task.id} is waiting for the publishing device to finish Git synchronization. ${taskBindings.length} confirmed ${taskBindings.length === 1 ? 'session remains' : 'sessions remain'} available in the Agent Host sessions sidebar.`
+                    : `A remote session binding change for ${task.id} is waiting for the publishing device to finish Git synchronization. Existing links were not deleted; inspect or cancel pending changes in Remote devices if the publishing device is unavailable.`}</p>
+                  {gitSyncStatus?.error && <p className="copilot-error" role="alert">{gitSyncStatus.error}</p>}
+                  <div className="workspace-welcome-actions">
+                    {window.remoteVSCode?.gitSync && <button type="button" className="secondary-button" disabled={links.busy || syncingLinks} onClick={() => { void syncLinksNow() }}><Icon name="sync" /><span>{syncingLinks ? 'Syncing...' : 'Sync now'}</span></button>}
+                    {workspace && window.remoteVSCode && <button type="button" className="secondary-button" onClick={() => setDialog('remote-devices')}><Icon name="remote" /><span>Remote devices</span></button>}
+                    {workspace && <button type="button" className="primary-button" disabled={links.busy} onClick={openAgentHostSessions}>Browse Agent Host sessions</button>}
+                  </div>
+                </> : <>
+                  <h2>{task ? 'Keep the conversation moving' : 'Your task conversations, front and center'}</h2>
+                  <p>{!task ? 'Select a task to open its Agent Host chat.' : taskBindings.length ? `Choose a linked session for ${task.id} in the Agent Host sessions sidebar.` : `No Agent Host chat is linked to ${task.id}. Link an existing chat or create one from the Agent Host sessions sidebar.`}</p>
+                  {missingSelectedSession && <p role="status">The last selected session is no longer linked to this task. Choose a current session; no replacement was opened.</p>}
+                  <p className="muted">Local SDK and Companion sessions are not supported. Existing session data is left untouched.</p>
+                  {task && workspace && <button type="button" className="primary-button" disabled={links.busy} onClick={openAgentHostSessions}>Browse Agent Host sessions</button>}
+                </>}
               </div>
             </aside>}
           </Activity>

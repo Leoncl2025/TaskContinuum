@@ -26,8 +26,8 @@ function setup() {
   const status: WorkspaceGitSyncStatus = { enabled: false, state: 'disabled', intervalMs: 15000, pending: 0, provisionalTasks: [], peers: [], conflicts: [], revision: null }
   const service: GitSyncActions = {
     status: vi.fn(async () => status), enable: vi.fn(async () => {}), disable: vi.fn(async () => {}),
-    syncNow: vi.fn(async () => {}), revokeDevice: vi.fn(async () => {}), setSettings: vi.fn(async () => {}),
-    setMachineAlias: vi.fn(async () => {}),
+    syncNow: vi.fn(async () => {}), cancelPendingBinding: vi.fn(async () => {}), revokeDevice: vi.fn(async () => {}),
+    setSettings: vi.fn(async () => {}), setMachineAlias: vi.fn(async () => {}),
   }
   const currentRoot = vi.fn(async () => 'Q:\\workspace')
   const requireWindow = vi.fn(() => new BrowserWindow())
@@ -111,5 +111,21 @@ describe('Git synchronization IPC boundary', () => {
     expect(mocks.open).toHaveBeenCalledExactlyOnceWith('Q:\\appdata\\settings.json')
     mocks.open.mockResolvedValue('No associated editor.')
     await expect(invoke('open-settings')).rejects.toThrow('No associated editor')
+  })
+
+  it('requires native confirmation and validates revision-bound pending binding cancellation', async () => {
+    const { service, invoke, currentRoot } = setup()
+    const opId = 'a'.repeat(64)
+    const rev = 'b'.repeat(64)
+    expect(await invoke('cancel-pending-binding', { taskId: 'T-0072', operationIds: [opId], expectedRevision: rev })).toBe(false)
+    expect(service.cancelPendingBinding).not.toHaveBeenCalled()
+    mocks.consent.mockResolvedValue({ response: 1 })
+    expect(await invoke('cancel-pending-binding', { taskId: 'T-0072', operationIds: [opId], expectedRevision: rev })).toBe(true)
+    expect(service.cancelPendingBinding).toHaveBeenCalledExactlyOnceWith('Q:\\workspace', 'T-0072', [opId], rev)
+    await expect(invoke('cancel-pending-binding', { taskId: 'bad', operationIds: [opId], expectedRevision: rev })).rejects.toThrow()
+    await expect(invoke('cancel-pending-binding', { taskId: 'T-0072', operationIds: [opId, opId], expectedRevision: rev })).rejects.toThrow()
+    currentRoot.mockResolvedValueOnce('Q:\\workspace').mockResolvedValueOnce('Q:\\other')
+    await expect(invoke('cancel-pending-binding', { taskId: 'T-0072', operationIds: [opId], expectedRevision: rev })).rejects.toThrow('changed')
+    expect(service.cancelPendingBinding).toHaveBeenCalledTimes(1)
   })
 })

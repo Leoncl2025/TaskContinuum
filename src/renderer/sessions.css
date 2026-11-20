@@ -103,6 +103,15 @@
 .session-details .session-unlink-button:hover:not(:disabled) { background: var(--hover); border-color: color-mix(in srgb, var(--error) 45%, var(--border)); color: var(--error); }
 .session-sidebar-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-block: 12px; }
 .session-inline-confirm { margin-top: 12px; border: 1px solid var(--border); padding: 10px; border-radius: var(--radius-md); font-size: 12px; overflow-wrap: anywhere; }
+.session-sync-notice { margin-bottom: 8px; padding: 9px 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--raised); font-size: 11.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.session-sync-notice > p { display: flex; align-items: flex-start; gap: 7px; margin: 0; color: var(--text); }
+.session-sync-notice > p > .codicon { margin-top: 2px; color: var(--link); }
+.session-sync-notice .session-sidebar-actions { margin: 8px 0 0; }
+.session-sync-notice .secondary-button { min-height: 26px; gap: 5px; padding: 3px 9px; border-radius: var(--radius-sm); font-size: 11px; }
+.session-provisional-note { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; padding: 0 4px; font-size: 11px; }
+.session-provisional-note > .codicon { font-size: 12px; color: var(--link); }
+.workspace-links-awaiting { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-block: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--raised); font-size: 12px; }
+.workspace-links-awaiting > p { flex: 1 1 220px; margin: 0; line-height: 1.5; }
 .local-sessions .panel-header { padding-left: 15px; letter-spacing: 0; }
 .copilot-connection { display: flex; align-items: center; gap: 10px; padding: 13px 15px 19px; }
 .copilot-connection > .codicon { font-size: 23px; color: var(--accent); }

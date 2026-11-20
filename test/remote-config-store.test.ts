@@ -750,6 +750,48 @@ describe('SSH binding overlay and exact canonical reconciliation', () => {
     expect((await f.store.read()).document.bindings['T-0001']).toEqual([binding('old')])
   })
 
+  it('keeps canonically confirmed sessions active across 60s expiry and restart when an additive session link awaits sync, while honoring later unlinks', async () => {
+    const f = await receiving()
+    const added = await operation({
+      kind: 'binding',
+      payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [binding('old'), binding('added')] },
+      parents: [f.base.operationId],
+    })
+    expect((await f.store.acceptNotification(notice(added), a.actor.deviceId)).result).toBe('provisional')
+    expect((await f.store.read()).document.bindings['T-0001']).toEqual([binding('old'), binding('added')])
+
+    // After 60s expiry, provisional 'added' pauses into awaitingSync, while canonical 'old' remains active.
+    f.advance(60000)
+    const expired = await f.store.read()
+    expect(expired.provisional).toEqual([])
+    expect(expired.awaitingSync).toEqual([{ operationId: added.operationId, taskId: 'T-0001' }])
+    expect(expired.document.bindings['T-0001']).toEqual([binding('old')])
+
+    // Across restart, canonical 'old' still remains active while 'added' stays in awaitingSync.
+    await f.store.close()
+    const reopenedOverlay = new BindingOverlay({ workspaceId, recipientId: b.actor.deviceId, trust, markerFile: join(f.stateDirectory, 'pending-overlay.json') })
+    const reopened = new RemoteConfigStore({ ...f.options, overlay: reopenedOverlay })
+    stores.push(reopened)
+    const afterRestart = await reopened.read()
+    expect(afterRestart.document.bindings['T-0001']).toEqual([binding('old')])
+    expect(afterRestart.awaitingSync).toEqual([{ operationId: added.operationId, taskId: 'T-0001' }])
+
+    // If a subsequent verified notification unlinks 'old' while still awaiting Git sync, 'old' is immediately suppressed.
+    const unlinkedOld = await operation({
+      kind: 'binding',
+      payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [binding('added')] },
+      parents: [added.operationId],
+    })
+    expect((await reopened.acceptNotification(notice(unlinkedOld, [added]), a.actor.deviceId)).result).toBe('awaiting-sync')
+    const narrowed = await reopened.read()
+    expect(narrowed.document.bindings['T-0001']).toBeUndefined()
+
+    // Explicit revision-bound cancellation clears the pending marker cleanly.
+    const cancelled = await reopened.cancelPendingBinding('T-0001', [added.operationId], narrowed.revision)
+    expect(cancelled.awaitingSync).toEqual([])
+    expect(cancelled.document.bindings['T-0001']).toEqual([binding('old')])
+  })
+
   it('requests synchronization for missing or over-budget closures and honors current trust revocation', async () => {
     const f = await receiving()
     const missing = await operation({ kind: 'binding', payload: { schemaVersion: '2.1', action: 'set', taskId: 'T-0001', targets: [binding('unavailable')] }, parents: ['e'.repeat(64)] })

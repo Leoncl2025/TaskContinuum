@@ -146,19 +146,25 @@ describe('single selected checkout Git synchronization', () => {
     expect(await git(checkout, 'remote', 'get-url', 'upstream')).toBe('../remote.git')
   }, 60000)
 
-  it.each(['unstaged', 'staged', 'untracked'] as const)('preserves %s user work outside the selected nested folder', async (mode) => {
+  it.each(['unstaged', 'staged', 'untracked'] as const)('publishes nested metadata while preserving %s user work outside .taskcontinuum', async (mode) => {
     const setup = await fixture(1, 'Project')
     const app = await setup.replica()
     const checkout = setup.clients[0]
     const userFile = join(checkout, mode === 'untracked' ? 'outside.txt' : 'README.md')
     await writeFile(userFile, 'Do not publish or overwrite this user work.\n')
     if (mode === 'staged') await git(checkout, 'add', '--', 'README.md')
-    const head = await git(checkout, 'rev-parse', 'HEAD')
-    const index = await readFile(join(checkout, '.git', 'index'))
-    await expect(app.sync([record('blocked')])).rejects.toMatchObject({ code: 'busy' })
-    expect(await git(checkout, 'rev-parse', 'HEAD')).toBe(head)
-    expect(await git(setup.remote, 'rev-parse', BRANCH)).toBe(head)
-    expect(await readFile(join(checkout, '.git', 'index'))).toEqual(index)
+    const beforeHead = await git(checkout, 'rev-parse', 'HEAD')
+    const beforeStatus = await git(checkout, 'status', '--porcelain')
+    const beforeStaged = await git(checkout, 'diff', '--cached')
+    const beforeUnstaged = await git(checkout, 'diff')
+    const file = record(`nested-${mode}`)
+    const result = await app.sync([file])
+    expect(result.publishedPaths).toEqual([file.path])
+    expect(await git(setup.remote, 'diff', '--name-only', beforeHead, BRANCH)).toBe(`Project/${file.path}`)
+    expect(await git(setup.remote, 'show', `${BRANCH}:README.md`)).toBe('Original task prose.')
+    expect(await git(checkout, 'status', '--porcelain')).toBe(beforeStatus)
+    expect(await git(checkout, 'diff', '--cached')).toBe(beforeStaged)
+    expect(await git(checkout, 'diff')).toBe(beforeUnstaged)
     expect(await readFile(userFile, 'utf8')).toBe('Do not publish or overwrite this user work.\n')
   }, 60000)
 
@@ -369,17 +375,59 @@ describe('single selected checkout Git synchronization', () => {
     await expect(reopened.sync()).rejects.toMatchObject({ code: 'upstream' })
   }, 60000)
 
-  it.each(['unstaged', 'staged', 'untracked', 'metadata', 'merge', 'rebase', 'cherry-pick', 'index-lock', 'assume-unchanged'] as const)(
+  it.each(['unstaged', 'staged', 'staged-new', 'untracked'] as const)(
+    'synchronizes .taskcontinuum metadata across %s user work without committing, resetting, or stashing it', async (kind) => {
+      const setup = await fixture(2)
+      const a = await setup.replica(0)
+      const b = await setup.replica(1)
+      const before = await git(a.root, 'rev-parse', 'HEAD')
+      if (kind === 'unstaged' || kind === 'staged') {
+        await writeFile(join(a.root, 'README.md'), 'Agent task edits in progress\n')
+        if (kind === 'staged') await git(a.root, 'add', 'README.md')
+      } else if (kind === 'staged-new') {
+        await writeFile(join(a.root, 'staged-new.txt'), 'New staged work\n')
+        await git(a.root, 'add', 'staged-new.txt')
+      } else {
+        await writeFile(join(a.root, 'dirty.txt'), 'Untracked runner scratch\n')
+      }
+      const status = await git(a.root, 'status', '--porcelain')
+      const staged = await git(a.root, 'diff', '--cached')
+      const unstaged = await git(a.root, 'diff')
+      const file = record(`dirty-${kind}`)
+      const result = await a.sync([file])
+      expect(result.publishedPaths).toEqual([file.path])
+      expect(await git(setup.remote, 'diff', '--name-only', before, BRANCH)).toBe(file.path)
+      expect(await git(a.root, 'status', '--porcelain')).toBe(status)
+      expect(await git(a.root, 'diff', '--cached')).toBe(staged)
+      expect(await git(a.root, 'diff')).toBe(unstaged)
+      expect(await git(a.root, 'stash', 'list')).toBe('')
+      await b.sync()
+      expect(await readFile(join(b.root, ...file.path.split('/')), 'utf8')).toBe(file.content)
+    }, 60000,
+  )
+
+  it('pauses safely if an incoming upstream commit modifies the same user file that has local edits', async () => {
+    const setup = await fixture()
+    const app = await setup.replica()
+    await writeFile(join(setup.seed, 'README.md'), 'Upstream task prose update.\n')
+    await git(setup.seed, 'commit', '--quiet', '-am', 'Upstream README edit')
+    await git(setup.seed, 'push', '--quiet')
+    await writeFile(join(app.root, 'README.md'), 'Conflicting local README edit.\n')
+    const before = await git(app.root, 'rev-parse', 'HEAD')
+    await expect(app.sync([record('blocked-by-overlap')])).rejects.toMatchObject({ code: 'busy' })
+    expect(await git(app.root, 'rev-parse', 'HEAD')).toBe(before)
+    expect(await readFile(join(app.root, 'README.md'), 'utf8')).toBe('Conflicting local README edit.\n')
+  }, 60000)
+
+  it.each(['metadata', 'merge', 'rebase', 'cherry-pick', 'index-lock', 'assume-unchanged'] as const)(
     'pauses on %s work without staging, stashing, resetting, committing, or pushing it', async (kind) => {
       const setup = await fixture()
       const app = await setup.replica()
       const before = await git(app.root, 'rev-parse', 'HEAD')
-      if (kind === 'unstaged' || kind === 'staged' || kind === 'assume-unchanged') {
+      if (kind === 'assume-unchanged') {
         await writeFile(join(app.root, 'README.md'), 'Private task edits')
-        if (kind === 'staged') await git(app.root, 'add', 'README.md')
-        if (kind === 'assume-unchanged') await git(app.root, 'update-index', '--assume-unchanged', 'README.md')
-      } else if (kind === 'untracked') await writeFile(join(app.root, 'private.txt'), 'Private')
-      else if (kind === 'metadata') await writeRecord(app.root, record('not-in-outbox'))
+        await git(app.root, 'update-index', '--assume-unchanged', 'README.md')
+      } else if (kind === 'metadata') await writeRecord(app.root, record('not-in-outbox'))
       else if (kind === 'rebase') await mkdir(join(app.root, '.git', 'rebase-merge'))
       else await writeFile(join(app.root, '.git', kind === 'merge' ? 'MERGE_HEAD' : kind === 'cherry-pick' ? 'CHERRY_PICK_HEAD' : 'index.lock'), before)
       const status = await git(app.root, 'status', '--porcelain')
@@ -630,13 +678,22 @@ describe('single selected checkout Git synchronization', () => {
     expect(await present(join(app.root, 'filtered.txt'))).toBe(false)
   }, 60000)
 
-  it('rejects callback writes and retains pending metadata without pushing', async () => {
+  it('rejects callback writes to .taskcontinuum without pushing while allowing concurrent user edits', async () => {
     const setup = await fixture()
     const app = await setup.replica()
     const before = await git(setup.remote, 'rev-parse', BRANCH)
-    await expect(app.sync([record('callback')], { validateReplica: async (root) => { await writeFile(join(root, 'README.md'), 'Concurrent user edits') } })).rejects.toMatchObject({ code: 'busy' })
+    const rogue = record('rogue-callback-write')
+    await expect(app.sync([record('callback')], {
+      validateReplica: async (root) => { await writeRecord(root, rogue) },
+    })).rejects.toMatchObject({ code: 'busy' })
     expect(await git(setup.remote, 'rev-parse', BRANCH)).toBe(before)
+    await rm(join(app.root, ...rogue.path.split('/')))
+
+    await app.sync([record('callback')], {
+      validateReplica: async (root) => { await writeFile(join(root, 'README.md'), 'Concurrent user edits') },
+    })
     expect(await readFile(join(app.root, 'README.md'), 'utf8')).toBe('Concurrent user edits')
+    expect(await git(setup.remote, 'show', `${BRANCH}:README.md`)).toBe('Original task prose.')
   }, 60000)
 
   it('serializes owners and safely recovers only dead process locks', async () => {

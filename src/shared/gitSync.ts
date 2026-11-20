@@ -14,6 +14,7 @@ export interface WorkspaceGitSyncStatus {
   error?: string
   pending: number
   provisionalTasks: string[]
+  awaitingSync?: PendingBindingMarker[]
   conflicts: string[]
   peers: GitSyncPeer[]
   localDevice?: { deviceId: string; machineName: string }
@@ -28,6 +29,7 @@ export interface WorkspaceGitSyncBridge {
   enable(): Promise<boolean>
   disable(): Promise<void>
   syncNow(): Promise<void>
+  cancelPendingBinding?(taskId: string, operationIds: string[], expectedRevision: string | null): Promise<boolean>
   revokeDevice(deviceId: string): Promise<void>
   setMachineAlias(deviceId: string, alias: string | null, expectedRevision: string | null): Promise<void>
   setSetting(key: 'autoLink' | 'tunnelEnabled' | 'connectTimeoutMs', value: boolean | number | null, expectedRevision: string | null): Promise<void>
@@ -35,4 +37,4 @@ export interface WorkspaceGitSyncBridge {
   onStatusChanged(listener: () => void): () => void
   onBindingsChanged(listener: () => void): () => void
 }
-import type { RemoteSettings } from './remoteConfig'
+import type { PendingBindingMarker, RemoteSettings } from './remoteConfig'

@@ -1405,4 +1405,52 @@ describe('workspace switching in the desktop workbench', () => {
     expect(itemKeys(restoredTree)).toEqual(expectedKeys)
     expect(bridge.updateSessionLink).not.toHaveBeenCalled()
   })
+
+  it('shows a clear awaiting-sync status in chat and sidebar instead of reporting unlinked or missing sessions', async () => {
+    const { first, repository, target } = creationFixture()
+    const git = gitSyncUiFixture()
+    const pendingOp = 'f'.repeat(64)
+    git.api.cancelPendingBinding = vi.fn(async () => {
+      git.setStatus({ ...git.getStatus(), awaitingSync: [] })
+      git.notify()
+      return true
+    })
+    git.setStatus({
+      ...git.getStatus(),
+      enabled: true,
+      state: 'idle',
+      revision: 'a'.repeat(64),
+      awaitingSync: [{ operationId: pendingOp, taskId: 'T-0002' }],
+    })
+    window.remoteVSCode = git.remote
+    repository[first.id] = { document: { schemaVersion: '2.1', bindings: {} }, revision: 'a'.repeat(64) }
+    localStorage.setItem(`taskcontinuum:workbench-selection:v2:${first.id}`, JSON.stringify({
+      version: 2,
+      taskId: 'T-0002',
+      openTaskIds: ['T-0002'],
+      sessions: { 'T-0002': sessionBindingKey({ agentHost: target }) },
+    }))
+    const user = userEvent.setup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+
+    expect(await screen.findByRole('heading', { name: 'Session links waiting for Git sync' })).toBeInTheDocument()
+    expect(screen.queryByText(/No Agent Host chat is linked to T-0002/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/last selected session is no longer linked/)).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Browse Agent Host sessions' }))
+    const sidebar = screen.getByRole('complementary', { name: 'Agent Host sessions' })
+    expect(within(sidebar).getByRole('status', { name: 'Pending binding synchronization' }))
+      .toHaveTextContent('waiting for the publishing device to finish Git synchronization')
+    expect(within(sidebar).queryByText('No sessions linked to this task.')).not.toBeInTheDocument()
+
+    await user.click(within(sidebar).getByRole('button', { name: 'Sync now' }))
+    expect(git.api.syncNow).toHaveBeenCalledOnce()
+
+    await user.click(within(sidebar).getByRole('button', { name: 'Remote devices' }))
+    const dialog = screen.getByRole('dialog', { name: 'Remote devices' })
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel pending for T-0002' }))
+    expect(git.api.cancelPendingBinding).toHaveBeenCalledExactlyOnceWith('T-0002', [pendingOp], 'a'.repeat(64))
+  })
 })

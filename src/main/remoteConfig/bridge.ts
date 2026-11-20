@@ -2,6 +2,7 @@ import { dialog, ipcMain, shell } from 'electron'
 import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import { z } from 'zod'
 import type { WorkspaceGitSyncStatus } from '../../shared/gitSync'
+import { remoteConfigLimits } from '../../shared/remoteConfig'
 import type { RemoteSettingChanges } from './settingsFile'
 import { machineAliasChangeSchema } from './machineAlias'
 import { handleDesktopOperation } from '../desktopOperations'
@@ -11,6 +12,7 @@ export interface GitSyncActions {
   enable(root: string): Promise<void>
   disable(root: string): Promise<void>
   syncNow(root: string): Promise<void>
+  cancelPendingBinding?(root: string, taskId: string, operationIds: string[], expectedRevision: string | null): Promise<void>
   revokeDevice(root: string, deviceId: string): Promise<void>
   setSettings(root: string, expectedRevision: string | null, changes: RemoteSettingChanges): Promise<void>
   setMachineAlias(root: string, deviceId: string, alias: string | null, expectedRevision: string | null): Promise<void>
@@ -29,7 +31,7 @@ export function registerGitSyncBridge(requireWindow: (event: IpcMainInvokeEvent)
     const consent = await dialog.showMessageBox(window, {
       type: 'warning', title: 'Enable automatic workspace links',
       message: 'Synchronize this workspace and automatically link its enrolled devices?',
-      detail: `Workspace: ${root}\nTaskCon will use this same checkout for signed immutable Agent Host bindings, check its upstream every 15 seconds, and immediately commit/push public identities, invitations and configuration changes when Git is safe. No separate AD clone or worktree is created. Only public .taskcontinuum metadata is automatically committed. Staged changes, dirty user files, in-progress Git operations and unpublished user commits pause synchronization; TaskCon never stashes, discards or publishes them. Pending configuration remains durable in local app data.\n\nThe target follows the current branch's configured upstream within this repository; no branch is permanently bound and main/master is not assumed. Without an upstream, Git synchronization pauses while the workspace and saved configuration remain available. Legacy session files and browser bindings are not imported; select existing Agent Host sessions again after enabling.\n\nNew signed device identities in this shared repository will be admitted and pinned under this local policy. Linked devices automatically receive read and send access to locally-confirmed linked sessions and permission to explicitly create Agent Host sessions in this workspace. Existing enrolled devices' read-only workspace grants are upgraded; no separate session-access switch is required. No session is created and no prompt is sent just by linking. Existing fingerprint changes stay blocked. Private keys and bearer invitations never enter Git. OS shell access is not granted and native tool approvals remain on the execution machine.\n\nSign in to the same Dev Tunnel owner account on each machine. You can pause synchronization or revoke peers in Devices.`,
+      detail: `Workspace: ${root}\nTaskCon will use this same checkout for signed immutable Agent Host bindings, check its upstream every 15 seconds, and immediately commit/push public identities, invitations and configuration changes when Git is safe. No separate AD clone or worktree is created. Only public .taskcontinuum metadata is automatically committed. Uncommitted user files outside .taskcontinuum are left untouched; conflicting incoming paths, uncommitted .taskcontinuum edits, in-progress Git operations and unpublished user commits pause synchronization, and TaskCon never stashes, discards or publishes user work. Pending configuration remains durable in local app data.\n\nThe target follows the current branch's configured upstream within this repository; no branch is permanently bound and main/master is not assumed. Without an upstream, Git synchronization pauses while the workspace and saved configuration remain available. Legacy session files and browser bindings are not imported; select existing Agent Host sessions again after enabling.\n\nNew signed device identities in this shared repository will be admitted and pinned under this local policy. Linked devices automatically receive read and send access to locally-confirmed linked sessions and permission to explicitly create Agent Host sessions in this workspace. Existing enrolled devices' read-only workspace grants are upgraded; no separate session-access switch is required. No session is created and no prompt is sent just by linking. Existing fingerprint changes stay blocked. Private keys and bearer invitations never enter Git. OS shell access is not granted and native tool approvals remain on the execution machine.\n\nSign in to the same Dev Tunnel owner account on each machine. You can pause synchronization or revoke peers in Devices.`,
       buttons: ['Cancel', 'Enable automatic links'], defaultId: 0, cancelId: 0,
     })
     if (consent.response !== 1) return false
@@ -39,6 +41,26 @@ export function registerGitSyncBridge(requireWindow: (event: IpcMainInvokeEvent)
   })
   handle('disable', async () => service.disable(await currentRoot()))
   handle('sync', async () => service.syncNow(await currentRoot()))
+  handle('cancel-pending-binding', async (window, value) => {
+    const request = z.object({
+      taskId: z.string().max(64).regex(/^T-\d{4,}$/),
+      operationIds: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(remoteConfigLimits.overlayOperations)
+        .refine((ids) => new Set(ids).size === ids.length, 'Duplicate pending operation IDs.'),
+      expectedRevision: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+    }).strict().parse(value)
+    if (!service.cancelPendingBinding) throw new Error('Pending binding cancellation is unavailable in this build.')
+    const root = await currentRoot()
+    const consent = await dialog.showMessageBox(window, {
+      type: 'warning', title: 'Cancel pending remote binding change',
+      message: `Cancel ${request.operationIds.length} unresolved pending binding change(s) for ${request.taskId}?`,
+      detail: `Workspace: ${root}\nThis removes only local pending markers on this device. Signed binding history and original chats are not deleted or modified. If the publishing device pushes that operation to Git later, it will still be validated and applied.`,
+      buttons: ['Keep waiting', 'Cancel pending change'], defaultId: 0, cancelId: 0,
+    })
+    if (consent.response !== 1) return false
+    await unchanged(root)
+    await service.cancelPendingBinding(root, request.taskId, request.operationIds, request.expectedRevision)
+    return true
+  })
   handle('revoke', async (window, value) => {
     const root = await currentRoot()
     const deviceId = z.uuid().parse(value)

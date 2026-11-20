@@ -6,10 +6,11 @@ import {
   type PendingBindingMarker, type RemoteRecord,
 } from '../../shared/remoteConfig'
 import {
-  canonicalJson, operationIdSchema, readCheckedFile, recordClosure, remoteRecordSchema,
+  bindingTargets, canonicalJson, operationIdSchema, readCheckedFile, recordClosure, remoteRecordSchema,
   RemoteConfigError, resolveRecords, unionRecords, verifyRecord, writeLocalState,
   type Awaitable, type RecordTrust,
 } from './records'
+import { sessionLinkKey } from '../sessionLinkSchema'
 
 export const bindingChangedNotificationSchema = z.object({
   schemaVersion: z.literal(1), kind: z.literal('binding.changed'), workspaceId: z.uuid(), recipientId: z.uuid(),
@@ -18,8 +19,21 @@ export const bindingChangedNotificationSchema = z.object({
 }).strict()
 const markersSchema = z.object({
   schemaVersion: z.literal(1), workspaceId: z.uuid(),
-  markers: z.array(z.object({ operationId: operationIdSchema, taskId: z.string().max(64).regex(/^T-\d{4,}$/) }).strict()).max(remoteConfigLimits.overlayOperations),
+  markers: z.array(z.object({
+    operationId: operationIdSchema,
+    taskId: z.string().max(64).regex(/^T-\d{4,}$/),
+    retainedKeys: z.array(z.string().min(1).max(4096)).max(1000).optional(),
+  }).strict()).max(remoteConfigLimits.overlayOperations),
 }).strict()
+
+interface StoredMarker extends PendingBindingMarker {
+  retainedKeys?: string[]
+}
+
+function operationRetainedKeys(operation: RemoteRecord<'binding'>): string[] {
+  if (operation.payload.action !== 'set') return []
+  return [...new Set(bindingTargets(operation.payload).map(sessionLinkKey))].sort()
+}
 
 interface Entry { operation: RemoteRecord<'binding'>; dependencies: RemoteRecord[]; deadline: number }
 export interface BindingOverlayState {
@@ -27,6 +41,7 @@ export interface BindingOverlayState {
   heads: string[]
   provisional: string[]
   awaitingSync: PendingBindingMarker[]
+  retainedKeys: Readonly<Record<string, readonly string[] | undefined>>
   revision: string
 }
 export interface BindingOverlayOptions {
@@ -44,7 +59,7 @@ export interface BindingOverlayOptions {
 
 export class BindingOverlay {
   private readonly entries = new Map<string, Entry>()
-  private markers = new Map<string, PendingBindingMarker>()
+  private markers = new Map<string, StoredMarker>()
   private pending: Promise<unknown> = Promise.resolve()
   private loaded = false
   private closed = false
@@ -73,7 +88,7 @@ export class BindingOverlay {
     if (this.options.markerFile) {
       const file = this.options.markerFile
       try {
-        const saved = markersSchema.parse(JSON.parse((await readCheckedFile(dirname(file), file, 32768)).toString('utf8')))
+        const saved = markersSchema.parse(JSON.parse((await readCheckedFile(dirname(file), file, remoteConfigLimits.overlayBytes)).toString('utf8')))
         if (saved.workspaceId !== this.options.workspaceId) throw new RemoteConfigError('workspace-mismatch', 'Saved pending bindings belong to a different workspace.')
         this.markers = new Map(saved.markers.map((marker) => [marker.operationId, marker]))
         if (this.markers.size !== saved.markers.length) throw new RemoteConfigError('invalid-marker', 'Saved pending bindings contain duplicate operation IDs.')
@@ -109,12 +124,15 @@ export class BindingOverlay {
   }
   private state(): BindingOverlayState {
     const heads = [...this.entries.keys()].sort()
-    const awaitingSync = [...this.markers.values()].filter((marker) => !this.entries.has(marker.operationId)).sort((left, right) => left.operationId < right.operationId ? -1 : 1)
+    const expired = [...this.markers.values()].filter((marker) => !this.entries.has(marker.operationId)).sort((left, right) => left.operationId < right.operationId ? -1 : 1)
+    const awaitingSync = expired.map(({ operationId, taskId }) => ({ operationId, taskId }))
+    const retainedKeys = Object.fromEntries(expired.map((marker) => [marker.operationId, marker.retainedKeys]))
     return {
       records: unionRecords(...[...this.entries.values()].map((entry) => [entry.operation, ...entry.dependencies])),
       heads, provisional: [...new Set([...this.entries.values()].map((entry) => entry.operation.payload.taskId))].sort(),
       awaitingSync,
-      revision: createHash('sha256').update(canonicalJson({ heads, awaitingSync })).digest('hex'),
+      retainedKeys,
+      revision: createHash('sha256').update(canonicalJson({ heads, awaitingSync, retainedKeys })).digest('hex'),
     }
   }
   private async reconcileCurrent(canonical: readonly RemoteRecord[], trust: RecordTrust): Promise<boolean> {
@@ -185,7 +203,24 @@ export class BindingOverlay {
         if (canonical.some((record) => record.operationId === operationId) && canonicalEntity?.state !== 'blocked') return response(canonicalEntity?.state === 'needs-resolution' ? 'conflict' : 'already-synced')
         const current = this.markers.get(operationId)
         if (current && !this.entries.has(operationId)) { this.requestSync(); return response('awaiting-sync', 'The provisional authorization expired or was recovered after restart. Await the exact Git operation.') }
-        if ([...this.markers.values()].some((marker) => marker.taskId === operation.payload.taskId && !this.entries.has(marker.operationId))) {
+        const expiredForTask = [...this.markers.values()].filter((marker) => marker.taskId === operation.payload.taskId && !this.entries.has(marker.operationId))
+        if (expiredForTask.length) {
+          const incomingKeys = new Set(operationRetainedKeys(operation))
+          let narrowed = false
+          const next = new Map(this.markers)
+          for (const marker of expiredForTask) {
+            if (!marker.retainedKeys?.length) continue
+            const filtered = marker.retainedKeys.filter((key) => incomingKeys.has(key))
+            if (filtered.length !== marker.retainedKeys.length) {
+              next.set(marker.operationId, { ...marker, retainedKeys: filtered })
+              narrowed = true
+            }
+          }
+          if (narrowed) {
+            await this.persist(next)
+            this.markers = next
+            this.options.onChange?.()
+          }
           this.requestSync()
           return response('awaiting-sync', 'An earlier provisional binding on this task still requires canonical reconciliation or explicit cancellation.')
         }
@@ -197,7 +232,7 @@ export class BindingOverlay {
           const bytes = Buffer.byteLength(canonicalJson(unionRecords(this.state().records, closure, [operation])))
           if (bytes > remoteConfigLimits.overlayBytes) throw new RemoteConfigError('resource-limit', 'The temporary binding overlay exceeds 1 MiB.')
           const next = new Map(this.markers)
-          next.set(operationId, { operationId, taskId: operation.payload.taskId })
+          next.set(operationId, { operationId, taskId: operation.payload.taskId, retainedKeys: operationRetainedKeys(operation) })
           await this.persist(next)
           this.markers = next
           this.entries.set(operationId, { operation, dependencies: closure, deadline: this.now() + (this.options.lifetimeMs ?? remoteConfigLimits.overlayLifetimeMs) })
@@ -224,6 +259,22 @@ export class BindingOverlay {
       await this.persist(next)
       this.markers = next
       this.entries.delete(operationId)
+      this.schedule()
+      this.options.onChange?.()
+    })
+  }
+
+  cancelMany(operationIds: readonly string[]): Promise<void> {
+    z.array(operationIdSchema).min(1).max(remoteConfigLimits.overlayOperations).parse(operationIds)
+    return this.queue(async () => {
+      const next = new Map(this.markers)
+      for (const id of operationIds) {
+        if (!next.has(id)) throw new RemoteConfigError('stale-revision', 'A pending binding changed. Reload its current state before cancelling.')
+        next.delete(id)
+      }
+      await this.persist(next)
+      this.markers = next
+      for (const id of operationIds) this.entries.delete(id)
       this.schedule()
       this.options.onChange?.()
     })

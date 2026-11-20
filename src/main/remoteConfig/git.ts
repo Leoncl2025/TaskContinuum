@@ -92,6 +92,22 @@ function isWithin(parent: string, child: string): boolean {
   return !path || (!isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`))
 }
 
+function parsePorcelainEntries(raw: string): Array<{ xy: string; paths: string[] }> {
+  const tokens = raw.split('\0')
+  const entries: Array<{ xy: string; paths: string[] }> = []
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index]
+    if (!token) continue
+    const xy = token.slice(0, 2)
+    const paths = [token.slice(3)]
+    if ((xy[0] === 'R' || xy[0] === 'C' || xy[1] === 'R' || xy[1] === 'C') && index + 1 < tokens.length && tokens[index + 1]) {
+      paths.push(tokens[++index])
+    }
+    entries.push({ xy, paths })
+  }
+  return entries
+}
+
 function managedPath(path: string): boolean {
   return path === DESCRIPTOR || RECORD_PATH.test(path)
 }
@@ -813,7 +829,10 @@ export class GitReplica {
         // Two-tree read-tree refuses to overwrite work added since the preflight.
         // It updates this checkout only; Git's real index lock serializes writers.
         const checkout = await this.git(this.repositoryRoot, ['read-tree', '-m', '-u', previous!, head], { signal, allowFailure: true })
-        if (checkout.code) throw new GitSyncError('busy', 'Git could not safely update the selected checkout. Preserve/reconcile local changes and retry.')
+        if (checkout.code) {
+          await rm(join(this.directory, this.pendingName()), { force: true })
+          throw new GitSyncError('busy', 'Git could not safely update the selected checkout. Preserve/reconcile local changes and retry.')
+        }
       }
     } finally { await this.releaseLock(headLockPath, headLock) }
     await this.assertUpstream(signal)
@@ -905,7 +924,7 @@ export class GitReplica {
       try {
         const repositoryFiles = files.map((path) => this.repositoryPath(path))
         const allowed = new Set(repositoryFiles)
-        const before = await this.checkoutSnapshot(undefined, allowed)
+        const before = await this.checkoutSnapshot(undefined, { allowedUntracked: allowed, requireCleanWorktree: true })
         if (!before.head) throw new GitSyncError('busy', `${before.reason} The new task is local; finish your other Git work before committing and pushing it.`)
         await this.checkManagedPaths(files)
         for (const path of files) await regularFile(join(this.root, ...path.split('/')))
@@ -916,7 +935,7 @@ export class GitReplica {
           throw new GitSyncError('busy', 'The local branch and upstream differ. Pull or push your existing commits in terminal Git, then publish this already-created task; do not create it again.')
         }
         await this.assertUpstream()
-        const current = await this.checkoutSnapshot(undefined, allowed)
+        const current = await this.checkoutSnapshot(undefined, { allowedUntracked: allowed, requireCleanWorktree: true })
         if (current.head !== before.head || current.mapping !== before.mapping) throw new GitSyncError('busy', 'The workspace changed before task publication. The new task was retained locally.')
         await this.git(this.repositoryRoot, ['add', '--', ...repositoryFiles])
         await this.assertUpstream()
@@ -938,7 +957,7 @@ export class GitReplica {
         }
         if (remaining.size) integrity('The task commit does not contain every generated file. Nothing was pushed.')
         await this.assertUpstream()
-        const ready = await this.checkoutSnapshot()
+        const ready = await this.checkoutSnapshot(undefined, { requireCleanWorktree: true })
         if (ready.head !== head) throw new GitSyncError('busy', 'The workspace changed after committing the task. The commit is local; review it before pushing.')
         const pushed = await this.git(this.repositoryRoot, ['push', '--porcelain', '--no-verify', '--no-follow-tags', '--recurse-submodules=no',
           `--force-with-lease=${this.upstreamRef}:${before.head}`, '--', this.upstream.pushUrl, `${head}:${this.upstreamRef}`], { allowFailure: true })
@@ -976,7 +995,10 @@ export class GitReplica {
     } finally { await rm(index, { force: true }); await rm(`${index}.lock`, { force: true }) }
   }
 
-  private async checkoutSnapshot(signal?: AbortSignal, allowedUntracked?: ReadonlySet<string>): Promise<{ head?: string; mapping?: string; trackingRef?: string; reason?: string }> {
+  private async checkoutSnapshot(
+    signal?: AbortSignal,
+    options?: { allowedUntracked?: ReadonlySet<string>; requireCleanWorktree?: boolean },
+  ): Promise<{ head?: string; mapping?: string; trackingRef?: string; reason?: string }> {
     const current = await this.readUpstream(signal)
     if (!this.sameUpstream(current)) throw new GitSyncError('upstream-changed', 'The workspace branch or upstream changed before checkout refresh. Retry synchronization on the current branch.')
     const gitDirectory = await this.text(this.repositoryRoot, ['rev-parse', '--absolute-git-dir'], signal)
@@ -984,9 +1006,21 @@ export class GitReplica {
       if (await exists(join(gitDirectory, marker))) return { reason: 'A user Git operation is in progress.' }
     }
     if (await this.usesCheckoutFilter(signal)) return { reason: 'Workspace files require a configured Git filter; refresh the checkout explicitly before synchronizing.' }
-    const status = await this.text(this.repositoryRoot, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'], signal)
-    if (status.split('\0').filter(Boolean).some((entry) => !entry.startsWith('?? ') || !allowedUntracked?.has(entry.slice(3)))) {
-      return { reason: 'The user checkout has staged, unstaged, or untracked work.' }
+    const status = (await this.git(this.repositoryRoot, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'], { signal })).stdout.toString('utf8')
+    const entries = parsePorcelainEntries(status)
+    if (entries.some(({ xy }) => xy.includes('U') || xy === 'AA' || xy === 'DD')) {
+      return { reason: 'A user Git operation is in progress.' }
+    }
+    if (options?.requireCleanWorktree) {
+      if (entries.some(({ xy, paths }) => xy !== '??' || !options.allowedUntracked?.has(paths[0]))) {
+        return { reason: 'The user checkout has staged, unstaged, or untracked work.' }
+      }
+    } else {
+      const managedRoot = this.repositoryPath('.taskcontinuum')
+      const touchesManaged = (path: string) => path === managedRoot || path.startsWith(`${managedRoot}/`) || managedRoot.startsWith(`${path}/`)
+      if (entries.some(({ paths }) => paths.some(touchesManaged))) {
+        return { reason: 'The workspace .taskcontinuum metadata has uncommitted local changes.' }
+      }
     }
     const flags = await this.text(this.repositoryRoot, ['ls-files', '-v', '-z'], signal)
     if (flags.split('\0').some((line) => /^[a-zS]/.test(line))) return { reason: 'The checkout uses assume-unchanged or skip-worktree index entries. Clear them before automatic synchronization.' }

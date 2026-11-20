@@ -54,6 +54,10 @@ export function WorkspaceGitSyncControls() {
   ]
   const aliasConflicts = status?.conflicts.some((conflict) => conflict.startsWith('alias:'))
   const otherConflicts = status?.conflicts.some((conflict) => !conflict.startsWith('alias:'))
+  const awaitingByTask = new Map<string, string[]>()
+  for (const marker of status?.awaitingSync ?? []) {
+    awaitingByTask.set(marker.taskId, [...awaitingByTask.get(marker.taskId) ?? [], marker.operationId])
+  }
   return <section className="remote-device-controls workspace-links-controls" aria-label="Workspace Git synchronization" aria-busy={busy}>
     <div className="workspace-links-header">
       <h3>Automatic workspace links</h3>
@@ -82,6 +86,10 @@ export function WorkspaceGitSyncControls() {
       </select></label>
     </div>}
     {!!status?.provisionalTasks.length && <p role="status">Provisional bindings: {status.provisionalTasks.join(', ')}. Waiting for the same operations in Git.</p>}
+    {[...awaitingByTask.entries()].map(([taskId, operationIds]) => <div key={taskId} className="workspace-links-awaiting" role="status">
+      <p>Pending bindings for {taskId} are waiting for the publishing device to finish Git synchronization.</p>
+      {api.cancelPendingBinding && <button type="button" className="secondary-button" disabled={busy} onClick={() => { void run(() => api.cancelPendingBinding!(taskId, operationIds, status?.revision ?? null)) }}>Cancel pending for {taskId}</button>}
+    </div>)}
     {!!status?.conflicts.length && <p role="alert" className="copilot-error">Configuration needs resolution: {status.conflicts.join(', ')}.{otherConflicts && ' Ambiguous bindings are disabled; select the intended session again to resolve.'}{aliasConflicts && ' Rename the affected machines, then explicitly save or clear each conflicting alias.'}</p>}
     {!!machines.length && <p className="muted workspace-links-description">Machine aliases sync with this workspace in its public configuration. Do not include secrets. Hostnames and connection identities stay unchanged.{!enabled && ' Enable automatic links to edit aliases.'}</p>}
     {machines.map((machine) => {

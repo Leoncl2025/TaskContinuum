@@ -247,9 +247,15 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
     logAgentHostDiagnostic('configuration.snapshot', { scope: this.options.workspaceRoot, step: 'records', status: 'ok', count: records.length })
     const bindings = resolution.bindings
     for (const marker of overlay?.awaitingSync ?? []) {
-      delete bindings[marker.taskId]
-      const entity = resolution.entities[`binding:${marker.taskId}`]
-      if (entity) entity.state = 'blocked'
+      const retained = overlay?.retainedKeys[marker.operationId]
+      const allowed = new Set(retained ?? [])
+      const kept = (bindings[marker.taskId] ?? []).filter((target) => allowed.has(sessionLinkKey(target)))
+      if (kept.length) bindings[marker.taskId] = kept
+      else {
+        delete bindings[marker.taskId]
+        const entity = resolution.entities[`binding:${marker.taskId}`]
+        if (entity) entity.state = 'blocked'
+      }
       resolution.diagnostics.push({ code: 'awaiting-sync', message: 'A provisional binding expired or was recovered after restart. Await the exact canonical operation or explicitly cancel it.', entityKey: `binding:${marker.taskId}`, operationId: marker.operationId })
     }
     const document: SessionLinksDocument = { schemaVersion: '2.1', bindings }
@@ -660,6 +666,23 @@ export class RemoteConfigStore implements RepositorySessionLinksBackend {
 
   receiveOverlay(notification: unknown, senderId: string): Promise<BindingNotificationAcknowledgement> {
     return this.acceptNotification(notification, senderId)
+  }
+
+  cancelPendingBinding(taskId: string, operationIds: string[], expectedRevision: string | null): Promise<RemoteConfigSnapshot> {
+    sessionLinkTaskIdSchema.parse(taskId)
+    z.array(operationIdSchema).min(1).max(remoteConfigLimits.overlayOperations).refine((ids) => new Set(ids).size === ids.length, 'Duplicate pending operation IDs.').parse(operationIds)
+    return this.transaction(async (state, recovered) => {
+      if (!state.initialized) throw new RemoteConfigError('initialization-required', 'Enable the immutable binding store before reviewing temporary bindings.')
+      if (!this.options.overlay) throw new RemoteConfigError('overlay-disabled', 'This workspace does not have a temporary binding overlay.')
+      const before = await this.ensureRevision(state, expectedRevision)
+      const pending = before.awaitingSync.filter((marker) => marker.taskId === taskId).map((marker) => marker.operationId).sort()
+      if (!pending.length || canonicalJson(pending) !== canonicalJson([...operationIds].sort())) {
+        throw new RemoteConfigError('stale-revision', 'The pending changes for this task changed. Reload and review them before cancelling.')
+      }
+      await this.options.overlay.cancelMany(pending)
+      const snapshot = await this.snapshot(state)
+      return { value: snapshot, changed: recovered, snapshot }
+    })
   }
 
   async close(): Promise<void> {

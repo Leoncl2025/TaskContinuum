@@ -64,8 +64,11 @@ those branches receive the records; task documents always reflect the user check
   Task documents and public configuration have one editable location.
 - Git synchronization is fixed at **15,000 ms** while enabled.
 - A local configuration change durably saves its immutable operation, then
-  immediately schedules Git publication when the checkout is safe. A binding change also immediately
-  notifies the affected SSH peers without waiting for Git completion.
+  immediately schedules Git publication when the checkout is safe. Uncommitted
+  user files outside `.taskcontinuum/` are preserved untouched and do not block
+  metadata publication; conflicting incoming paths, uncommitted `.taskcontinuum/`
+  edits, in-progress Git operations and unpublished user commits pause sync.
+  A binding change also immediately notifies the affected SSH peers without waiting for Git completion.
 - Git operations are serialized; edits during a running cycle coalesce into
   follow-up work. Overlapping timer ticks are skipped so slow Git operations do
   not keep the UI permanently waiting. Push races have at most three attempts per cycle.
