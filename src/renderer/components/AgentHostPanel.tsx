@@ -226,6 +226,7 @@ type AgentHostPanelProps = {
   connectionRevision?: number
   active?: boolean
   paneSlot?: 'single' | 'primary' | 'secondary'
+  splitOrientation?: 'horizontal' | 'vertical'
   showTaskBadge?: boolean
   closeLabel?: string
   hideClose?: boolean
@@ -236,8 +237,11 @@ type AgentHostPanelProps = {
   onDraftChange?(draft: string): void
   onActivatePane?(): void
   onSplitRight?(): void
+  onSplitDown?(): void
+  onToggleSplitOrientation?(): void
   onSwapSplit?(): void
   onPopOut?(draft: string): Promise<boolean> | boolean | void
+  onHeaderContextMenu?(anchor: { x: number; y: number }, getDraft: () => string, clearDraft: (snapshot: string) => void): void
   onClose(): void
   onDevices?(): void
   onSessions?(): void
@@ -247,7 +251,7 @@ type AgentHostPanelProps = {
   prepareFirstMessage?(text: string): Promise<string>
 } & ({ task: TaskRecord; workspace?: never; onDetach(): void } | { task?: never; workspace: Pick<WorkspaceSnapshot, 'id' | 'name'>; onDetach?: never })
 
-export function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, paneSlot, showTaskBadge = false, closeLabel = 'Hide chat panel', hideClose = false, restoredDraft, headerTarget, cachedTitle, onTitles, onDraftChange, onActivatePane, onSplitRight, onSwapSplit, onPopOut, onDetach, onClose, onDevices, onSessions, onBusy, panelKey, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
+export function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, paneSlot, splitOrientation = 'horizontal', showTaskBadge = false, closeLabel = 'Hide chat panel', hideClose = false, restoredDraft, headerTarget, cachedTitle, onTitles, onDraftChange, onActivatePane, onSplitRight, onSplitDown, onToggleSplitOrientation, onSwapSplit, onPopOut, onHeaderContextMenu, onDetach, onClose, onDevices, onSessions, onBusy, panelKey, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
   const bridge = window.agentHost
   const { sessionId, chatId } = target
   const { clientId, machineName } = target.owner
@@ -265,6 +269,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const [historyLoadError, setHistoryLoadError] = useState<{ key: string; message: string }>()
   const [deliveryReview, setDeliveryReview] = useState<{ id: string; status: 'checking' | 'not-found' | 'abandoning' | 'failed'; acknowledged: boolean; error?: string }>()
   const [draft, setDraft] = useState(() => restoredDraft?.text ?? '')
+  const draftSnapshotRef = useRef(draft)
   const [seenDraftNonce, setSeenDraftNonce] = useState(restoredDraft?.nonce)
   if (restoredDraft && restoredDraft.nonce !== seenDraftNonce) {
     setSeenDraftNonce(restoredDraft.nonce)
@@ -301,7 +306,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const firstMessageSent = useRef(false)
   const imageInput = useChatImageInput(`${contextId}:${key}`, images, setImages, busy)
   const notifyDraftChange = useEffectEvent((value: string) => { onDraftChange?.(value) })
-  useEffect(() => { notifyDraftChange(draft) }, [draft])
+  useEffect(() => { draftSnapshotRef.current = draft; notifyDraftChange(draft) }, [draft])
   useEffect(() => {
     mounted.current = true
     return () => { mounted.current = false }
@@ -563,9 +568,10 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     ? 'Wait for Agent Host work and image processing to finish before updating.'
     : draft.length || images.length ? 'Send or clear unsent chat text and images before updating. Drafts are not discarded by an update.' : undefined
   const chatActions = <>
-    {onSplitRight && <IconButton icon="split-horizontal" label="Split chat right" title="Split chat right (Ctrl+\)" aria-keyshortcuts="Control+Backslash" onClick={() => { setDetailsKey(undefined); onSplitRight() }} />}
-    {onSwapSplit && <IconButton icon="arrow-swap" label="Swap split panes" title="Swap left and right split panes" onClick={() => { setDetailsKey(undefined); onSwapSplit() }} />}
-    {onPopOut && <IconButton icon="empty-window" label="Open session in new window" title="Open session in new window" onClick={() => {
+    {onSplitRight && <IconButton icon="split-horizontal" label="Split chat right" title="Split chat right (Ctrl+\) · Alt+Click to split down" aria-keyshortcuts="Control+Backslash" onClick={(event) => { setDetailsKey(undefined); if (event.altKey && onSplitDown) onSplitDown(); else onSplitRight() }} />}
+    {onToggleSplitOrientation && <IconButton icon={splitOrientation === 'vertical' ? 'split-horizontal' : 'split-vertical'} label={splitOrientation === 'vertical' ? 'Switch to left/right split' : 'Switch to top/bottom split'} title={splitOrientation === 'vertical' ? 'Switch to left/right split' : 'Switch to top/bottom split'} onClick={() => { setDetailsKey(undefined); onToggleSplitOrientation() }} />}
+    {onSwapSplit && <IconButton icon="arrow-swap" label="Swap split panes" title="Swap split panes" onClick={() => { setDetailsKey(undefined); onSwapSplit() }} />}
+    {onPopOut && <IconButton icon="empty-window" label="Open session in new window" title="Open session in new window (right-click header for Move / Copy)" onClick={() => {
       setDetailsKey(undefined)
       const snapshot = draft
       void Promise.resolve(onPopOut(snapshot)).then((transferred) => {
@@ -578,7 +584,16 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     {!workspace && !hideClose && <IconButton icon="close" label={closeLabel} onClick={() => { setDetailsKey(undefined); onClose() }} />}
   </>
   const HeaderTag = headerTarget ? 'div' : 'header'
-  const header = <HeaderTag className="ahp-chat-header" aria-label="Chat header" role={headerTarget ? 'group' : undefined}>
+  const header = <HeaderTag className="ahp-chat-header" aria-label="Chat header" role={headerTarget ? 'group' : undefined} onContextMenu={onHeaderContextMenu ? (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    onActivatePane?.()
+    onHeaderContextMenu(
+      { x: event.clientX, y: event.clientY },
+      () => draftSnapshotRef.current,
+      (snapshot) => setDraft((current) => current === snapshot ? '' : current),
+    )
+  } : undefined}>
     <div className="ahp-chat-title"><Icon name="copilot" />{showTaskBadge && task && <span className="ahp-chat-task-badge" title={task.title}>{task.id}</span>}<strong title={displayTitle}>{displayTitle}</strong></div>
     <div className="ahp-chat-meta">
       <span className="ahp-chat-status" role="status" data-state={stateLabel} title={stateLabel}><span aria-hidden="true" /><span className="ahp-chat-state-label">{stateLabel}</span></span>

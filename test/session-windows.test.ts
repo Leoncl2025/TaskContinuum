@@ -135,6 +135,17 @@ describe('SessionWindowManager', () => {
       key: sessionWindowPanelKey('T-0001', target),
       taskId: 'T-0001',
       target,
+      mode: 'move',
+    }])
+
+    // Re-opening in 'copy' mode updates the window mode in place and publishes the updated summary.
+    const asCopy = await manager.open({ taskId: 'T-0001', target, mode: 'copy' })
+    expect(asCopy).toEqual({ opened: true, reused: true })
+    expect(manager.list()).toEqual([{
+      key: sessionWindowPanelKey('T-0001', target),
+      taskId: 'T-0001',
+      target,
+      mode: 'copy',
     }])
 
     // Docking from the popout window closes it, focuses main, and forwards the updated draft.

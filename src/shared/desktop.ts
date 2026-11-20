@@ -9,16 +9,20 @@ export interface DesktopInfo {
   security: { contextIsolated: boolean; sandboxed: boolean }
 }
 
+export type SessionWindowMode = 'move' | 'copy'
+
 export interface SessionWindowOpenRequest {
   readonly taskId: string
   readonly target: AgentHostTarget
   readonly draft?: string
+  readonly mode?: SessionWindowMode
 }
 
 export interface SessionWindowSummary {
   readonly key: string
   readonly taskId: string
   readonly target: AgentHostTarget
+  readonly mode: SessionWindowMode
 }
 
 export interface SessionWindowActivatedEvent {

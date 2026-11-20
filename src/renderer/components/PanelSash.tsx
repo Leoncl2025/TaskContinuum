@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { clampSplitRatio, defaultLayout, splitRatioLimits } from '../layout'
-import type { LayoutPanel } from '../layout'
+import type { LayoutPanel, SplitOrientation } from '../layout'
 
 export function PanelSash({ panel, width, min, max, onResize, onReset }: {
   panel: LayoutPanel
@@ -67,15 +67,17 @@ export function PanelSash({ panel, width, min, max, onResize, onReset }: {
     }} />
 }
 
-export function ChatSplitSash({ ratio, onResize, onReset }: {
+export function ChatSplitSash({ ratio, orientation = 'horizontal', onResize, onReset }: {
   ratio: number
+  orientation?: SplitOrientation
   onResize(ratio: number): void
   onReset(): void
 }) {
   const element = useRef<HTMLDivElement>(null)
-  const drag = useRef<{ pointerId: number; startX: number; ratio: number; containerWidth: number } | undefined>(undefined)
+  const drag = useRef<{ pointerId: number; startCoord: number; ratio: number; containerSpan: number } | undefined>(undefined)
   const [dragging, setDragging] = useState(false)
   const percent = Math.round(ratio * 100)
+  const verticalStack = orientation === 'vertical'
 
   useEffect(() => {
     if (!dragging) return
@@ -98,24 +100,29 @@ export function ChatSplitSash({ ratio, onResize, onReset }: {
     if (element.current?.hasPointerCapture(current.pointerId)) element.current.releasePointerCapture(current.pointerId)
   }
 
-  return <div ref={element} className="panel-sash chat-split-sash" role="separator" tabIndex={0}
+  return <div ref={element} className="panel-sash chat-split-sash" data-orientation={orientation} role="separator" tabIndex={0}
     aria-label="Resize split chat panes" title="Drag to resize split panes (double-click to reset 50/50)"
-    aria-orientation="vertical" aria-valuemin={Math.round(splitRatioLimits.min * 100)}
-    aria-valuemax={Math.round(splitRatioLimits.max * 100)} aria-valuenow={percent} aria-valuetext={`${percent}% left pane`}
+    aria-orientation={verticalStack ? 'horizontal' : 'vertical'}
+    aria-valuemin={Math.round(splitRatioLimits.min * 100)}
+    aria-valuemax={Math.round(splitRatioLimits.max * 100)}
+    aria-valuenow={percent}
+    aria-valuetext={`${percent}% ${verticalStack ? 'top' : 'left'} pane`}
     data-dragging={dragging}
     onPointerDown={(event) => {
       if (event.button !== 0 || drag.current) return
       event.preventDefault()
       event.currentTarget.focus()
-      const containerWidth = Math.max(1, event.currentTarget.parentElement?.getBoundingClientRect().width ?? 800)
+      const rect = event.currentTarget.parentElement?.getBoundingClientRect()
+      const containerSpan = Math.max(1, verticalStack ? rect?.height ?? 600 : rect?.width ?? 800)
       event.currentTarget.setPointerCapture(event.pointerId)
-      drag.current = { pointerId: event.pointerId, startX: event.clientX, ratio, containerWidth }
+      drag.current = { pointerId: event.pointerId, startCoord: verticalStack ? event.clientY : event.clientX, ratio, containerSpan }
       setDragging(true)
     }}
     onPointerMove={(event) => {
       const current = drag.current
       if (current?.pointerId === event.pointerId) {
-        onResize(clampSplitRatio(current.ratio + (event.clientX - current.startX) / current.containerWidth))
+        const coord = verticalStack ? event.clientY : event.clientX
+        onResize(clampSplitRatio(current.ratio + (coord - current.startCoord) / current.containerSpan))
       }
     }}
     onPointerUp={(event) => { if (drag.current?.pointerId === event.pointerId) finish() }}
@@ -126,7 +133,9 @@ export function ChatSplitSash({ ratio, onResize, onReset }: {
       if (event.key === 'Escape' && drag.current) { event.preventDefault(); event.stopPropagation(); finish(true); return }
       if (drag.current || event.altKey || event.ctrlKey || event.metaKey) return
       const step = event.shiftKey ? 0.1 : 0.04
-      const next = event.key === 'ArrowLeft' ? ratio - step : event.key === 'ArrowRight' ? ratio + step
+      const decrease = event.key === 'ArrowLeft' || event.key === 'ArrowUp'
+      const increase = event.key === 'ArrowRight' || event.key === 'ArrowDown'
+      const next = decrease ? ratio - step : increase ? ratio + step
         : event.key === 'Home' ? splitRatioLimits.min : event.key === 'End' ? splitRatioLimits.max : undefined
       if (next !== undefined) { event.preventDefault(); onResize(clampSplitRatio(next)) }
       else if (event.key === 'Enter') { event.preventDefault(); onResize(defaultLayout.splitRatio); onReset() }

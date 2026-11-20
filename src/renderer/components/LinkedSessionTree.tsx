@@ -30,8 +30,9 @@ interface Props {
   historyTransfers?: Readonly<Record<string, AgentHostHistoryTransfer>>
   unlinkDisabled: boolean
   onSelect?(binding: SessionBinding): void
-  onSplit?(binding: SessionBinding): void
+  onSplit?(binding: SessionBinding, direction?: 'right' | 'down'): void
   onPopOut?(binding: SessionBinding): void
+  onSessionContextMenu?(binding: SessionBinding, anchor: { x: number; y: number }): void
   onLayoutChange?(layout: SessionGroupLayout, makeManual: boolean): void
   onUnlink?(binding: SessionBinding): void
 }
@@ -69,7 +70,7 @@ function GroupNameEditor({ title, onFinish }: { title: string; onFinish(value: s
     }} />
 }
 
-export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, secondaryKey, popoutKeys, expandSession, sessions, cachedTitles, historyTransfers, unlinkDisabled, onSelect, onSplit, onPopOut, onLayoutChange, onUnlink }: Props) {
+export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, secondaryKey, popoutKeys, expandSession, sessions, cachedTitles, historyTransfers, unlinkDisabled, onSelect, onSplit, onPopOut, onSessionContextMenu, onLayoutChange, onUnlink }: Props) {
   const aliases = useMachineAliases()
   const [expansion, setExpansion] = useState(() => ({ keys: new Set(expandSession ? [expandSession.key] : []), request: expandSession?.id }))
   if (expandSession && expandSession.id !== expansion.request) {
@@ -263,6 +264,19 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
         break
       case 'Enter':
       case ' ': if (entry.kind === 'group') toggleGroup(entry.group); else onSelect?.(entry.binding); break
+      case 'ContextMenu':
+      case 'F10':
+        if (event.key === 'F10' && !event.shiftKey) return
+        if (entry.kind === 'session' && onSessionContextMenu) {
+          event.preventDefault()
+          event.stopPropagation()
+          const rect = elements.current.get(key)?.firstElementChild?.getBoundingClientRect()
+          onSessionContextMenu(entry.binding, {
+            x: rect ? Math.round(rect.left + Math.min(80, rect.width * 0.4)) : 120,
+            y: rect ? Math.round(rect.bottom - 4) : 120,
+          })
+        }
+        return
       case 'F2': if (entry.kind === 'group' && onLayoutChange) setEditing(key); else return; break
       default: return
     }
@@ -293,7 +307,13 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
       onFocus={(event) => { if (event.target === event.currentTarget) setFocused(key) }} onKeyDown={(event) => navigate(event, byKey.get(key)!)}>
       <div className={`session-tree-row ${key === activeKey ? 'is-selected' : ''}${isSplit ? ' is-split-pane' : ''}`} data-transferring={Boolean(transfer)}
         data-dragging={dragged === key || undefined} draggable={canDragRow || undefined}
-        onDragStart={(event) => startDrag(event, node)} onDragEnd={clearDrag}>
+        onDragStart={(event) => startDrag(event, node)} onDragEnd={clearDrag}
+        onContextMenu={onSessionContextMenu ? (event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          focus(key)
+          onSessionContextMenu(binding, { x: event.clientX, y: event.clientY })
+        } : undefined}>
         {transfer && <progress className="session-transfer-mask" aria-label={`History transfer for ${label}`} max={100} value={transfer.value} aria-valuetext={transfer.description} />}
         {canArrange && <span className="session-drag-grip" aria-hidden="true"><Icon name="gripper" /></span>}
         <button type="button" tabIndex={-1} className="session-row" draggable={canDragRow || undefined} aria-label={`Open ${label}`} title={label}
@@ -305,11 +325,11 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
             </span> : <span className="session-machine" title={binding.owner.machineName}>
               <span title={binding.owner.machineName}>{machineLabel(binding.owner, aliases)}</span>
               {isPoppedOut && <span className="session-state-pill" title="Open in separate window"><Icon name="multiple-windows" />Window</span>}
-              {isSplit && <span className="session-state-pill" title="Open in right split pane"><Icon name="split-horizontal" />Split</span>}
+              {isSplit && <span className="session-state-pill" title="Open in split pane"><Icon name="split-horizontal" />Split</span>}
             </span>}
         </button>
         {(onSplit || onPopOut) && <div className="session-row-actions">
-          {onSplit && <IconButton icon="split-horizontal" label={`Split ${label} right`} title="Split right" tabIndex={-1} onClick={() => { focus(key); onSplit(binding) }} />}
+          {onSplit && <IconButton icon="split-horizontal" label={`Split ${label} right`} title="Split right (Alt+Click to split down)" tabIndex={-1} onClick={(event) => { focus(key); onSplit(binding, event.altKey ? 'down' : 'right') }} />}
           {onPopOut && <IconButton icon={isPoppedOut ? 'multiple-windows' : 'empty-window'} label={isPoppedOut ? `Focus ${label} window` : `Pop out ${label}`} title={isPoppedOut ? 'Focus session window' : 'Open in new window'} tabIndex={-1} onClick={() => { focus(key); onPopOut(binding) }} />}
         </div>}
         <IconButton icon={open ? 'chevron-up' : 'chevron-down'} label={`${open ? 'Hide' : 'Show'} details for ${label}`} tabIndex={-1} aria-expanded={open} aria-controls={open ? detailsId : undefined}

@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { agentHostKey } from '../shared/agentHost'
 import type { AgentHostTarget } from '../shared/agentHost'
 import { MAX_CHAT_TEXT_LENGTH } from '../shared/chatAttachments'
-import type { DesktopWindowContext, SessionWindowSummary } from '../shared/desktop'
+import type { DesktopWindowContext, SessionWindowMode, SessionWindowSummary } from '../shared/desktop'
 import type { WorkspaceState } from '../shared/workspace'
 import { agentHostTargetSchema } from './agentHostProtocol'
 import { isTrustedRendererUrl } from './security'
@@ -18,6 +18,7 @@ const openSessionWindowSchema = z.object({
   taskId: taskIdSchema,
   target: agentHostTargetSchema,
   draft: draftSchema,
+  mode: z.enum(['move', 'copy']).optional(),
 }).strict()
 
 const focusSessionWindowSchema = z.object({
@@ -37,6 +38,7 @@ interface PopoutEntry {
   readonly entryKey: string
   readonly panelKey: string
   readonly workspaceRoot: string
+  mode: SessionWindowMode
   context: SessionContext
   readonly window: BrowserWindow
 }
@@ -158,6 +160,7 @@ export class SessionWindowManager {
         key: entry.panelKey,
         taskId: entry.context.task.id,
         target: entry.context.target,
+        mode: entry.mode,
       })
     }
     return summaries
@@ -213,10 +216,15 @@ export class SessionWindowManager {
     if (!task) throw new Error(`Task ${request.taskId} is unavailable in the current workspace.`)
     await this.options.authorizeSession(workspace.root, request.target)
 
+    const requestedMode: SessionWindowMode = request.mode ?? 'move'
     const panelKey = sessionWindowPanelKey(task.id, request.target)
     const entryKey = `${workspace.root}::${panelKey}`
     const existing = this.popouts.get(entryKey)
     if (existing && !existing.window.isDestroyed()) {
+      if (existing.mode !== requestedMode) {
+        existing.mode = requestedMode
+        this.publishChanged()
+      }
       this.focusBrowserWindow(existing.window)
       return { opened: true, reused: true }
     }
@@ -241,7 +249,7 @@ export class SessionWindowManager {
     const creation = (async () => {
       const window = this.options.createBrowserWindow(context, this.cascadeCounter++)
       const senderId = window.webContents.id
-      const entry: PopoutEntry = { entryKey, panelKey, workspaceRoot: workspace.root, context, window }
+      const entry: PopoutEntry = { entryKey, panelKey, workspaceRoot: workspace.root, mode: requestedMode, context, window }
       this.popouts.set(entryKey, entry)
       this.bySenderId.set(senderId, { kind: 'session', entry, window })
       const cleanup = () => {

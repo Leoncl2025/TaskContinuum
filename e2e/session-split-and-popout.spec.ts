@@ -21,7 +21,7 @@ test.beforeAll(async () => {
 test.afterAll(async () => { await server?.close() })
 
 for (const theme of ['light', 'dark'] as const) {
-  test(`splits sessions side by side, resizes sash, swaps panes without losing drafts, and supports drag-to-split in ${theme} mode`, async ({ browser }, testInfo) => {
+  test(`supports right-click VS Code context menu, left/right & top/bottom split, Split & Move, and 4-way drag-to-split in ${theme} mode`, async ({ browser }, testInfo) => {
     const context = await browser.newContext({ viewport: { width: 1520, height: 920 }, deviceScaleFactor: 2 })
     const page = await context.newPage()
     const errors: string[] = []
@@ -30,82 +30,110 @@ for (const theme of ['light', 'dark'] as const) {
       await page.goto(`${url}?workbench&panes&sessions&theme=${theme}`)
       await page.evaluate(async () => { await document.fonts.ready })
 
-      // Open Agent Host sessions sidebar so linked sessions and badges are visible alongside the split view.
       await page.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
       const sidebar = page.getByRole('complementary', { name: 'Agent Host sessions', exact: true })
       const tree = sidebar.getByRole('tree', { name: 'Sessions for T-0002' })
       await expect(tree.getByRole('treeitem')).toHaveCount(4)
 
-      // Hide right Task Details panel so both split chat panes have generous side-by-side space.
+      // Hide right Task Details panel so split chat panes have generous space.
       await page.getByRole('button', { name: 'Toggle task details', exact: true }).click()
 
       const primaryInitialComposer = page.getByRole('textbox', { name: 'Message Agent Host' })
       await primaryInitialComposer.fill('Draft on release plan')
 
-      // Click "Split chat right" in the unified titlebar chat header.
-      await page.locator('.titlebar').getByRole('button', { name: 'Split chat right', exact: true }).click()
+      // Right-click a session row in the sidebar -> verify VS Code context menu & Split & Move submenu!
+      const secondRow = tree.getByRole('treeitem', { name: 'Investigate session creation', exact: true }).locator('.session-tree-row')
+      await secondRow.click({ button: 'right' })
+      const menu = page.getByRole('menu', { name: 'Session view actions', exact: true })
+      await expect(menu).toBeVisible()
+      for (const label of ['Split Right', 'Split Down', 'Split & Move', 'Move into New Window', 'Copy into New Window']) {
+        await expect(menu.getByRole('menuitem', { name: new RegExp(`^${label}`) })).toBeVisible()
+      }
+      await menu.getByRole('menuitem', { name: /^Split & Move/ }).hover()
+      const submenu = page.getByRole('menu', { name: 'Split and Move', exact: true })
+      await expect(submenu).toBeVisible()
+      for (const dir of ['Split Up', 'Split Down', 'Split Left', 'Split Right']) {
+        await expect(submenu.getByRole('menuitem', { name: dir, exact: true })).toBeVisible()
+      }
+      await page.screenshot({
+        path: testInfo.outputPath(`session-context-menu-${theme}.png`),
+        animations: 'disabled',
+      })
 
-      const leftPane = page.getByRole('complementary', { name: 'Agent Host task chat', exact: true })
-      const rightPane = page.getByRole('complementary', { name: 'Secondary split Agent Host task chat', exact: true })
+      // Click "Split Right" in the submenu to open side-by-side horizontal split.
+      await submenu.getByRole('menuitem', { name: 'Split Right', exact: true }).click()
+      await expect(menu).toHaveCount(0)
+
+      const firstPane = page.getByRole('complementary', { name: 'Agent Host task chat', exact: true })
+      const secondPane = page.getByRole('complementary', { name: 'Secondary split Agent Host task chat', exact: true })
       const sash = page.getByRole('separator', { name: 'Resize split chat panes', exact: true })
-      await expect(leftPane).toBeVisible()
-      await expect(rightPane).toBeVisible()
-      await expect(sash).toBeVisible()
+      await expect(firstPane).toBeVisible()
+      await expect(secondPane).toBeVisible()
+      await expect(sash).toHaveAttribute('aria-orientation', 'vertical')
+      await expect(firstPane.getByLabel('Chat header')).toContainText('A focused release plan')
+      await expect(secondPane.getByLabel('Chat header')).toContainText('Investigate session creation')
+      await expect(secondPane).toHaveAttribute('data-pane-focused', 'true')
 
-      await expect(leftPane.getByLabel('Chat header')).toContainText('A focused release plan')
-      await expect(rightPane.getByLabel('Chat header')).toContainText('Investigate session creation')
-      await expect(rightPane).toHaveAttribute('data-pane-focused', 'true')
-      await expect(tree.locator('.session-state-pill')).toContainText('Split')
-
-      // Type a distinct draft in the right split pane and capture 2x preview screenshot.
-      await rightPane.getByRole('textbox', { name: 'Message Agent Host' }).fill('Draft on session creation')
+      await secondPane.getByRole('textbox', { name: 'Message Agent Host' }).fill('Draft on session creation')
       await page.mouse.move(1, 1)
       await page.screenshot({
         path: testInfo.outputPath(`session-split-${theme}.png`),
         animations: 'disabled',
       })
 
-      // Swap split panes: zero remount -> both drafts swap sides intact!
-      await rightPane.getByRole('button', { name: 'Swap split panes', exact: true }).click()
-      await expect(leftPane.getByLabel('Chat header')).toContainText('Investigate session creation')
-      await expect(rightPane.getByLabel('Chat header')).toContainText('A focused release plan')
-      await expect(leftPane.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Draft on session creation')
-      await expect(rightPane.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Draft on release plan')
+      // Right-click the second pane's Chat header -> choose Split & Move -> Split Up (vertical top/bottom split!).
+      await secondPane.getByLabel('Chat header').click({ button: 'right' })
+      const headerMenu = page.getByRole('menu', { name: 'Session view actions', exact: true })
+      await headerMenu.getByRole('menuitem', { name: /^Split & Move/ }).hover()
+      await page.getByRole('menu', { name: 'Split and Move', exact: true }).getByRole('menuitem', { name: 'Split Up', exact: true }).click()
 
-      // Resize sash via keyboard and reset via Enter.
+      // Verify top/bottom vertical split geometry AND zero-remount draft preservation!
+      await expect(page.locator('.chat-workspace')).toHaveAttribute('data-split-orientation', 'vertical')
+      await expect(sash).toHaveAttribute('aria-orientation', 'horizontal')
+      await expect(firstPane.getByLabel('Chat header')).toContainText('Investigate session creation')
+      await expect(secondPane.getByLabel('Chat header')).toContainText('A focused release plan')
+      await expect(firstPane.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Draft on session creation')
+      await expect(secondPane.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Draft on release plan')
+      const topBox = (await firstPane.boundingBox())!
+      const bottomBox = (await secondPane.boundingBox())!
+      expect(bottomBox.y).toBeGreaterThanOrEqual(topBox.y + topBox.height - 2)
+
+      await page.mouse.move(1, 1)
+      await page.screenshot({
+        path: testInfo.outputPath(`session-split-vertical-${theme}.png`),
+        animations: 'disabled',
+      })
+
+      // Resize vertical sash via ArrowDown and reset via Enter.
       await sash.focus()
-      await page.keyboard.press('ArrowRight')
+      await page.keyboard.press('ArrowDown')
       await expect(sash).toHaveAttribute('aria-valuenow', '54')
       await page.keyboard.press('Enter')
       await expect(sash).toHaveAttribute('aria-valuenow', '50')
 
-      // Ctrl+\ switches focus between primary and secondary; Ctrl+Shift+\ closes split while preserving primary draft.
-      await expect(rightPane).toHaveAttribute('data-pane-focused', 'true')
-      await page.keyboard.press('Control+\\')
-      await expect(leftPane).toHaveAttribute('data-pane-focused', 'true')
+      // Close split with Ctrl+Shift+\, then drag a session to the bottom edge for 4-way drag-to-split ("Split Down")!
       await page.keyboard.press('Control+Shift+\\')
-      await expect(rightPane).toHaveCount(0)
-      await expect(leftPane.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Draft on session creation')
+      await expect(secondPane).toHaveCount(0)
 
-      // Drag a session from the sidebar onto the right half of .chat-workspace to re-open Split View.
       const fourthRow = tree.getByRole('treeitem', { name: 'Verify the next release', exact: true }).locator('.session-tree-row')
       const workspaceBox = (await page.locator('.chat-workspace').boundingBox())!
       const dataTransfer = await page.evaluateHandle(() => new DataTransfer())
       await fourthRow.dispatchEvent('dragstart', { dataTransfer })
       await page.locator('.chat-workspace').dispatchEvent('dragover', {
         dataTransfer,
-        clientX: workspaceBox.x + workspaceBox.width * 0.8,
-        clientY: workspaceBox.y + workspaceBox.height * 0.4,
+        clientX: workspaceBox.x + workspaceBox.width * 0.5,
+        clientY: workspaceBox.y + workspaceBox.height * 0.9,
       })
-      await expect(page.locator('.chat-drop-overlay[data-zone="secondary"]')).toContainText('Split right')
+      await expect(page.locator('.chat-drop-overlay[data-zone="down"]')).toContainText('Split Down')
       await page.locator('.chat-workspace').dispatchEvent('drop', {
         dataTransfer,
-        clientX: workspaceBox.x + workspaceBox.width * 0.8,
-        clientY: workspaceBox.y + workspaceBox.height * 0.4,
+        clientX: workspaceBox.x + workspaceBox.width * 0.5,
+        clientY: workspaceBox.y + workspaceBox.height * 0.9,
       })
       await fourthRow.dispatchEvent('dragend', { dataTransfer })
-      await expect(rightPane).toBeVisible()
-      await expect(rightPane.getByLabel('Chat header')).toContainText('Verify the next release')
+      await expect(secondPane).toBeVisible()
+      await expect(page.locator('.chat-workspace')).toHaveAttribute('data-split-orientation', 'vertical')
+      await expect(secondPane.getByLabel('Chat header')).toContainText('Verify the next release')
 
       expect(errors).toEqual([])
     } finally {
@@ -173,12 +201,30 @@ test('pops out an Agent Host session into a standalone Electron window and docks
       return syncState
     }, { timeout: 25_000 }).toBe('connected')
 
-    // Type an unsent draft in the main window, then pop the session out into a standalone window.
+    // First test "Copy into New Window" via right-click context menu: both main and standalone windows remain live!
     const mainComposer = mainPage.getByRole('textbox', { name: 'Message Agent Host' })
     await mainComposer.fill('Carry this draft into the standalone window')
 
+    const copyWindowPromise = app.waitForEvent('window')
+    await mainPage.getByLabel('Chat header').click({ button: 'right' })
+    await mainPage.getByRole('menu', { name: 'Session view actions', exact: true })
+      .getByRole('menuitem', { name: /^Copy into New Window/ }).click()
+    const copyPage = await copyWindowPromise
+    copyPage.on('pageerror', (error) => errors.push(error.message))
+    await expect(copyPage.locator('.session-window')).toBeVisible()
+    await expect(copyPage.getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible()
+    // Main window ALSO keeps its live composer visible in 'copy' mode!
+    await expect(mainComposer).toBeVisible()
+    await expect(mainComposer).toHaveValue('Carry this draft into the standalone window')
+    const copyClosed = copyPage.waitForEvent('close')
+    await copyPage.getByRole('button', { name: 'Close window', exact: true }).click()
+    await copyClosed
+
+    // Now test "Move into New Window" via right-click context menu -> moves out of main and carries draft!
     const popoutPromise = app.waitForEvent('window')
-    await mainPage.locator('.titlebar').getByRole('button', { name: 'Open session in new window', exact: true }).click()
+    await mainPage.getByLabel('Chat header').click({ button: 'right' })
+    await mainPage.getByRole('menu', { name: 'Session view actions', exact: true })
+      .getByRole('menuitem', { name: 'Move into New Window', exact: true }).click()
     const popoutPage = await popoutPromise
     popoutPage.on('pageerror', (error) => errors.push(error.message))
 

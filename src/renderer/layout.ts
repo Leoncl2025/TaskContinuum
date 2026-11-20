@@ -1,3 +1,6 @@
+export type SplitOrientation = 'horizontal' | 'vertical'
+export type SplitDirection = 'up' | 'down' | 'left' | 'right'
+
 export interface LayoutPreferences {
   sidebar: boolean
   chat: boolean
@@ -6,6 +9,7 @@ export interface LayoutPreferences {
   sidebarWidth: number
   detailsWidth: number
   splitRatio: number
+  splitOrientation: SplitOrientation
 }
 
 export type LayoutPanel = 'sidebar' | 'details'
@@ -13,7 +17,16 @@ export const panelLimits = { sidebar: { min: 220, max: 600 }, details: { min: 32
 export const splitRatioLimits = { min: 0.25, max: 0.75 }
 const key = 'taskcontinuum:layout:v2'
 const legacyKey = 'taskcontinuum:layout:v1'
-export const defaultLayout: LayoutPreferences = { sidebar: true, chat: true, details: true, theme: 'light', sidebarWidth: 258, detailsWidth: 380, splitRatio: 0.5 }
+export const defaultLayout: LayoutPreferences = {
+  sidebar: true,
+  chat: true,
+  details: true,
+  theme: 'light',
+  sidebarWidth: 258,
+  detailsWidth: 380,
+  splitRatio: 0.5,
+  splitOrientation: 'horizontal',
+}
 
 export function clampSplitRatio(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return defaultLayout.splitRatio
@@ -75,6 +88,7 @@ export function readLayout(): LayoutPreferences {
       sidebarWidth: panelWidth(saved.sidebarWidth, 'sidebar'),
       detailsWidth: panelWidth(stored === null ? saved.chatWidth : saved.detailsWidth, 'details'),
       splitRatio: clampSplitRatio(saved.splitRatio),
+      splitOrientation: saved.splitOrientation === 'vertical' ? 'vertical' : 'horizontal',
     }
   } catch {
     return { ...defaultLayout }

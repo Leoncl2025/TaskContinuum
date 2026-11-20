@@ -150,7 +150,10 @@ kbd { font-family: inherit; font-size: 10px; color: var(--muted); border: 1px so
 .panel-sash::after { content: ''; position: absolute; inset: 0 2px; background: transparent; }
 .panel-sash:hover::after, .panel-sash:focus-visible::after, .panel-sash[data-dragging='true']::after { background: var(--accent); }
 .panel-sash:focus-visible { outline: none; }
-.workbench:has(.panel-sash[data-dragging='true']), .workbench:has(.panel-sash[data-dragging='true']) * { cursor: col-resize !important; user-select: none !important; }
+.chat-split-sash[data-orientation='vertical'] { flex: 0 0 6px; width: auto; height: 6px; margin: -3px 0; cursor: row-resize; }
+.chat-split-sash[data-orientation='vertical']::after { inset: 2px 0; }
+.workbench:has(.panel-sash:not([data-orientation='vertical'])[data-dragging='true']), .workbench:has(.panel-sash:not([data-orientation='vertical'])[data-dragging='true']) * { cursor: col-resize !important; user-select: none !important; }
+.workbench:has(.chat-split-sash[data-orientation='vertical'][data-dragging='true']), .workbench:has(.chat-split-sash[data-orientation='vertical'][data-dragging='true']) * { cursor: row-resize !important; user-select: none !important; }
 .activity-bar { width: 48px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; background: var(--panel); border-right: 1px solid var(--border); padding-top: 5px; }
 .activity { position: relative; display: flex; align-items: center; justify-content: center; width: 38px; height: 40px; margin: 4px 5px; border-radius: var(--radius-md); color: var(--muted); }
 .activity .codicon { font-size: 23px; }
@@ -304,10 +307,14 @@ kbd { font-family: inherit; font-size: 10px; color: var(--muted); border: 1px so
 .empty-workbench p { color: var(--muted); }
 
 .chat-workspace { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; }
-.chat-workspace:has(> .compact-split-switcher) { flex-direction: column; }
-.chat-workspace[data-split='true'] > [data-pane-slot='primary'] { order: 1; flex: var(--split-left-grow, .5) 1 0%; min-width: 0; }
+.chat-workspace:has(> .compact-split-switcher),
+.chat-workspace[data-split='true'][data-split-orientation='vertical'] { flex-direction: column; }
+.chat-workspace[data-split='true'] > [data-pane-slot='primary'] { order: 1; flex: var(--split-left-grow, .5) 1 0%; min-width: 0; min-height: 0; }
 .chat-workspace[data-split='true'] > .chat-split-sash { order: 2; }
-.chat-workspace[data-split='true'] > [data-pane-slot='secondary'] { order: 3; flex: var(--split-right-grow, .5) 1 0%; min-width: 0; border-left: 1px solid var(--border); }
+.chat-workspace[data-split='true'] > [data-pane-slot='secondary'] { order: 3; flex: var(--split-right-grow, .5) 1 0%; min-width: 0; min-height: 0; border-left: 1px solid var(--border); }
+.chat-workspace[data-split='true'][data-split-orientation='vertical'] > [data-pane-slot='secondary'] { border-left: 0; border-top: 1px solid var(--border); }
+.chat-workspace[data-split='true'][data-split-orientation='vertical'] .composer-area { padding: 8px 18px 10px; }
+.chat-workspace[data-split='true'][data-split-orientation='vertical'] .composer textarea { min-height: 48px; padding: 9px 14px 4px; }
 .chat-workspace[data-split='true'] > .chat-panel > :is(.ahp-chat-header, .panel-header) { background: color-mix(in srgb, var(--panel) 78%, var(--raised)); transition: background 120ms ease, box-shadow 120ms ease; }
 .chat-workspace[data-split='true'] > .chat-panel[data-pane-focused='true'] > :is(.ahp-chat-header, .panel-header) { background: var(--panel); box-shadow: inset 0 2px 0 var(--link); }
 .chat-workspace[data-split='true'] > .chat-panel:not([data-pane-focused='true']) > .ahp-chat-header .ahp-chat-title strong { color: var(--muted); font-weight: 500; }
@@ -316,9 +323,12 @@ kbd { font-family: inherit; font-size: 10px; color: var(--muted); border: 1px so
 .compact-split-switcher > button[role='tab'] { display: flex; flex: 1; min-width: 0; align-items: center; justify-content: center; gap: 6px; height: 28px; padding: 0 8px; border-radius: var(--radius-sm); color: var(--muted); font-size: 11.5px; }
 .compact-split-switcher > button[role='tab'] > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .compact-split-switcher > button[role='tab'][aria-selected='true'] { background: var(--selected); color: var(--text); font-weight: 500; }
-.chat-drop-overlay { position: absolute; top: 8px; bottom: 8px; z-index: 12; display: grid; place-items: center; border: 1.5px dashed color-mix(in srgb, var(--link) 68%, var(--border)); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--link) 11%, transparent); backdrop-filter: blur(1px); pointer-events: none; }
-.chat-drop-overlay[data-zone='primary'] { left: 8px; right: calc(50% + 4px); }
-.chat-drop-overlay[data-zone='secondary'] { left: calc(50% + 4px); right: 8px; }
+.chat-drop-overlay { position: absolute; z-index: 12; display: grid; place-items: center; border: 1.5px dashed color-mix(in srgb, var(--link) 68%, var(--border)); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--link) 11%, transparent); backdrop-filter: blur(1px); pointer-events: none; }
+.chat-drop-overlay[data-zone='left'] { top: 8px; bottom: 8px; left: 8px; right: calc(50% + 4px); }
+.chat-drop-overlay[data-zone='right'] { top: 8px; bottom: 8px; left: calc(50% + 4px); right: 8px; }
+.chat-drop-overlay[data-zone='up'] { top: 8px; bottom: calc(50% + 4px); left: 8px; right: 8px; }
+.chat-drop-overlay[data-zone='down'] { top: calc(50% + 4px); bottom: 8px; left: 8px; right: 8px; }
+.chat-drop-overlay[data-zone='center'] { inset: 8px; }
 .chat-drop-badge { display: inline-flex; align-items: center; gap: 7px; padding: 7px 14px; border: 1px solid color-mix(in srgb, var(--link) 55%, var(--border)); border-radius: 999px; background: var(--panel); color: var(--text); font-size: 12px; font-weight: 600; box-shadow: 0 8px 24px var(--shadow); }
 .chat-drop-badge > .codicon { color: var(--link); font-size: 14px; }
 .chat-panel { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; background: var(--bg); }
