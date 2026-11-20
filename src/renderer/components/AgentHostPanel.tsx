@@ -274,6 +274,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const operating = useRef(false)
   const mounted = useRef(false)
   const following = useRef(true)
+  const panel = useRef<HTMLElement>(null)
   const composer = useRef<HTMLTextAreaElement>(null)
   const log = useRef<HTMLDivElement>(null)
   const logSize = useRef({ width: 0, height: 0 })
@@ -515,6 +516,21 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       setCatalog({ key: catalogKey, models: [], error: failure instanceof Error ? failure.message : 'The original session could not be verified. Reconnect to retry.' })
     } finally { operating.current = false; setBusy(false) }
   }
+  const reconnectFromShortcut = useEffectEvent((event: KeyboardEvent) => {
+    if (event.defaultPrevented || event.isComposing || event.repeat
+      || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey
+      || event.key !== 'F5' || !active || document.querySelector('dialog[open]')
+      || panel.current?.closest('[inert]')) return
+    event.preventDefault()
+    if (!bridge || busy) return
+    void reconnect()
+  })
+  useEffect(() => {
+    if (!active) return
+    const handle = (event: KeyboardEvent) => reconnectFromShortcut(event)
+    window.addEventListener('keydown', handle)
+    return () => window.removeEventListener('keydown', handle)
+  }, [active])
   const connectionError = error ?? view?.error
   const catalogError = currentCatalog?.error !== connectionError ? currentCatalog?.error : undefined
   const historyFailure = view?.history?.error ?? (historyLoadError?.key === watchKey ? historyLoadError.message : undefined)
@@ -527,7 +543,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     : draft.length || images.length ? 'Send or clear unsent chat text and images before updating. Drafts are not discarded by an update.' : undefined
   const chatActions = <>
     {onDevices && <IconButton icon="remote" label="Manage devices" onClick={() => { setDetailsKey(undefined); onDevices() }} />}
-    <IconButton icon="refresh" label="Reconnect Agent Host" disabled={busy} onClick={() => { setDetailsKey(undefined); void reconnect() }} />
+    <IconButton icon="refresh" label="Reconnect Agent Host" title="Reconnect Agent Host (F5)" aria-keyshortcuts="F5" disabled={busy} onClick={() => { setDetailsKey(undefined); void reconnect() }} />
     {onDetach && <IconButton icon="debug-disconnect" label="Detach conversation" disabled={busy || pending} onClick={() => { setDetailsKey(undefined); onDetach() }} />}
     {!workspace && <IconButton icon="close" label="Hide chat panel" onClick={() => { setDetailsKey(undefined); onClose() }} />}
   </>
@@ -543,7 +559,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       <div className="ahp-chat-secondary-actions">{chatActions}</div>
     </div>
   </HeaderTag>
-  return <ChatLinkTargetContext.Provider value={linkTarget}><aside className="chat-panel ahp-panel" aria-label={workspace ? 'Agent Host task creation chat' : 'Agent Host task chat'} data-update-blocker={updateBlocker}>
+  return <ChatLinkTargetContext.Provider value={linkTarget}><aside ref={panel} className="chat-panel ahp-panel" aria-label={workspace ? 'Agent Host task creation chat' : 'Agent Host task chat'} aria-keyshortcuts="F5" data-update-blocker={updateBlocker}>
     {headerTarget ? active && createPortal(header, headerTarget) : header}
     {detailsOpen && <Dialog title="Chat details" className="ahp-chat-details" onClose={() => setDetailsKey(undefined)}>
       <dl>
@@ -608,7 +624,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
             <label title={selectedModel?.name ?? 'Your model and options are remembered on this device for this Agent Host provider.'}><Icon name="copilot" /><select aria-label="Agent Host model" value={modelId} disabled={busy || pending || responding || view?.readOnly || !models.length} onChange={(event) => chooseModel(event.target.value)}><option value="">{!currentCatalog ? 'Loading models...' : !models.length ? 'Models unavailable' : 'Choose a model'}</option>{modelId && !modelReady && <option value={modelId} disabled>{modelId} (unavailable)</option>}{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
           </div>
           {selectedModel && <AgentHostModelOptions key={`${key}:${selectedModel.provider}:${modelId}`} schema={selectedModel.configSchema} config={config} disabled={busy || pending || responding || Boolean(view?.readOnly)} onChange={(config) => chooseModel(modelId, config)} />}
-          <IconButton icon="refresh" label="Retry loading models" disabled={!bridge || busy || !currentCatalog} onClick={() => { void reconnect() }} />
+          <IconButton icon="refresh" label="Retry loading models" title="Retry loading models (F5)" aria-keyshortcuts="F5" disabled={!bridge || busy || !currentCatalog} onClick={() => { void reconnect() }} />
           {activeTurn ? <IconButton icon="debug-stop" label="Stop Agent Host response" disabled={busy || view?.readOnly || view?.state !== 'connected'} onClick={() => { void cancel() }} /> : <button className="send-button" type="submit" aria-label="Send to Agent Host" title="Send to Agent Host" disabled={!canSend || imageInput.reading || !draft.trim() && !images.length}><Icon name="arrow-up" /></button>}
         </div>
       </div>

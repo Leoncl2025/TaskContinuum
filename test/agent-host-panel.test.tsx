@@ -1392,4 +1392,46 @@ describe('Agent Host chat UI', () => {
     await waitFor(() => expect(screen.queryByRole('group', { name: 'Resolve uncertain delivery' })).not.toBeInTheDocument())
     expect(setup.bridge.send).not.toHaveBeenCalled()
   })
+
+  it('reconnects and retries loading models on F5 while preserving drafts and ignoring modified, repeat, inactive, or modal events', async () => {
+    const setup = fixture()
+    vi.mocked(setup.bridge.models).mockRejectedValue(new Error('The owner model catalog is unavailable.'))
+    const user = userEvent.setup()
+    const rendered = render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('The owner model catalog is unavailable.')
+    expect(screen.getByRole('button', { name: 'Reconnect Agent Host' })).toHaveAttribute('title', 'Reconnect Agent Host (F5)')
+    expect(screen.getByRole('button', { name: 'Retry loading models' })).toHaveAttribute('title', 'Retry loading models (F5)')
+
+    const composer = screen.getByRole('textbox', { name: 'Message Agent Host' })
+    await user.type(composer, 'Keep this draft across F5')
+    const initialModelCalls = vi.mocked(setup.bridge.models).mock.calls.length
+    vi.mocked(setup.bridge.models).mockResolvedValue([{ id: 'gpt-6', name: 'GPT-6', provider: 'copilotcli' }])
+
+    for (const ignored of [
+      { ctrlKey: true }, { shiftKey: true }, { altKey: true }, { metaKey: true }, { repeat: true }, { isComposing: true },
+    ]) {
+      expect(fireEvent.keyDown(composer, { key: 'F5', ...ignored })).toBe(true)
+    }
+    expect(setup.bridge.watch).toHaveBeenCalledOnce()
+    expect(setup.bridge.models).toHaveBeenCalledTimes(initialModelCalls)
+
+    expect(fireEvent.keyDown(composer, { key: 'F5' })).toBe(false)
+    await screen.findByRole('option', { name: 'GPT-6' })
+    expect(setup.bridge.watch).toHaveBeenCalledTimes(2)
+    expect(setup.bridge.models).toHaveBeenCalledTimes(initialModelCalls + 1)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(composer).toHaveValue('Keep this draft across F5')
+    expect(setup.bridge.send).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: 'Chat details' }))
+    expect(screen.getByRole('dialog', { name: 'Chat details' })).toBeInTheDocument()
+    expect(fireEvent.keyDown(window, { key: 'F5' })).toBe(true)
+    expect(setup.bridge.watch).toHaveBeenCalledTimes(2)
+    await user.click(screen.getByRole('button', { name: 'Close Chat details' }))
+
+    rendered.rerender(<AgentHostPanel task={demoTasks[1]} target={setup.target} active={false} onDetach={vi.fn()} onClose={vi.fn()} />)
+    expect(fireEvent.keyDown(window, { key: 'F5' })).toBe(true)
+    expect(setup.bridge.watch).toHaveBeenCalledTimes(2)
+    expect(setup.bridge.models).toHaveBeenCalledTimes(initialModelCalls + 1)
+  })
 })
