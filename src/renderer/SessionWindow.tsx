@@ -75,7 +75,7 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
   )
 
   const [paneTree, setPaneTree] = useState<PaneTreeState>(() =>
-    createInitialPaneTree(
+    context.initialPaneTree ?? createInitialPaneTree(
       [context.task.id],
       context.task.id,
       initialSessionKey !== undefined ? { [context.task.id]: initialSessionKey } : {},
@@ -196,7 +196,9 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
   const applyTreeChange = useCallback((updater: (current: PaneTreeState) => PaneTreeState) => {
     setPaneTree((previous) => {
       const base = reconcilePaneTreeWithTasks(previous, validTaskIds, context.task.id)
-      return updater(base)
+      const next = updater(base)
+      void window.desktop?.windows?.savePaneTree?.(next)?.catch(() => undefined)
+      return next
     })
   }, [validTaskIds, context.task.id])
 

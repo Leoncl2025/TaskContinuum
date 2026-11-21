@@ -133,6 +133,9 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const validTaskIds = useMemo(() => new Set(tasks.map((item) => item.id)), [tasks])
 
   const [paneTree, setPaneTree] = useState<PaneTreeState>(() => {
+    if (selection.paneTree) {
+      return selection.paneTree
+    }
     const requested = selection.taskId === undefined ? tasks[0]?.id ?? null : selection.taskId
     const validSelected = requested !== null && !tasks.some((item) => item.id === requested) ? tasks[0]?.id ?? null : requested
     const savedOpen = selection.openTaskIds ?? (validSelected ? [validSelected] : [])
@@ -292,7 +295,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     userEmptiedTabsRef.current = nextFocused.activeTaskId === null && listPaneGroups(next.root).length === 1
     currentTaskId.current = nextFocused.activeTaskId
     if (!options?.skipSync) {
-      syncPaneSelection(nextFocused.activeTaskId, nextFocused.openTaskIds, nextFocused.sessions)
+      syncPaneSelection(nextFocused.activeTaskId, nextFocused.openTaskIds, nextFocused.sessions, next)
     }
     if (next !== base) setPaneTree(next)
     return next
@@ -589,7 +592,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     currentSessionKey.current = key
     const nextTree = applyTreeChange((current) => selectSessionInGroup(current, current.activeGroupId, taskId, key, fallbackKey), { skipSync: true })
     const nextFocused = activePaneGroup(nextTree)
-    selection.selectSession(taskId, key, nextFocused.openTaskIds)
+    selection.selectSession(taskId, key, nextFocused.openTaskIds, nextTree)
     showTaskChat()
   }
 

@@ -188,7 +188,7 @@ for (const theme of ['light', 'dark'] as const) {
 
 test('opens a sidebar-less Task-Page Popup Window, supports nested splits and Task Page drag inside the popup, and docks back', async ({ browserName }, testInfo) => {
   void browserName
-  test.setTimeout(90000)
+  test.setTimeout(120000)
   const root = await mkdtemp(join(tmpdir(), 'continuum-popout-desktop-'))
   const workspace = join(root, 'tasks')
   const discovery = join(root, 'discovery')
@@ -312,6 +312,47 @@ test('opens a sidebar-less Task-Page Popup Window, supports nested splits and Ta
     ])
     await expect(mainPage.getByRole('textbox', { name: 'Message Agent Host' }))
       .toHaveValue('Docked from nested popup window!')
+
+    // Now test FULL DESKTOP RESTART PERSISTENCE of BOTH Main Window split-screen sessions AND Popup Window split sessions!
+    // 1. Split the Main Window right so Main Window has 2 split panes on T-0001 (both connected to Original Host chat).
+    await mainPage.getByRole('tablist', { name: 'Open tasks' }).getByRole('tab', { name: 'Multi-window session workflow', exact: true }).click()
+    await mainPage.keyboard.press('Control+\\')
+    await expect(mainPage.getByRole('region', { name: 'Screen pane 1', exact: true })).toBeVisible()
+    await expect(mainPage.getByRole('region', { name: 'Screen pane 2', exact: true })).toBeVisible()
+
+    // 2. Also open a Popup Window via Copy into New Window, and split inside the Popup Window too!
+    const persistedPopupPromise = app.waitForEvent('window')
+    await mainPage.getByRole('region', { name: 'Screen pane 2', exact: true }).getByLabel('Chat header').click({ button: 'right' })
+    await mainPage.getByRole('menu', { name: 'Session view actions', exact: true })
+      .getByRole('menuitem', { name: /^Copy into New Window/ }).click()
+    const persistedPopup = await persistedPopupPromise
+    persistedPopup.on('pageerror', (error) => errors.push(error.message))
+    await expect(persistedPopup.getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible()
+    await persistedPopup.keyboard.press('Control+\\')
+    await expect(persistedPopup.getByRole('region', { name: 'Screen pane 1', exact: true })).toBeVisible()
+    await expect(persistedPopup.getByRole('region', { name: 'Screen pane 2', exact: true })).toBeVisible()
+
+    // 3. Close the entire Electron application while both the split Main Window AND the split Popup Window are open!
+    await app.close()
+    app = undefined
+
+    // 4. Relaunch Electron against the exact same workspace & profile -> verify BOTH Main Window split AND Popup Window split + sessions restore!
+    app = await electron.launch({ args: [resolve('.')], cwd: resolve('.'), env: environment })
+    await expect.poll(() => app!.windows().length, { timeout: 25_000 }).toBe(2)
+    const relaunchedMain = app.windows()[0]
+    const relaunchedPopup = app.windows()[1]
+    relaunchedMain.on('pageerror', (error) => errors.push(error.message))
+    relaunchedPopup.on('pageerror', (error) => errors.push(error.message))
+
+    // Main window restored both split panes and reconnected their sessions!
+    await expect(relaunchedMain.getByRole('region', { name: 'Screen pane 1', exact: true }).getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible({ timeout: 25_000 })
+    await expect(relaunchedMain.getByRole('region', { name: 'Screen pane 2', exact: true }).getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible({ timeout: 25_000 })
+
+    // Popup window ALSO restored automatically with its own 2 split panes and reconnected sessions!
+    await expect(relaunchedPopup.locator('.session-window')).toBeVisible()
+    await expect(relaunchedPopup.getByRole('region', { name: 'Screen pane 1', exact: true }).getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible({ timeout: 25_000 })
+    await expect(relaunchedPopup.getByRole('region', { name: 'Screen pane 2', exact: true }).getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible({ timeout: 25_000 })
+
     expect(errors).toEqual([])
   } finally {
     await app?.close()

@@ -19,6 +19,7 @@ const bridge: DesktopBridge = {
     open: (request) => ipcRenderer.invoke('desktop:session-window-open', request),
     focus: (request) => ipcRenderer.invoke('desktop:session-window-focus', request),
     dock: (request) => request === undefined ? ipcRenderer.invoke('desktop:session-window-dock') : ipcRenderer.invoke('desktop:session-window-dock', request),
+    savePaneTree: (tree) => ipcRenderer.invoke('desktop:session-window-save-tree', tree),
     list: () => ipcRenderer.invoke('desktop:session-window-list'),
     onChanged: (listener) => {
       const receive = (_event: Electron.IpcRendererEvent, windows: SessionWindowSummary[]) => listener(windows)

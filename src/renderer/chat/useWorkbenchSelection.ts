@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { z } from 'zod'
+import { persistedPaneTreeSchema } from '../../shared/paneTreeSchema'
+import type { PersistedPaneTreeNode, PersistedPaneTreeState } from '../../shared/paneTreeSchema'
 import { DEFAULT_SESSION_SORT_MODE, sessionSortModes } from './sessionBindings'
 import type { SessionSortMode } from './sessionBindings'
 import { forgetSessionInLayout, layoutSessionKeys, MAX_SESSION_GROUP_NAME } from './sessionGroups'
@@ -51,9 +53,13 @@ const selectionSchema = legacySelectionSchema.extend({
   sessionSort: sessionSortSchema.optional(),
   sessionSorts: sessionSortsSchema.optional(),
   sessionGroups: sessionGroupsSchema.optional(),
+  paneTree: persistedPaneTreeSchema.optional(),
 }).refine((selection) => selection.taskId === null ? selection.openTaskIds.length === 0 : selection.openTaskIds.includes(selection.taskId), 'The active task must be open.')
 type Selection = z.infer<typeof selectionSchema>
-type SelectionInput = Omit<Selection, 'sessionGroups'> & { sessionGroups?: Record<string, SessionGroupLayout> }
+type SelectionInput = Omit<Selection, 'sessionGroups' | 'paneTree'> & {
+  sessionGroups?: Record<string, SessionGroupLayout>
+  paneTree?: PersistedPaneTreeState
+}
 type State = { workspaceId?: string; selection?: Selection; persisted?: boolean; error?: string }
 const emptySessions: Readonly<Record<string, string | null>> = Object.freeze({})
 const emptySessionOrders: Readonly<Record<string, readonly string[]>> = Object.freeze({})
@@ -95,13 +101,33 @@ function rememberTaskSort(selection: Selection | undefined, taskId: string, mode
   return Object.fromEntries(entries.slice(-sessionLimit))
 }
 
-function preservedSessionLayout(selection: Selection | undefined): Pick<Selection, 'sessionOrders' | 'sessionSort' | 'sessionSorts' | 'sessionGroups'> {
+function preservedSessionLayout(selection: Selection | undefined): Pick<Selection, 'sessionOrders' | 'sessionSort' | 'sessionSorts' | 'sessionGroups' | 'paneTree'> {
   return {
     ...(selection?.sessionOrders && Object.keys(selection.sessionOrders).length ? { sessionOrders: selection.sessionOrders } : {}),
     ...(selection?.sessionSort && selection.sessionSort !== DEFAULT_SESSION_SORT_MODE ? { sessionSort: selection.sessionSort } : {}),
     ...(selection?.sessionSorts && Object.keys(selection.sessionSorts).length ? { sessionSorts: selection.sessionSorts } : {}),
     ...(selection?.sessionGroups && Object.keys(selection.sessionGroups).length ? { sessionGroups: selection.sessionGroups } : {}),
+    ...(selection?.paneTree ? { paneTree: selection.paneTree } : {}),
   }
+}
+
+function clearSessionFromPersistedTree(tree: PersistedPaneTreeState | undefined, taskId: string, expectedKey: string): PersistedPaneTreeState | undefined {
+  if (!tree) return undefined
+  let changed = false
+  function walk(node: PersistedPaneTreeNode): PersistedPaneTreeNode {
+    if (node.kind === 'group') {
+      if (node.sessions[taskId] !== expectedKey) return node
+      changed = true
+      const nextSessions = { ...node.sessions }
+      delete nextSessions[taskId]
+      return { ...node, sessions: nextSessions }
+    }
+    const first = walk(node.first)
+    const second = walk(node.second)
+    return first === node.first && second === node.second ? node : { ...node, first, second }
+  }
+  const root = walk(tree.root)
+  return changed ? { ...tree, root } : tree
 }
 
 function revealSession(selection: Selection | undefined, taskId: string, key: string): Selection['sessionGroups'] {
@@ -131,9 +157,16 @@ function read(workspaceId: string | undefined): State {
     }
     const parsed = selectionSchema.safeParse(value)
     if (parsed.success) return { workspaceId, selection: parsed.data, persisted: true }
+    if (value && typeof value === 'object' && 'paneTree' in value) {
+      const rest: Record<string, unknown> = { ...value }
+      delete rest.paneTree
+      const withoutPaneTree = selectionSchema.safeParse(rest)
+      if (withoutPaneTree.success) return { workspaceId, selection: withoutPaneTree.data, error: 'Saved split pane layout is invalid. Your task and conversation selections are unchanged.' }
+    }
     if (value && typeof value === 'object' && 'sessionGroups' in value) {
       const rest: Record<string, unknown> = { ...value }
       delete rest.sessionGroups
+      delete rest.paneTree
       const withoutGroups = selectionSchema.safeParse(rest)
       if (withoutGroups.success) return { workspaceId, selection: withoutGroups.data, error: 'Saved session groups are invalid. Your task and conversation selections are unchanged.' }
     }
@@ -191,26 +224,55 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
     }))
   }, [update])
 
-  const selectSession = useCallback((taskId: string, key: string, shown?: readonly string[]) => {
-    update((selection) => ({
-      version: 2, taskId, openTaskIds: openTasks(selection, taskId, shown), sessions: rememberSession(selection, taskId, key),
-      ...preservedSessionLayout(selection), sessionGroups: revealSession(selection, taskId, key),
-    }))
+  const selectSession = useCallback((taskId: string, key: string, shown?: readonly string[], nextPaneTree?: PersistedPaneTreeState | null) => {
+    update((selection) => {
+      const base = preservedSessionLayout(selection)
+      const resolvedTree = nextPaneTree === undefined
+        ? base.paneTree
+        : nextPaneTree && nextPaneTree.root.kind === 'split'
+          ? nextPaneTree
+          : undefined
+      const { paneTree: _ignored, ...restPreserved } = base
+      void _ignored
+      return {
+        version: 2,
+        taskId,
+        openTaskIds: openTasks(selection, taskId, shown),
+        sessions: rememberSession(selection, taskId, key),
+        ...restPreserved,
+        ...(resolvedTree ? { paneTree: resolvedTree } : {}),
+        sessionGroups: revealSession(selection, taskId, key),
+      }
+    })
   }, [update])
 
-  const syncPaneSelection = useCallback((taskId: string | null, openIds: readonly string[], sessionsPatch?: Readonly<Record<string, string | null>>) => {
+  const syncPaneSelection = useCallback((
+    taskId: string | null,
+    openIds: readonly string[],
+    sessionsPatch?: Readonly<Record<string, string | null>>,
+    nextPaneTree?: PersistedPaneTreeState | null,
+  ) => {
     update((selection) => {
       const nextOpen = taskId === null ? [] : [...new Set([...openIds, taskId])]
       const baseSessions = selection?.sessions ?? {}
       const mergedSessions = sessionsPatch
         ? Object.fromEntries(Object.entries({ ...baseSessions, ...sessionsPatch }).slice(-sessionLimit))
         : baseSessions
+      const base = preservedSessionLayout(selection)
+      const resolvedTree = nextPaneTree === undefined
+        ? base.paneTree
+        : nextPaneTree && nextPaneTree.root.kind === 'split'
+          ? nextPaneTree
+          : undefined
+      const { paneTree: _ignored, ...restPreserved } = base
+      void _ignored
       return {
         version: 2,
         taskId,
         openTaskIds: nextOpen,
         sessions: mergedSessions,
-        ...preservedSessionLayout(selection),
+        ...restPreserved,
+        ...(resolvedTree ? { paneTree: resolvedTree } : {}),
       }
     })
   }, [update])
@@ -232,12 +294,17 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
     update((selection) => {
       const saved = selection?.sessionGroups?.[taskId]
       const layout = saved && forgetSessionInLayout(saved, expectedKey)
+      const nextTree = clearSessionFromPersistedTree(selection?.paneTree, taskId, expectedKey)
       const cleared = clearSelection && (!selection || !Object.hasOwn(selection.sessions, taskId) || selection.sessions[taskId] === expectedKey)
-      if (!cleared && layout === saved) return selection
+      if (!cleared && layout === saved && nextTree === selection?.paneTree) return selection
+      const { paneTree: _ignored, ...restPreserved } = preservedSessionLayout(selection)
+      void _ignored
       return {
         version: 2, taskId: selection ? selection.taskId : taskId, openTaskIds: selection?.openTaskIds ?? [taskId],
         sessions: cleared ? rememberSession(selection, taskId, null) : selection?.sessions ?? {},
-        ...preservedSessionLayout(selection), ...(layout && layout !== saved ? rememberSessionLayout(selection, taskId, layout) : {}),
+        ...restPreserved,
+        ...(nextTree ? { paneTree: nextTree } : {}),
+        ...(layout && layout !== saved ? rememberSessionLayout(selection, taskId, layout) : {}),
       }
     })
   }, [update])
@@ -253,6 +320,7 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
         openTaskIds: openTasks(selection, resolvedTaskId, shown),
         sessions: selection?.sessions ?? {},
         ...rememberSessionLayout(selection, taskId, layout),
+        ...(selection?.paneTree ? { paneTree: selection.paneTree } : {}),
         ...(defaultSort !== DEFAULT_SESSION_SORT_MODE ? { sessionSort: defaultSort } : {}),
         ...(nextSorts && Object.keys(nextSorts).length ? { sessionSorts: nextSorts } : {}),
       }
@@ -305,6 +373,7 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
 
   return {
     taskId: saved?.selection?.taskId, openTaskIds: saved?.selection?.openTaskIds,
+    paneTree: saved?.selection?.paneTree,
     sessions: saved?.selection?.sessions ?? emptySessions,
     sessionOrders,
     sessionGroups,

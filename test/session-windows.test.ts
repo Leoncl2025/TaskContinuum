@@ -1,5 +1,8 @@
 // @vitest-environment node
 import { EventEmitter } from 'node:events'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import { APP_URL } from '../src/main/security'
@@ -49,14 +52,16 @@ function mockWindow(id: number, url = APP_URL) {
   return { window: window as unknown as BrowserWindow & { setMinimized(v: boolean): void; emitCrash(): void }, webContents, ipcEvent }
 }
 
-function setupManager() {
+function setupManager(storageFile?: string) {
   let nextId = 10
   let workspaceRoot: string | null = 'Q:\\workspace'
   const created: ReturnType<typeof mockWindow>[] = []
   const authorizeSession = vi.fn(async () => {})
+  const prepareWorkspace = vi.fn(async () => {})
   const onSessionWindowClosed = vi.fn()
   const onAnyWindowClosedDuringInstall = vi.fn()
   const manager = new SessionWindowManager({
+    storageFile,
     getWorkspaceState: async () => ({
       current: workspaceRoot ? {
         id: 'a'.repeat(64),
@@ -65,10 +70,14 @@ function setupManager() {
         root: workspaceRoot,
         loadedAt: '2026-11-20T00:00:00.000Z',
         warnings: [],
-        tasks: [{ ...fixtureTasks[0], id: 'T-0001', title: 'Implement popout windows' }],
+        tasks: [
+          { ...fixtureTasks[0], id: 'T-0001', title: 'Implement popout windows' },
+          { ...fixtureTasks[0], id: 'T-0002', title: 'Secondary task' },
+        ],
       } : null,
       recent: [],
     }),
+    prepareWorkspace,
     authorizeSession,
     createBrowserWindow: () => {
       const entry = mockWindow(nextId++)
@@ -85,6 +94,7 @@ function setupManager() {
     manager,
     main,
     created,
+    prepareWorkspace,
     authorizeSession,
     onSessionWindowClosed,
     onAnyWindowClosedDuringInstall,
@@ -203,6 +213,76 @@ describe('SessionWindowManager', () => {
         { taskId: 'T-0001', sessionKey: 'ahp:secondary', draft: 'Draft from split pane' },
       ],
     })
+  })
+
+  it('persists open popup windows and their nested split PaneTreeState across app shutdown, while forgetting manually closed popups', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'tc-session-win-persist-'))
+    const storageFile = join(dir, 'session-windows.json')
+    try {
+      const target1 = agentHostTargetFixture('persist-1')
+      const target2 = agentHostTargetFixture('persist-2')
+      const firstRun = setupManager(storageFile)
+
+      await firstRun.manager.open({ taskId: 'T-0001', target: target1, mode: 'copy' })
+      await firstRun.manager.open({ taskId: 'T-0002', target: target2, mode: 'move' })
+      expect(firstRun.created).toHaveLength(2)
+
+      // Save a nested 2-pane split layout inside popup window 1.
+      const savedTree = {
+        activeGroupId: 'g-right',
+        root: {
+          kind: 'split' as const,
+          id: 'sp-1',
+          orientation: 'horizontal' as const,
+          ratio: 0.55,
+          first: {
+            kind: 'group' as const,
+            id: 'g-left',
+            openTaskIds: ['T-0001'],
+            activeTaskId: 'T-0001',
+            sessions: { 'T-0001': 'ahp:left-session' },
+          },
+          second: {
+            kind: 'group' as const,
+            id: 'g-right',
+            openTaskIds: ['T-0001', 'T-0002'],
+            activeTaskId: 'T-0002',
+            sessions: { 'T-0002': 'ahp:right-session' },
+          },
+        },
+      }
+      firstRun.manager.savePaneTree(firstRun.created[0].window, savedTree)
+
+      // User manually closes popup window 2 BEFORE quitting the app -> must NOT reopen on next launch.
+      firstRun.created[1].window.close()
+
+      // App shutdown: mainWindow closes -> popups are destroyed with preservePersisted = true, then flushed.
+      firstRun.manager.prepareMainWindowClose()
+      firstRun.manager.unregisterMainWindow(firstRun.main.window)
+      await firstRun.manager.flush()
+
+      // Next app launch: restoreSavedWindows reopens ONLY popup window 1 with its exact nested split tree!
+      const secondRun = setupManager(storageFile)
+      const count = await secondRun.manager.restoreSavedWindows()
+      expect(count).toBe(1)
+      expect(secondRun.prepareWorkspace).toHaveBeenCalledWith('Q:\\workspace')
+      expect(secondRun.created).toHaveLength(1)
+      expect(secondRun.manager.list()).toEqual([{
+        key: sessionWindowPanelKey('T-0001', target1),
+        taskId: 'T-0001',
+        target: target1,
+        mode: 'copy',
+      }])
+      const restoredContext = secondRun.manager.getContext(secondRun.created[0].window)
+      expect(restoredContext).toMatchObject({
+        kind: 'session',
+        task: { id: 'T-0001' },
+        target: target1,
+        initialPaneTree: savedTree,
+      })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
 

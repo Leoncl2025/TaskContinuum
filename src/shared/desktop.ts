@@ -1,5 +1,6 @@
 import type { AgentHostTarget } from './agentHost'
 import type { ChatLinkBridge } from './chatLinks'
+import type { PersistedPaneTreeState } from './paneTreeSchema'
 import type { TaskRecord } from './tasks'
 
 export interface DesktopInfo {
@@ -41,6 +42,14 @@ export interface SessionWindowActivatedEvent {
   readonly pages?: readonly DockedTaskPage[]
 }
 
+export interface SessionWindowBounds {
+  readonly x: number
+  readonly y: number
+  readonly width: number
+  readonly height: number
+  readonly maximized?: boolean
+}
+
 export type DesktopWindowContext =
   | { readonly kind: 'main' }
   | {
@@ -53,6 +62,7 @@ export type DesktopWindowContext =
       readonly target?: AgentHostTarget
       readonly sessionKey?: string | null
       readonly initialDraft?: string
+      readonly initialPaneTree?: PersistedPaneTreeState
     }
 
 export interface DesktopSessionWindowsBridge {
@@ -60,6 +70,7 @@ export interface DesktopSessionWindowsBridge {
   open(request: SessionWindowOpenRequest): Promise<{ opened: boolean; reused: boolean; windowId?: string }>
   focus(request: { windowId?: string; taskId?: string; target?: AgentHostTarget }): Promise<boolean>
   dock(request?: { windowId?: string; taskId?: string; target?: AgentHostTarget; sessionKey?: string | null; draft?: string; pages?: readonly DockedTaskPage[] }): Promise<void>
+  savePaneTree?(tree: PersistedPaneTreeState): Promise<void>
   list(): Promise<SessionWindowSummary[]>
   onChanged(listener: (windows: SessionWindowSummary[]) => void): () => void
   onActivateSession(listener: (event: SessionWindowActivatedEvent) => void): () => void

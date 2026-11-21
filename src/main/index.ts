@@ -16,6 +16,7 @@ import { desktopOperations, handleDesktopOperation } from './desktopOperations'
 import { createDesktopUpdateService } from './updates'
 import { registerUpdateBridge } from './updateBridge'
 import { MultiWindowInstallCoordinator, SessionWindowManager } from './sessionWindows'
+import type { SessionWindowBounds } from '../shared/desktop'
 
 app.setName('Task Continuum')
 if (process.platform === 'win32') app.setAppUserModelId('com.leoncl2025.taskcontinuum')
@@ -53,11 +54,13 @@ else app.on('second-instance', () => {
 
 function cleanupDesktop(): Promise<void> {
   return cleanupPromise ??= (async () => {
-    sessionWindows?.closeAllPopouts()
+    sessionWindows?.prepareMainWindowClose()
+    sessionWindows?.closeAllPopouts(true)
     const results = await Promise.allSettled([
       Promise.resolve().then(() => agentHost?.close()),
       Promise.resolve().then(() => remoteVSCode?.close()),
       Promise.resolve().then(() => windowZoom?.flush()),
+      Promise.resolve().then(() => sessionWindows?.flush()),
       Promise.resolve().then(() => updates?.flushPreferences()),
     ])
     const diagnostics = await Promise.allSettled([stopAgentHostDiagnostics()])
@@ -130,6 +133,11 @@ function registerDesktopBridge(): void {
     if (!sessionWindows) return Promise.resolve()
     return sessionWindows.dock(window, request)
   })
+  handleDesktopOperation(ipcMain, 'desktop:session-window-save-tree', (event, tree: unknown) => {
+    const window = requireTrustedWindow(event)
+    sessionWindows?.savePaneTree(window, tree)
+    return Promise.resolve()
+  })
 }
 
 function configureRendererSession(webSession: Electron.Session): void {
@@ -168,13 +176,24 @@ function hardenWindow(window: BrowserWindow, zoom: WindowZoomPreferences, onUnex
   })
 }
 
-function createSessionBrowserWindow(title: string, cascadeIndex: number): BrowserWindow {
+function createSessionBrowserWindow(title: string, cascadeIndex: number, savedBounds?: SessionWindowBounds): BrowserWindow {
   const zoom = windowZoom ??= new WindowZoomPreferences(app.getPath('userData'))
-  const width = 920
-  const height = 780
+  let width = 920
+  let height = 780
   let x: number | undefined
   let y: number | undefined
-  if (mainWindow && !mainWindow.isDestroyed()) {
+  if (savedBounds) {
+    const workArea = screen.getDisplayMatching({
+      x: savedBounds.x,
+      y: savedBounds.y,
+      width: savedBounds.width,
+      height: savedBounds.height,
+    }).workArea
+    width = Math.max(480, Math.min(workArea.width, savedBounds.width))
+    height = Math.max(420, Math.min(workArea.height, savedBounds.height))
+    x = Math.max(workArea.x, Math.min(workArea.x + workArea.width - width, savedBounds.x))
+    y = Math.max(workArea.y, Math.min(workArea.y + workArea.height - height, savedBounds.y))
+  } else if (mainWindow && !mainWindow.isDestroyed()) {
     const base = mainWindow.getBounds()
     const workArea = screen.getDisplayMatching(base).workArea
     const step = (cascadeIndex % 6) * 28
@@ -234,6 +253,11 @@ async function createWindow(): Promise<void> {
   }
   window.webContents.on('render-process-gone', closeConnections)
   window.webContents.on('destroyed', closeConnections)
+  window.on('close', () => {
+    if (!updateRestart?.preparing || cleanupComplete) {
+      sessionWindows?.prepareMainWindowClose()
+    }
+  })
   window.on('closed', () => {
     sessionWindows?.unregisterMainWindow(window)
     mainWindow = undefined
@@ -275,16 +299,19 @@ void app.whenReady().then(async () => {
   })
   sessionWindows = new SessionWindowManager({
     devUrl,
+    storageFile: join(app.getPath('userData'), 'session-windows.json'),
     getWorkspaceState: workspaces.getState,
+    prepareWorkspace: async (root) => { await remoteVSCode?.gitSync.open(root) },
     authorizeSession: async (root, target) => {
       if (!remoteVSCode) throw new Error('Agent Host access is not ready.')
       await remoteVSCode.agentHosts.authorize(root, target)
     },
-    createBrowserWindow: (context, cascadeIndex) => createSessionBrowserWindow(`${context.task.id} · Task Continuum`, cascadeIndex),
+    createBrowserWindow: (context, cascadeIndex, savedBounds) => createSessionBrowserWindow(`${context.task.id} · Task Continuum`, cascadeIndex, savedBounds),
     loadWindow: (window) => window.loadURL(devUrl ?? APP_URL),
     onSessionWindowClosed: (window) => agentHost?.closeWindow(window),
     onAnyWindowClosedDuringInstall: () => { if (updateRestart?.preparing) updateRestart.abort() },
   })
+  await sessionWindows.load()
   remoteVSCode = registerRemoteVSCodeBridge(requireTrustedWindow, workspaces.currentRoot, () => {
     sessionWindows?.broadcast('remote-vscode:git-status-changed')
   }, () => {
@@ -328,11 +355,14 @@ void app.whenReady().then(async () => {
     if (windowLoaded) service.start()
   }).catch((error: unknown) => console.error('Application updates could not initialize:', error))
   await createWindow()
+  if (!quitting && !cleanupComplete) {
+    await sessionWindows.restoreSavedWindows().catch((error: unknown) => console.error('Session window restore failed:', error))
+  }
   windowLoaded = true
   if (!quitting && !cleanupComplete) updates?.start()
   app.on('activate', () => {
     if (!quitting && !cleanupComplete && BrowserWindow.getAllWindows().length === 0) {
-      void createWindow().catch((error: unknown) => { console.error(error); app.exit(1) })
+      void createWindow().then(() => sessionWindows?.restoreSavedWindows()).catch((error: unknown) => { console.error(error); app.exit(1) })
     }
   })
 }).catch((error: unknown) => { console.error(error); app.exit(1) })
