@@ -99,6 +99,7 @@ export class AgentHostConnection {
   }
 
   get state(): AgentHostView['state'] { return this.connected ? 'connected' : this.opening ? 'connecting' : 'offline' }
+  get isClosed(): boolean { return this.closed }
   get sizeLimitError(): AgentHostSizeLimitError | undefined { return this.lastSizeFailure }
   get historyEpoch(): string { return this.historyGeneration }
   get historyProgress(): AgentHostHistoryTransfer | undefined { return this.historyTransfer ? { ...this.historyTransfer } : undefined }

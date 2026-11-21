@@ -388,7 +388,7 @@ export class SessionCollaborationService {
       const isLocal = link.owner.clientId === me.clientId
       if (isLocal) {
         const discovered = localSessions.find((session) => agentHostKey(session) === agentHostKey(link))
-        const cached = this.loadedConnections.get(`${canonical}:${agentHostKey(link)}`)
+        const cached = this.getLoadedConnection(`${canonical}:${agentHostKey(link)}`)
         const title = cached?.view.chat?.title || discovered?.title || link.sessionId
         sessions.push({
           targetRef,
@@ -403,7 +403,7 @@ export class SessionCollaborationService {
         })
       } else {
         const peer = remoteDevices.find((device) => device.ownerClientId === link.owner.clientId)
-        const cached = this.loadedConnections.get(`${canonical}:${agentHostKey(link)}`)
+        const cached = this.getLoadedConnection(`${canonical}:${agentHostKey(link)}`)
         sessions.push({
           targetRef,
           taskId: request.taskId,
@@ -430,117 +430,142 @@ export class SessionCollaborationService {
     })
   }
 
-  private async openAuthorizedConnection(canonicalRoot: string, link: SessionLink): Promise<AgentHostConnection> {
-    let connection: AgentHostConnection
-    try {
-      connection = await this.deps.agentHosts.connection(canonicalRoot, link)
-      this.loadedConnections.set(`${canonicalRoot}:${agentHostKey(link)}`, connection)
-      await connection.open()
-    } catch {
-      throw new CollaborationError('UNAVAILABLE', 'Could not connect to the target Agent Host session.')
+  private getLoadedConnection(key: string): AgentHostConnection | undefined {
+    const cached = this.loadedConnections.get(key)
+    if (cached?.isClosed) {
+      this.loadedConnections.delete(key)
+      return undefined
     }
-    if (this.closed) throw new CollaborationError('UNAVAILABLE', 'Session collaboration service is closed.')
-    return connection
+    return cached
+  }
+
+  private async acquireAuthorizedConnection(canonicalRoot: string, link: SessionLink): Promise<{ connection: AgentHostConnection; release: () => void }> {
+    const key = `${canonicalRoot}:${agentHostKey(link)}`
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let release: (() => void) | undefined
+      try {
+        const connection = await this.deps.agentHosts.connection(canonicalRoot, link)
+        if (connection.isClosed) {
+          this.loadedConnections.delete(key)
+          if (attempt === 0) continue
+        }
+        release = connection.retain()
+        this.loadedConnections.set(key, connection)
+        await connection.open()
+        if (this.closed) {
+          release()
+          throw new CollaborationError('UNAVAILABLE', 'Session collaboration service is closed.')
+        }
+        return { connection, release }
+      } catch (error) {
+        release?.()
+        if (error instanceof CollaborationError && this.closed) throw error
+        throw new CollaborationError('UNAVAILABLE', 'Could not connect to the target Agent Host session.')
+      }
+    }
+    throw new CollaborationError('UNAVAILABLE', 'Could not connect to the target Agent Host session.')
   }
 
   private async readContext(root: string, request: CollaborationContextRequest): Promise<CollaborationContextResult> {
     await this.initialize()
     const canonical = await this.canonicalRoot(root)
     const { taskId, link } = await this.resolveTargetLink(canonical, request.targetRef, request.taskId)
-    const connection = await this.openAuthorizedConnection(canonical, link)
-    await this.resolveTargetLink(canonical, request.targetRef, taskId)
+    const { connection, release } = await this.acquireAuthorizedConnection(canonical, link)
+    try {
+      await this.resolveTargetLink(canonical, request.targetRef, taskId)
 
-    let view = connection.view
-    if (!view.chat) throw new CollaborationError('UNAVAILABLE', 'Target session history is not available yet.')
-    if (request.cursor !== undefined) {
-      let existingIndex = view.chat.turns.findIndex((turn) => turn.id === request.cursor)
-      while ((existingIndex < 0 || existingIndex < request.limit) && view.history?.hasMore) {
-        try { await connection.loadHistory() }
-        catch { throw new CollaborationError('UNAVAILABLE', 'Could not load earlier history for the requested cursor.') }
-        await this.resolveTargetLink(canonical, request.targetRef, taskId)
-        view = connection.view
-        if (!view.chat) break
-        const updatedIndex = view.chat.turns.findIndex((turn) => turn.id === request.cursor)
-        if (updatedIndex === existingIndex) break
-        existingIndex = updatedIndex
+      let view = connection.view
+      if (!view.chat) throw new CollaborationError('UNAVAILABLE', 'Target session history is not available yet.')
+      if (request.cursor !== undefined) {
+        let existingIndex = view.chat.turns.findIndex((turn) => turn.id === request.cursor)
+        while ((existingIndex < 0 || existingIndex < request.limit) && view.history?.hasMore) {
+          try { await connection.loadHistory() }
+          catch { throw new CollaborationError('UNAVAILABLE', 'Could not load earlier history for the requested cursor.') }
+          await this.resolveTargetLink(canonical, request.targetRef, taskId)
+          view = connection.view
+          if (!view.chat) break
+          const updatedIndex = view.chat.turns.findIndex((turn) => turn.id === request.cursor)
+          if (updatedIndex === existingIndex) break
+          existingIndex = updatedIndex
+        }
       }
-    }
-    const chat = view.chat!
-    let end = chat.turns.length
-    if (request.cursor !== undefined) {
-      end = chat.turns.findIndex((turn) => turn.id === request.cursor)
-      if (end < 0) throw new CollaborationError('INVALID_REQUEST', 'The requested context cursor was not found in the target session.')
-    }
-    const start = Math.max(0, end - request.limit)
-    const selectedTurns = chat.turns.slice(start, end)
-    const messageLimit = request.detail === 'full' ? 8_000 : 1_200
-    const responseLimit = request.detail === 'full' ? 16_000 : 2_400
-
-    const serializedTurns: CollaborationContextTurn[] = []
-    let usedBytes = 0
-    let overallTruncated = false
-    for (let index = selectedTurns.length - 1; index >= 0; index--) {
-      const turn = selectedTurns[index]
-      const clippedMessage = clipText(turn.message.text, messageLimit)
-      const summary = summarizeParts(turn.responseParts, responseLimit)
-      const candidate: CollaborationContextTurn = {
-        turnId: turn.id,
-        origin: turnOrigin(turn.message),
-        messageText: clippedMessage.text,
-        responseText: summary.responseText,
-        toolSummary: summary.toolSummary,
-        truncated: clippedMessage.truncated || summary.truncated,
+      const chat = view.chat!
+      let end = chat.turns.length
+      if (request.cursor !== undefined) {
+        end = chat.turns.findIndex((turn) => turn.id === request.cursor)
+        if (end < 0) throw new CollaborationError('INVALID_REQUEST', 'The requested context cursor was not found in the target session.')
       }
-      const bytes = Buffer.byteLength(JSON.stringify(candidate), 'utf8')
-      if (serializedTurns.length > 0 && usedBytes + bytes > COLLABORATION_LIMITS.maxContextBytes - 4096) {
-        overallTruncated = true
-        break
+      const start = Math.max(0, end - request.limit)
+      const selectedTurns = chat.turns.slice(start, end)
+      const messageLimit = request.detail === 'full' ? 8_000 : 1_200
+      const responseLimit = request.detail === 'full' ? 16_000 : 2_400
+
+      const serializedTurns: CollaborationContextTurn[] = []
+      let usedBytes = 0
+      let overallTruncated = false
+      for (let index = selectedTurns.length - 1; index >= 0; index--) {
+        const turn = selectedTurns[index]
+        const clippedMessage = clipText(turn.message.text, messageLimit)
+        const summary = summarizeParts(turn.responseParts, responseLimit)
+        const candidate: CollaborationContextTurn = {
+          turnId: turn.id,
+          origin: turnOrigin(turn.message),
+          messageText: clippedMessage.text,
+          responseText: summary.responseText,
+          toolSummary: summary.toolSummary,
+          truncated: clippedMessage.truncated || summary.truncated,
+        }
+        const bytes = Buffer.byteLength(JSON.stringify(candidate), 'utf8')
+        if (serializedTurns.length > 0 && usedBytes + bytes > COLLABORATION_LIMITS.maxContextBytes - 4096) {
+          overallTruncated = true
+          break
+        }
+        usedBytes += bytes
+        overallTruncated ||= candidate.truncated
+        serializedTurns.unshift(candidate)
       }
-      usedBytes += bytes
-      overallTruncated ||= candidate.truncated
-      serializedTurns.unshift(candidate)
-    }
 
-    const effectiveStart = end - serializedTurns.length
-    const hasMoreHistory = effectiveStart > 0 || Boolean(view.history?.hasMore)
-    const hasDraft = Boolean(chat.draft?.text || chat.draft?.attachments?.length)
-    const chatStatus = view.pendingTurn?.state === 'uncertain' ? 'uncertainDelivery'
-      : hasDraft ? 'hasDraft'
-        : (chat.activeTurn || view.pendingTurn) ? 'inProgress' : 'idle'
+      const effectiveStart = end - serializedTurns.length
+      const hasMoreHistory = effectiveStart > 0 || Boolean(view.history?.hasMore)
+      const hasDraft = Boolean(chat.draft?.text || chat.draft?.attachments?.length)
+      const chatStatus = view.pendingTurn?.state === 'uncertain' ? 'uncertainDelivery'
+        : hasDraft ? 'hasDraft'
+          : (chat.activeTurn || view.pendingTurn) ? 'inProgress' : 'idle'
 
-    let activeTurnSummary: CollaborationContextResult['activeTurn']
-    if (chat.activeTurn) {
-      const clippedMsg = clipText(chat.activeTurn.message.text, 1_200)
-      const activeParts = summarizeParts(chat.activeTurn.responseParts, 2_400)
-      overallTruncated ||= clippedMsg.truncated || activeParts.truncated
-      activeTurnSummary = {
-        turnId: chat.activeTurn.id,
-        origin: turnOrigin(chat.activeTurn.message),
-        messagePreview: clippedMsg.text,
-        responsePreview: activeParts.responseText,
-        runningTools: activeParts.runningTools,
+      let activeTurnSummary: CollaborationContextResult['activeTurn']
+      if (chat.activeTurn) {
+        const clippedMsg = clipText(chat.activeTurn.message.text, 1_200)
+        const activeParts = summarizeParts(chat.activeTurn.responseParts, 2_400)
+        overallTruncated ||= clippedMsg.truncated || activeParts.truncated
+        activeTurnSummary = {
+          turnId: chat.activeTurn.id,
+          origin: turnOrigin(chat.activeTurn.message),
+          messagePreview: clippedMsg.text,
+          responsePreview: activeParts.responseText,
+          runningTools: activeParts.runningTools,
+        }
       }
-    }
 
-    const nativePending = (chat.queuedMessages?.length ?? 0) + (chat.steeringMessage ? 1 : 0)
-    const tcPending = this.messages.filter((item) => item.root === canonical && item.status.targetRef === request.targetRef
-      && (item.status.state === 'queued' || item.status.state === 'dispatching')).length
+      const nativePending = (chat.queuedMessages?.length ?? 0) + (chat.steeringMessage ? 1 : 0)
+      const tcPending = this.messages.filter((item) => item.root === canonical && item.status.targetRef === request.targetRef
+        && (item.status.state === 'queued' || item.status.state === 'dispatching')).length
 
-    return collaborationContextResultSchema.parse({
-      taskId,
-      targetRef: request.targetRef,
-      title: chat.title || link.sessionId,
-      state: view.state,
-      canSend: view.state === 'connected' && !view.readOnly,
-      readOnly: view.readOnly,
-      chatStatus,
-      ...(activeTurnSummary ? { activeTurn: activeTurnSummary } : {}),
-      pendingCount: nativePending + tcPending,
-      turns: serializedTurns,
-      hasMoreHistory,
-      ...(hasMoreHistory && serializedTurns.length > 0 ? { nextCursor: serializedTurns[0].turnId } : {}),
-      truncated: overallTruncated,
-    })
+      return collaborationContextResultSchema.parse({
+        taskId,
+        targetRef: request.targetRef,
+        title: chat.title || link.sessionId,
+        state: view.state,
+        canSend: view.state === 'connected' && !view.readOnly,
+        readOnly: view.readOnly,
+        chatStatus,
+        ...(activeTurnSummary ? { activeTurn: activeTurnSummary } : {}),
+        pendingCount: nativePending + tcPending,
+        turns: serializedTurns,
+        hasMoreHistory,
+        ...(hasMoreHistory && serializedTurns.length > 0 ? { nextCursor: serializedTurns[0].turnId } : {}),
+        truncated: overallTruncated,
+      })
+    } finally { release() }
   }
 
   private targetLockKey(canonicalRoot: string, link: Pick<AgentHostTarget, 'sessionId' | 'chatId' | 'owner'>): string {
@@ -561,7 +586,7 @@ export class SessionCollaborationService {
     }
     if ((record.status.state === 'delivered' || record.status.state === 'uncertain') && record.status.turnId) {
       const parsed = parseCollaborationTargetRef(record.status.targetRef)
-      const connection = this.loadedConnections.get(`${canonicalRoot}:${JSON.stringify([parsed.ownerClientId, parsed.sessionId, parsed.chatId])}`)
+      const connection = this.getLoadedConnection(`${canonicalRoot}:${JSON.stringify([parsed.ownerClientId, parsed.sessionId, parsed.chatId])}`)
       const liveTurnStatus = resolveTurnStatus(connection?.view.chat, record.status.turnId)
       if (liveTurnStatus && liveTurnStatus !== record.status.turnStatus) {
         return collaborationMessageStatusSchema.parse({ ...record.status, turnStatus: liveTurnStatus })
@@ -599,97 +624,99 @@ export class SessionCollaborationService {
       throw new CollaborationError('QUOTA_EXCEEDED', `Too many queued collaboration messages for ${taskId}.`)
     }
 
-    const connection = await this.openAuthorizedConnection(canonical, link)
-    await this.resolveTargetLink(canonical, request.targetRef, taskId)
+    const { connection, release } = await this.acquireAuthorizedConnection(canonical, link)
+    try {
+      await this.resolveTargetLink(canonical, request.targetRef, taskId)
 
-    const view = connection.view
-    if (view.readOnly) {
-      throw new CollaborationError('ACCESS_DENIED', 'The target session is read-only or does not allow sending.')
-    }
-    const createdAt = this.isoNow()
-    if (view.chat?.draft?.text || view.chat?.draft?.attachments?.length) {
-      const blocked: SavedMessage = {
+      const view = connection.view
+      if (view.readOnly) {
+        throw new CollaborationError('ACCESS_DENIED', 'The target session is read-only or does not allow sending.')
+      }
+      const createdAt = this.isoNow()
+      if (view.chat?.draft?.text || view.chat?.draft?.attachments?.length) {
+        const blocked: SavedMessage = {
+          root: canonical,
+          requestHash,
+          status: {
+            messageId: request.messageId,
+            taskId,
+            targetRef: request.targetRef,
+            state: 'blocked',
+            createdAt,
+            updatedAt: createdAt,
+            reason: 'Target session has an unsent human draft; collaboration message was not sent.',
+          },
+        }
+        this.messages.push(blocked)
+        await this.persistMessages()
+        return collaborationMessageStatusSchema.parse(blocked.status)
+      }
+      if (view.pendingTurn?.state === 'uncertain') {
+        const blocked: SavedMessage = {
+          root: canonical,
+          requestHash,
+          status: {
+            messageId: request.messageId,
+            taskId,
+            targetRef: request.targetRef,
+            state: 'blocked',
+            createdAt,
+            updatedAt: createdAt,
+            reason: 'Target session has an uncertain delivery awaiting manual review.',
+          },
+        }
+        this.messages.push(blocked)
+        await this.persistMessages()
+        return collaborationMessageStatusSchema.parse(blocked.status)
+      }
+
+      const lockKey = this.targetLockKey(canonical, link)
+      const hasQueuedAhead = this.messages.some((item) => item.root === canonical && item.status.targetRef === request.targetRef && item.status.state === 'queued')
+      const targetBusy = this.dispatchingTargets.has(lockKey) || hasQueuedAhead
+        || Boolean(view.chat?.activeTurn) || Boolean(view.pendingTurn) || Boolean(view.chat?.queuedMessages?.length)
+
+      await this.incrementSentCount(canonical, taskId)
+
+      if (targetBusy) {
+        const expiresAt = new Date(this.now() + COLLABORATION_LIMITS.messageTtlMs).toISOString()
+        const queued: SavedMessage = {
+          root: canonical,
+          requestHash,
+          text: request.text,
+          status: {
+            messageId: request.messageId,
+            taskId,
+            targetRef: request.targetRef,
+            state: 'queued',
+            createdAt,
+            updatedAt: createdAt,
+            expiresAt,
+            reason: 'Target session is currently busy; message is queued until the current turn finishes.',
+          },
+        }
+        this.messages.push(queued)
+        await this.persistMessages()
+        this.watchTargetForQueue(canonical, link, connection)
+        return collaborationMessageStatusSchema.parse(queued.status)
+      }
+
+      const record: SavedMessage = {
         root: canonical,
         requestHash,
         status: {
           messageId: request.messageId,
           taskId,
           targetRef: request.targetRef,
-          state: 'blocked',
+          state: 'dispatching',
           createdAt,
           updatedAt: createdAt,
-          reason: 'Target session has an unsent human draft; collaboration message was not sent.',
         },
       }
-      this.messages.push(blocked)
+      this.messages.push(record)
       await this.persistMessages()
-      return collaborationMessageStatusSchema.parse(blocked.status)
-    }
-    if (view.pendingTurn?.state === 'uncertain') {
-      const blocked: SavedMessage = {
-        root: canonical,
-        requestHash,
-        status: {
-          messageId: request.messageId,
-          taskId,
-          targetRef: request.targetRef,
-          state: 'blocked',
-          createdAt,
-          updatedAt: createdAt,
-          reason: 'Target session has an uncertain delivery awaiting manual review.',
-        },
-      }
-      this.messages.push(blocked)
-      await this.persistMessages()
-      return collaborationMessageStatusSchema.parse(blocked.status)
-    }
-
-    const lockKey = this.targetLockKey(canonical, link)
-    const hasQueuedAhead = this.messages.some((item) => item.root === canonical && item.status.targetRef === request.targetRef && item.status.state === 'queued')
-    const targetBusy = this.dispatchingTargets.has(lockKey) || hasQueuedAhead
-      || Boolean(view.chat?.activeTurn) || Boolean(view.pendingTurn) || Boolean(view.chat?.queuedMessages?.length)
-
-    await this.incrementSentCount(canonical, taskId)
-
-    if (targetBusy) {
-      const expiresAt = new Date(this.now() + COLLABORATION_LIMITS.messageTtlMs).toISOString()
-      const queued: SavedMessage = {
-        root: canonical,
-        requestHash,
-        text: request.text,
-        status: {
-          messageId: request.messageId,
-          taskId,
-          targetRef: request.targetRef,
-          state: 'queued',
-          createdAt,
-          updatedAt: createdAt,
-          expiresAt,
-          reason: 'Target session is currently busy; message is queued until the current turn finishes.',
-        },
-      }
-      this.messages.push(queued)
-      await this.persistMessages()
-      this.watchTargetForQueue(canonical, link, connection)
-      return collaborationMessageStatusSchema.parse(queued.status)
-    }
-
-    const record: SavedMessage = {
-      root: canonical,
-      requestHash,
-      status: {
-        messageId: request.messageId,
-        taskId,
-        targetRef: request.targetRef,
-        state: 'dispatching',
-        createdAt,
-        updatedAt: createdAt,
-      },
-    }
-    this.messages.push(record)
-    await this.persistMessages()
-    await this.dispatchNow(canonical, record, request.text, link, connection)
-    return this.enrichStatus(canonical, record)
+      await this.dispatchNow(canonical, record, request.text, link, connection)
+      return await this.enrichStatus(canonical, record)
+    } finally { release() }
   }
 
   private async incrementSentCount(canonicalRoot: string, taskId: string): Promise<void> {
@@ -788,9 +815,11 @@ export class SessionCollaborationService {
       void (async () => {
         try {
           const { link } = await this.resolveTargetLink(canonicalRoot, item.status.targetRef, taskId)
-          const connection = await this.openAuthorizedConnection(canonicalRoot, link)
-          this.watchTargetForQueue(canonicalRoot, link, connection)
-          await this.drainTargetQueue(canonicalRoot, link, connection)
+          const { connection, release } = await this.acquireAuthorizedConnection(canonicalRoot, link)
+          try {
+            this.watchTargetForQueue(canonicalRoot, link, connection)
+            await this.drainTargetQueue(canonicalRoot, link, connection)
+          } finally { release() }
         } catch { /* Remains queued until reachable or expired. */ }
       })()
     }
@@ -855,6 +884,17 @@ export class SessionCollaborationService {
       return
     }
 
+    if (connection.isClosed || connection.state === 'offline') {
+      try {
+        const { connection: fresh, release } = await this.acquireAuthorizedConnection(canonicalRoot, link)
+        this.watchTargetForQueue(canonicalRoot, link, fresh)
+        release()
+        connection = fresh
+      } catch {
+        return
+      }
+    }
+
     const view = connection.view
     if (view.state !== 'connected' || !view.chat) return
     if (view.readOnly) {
@@ -904,7 +944,9 @@ export class SessionCollaborationService {
     next.text = undefined
     next.status = { ...next.status, state: 'dispatching', updatedAt: this.isoNow(), reason: undefined }
     await this.persistMessages()
-    await this.dispatchNow(canonicalRoot, next, messageText, link, connection)
+    const release = connection.retain()
+    try { await this.dispatchNow(canonicalRoot, next, messageText, link, connection) }
+    finally { release() }
   }
 
   private async messageStatus(root: string, messageId: string): Promise<CollaborationMessageStatus> {

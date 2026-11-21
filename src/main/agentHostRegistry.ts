@@ -472,11 +472,12 @@ export class AgentHostRegistry {
     if (pendingClose) await pendingClose
     if (this.closed) throw new Error('Agent Host registry is closed.')
     let connection = this.connections.get(key)
-    if (connection) {
+    if (connection && !connection.isClosed) {
       this.connections.delete(key)
       this.connections.set(key, connection)
       return connection
     }
+    if (connection) this.connections.delete(key)
     if (this.connections.size >= LOCAL_AGENT_HOST_LIMITS.maxConnections && !this.evictConnection()) {
       throw new Error('Agent Host connection limit reached.')
     }

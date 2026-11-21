@@ -90,24 +90,32 @@ async function setupCollaborationFixture() {
     await new Promise<void>((resolveClose) => gatewayServer.close(() => resolveClose()))
   })
 
-  const localConnection = new AgentHostConnection(
-    localTarget,
-    join(dataDir, 'local-conn'),
-    (signal) => connectLocalAgentHost(localHost.endpoint, signal),
-  )
-  cleanups.push(() => localConnection.close())
+  const newLocalConnection = () => {
+    const conn = new AgentHostConnection(
+      localTarget,
+      join(dataDir, 'local-conn'),
+      (signal) => connectLocalAgentHost(localHost.endpoint, signal),
+    )
+    cleanups.push(() => conn.close())
+    return conn
+  }
+  let localConnection = newLocalConnection()
 
   const encodedRemoteTarget = Buffer.from(JSON.stringify(remoteTarget)).toString('base64url')
-  const remoteConnection = new AgentHostConnection(
-    remoteTarget,
-    join(dataDir, 'remote-conn'),
-    (signal) => connectAgentHostWebSocket(
-      `ws://127.0.0.1:${gatewayPort}/device/agent-host?target=${encodedRemoteTarget}`,
-      { headers: { Authorization: ['Bearer', gatewayToken].join(' ') } },
-      signal,
-    ),
-  )
-  cleanups.push(() => remoteConnection.close())
+  const newRemoteConnection = () => {
+    const conn = new AgentHostConnection(
+      remoteTarget,
+      join(dataDir, 'remote-conn'),
+      (signal) => connectAgentHostWebSocket(
+        `ws://127.0.0.1:${gatewayPort}/device/agent-host?target=${encodedRemoteTarget}`,
+        { headers: { Authorization: ['Bearer', gatewayToken].join(' ') } },
+        signal,
+      ),
+    )
+    cleanups.push(() => conn.close())
+    return conn
+  }
+  let remoteConnection = newRemoteConnection()
 
   let currentTime = Date.parse('2026-11-16T03:00:00.000Z')
   let authorizedTargets = [localTarget, remoteTarget]
@@ -151,7 +159,14 @@ async function setupCollaborationFixture() {
           const ok = authorizedTargets.some((item) => item.chatId === target.chatId && item.owner.clientId === target.owner.clientId)
           if (!ok) throw new Error('Unauthorized target.')
         },
-        connection: async (_root, target) => target.owner.clientId === localOwner.clientId ? localConnection : remoteConnection,
+        connection: async (_root, target) => {
+          if (target.owner.clientId === localOwner.clientId) {
+            if (localConnection.isClosed) localConnection = newLocalConnection()
+            return localConnection
+          }
+          if (remoteConnection.isClosed) remoteConnection = newRemoteConnection()
+          return remoteConnection
+        },
       },
       readLinks: async () => ({
         document: { schemaVersion: '2.1', bindings },
@@ -174,7 +189,8 @@ async function setupCollaborationFixture() {
     remoteOwner,
     localTarget,
     remoteTarget,
-    remoteConnection,
+    get localConnection() { return localConnection },
+    get remoteConnection() { return remoteConnection },
     setTime: (ms: number) => { currentTime = ms },
     advanceTime: (deltaMs: number) => { currentTime += deltaMs },
     setAuthorizedTargets: (targets: AgentHostTarget[]) => { authorizedTargets = targets },
@@ -452,5 +468,35 @@ describe('SessionCollaborationService and gateway provenance', () => {
     setup.advanceTime(COLLABORATION_LIMITS.messageTtlMs + 1_000)
     const expiredStatus = await api.messageStatus(expiringId)
     expect(expiredStatus.state).toBe('expired')
+  })
+
+  it('self-heals after cached connection eviction or disconnect without losing context reads or sends', async () => {
+    const setup = await setupCollaborationFixture()
+    const service = setup.createService()
+    await service.setTaskPolicy(setup.workspaceRoot, 'T-0072', { enabled: true })
+    const api = service.forWorkspace(setup.workspaceRoot)
+    const remoteRef = formatCollaborationTargetRef('T-0072', setup.remoteTarget)
+
+    // Initial context read populates loadedConnections.
+    await expect(api.readContext({ targetRef: remoteRef, limit: 3, detail: 'summary' })).resolves.toMatchObject({ state: 'connected' })
+
+    // Simulate pool eviction closing the cached connection instance.
+    const evicted = setup.remoteConnection
+    await evicted.close()
+    expect(evicted.isClosed).toBe(true)
+
+    // Subsequent listSessions, sendMessage, and readContext seamlessly acquire a fresh connection.
+    const listed = await api.listSessions({ taskId: 'T-0072' })
+    expect(listed.sessions.find((item) => item.targetRef === remoteRef)?.state).toBe('connected')
+
+    const msgId = randomUUID()
+    const sent = await api.sendMessage({
+      targetRef: remoteRef,
+      messageId: msgId,
+      text: 'Delivered after connection eviction',
+    })
+    expect(sent.state).toBe('delivered')
+    expect(setup.remoteConnection).not.toBe(evicted)
+    expect(setup.remoteHost.dispatches).toHaveLength(1)
   })
 })

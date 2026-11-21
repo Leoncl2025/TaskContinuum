@@ -104,11 +104,12 @@ export class AgentHostManager {
     if (pendingClose) await pendingClose
     if (this.closed) throw new Error('Agent Host manager is closed.')
     let connection = this.remote.get(key)
-    if (connection) {
+    if (connection && !connection.isClosed) {
       this.remote.delete(key)
       this.remote.set(key, connection)
       return connection
     }
+    if (connection) this.remote.delete(key)
     this.trimRemoteOwner(target.owner.clientId)
     if (this.remote.size >= REMOTE_AGENT_HOST_LIMITS.maxConnections && !this.evictRemote(false) && !this.evictRemote(true)) {
       throw new Error('Remote Agent Host connection limit reached.')
