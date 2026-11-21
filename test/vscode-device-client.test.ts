@@ -360,6 +360,31 @@ describe('paired native Agent Host SSH transport', () => {
       }
     } finally { await stopAgentHostDiagnostics() }
   })
+
+  it('resets a stale cached tunnel on websocket failure and ignores background retry backoff on explicit session open', async () => {
+    const recover = vi.fn(async () => {})
+    const setup = await fixture(recover)
+    await setup.client.import(setup.workspace, setup.invitation, true)
+
+    // 1. Trigger a transient tunnel failure on list()/ensure() to populate background retry backoff, then verify explicit agentHostTransport clears it.
+    setup.transport.mockRejectedValueOnce(new Error('Transient tunnel drop'))
+    await setup.client.list(setup.workspace)
+    await vi.waitFor(() => expect(setup.transport).toHaveBeenCalledOnce())
+    const socket = { send: vi.fn(), recv: vi.fn(), close: vi.fn(async () => {}) }
+    const websocket = vi.spyOn(agentTransport, 'connectAgentHostWebSocket').mockResolvedValueOnce(socket)
+    expect(await setup.client.agentHostTransport(setup.workspace, setup.target, new AbortController().signal)).toBe(socket)
+    expect(setup.transport).toHaveBeenCalledTimes(2)
+
+    // 2. Within the 10s refreshed window, simulate a dead cached tunnel on the first websocket handshake: must reset active, run recoverOwner + ensure, and succeed.
+    recover.mockClear()
+    websocket
+      .mockRejectedValueOnce(new Error('Agent Host connection failed or access was rejected.'))
+      .mockResolvedValueOnce(socket)
+    expect(await setup.client.agentHostTransport(setup.workspace, setup.target, new AbortController().signal)).toBe(socket)
+    expect(recover).toHaveBeenCalledOnce()
+    expect(setup.transport).toHaveBeenCalledTimes(3)
+    expect(websocket).toHaveBeenCalledTimes(3)
+  })
 })
 
 async function canonicalRoot(root: string): Promise<string> {

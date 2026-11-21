@@ -9,6 +9,7 @@ import { deviceRequest, DeviceRequestError } from './vscodeDeviceHttp'
 import type { DeviceProtector } from './vscodeDeviceHost'
 import type { AgentHostSession, AgentHostTarget } from '../shared/agentHost'
 import { agentHostCatalogSchema, agentHostTargetSchema } from './agentHostProtocol'
+import { AgentHostSizeLimitError } from './agentHostLimits'
 import { connectAgentHostWebSocket } from './agentHostTransport'
 import { AGENT_HOST_TRACE_HEADER, logAgentHostDiagnostic } from './agentHostDiagnostics'
 import type { AgentHostDiagnosticDetails } from './agentHostDiagnostics'
@@ -87,7 +88,7 @@ export class VSCodeDeviceClient {
     if (!peer) throw new Error('Device does not belong to this task workspace.')
     return peer
   }
-  async import(root: string, value: unknown, autoConnect = false): Promise<void> {
+  async import(root: string, value: unknown, autoConnect = false, preserveReadiness = false): Promise<void> {
     const parsed = deviceInvitationSchema.safeParse(value)
     if (!parsed.success) throw new Error('Only private device invitations are supported. Legacy per-session invitations cannot be imported; existing data was not changed.')
     const invitation = parsed.data
@@ -100,8 +101,11 @@ export class VSCodeDeviceClient {
       if (prior && prior.invitation.devTunnel.hostPublicKey !== invitation.devTunnel.hostPublicKey) throw new Error('Device host key changed. Forget the previous device before pairing.')
       if (prior?.invitation.ownerClientId && prior.invitation.ownerClientId !== invitation.ownerClientId) throw new Error('Device owner identity changed. Forget the previous device before pairing.')
       if (prior) {
+        const sameIdentity = preserveReadiness && prior.invitation.id === invitation.id
+          && prior.invitation.devTunnel.clientPublicKey === invitation.devTunnel.clientPublicKey
+          && JSON.stringify(prior.invitation.participant) === JSON.stringify(invitation.participant)
         logAgentHostDiagnostic('device.identity', { ownerId: invitation.ownerClientId, status: 'begin', step: 'configuration', reason: 'reimport' })
-        this.drop(prior.id, 'reimport', 'configuration')
+        this.drop(prior.id, 'reimport', 'configuration', !sameIdentity)
         this.retry.delete(prior.id)
       }
       if (!prior && this.peers.length >= 32) throw new Error('Device limit reached.')
@@ -153,12 +157,14 @@ export class VSCodeDeviceClient {
     return !this.closed && !!peer && peer.enabled && Date.parse(peer.invitation.expiresAt) > Date.now()
       && !!this.active.get(peer.id)?.refreshed && !this.active.get(peer.id)!.abort.signal.aborted
   }
-  private drop(id: string, reason: AgentHostDiagnosticDetails['reason'], step: AgentHostDiagnosticDetails['step'] = 'tunnel'): void {
+  private drop(id: string, reason: AgentHostDiagnosticDetails['reason'], step: AgentHostDiagnosticDetails['step'] = 'tunnel', notifyPeerChange = true): void {
     const peer = this.peers.find((item) => item.id === id)
     logAgentHostDiagnostic('device.disconnect', { ownerId: peer?.invitation.ownerClientId, status: 'closed', step, reason })
     const changed = new Error('The selected device connection or identity changed.')
-    this.peerChanges.get(id)?.abort(changed)
-    this.peerChanges.delete(id)
+    if (notifyPeerChange) {
+      this.peerChanges.get(id)?.abort(changed)
+      this.peerChanges.delete(id)
+    }
     this.attempts.get(id)?.abort(changed)
     const active = this.active.get(id)
     this.active.delete(id)
@@ -214,7 +220,7 @@ export class VSCodeDeviceClient {
           const reason = this.closed ? 'shutdown' : !peer.enabled ? 'owner-disabled'
             : step === 'tunnel' || abort.signal.reason?.name === 'TimeoutError' ? 'owner-offline'
               : abort.signal.aborted ? 'access-changed' : 'identity-failed'
-          this.drop(peer.id, reason, step)
+          this.drop(peer.id, reason, step, this.closed || !peer.enabled)
           if (!this.closed && peer.enabled) {
             this.errors.set(peer.id, error instanceof Error ? error.message : 'Device connection failed.')
             const count = (this.retry.get(peer.id)?.count ?? 0) + 1
@@ -345,6 +351,14 @@ export class VSCodeDeviceClient {
     return changes.signal
   }
 
+  private resetActive(id: string, active: Active): void {
+    if (this.active.get(id) !== active) return
+    this.active.delete(id)
+    this.retry.delete(id)
+    active.abort.abort(new Error('Stale device tunnel reset.'))
+    active.tunnel.close()
+  }
+
   /** Reuse an enabled private invitation without enabling, replacing, or discovering any other device. */
   async reconnectOwner(root: string, value: AgentHostTarget['owner'], signal: AbortSignal): Promise<boolean> {
     const owner = agentHostTargetSchema.shape.owner.parse(value)
@@ -371,59 +385,80 @@ export class VSCodeDeviceClient {
     const deadline = new AbortController()
     const timeout = setTimeout(() => deadline.abort(new DOMException('The selected Agent Host owner did not reconnect in time. Retry when that device is available.', 'TimeoutError')), 45000)
     timeout.unref?.()
-    let readiness = AbortSignal.any([signal, this.lifetime.signal, deadline.signal])
+    const baseReadiness = AbortSignal.any([signal, this.lifetime.signal, deadline.signal])
     logAgentHostDiagnostic('device.transport', { target, traceId, status: 'begin', step })
     try {
-      readiness.throwIfAborted()
-      await abortable(this.load(), readiness)
-      const canonical = await abortable(this.root(root), readiness)
-      const selected = this.ownerPeer(canonical, target.owner)
-      const renewing = selected && Date.parse(selected.invitation.expiresAt) <= Date.now()
-      if (selected && !renewing) readiness = AbortSignal.any([readiness, this.peerChangeSignal(selected)])
-      if (this.recoverOwner && !await abortable(this.ownerConnected(canonical, target.owner.clientId), readiness)) {
-        step = 'workspace-recovery'
-        const recoveryStarted = performance.now()
-        await abortable(this.recoverOwner(canonical, target.owner, readiness), readiness)
+      for (let attempt = 0; attempt < 2; attempt++) {
+        step = 'load'
+        let readiness = baseReadiness
         readiness.throwIfAborted()
-        logAgentHostDiagnostic('device.transport', { target, traceId, status: 'ok', step, elapsedMs: performance.now() - recoveryStarted })
+        await abortable(this.load(), readiness)
+        const canonical = await abortable(this.root(root), readiness)
+        const selected = this.ownerPeer(canonical, target.owner)
+        const reusedActive = selected ? this.active.get(selected.id) : undefined
+        const hadActive = Boolean(reusedActive?.refreshed)
+        const renewing = selected && Date.parse(selected.invitation.expiresAt) <= Date.now()
+        if (selected && !renewing) readiness = AbortSignal.any([readiness, this.peerChangeSignal(selected)])
+        if (this.recoverOwner && !await abortable(this.ownerConnected(canonical, target.owner.clientId), readiness)) {
+          step = 'workspace-recovery'
+          const recoveryStarted = performance.now()
+          await abortable(this.recoverOwner(canonical, target.owner, readiness), readiness)
+          readiness.throwIfAborted()
+          logAgentHostDiagnostic('device.transport', { target, traceId, status: 'ok', step, elapsedMs: performance.now() - recoveryStarted })
+        }
+        const peer = this.ownerPeer(canonical, target.owner)
+        if (!peer) throw new Error('Enable automatic workspace links on both devices and wait for the exact Agent Host owner to connect. Git alone does not grant access.')
+        if (Date.parse(peer.invitation.expiresAt) <= Date.now()) throw new Error('The owner connection credential is expired.')
+        if (selected && selected !== peer && (selected.id !== peer.id
+          || selected.invitation.ownerId !== peer.invitation.ownerId
+          || selected.invitation.devTunnel.hostPublicKey !== peer.invitation.devTunnel.hostPublicKey
+          || selected.invitation.devTunnel.clientPublicKey !== peer.invitation.devTunnel.clientPublicKey
+          || JSON.stringify(selected.invitation.participant) !== JSON.stringify(peer.invitation.participant))) throw new Error('The selected device connection or identity changed.')
+        readiness = AbortSignal.any([readiness, this.peerChangeSignal(peer)])
+        step = 'tunnel'
+        await abortable(this.validateRecipient(peer.invitation), readiness)
+        if (this.connecting.has(peer.id)) await abortable(this.connecting.get(peer.id)!, readiness)
+        if (!this.active.get(peer.id)?.refreshed || Date.now() - this.active.get(peer.id)!.refreshed > 10000) {
+          this.retry.delete(peer.id)
+          await abortable(this.ensure(peer), readiness)
+        }
+        readiness.throwIfAborted()
+        const active = this.active.get(peer.id)
+        this.currentPeer(peer, active)
+        if (await abortable(this.root(root), readiness) !== canonical) throw new Error('The task workspace changed while reconnecting.')
+        readiness.throwIfAborted()
+        this.currentPeer(peer, active)
+        const combined = AbortSignal.any([signal, active.abort.signal])
+        const encoded = Buffer.from(JSON.stringify(target)).toString('base64url')
+        step = 'websocket'
+        const websocketStarted = performance.now()
+        let transport: Awaited<ReturnType<typeof connectAgentHostWebSocket>>
+        try {
+          transport = await connectAgentHostWebSocket(`ws://127.0.0.1:${active.tunnel.port}/device/agent-host?target=${encoded}`, { headers: {
+            Host: `127.0.0.1:${peer.invitation.port}`, Authorization: `Bearer ${peer.invitation.token}`,
+            ...(traceId ? { [AGENT_HOST_TRACE_HEADER]: traceId } : {}),
+          } }, combined)
+        } catch (error) {
+          if (attempt === 0 && hadActive && reusedActive === active && !readiness.aborted
+            && this.peers.includes(peer) && peer.enabled && this.active.get(peer.id) === active
+            && !(error instanceof AgentHostSizeLimitError)) {
+            this.resetActive(peer.id, active)
+            continue
+          }
+          throw error
+        }
+        clearTimeout(timeout)
+        try {
+          combined.throwIfAborted()
+          this.currentPeer(peer, active)
+          if (await this.root(root) !== canonical) throw new Error('The task workspace changed while reconnecting.')
+          combined.throwIfAborted()
+          this.currentPeer(peer, active)
+        } catch (error) { await transport.close(); throw error }
+        logAgentHostDiagnostic('device.transport', { target, traceId, status: 'ok', step, elapsedMs: performance.now() - websocketStarted })
+        return transport
       }
-      const peer = this.ownerPeer(canonical, target.owner)
-      if (!peer) throw new Error('Enable automatic workspace links on both devices and wait for the exact Agent Host owner to connect. Git alone does not grant access.')
-      if (Date.parse(peer.invitation.expiresAt) <= Date.now()) throw new Error('The owner connection credential is expired.')
-      if (selected && selected !== peer && (!renewing || selected.id !== peer.id
-        || selected.invitation.id !== peer.invitation.id || selected.invitation.ownerId !== peer.invitation.ownerId
-        || selected.invitation.devTunnel.hostPublicKey !== peer.invitation.devTunnel.hostPublicKey
-        || selected.invitation.devTunnel.clientPublicKey !== peer.invitation.devTunnel.clientPublicKey
-        || JSON.stringify(selected.invitation.participant) !== JSON.stringify(peer.invitation.participant))) throw new Error('The selected device connection or identity changed.')
-      readiness = AbortSignal.any([readiness, this.peerChangeSignal(peer)])
-      step = 'tunnel'
-      await abortable(this.validateRecipient(peer.invitation), readiness)
-      if (this.connecting.has(peer.id)) await abortable(this.connecting.get(peer.id)!, readiness)
-      if (!this.active.get(peer.id)?.refreshed || Date.now() - this.active.get(peer.id)!.refreshed > 10000) await abortable(this.ensure(peer), readiness)
-      readiness.throwIfAborted()
-      const active = this.active.get(peer.id)
-      this.currentPeer(peer, active)
-      if (await abortable(this.root(root), readiness) !== canonical) throw new Error('The task workspace changed while reconnecting.')
-      readiness.throwIfAborted()
-      this.currentPeer(peer, active)
-      clearTimeout(timeout)
-      const combined = AbortSignal.any([signal, active.abort.signal])
-      const encoded = Buffer.from(JSON.stringify(target)).toString('base64url')
-      step = 'websocket'
-      const websocketStarted = performance.now()
-      const transport = await connectAgentHostWebSocket(`ws://127.0.0.1:${active.tunnel.port}/device/agent-host?target=${encoded}`, { headers: {
-        Host: `127.0.0.1:${peer.invitation.port}`, Authorization: `Bearer ${peer.invitation.token}`,
-        ...(traceId ? { [AGENT_HOST_TRACE_HEADER]: traceId } : {}),
-      } }, combined)
-      try {
-        combined.throwIfAborted()
-        this.currentPeer(peer, active)
-        if (await this.root(root) !== canonical) throw new Error('The task workspace changed while reconnecting.')
-        combined.throwIfAborted()
-        this.currentPeer(peer, active)
-      } catch (error) { await transport.close(); throw error }
-      logAgentHostDiagnostic('device.transport', { target, traceId, status: 'ok', step, elapsedMs: performance.now() - websocketStarted })
-      return transport
+      throw new Error('Agent Host connection failed.')
     } catch (error) {
       logAgentHostDiagnostic('device.transport', { target, traceId, status: 'error', step, elapsedMs: performance.now() - started, error })
       throw error

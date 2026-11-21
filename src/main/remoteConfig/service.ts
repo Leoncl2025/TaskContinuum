@@ -19,6 +19,7 @@ import { readJsonBounded, writeJsonAtomic } from '../shared/storage'
 import { deviceInvitationSchema } from '../vscodeDeviceProtocol'
 import { agentHostTargetSchema } from '../agentHostProtocol'
 import { logAgentHostDiagnostic, measureAgentHostDiagnostic } from '../agentHostDiagnostics'
+import { DeviceRequestError } from '../vscodeDeviceHttp'
 import type { VSCodeDeviceClient } from '../vscodeDeviceClient'
 import type { VSCodeDeviceHost } from '../vscodeDeviceHost'
 import { LocalEnrollments, initialWorkspaceId } from './enrollment'
@@ -476,7 +477,12 @@ export class WorkspaceSyncService {
           selected()
           // A targeted startup may authenticate before PeerLinks has registered this owner.
           runtime.recoveredOwners.add(owner.clientId)
-          if (!await abortable(this.options.devices.reconnectOwner(root, owner, current), current)) {
+          let reconnected = false
+          try { reconnected = await abortable(this.options.devices.reconnectOwner(root, owner, current), current) }
+          catch (error) {
+            if (!(error instanceof DeviceRequestError) || (error.status !== 401 && error.status !== 403) || current.aborted) throw error
+          }
+          if (!reconnected) {
             await abortable(this.connectPeer(runtime, target.peer, target.grant), current)
           }
           selected()
@@ -967,7 +973,7 @@ export class WorkspaceSyncService {
       let imported = false
       try {
         logAgentHostDiagnostic('device.identity', { ownerId: peer.deviceId, status: 'begin', step: 'configuration', reason: 'reimport' })
-        await this.options.devices.import(runtime.root, invitation, true)
+        await this.options.devices.import(runtime.root, invitation, true, true)
         imported = true
         check()
         await this.options.devices.connectOwner(runtime.root, peer.deviceId)

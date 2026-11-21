@@ -382,3 +382,21 @@ it('records nested upstream diagnostics without changing validation or exposing 
   expect(text).not.toContain('private-git-detail')
   expect(f.upstream).toHaveBeenCalledTimes(3)
 })
+
+it('refreshes a rotated private pairing token via metadata link when reconnectOwner receives 403', fixtureOptions, async () => {
+  const f = await fixture(true)
+  const rotatedToken = randomBytes(32).toString('base64url')
+  const rotatedInvitation = { ...f.invitations[0], token: rotatedToken, expiresAt: new Date(Date.now() + 7200000).toISOString() }
+  f.link.mockResolvedValue(rotatedInvitation)
+  f.requests.mockImplementation(async (_port, _remotePort, token, path) => {
+    expect(path).toBe('/device/identity')
+    if (token !== rotatedToken) throw new deviceHttp.DeviceRequestError(403)
+    return { ownerId: rotatedInvitation.ownerId, deviceId: rotatedInvitation.id }
+  })
+
+  expect(await f.devices.agentHostTransport(f.root, f.target, new AbortController().signal)).toBe(f.socket)
+  expect(f.link).toHaveBeenCalledOnce()
+  expect(f.websocket).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+    headers: expect.objectContaining({ Authorization: `Bearer ${rotatedToken}` }),
+  }), expect.any(AbortSignal))
+})
