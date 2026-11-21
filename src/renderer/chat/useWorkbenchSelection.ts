@@ -198,6 +198,23 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
     }))
   }, [update])
 
+  const syncPaneSelection = useCallback((taskId: string | null, openIds: readonly string[], sessionsPatch?: Readonly<Record<string, string | null>>) => {
+    update((selection) => {
+      const nextOpen = taskId === null ? [] : [...new Set([...openIds, taskId])]
+      const baseSessions = selection?.sessions ?? {}
+      const mergedSessions = sessionsPatch
+        ? Object.fromEntries(Object.entries({ ...baseSessions, ...sessionsPatch }).slice(-sessionLimit))
+        : baseSessions
+      return {
+        version: 2,
+        taskId,
+        openTaskIds: nextOpen,
+        sessions: mergedSessions,
+        ...preservedSessionLayout(selection),
+      }
+    })
+  }, [update])
+
   const revealSessionGroup = useCallback((taskId: string, key: string) => {
     update((selection) => {
       const sessionGroups = revealSession(selection, taskId, key)
@@ -282,6 +299,6 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
     sessionOrders: saved?.selection?.sessionOrders ?? emptySessionOrders,
     sessionGroups: saved?.selection?.sessionGroups ?? emptySessionGroups,
     sessionSort, sessionSorts, taskSortMode,
-    error: saved?.error, selectTask, closeTask, selectSession, rememberDefaultSession, clearSession, setSessionLayout, revealSessionGroup, setSessionSort, dismissError,
+    error: saved?.error, selectTask, closeTask, selectSession, syncPaneSelection, rememberDefaultSession, clearSession, setSessionLayout, revealSessionGroup, setSessionSort, dismissError,
   }
 }

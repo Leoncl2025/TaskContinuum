@@ -1,12 +1,11 @@
 import { Activity, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import type { CSSProperties, DragEvent, ReactNode } from 'react'
-import type { DesktopInfo, DesktopWindowContext, SessionWindowMode, SessionWindowSummary } from '../shared/desktop'
+import type { CSSProperties, ReactNode } from 'react'
+import type { DesktopInfo, DesktopWindowContext, SessionWindowActivatedEvent, SessionWindowMode, SessionWindowSummary } from '../shared/desktop'
 import { filterTasks } from '../shared/tasks'
-import type { TaskRecord } from '../shared/tasks'
 import type { WorkspaceSnapshot } from '../shared/workspace'
 import { useSessionLinks } from './chat/useSessionLinks'
 import { useWorkbenchSelection } from './chat/useWorkbenchSelection'
-import { sessionBindingKey, sessionBindingTitle } from './chat/sessionBindings'
+import { sessionBindingKey } from './chat/sessionBindings'
 import type { SessionBinding } from './chat/sessionBindings'
 import { buildSessionTree, treeSessionBindings } from './chat/sessionGroups'
 import { taskSessionLinks } from '../shared/sessionBindings'
@@ -15,10 +14,28 @@ import { TaskSidebar } from './components/TaskSidebar'
 import { TaskViewer } from './components/TaskViewer'
 import { defaultLayout, isCompact, panelSizes, readLayout, resizePanel, saveLayout, subscribeCompact, subscribeViewport, viewportWidth } from './layout'
 import type { LayoutPanel, LayoutPreferences, SplitDirection } from './layout'
-import { ChatSplitSash, PanelSash } from './components/PanelSash'
+import { PanelSash } from './components/PanelSash'
+import { PaneWorkspaceGrid } from './components/PaneWorkspaceGrid'
 import { SessionContextMenu } from './components/SessionContextMenu'
 import type { SessionContextMenuTarget } from './components/SessionContextMenu'
-import { SESSION_BINDING_DRAG_MIME } from './components/LinkedSessionTree'
+import {
+  activePaneGroup,
+  clearDetachedSessionFromTree,
+  closeTaskPageInGroup,
+  createInitialPaneTree,
+  findPaneGroup,
+  findParentSplit,
+  listPaneGroups,
+  openTaskPageInGroup,
+  reconcilePaneTreeWithTasks,
+  removePaneGroup,
+  resolveGroupActiveBinding,
+  selectSessionInGroup,
+  splitPaneGroup,
+  swapParentSplitChildren,
+  toggleParentSplitOrientation,
+} from './paneTree'
+import type { PaneTreeState } from './paneTree'
 import { useWorkspaces } from './useWorkspaces'
 import { WorkspacePicker } from './components/WorkspacePicker'
 import { RepositorySetup } from './components/RepositorySetup'
@@ -26,7 +43,6 @@ import { TaskCreationDialog } from './components/TaskCreationDialog'
 import { LocalTaskAgent } from './components/LocalTaskAgent'
 import type { TaskCreationMode } from './components/TaskCreationDialog'
 import { RemoteDevicesDialog } from './components/RemoteDevicesDialog'
-import { AgentHostPanel } from './components/AgentHostPanel'
 import { AgentHostSessionsSidebar } from './components/AgentHostSessionsSidebar'
 import type { AgentHostHistoryTransfer, AgentHostSession, AgentHostTarget } from '../shared/agentHost'
 import { agentHostKey } from '../shared/agentHost'
@@ -96,86 +112,6 @@ function MainWorkbenchRoot({ updates, updateSafetyError }: {
   </>
 }
 
-function PoppedOutSessionPane({ slot, focused, task, binding, title, ownerDisplay, alternatives, onActivate, onFocusWindow, onDockHere, onSelectAlternative, onClose, closeLabel }: {
-  slot: 'single' | 'primary' | 'secondary'
-  focused: boolean
-  task: TaskRecord
-  binding: SessionBinding
-  title: string
-  ownerDisplay: string
-  alternatives: readonly { binding: SessionBinding; label: string }[]
-  onActivate?(): void
-  onFocusWindow(): void
-  onDockHere(): void
-  onSelectAlternative(binding: SessionBinding): void
-  onClose(): void
-  closeLabel: string
-}) {
-  return <aside className="chat-panel empty-chat popped-out-chat" data-pane-slot={slot} data-pane-focused={slot !== 'single' ? focused || undefined : undefined} aria-label={slot === 'secondary' ? 'Secondary split task chat' : 'Task chat'} onPointerDownCapture={onActivate} onFocusCapture={onActivate}>
-    <header className="ahp-chat-header popped-out-header">
-      <div className="ahp-chat-title"><Icon name="multiple-windows" /><span className="ahp-chat-task-badge">{task.id}</span><strong title={title}>{title}</strong></div>
-      <div className="ahp-chat-meta"><span className="ahp-chat-machine" title={binding.owner.machineName}><Icon name="server" /><span>Copilot @ {ownerDisplay}</span></span></div>
-      <div className="ahp-chat-actions"><IconButton icon="close" label={closeLabel} onClick={onClose} /></div>
-    </header>
-    <div className="empty-workbench">
-      <span className="chat-welcome-icon"><Icon name="multiple-windows" /></span>
-      <h2>Open in separate window</h2>
-      <p role="status"><strong>{title}</strong> ({task.id}) is active in its own window so you can arrange conversations across displays without duplicate drafts.</p>
-      <div className="workspace-welcome-actions">
-        <button type="button" className="primary-button" onClick={onFocusWindow}><Icon name="link-external" /><span>Focus window</span></button>
-        <button type="button" className="secondary-button" onClick={onDockHere}><Icon name="layout-panel-dock" /><span>Dock back here</span></button>
-      </div>
-      {alternatives.length > 0 && <div className="split-picker-candidates" aria-label="Other sessions in this task">
-        <span className="split-picker-heading">Switch this pane to another session</span>
-        <div className="split-picker-list">
-          {alternatives.slice(0, 4).map(({ binding: candidate, label }) => <button key={sessionBindingKey(candidate)} type="button" className="secondary-button split-picker-chip" onClick={() => onSelectAlternative(candidate)}>
-            <Icon name="copilot" /><span>{label}</span>
-          </button>)}
-        </div>
-      </div>}
-    </div>
-  </aside>
-}
-
-function SplitSessionPickerPane({ slot, focused, orientation, task, candidates, onActivate, onPick, onBrowseSessions, onClose }: {
-  slot: 'single' | 'primary' | 'secondary'
-  focused: boolean
-  orientation: 'horizontal' | 'vertical'
-  task: TaskRecord | undefined
-  candidates: readonly { task: TaskRecord; binding: SessionBinding; label: string; machine: string }[]
-  onActivate(): void
-  onPick(taskId: string, binding: SessionBinding): void
-  onBrowseSessions(): void
-  onClose(): void
-}) {
-  const paneName = orientation === 'vertical' ? 'bottom' : 'right'
-  return <aside className="chat-panel empty-chat split-picker-chat" data-pane-slot={slot} data-pane-focused={slot !== 'single' ? focused || undefined : undefined} aria-label="Split session picker" onPointerDownCapture={onActivate} onFocusCapture={onActivate}>
-    <header className="ahp-chat-header popped-out-header">
-      <div className="ahp-chat-title"><Icon name={orientation === 'vertical' ? 'split-vertical' : 'split-horizontal'} /><strong>Split chat view</strong></div>
-      <div className="ahp-chat-meta"><span>{task ? `${task.id} · ${task.title}` : 'Select a session'}</span></div>
-      <div className="ahp-chat-actions"><IconButton icon="close" label="Close split pane" onClick={onClose} /></div>
-    </header>
-    <div className="empty-workbench">
-      <span className="chat-welcome-icon"><Icon name={orientation === 'vertical' ? 'split-vertical' : 'split-horizontal'} /></span>
-      <h2>Choose a session for the {paneName} pane</h2>
-      <p>{candidates.length ? 'Pick another linked conversation to compare or run side by side, or drag any session from the sidebar here.' : task ? `Link or create another Agent Host session for ${task.id} to view two conversations together.` : 'Select a task and link a session to open it in split view.'}</p>
-      {candidates.length > 0 && <div className="split-picker-candidates" aria-label="Available sessions for split view">
-        <div className="split-picker-list">
-          {candidates.slice(0, 6).map((item) => <button key={`${item.task.id}:${sessionBindingKey(item.binding)}`} type="button" className="secondary-button split-picker-chip" onClick={() => onPick(item.task.id, item.binding)}>
-            <Icon name="copilot" />
-            <span>{item.label}</span>
-            <small>{item.task.id} · {item.machine}</small>
-          </button>)}
-        </div>
-      </div>}
-      <div className="workspace-welcome-actions">
-        <button type="button" className="primary-button" onClick={onBrowseSessions}><Icon name="server-environment" /><span>Link or create session</span></button>
-        <button type="button" className="secondary-button" onClick={onClose}><span>Close split</span></button>
-      </div>
-    </div>
-  </aside>
-}
-
 function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen, onCreateRepository, onPublishRepository }: {
   workspaces: ReturnType<typeof useWorkspaces>
   updates: ReturnType<typeof useUpdates>
@@ -194,26 +130,37 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const links = useSessionLinks(!taskAgentOpen && workspace?.tasks.length ? workspace : null)
   const bindings = links.bindings
   const tasks = useMemo(() => workspace?.tasks ?? [], [workspace])
-  const requestedId = selection.taskId === undefined ? tasks[0]?.id ?? null : selection.taskId
-  const selectedId = requestedId !== null && !tasks.some((item) => item.id === requestedId) ? tasks[0]?.id ?? null : requestedId
-  const openTasks = useMemo(() => {
-    const tabIds = selection.openTaskIds ?? (selectedId ? [selectedId] : [])
-    return [...new Set([...tabIds.filter((id) => tasks.some((item) => item.id === id)), ...(selectedId ? [selectedId] : [])])]
-  }, [selection.openTaskIds, selectedId, tasks])
+  const validTaskIds = useMemo(() => new Set(tasks.map((item) => item.id)), [tasks])
+
+  const [paneTree, setPaneTree] = useState<PaneTreeState>(() => {
+    const requested = selection.taskId === undefined ? tasks[0]?.id ?? null : selection.taskId
+    const validSelected = requested !== null && !tasks.some((item) => item.id === requested) ? tasks[0]?.id ?? null : requested
+    const savedOpen = selection.openTaskIds ?? (validSelected ? [validSelected] : [])
+    const validOpen = [...new Set([...savedOpen.filter((id) => tasks.some((item) => item.id === id)), ...(validSelected ? [validSelected] : [])])]
+    return createInitialPaneTree(validOpen, validSelected, selection.sessions)
+  })
+  const userEmptiedTabsRef = useRef(selection.taskId === null)
+
+  const effectiveTree = useMemo(
+    () => reconcilePaneTreeWithTasks(paneTree, validTaskIds, userEmptiedTabsRef.current ? null : tasks[0]?.id ?? null),
+    [paneTree, validTaskIds, tasks],
+  )
+  const paneGroups = useMemo(() => listPaneGroups(effectiveTree.root), [effectiveTree.root])
+  const splitActive = !taskAgentOpen && paneGroups.length > 1
+  const focusedGroup = useMemo(() => activePaneGroup(effectiveTree), [effectiveTree])
+  const selectedId = focusedGroup.activeTaskId
+  const openTasks = focusedGroup.openTaskIds
+
   const [query, setQuery] = useState('')
   const [quickQuery, setQuickQuery] = useState('')
   const [layout, setLayout] = useState(readLayout)
   const [sidebarView, setSidebarView] = useState<'tasks' | 'sessions'>('tasks')
   const [expandSessionRequest, setExpandSessionRequest] = useState<{ taskId: string; key: string; id: number; active: boolean }>()
-  const selectedSessions = selection.sessions
-  const [visitedSessions, setVisitedSessions] = useState<string[]>([])
-  const [splitPane, setSplitPane] = useState<{ taskId: string; sessionKey?: string } | null>(null)
-  const [focusedSlot, setFocusedSlot] = useState<'primary' | 'secondary'>('primary')
   const [popoutWindows, setPopoutWindows] = useState<SessionWindowSummary[]>([])
   const [restoredDrafts, setRestoredDrafts] = useState<Record<string, { nonce: number; text: string }>>({})
-  const [chatDropZone, setChatDropZone] = useState<SplitDirection | 'center'>()
-  const [contextMenu, setContextMenu] = useState<SessionContextMenuTarget | null>(null)
+  const [sidebarContextMenu, setSidebarContextMenu] = useState<SessionContextMenuTarget | null>(null)
   const [busyPanels, setBusyPanels] = useState<Record<string, boolean>>({})
+  const draftsRef = useRef<Record<string, string>>({})
   const chordUntilRef = useRef(0)
   const [dialog, setDialog] = useState<DialogName>(null)
   const [chatHeaderTarget, setChatHeaderTarget] = useState<HTMLDivElement | null>(null)
@@ -226,86 +173,63 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const [desktopError, setDesktopError] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const compact = useSyncExternalStore(subscribeCompact, isCompact, () => false)
+
   const task = tasks.find((item) => item.id === selectedId)
   const primaryPanel = task || taskAgentOpen ? 'chat' : 'details'
-  const activeSortMode = selection.taskSortMode(task?.id)
-  const activeOrderedKeys = task ? selection.sessionOrders[task.id] : undefined
-  const activeSessionLayout = task ? selection.sessionGroups[task.id] : undefined
-  const taskBindings = useMemo(() => {
-    if (!task) return []
-    return treeSessionBindings(buildSessionTree(bindings[task.id] ?? [], {
-      mode: activeSortMode,
-      orderedKeys: activeOrderedKeys,
+
+  const orderedBindingsForTask = useCallback((taskId: string): readonly SessionBinding[] => {
+    const raw = bindings[taskId] ?? []
+    if (!raw.length) return raw
+    return treeSessionBindings(buildSessionTree(raw, {
+      mode: selection.taskSortMode(taskId),
+      orderedKeys: selection.sessionOrders[taskId],
       titles: sessionTitles.titles,
       timestamps: sessionTitles.timestamps,
       aliases,
-    }, activeSessionLayout).entries)
-  }, [task, bindings, activeSortMode, activeOrderedKeys, sessionTitles.titles, sessionTitles.timestamps, aliases, activeSessionLayout])
-  const activeKey = task ? Object.hasOwn(selectedSessions, task.id) ? selectedSessions[task.id]
-    : taskBindings[0] ? sessionBindingKey(taskBindings[0]) : undefined : undefined
-  const activeBinding = taskBindings.find((binding) => sessionBindingKey(binding) === activeKey)
-  const taskAwaitingSyncCount = task ? (gitSyncStatus?.awaitingSync ?? []).filter((marker) => marker.taskId === task.id).length : 0
-  const missingSelectedSession = links.ready && !taskAwaitingSyncCount && typeof activeKey === 'string' && !activeBinding
-  const agentHostBinding = activeBinding?.agentHost
-  const activePanelKey = task && activeBinding ? `${task.id}:${sessionBindingKey(activeBinding)}` : undefined
-  const popoutPanelKeys = useMemo(() => new Set(popoutWindows.map((item) => item.key)), [popoutWindows])
-  const movedPopoutPanelKeys = useMemo(
-    () => new Set(popoutWindows.filter((item) => item.mode !== 'copy').map((item) => item.key)),
-    [popoutWindows],
+    }, selection.sessionGroups[taskId]).entries)
+  }, [bindings, selection, sessionTitles.titles, sessionTitles.timestamps, aliases])
+
+  const taskBindings = useMemo(
+    () => task ? orderedBindingsForTask(task.id) : [],
+    [task, orderedBindingsForTask],
   )
-  const splitActive = Boolean(splitPane && !taskAgentOpen)
-  const secondaryTask = splitActive && splitPane ? tasks.find((item) => item.id === splitPane.taskId) ?? task : undefined
-  const rawSecondaryBinding = secondaryTask && splitPane?.sessionKey
-    ? (bindings[secondaryTask.id] ?? []).find((item) => sessionBindingKey(item) === splitPane.sessionKey)
-    : undefined
-  const rawSecondaryPanelKey = secondaryTask && rawSecondaryBinding ? `${secondaryTask.id}:${sessionBindingKey(rawSecondaryBinding)}` : undefined
-  const secondaryBinding = rawSecondaryPanelKey && rawSecondaryPanelKey !== activePanelKey ? rawSecondaryBinding : undefined
-  const secondaryPanelKey = secondaryTask && secondaryBinding ? `${secondaryTask.id}:${sessionBindingKey(secondaryBinding)}` : undefined
-  const effectiveFocusedSlot: 'primary' | 'secondary' = splitActive ? focusedSlot : 'primary'
-  const splitLayoutActive = splitActive && !compact
-  const primaryPoppedOut = Boolean(activePanelKey && movedPopoutPanelKeys.has(activePanelKey))
-  const secondaryPoppedOut = Boolean(secondaryPanelKey && movedPopoutPanelKeys.has(secondaryPanelKey))
-  const sidebarTask = effectiveFocusedSlot === 'secondary' && secondaryTask ? secondaryTask : task
+  const { sessionKey: activeKey, binding: activeBinding } = useMemo(
+    () => resolveGroupActiveBinding(focusedGroup, task?.id ?? null, taskBindings, selection.sessions),
+    [focusedGroup, task, taskBindings, selection.sessions],
+  )
+  const activePanelKey = task && activeBinding ? `${task.id}:${sessionBindingKey(activeBinding)}` : undefined
+
+  const popoutPanelKeys = useMemo(() => new Set(popoutWindows.map((item) => item.key)), [popoutWindows])
+  const sidebarTask = task
   const sidebarSortMode = selection.taskSortMode(sidebarTask?.id)
   const sidebarOrderedKeys = sidebarTask ? selection.sessionOrders[sidebarTask.id] : undefined
   const sidebarSessionLayout = sidebarTask ? selection.sessionGroups[sidebarTask.id] : undefined
-  const sidebarTaskBindings = useMemo(() => {
-    if (!sidebarTask) return []
-    return treeSessionBindings(buildSessionTree(bindings[sidebarTask.id] ?? [], {
-      mode: sidebarSortMode,
-      orderedKeys: sidebarOrderedKeys,
-      titles: sessionTitles.titles,
-      timestamps: sessionTitles.timestamps,
-      aliases,
-    }, sidebarSessionLayout).entries)
-  }, [sidebarTask, bindings, sidebarSortMode, sidebarOrderedKeys, sessionTitles.titles, sessionTitles.timestamps, aliases, sidebarSessionLayout])
-  const sidebarActiveKey = effectiveFocusedSlot === 'secondary'
-    ? secondaryBinding && secondaryTask?.id === sidebarTask?.id ? sessionBindingKey(secondaryBinding) : undefined
-    : activeBinding && task?.id === sidebarTask?.id ? sessionBindingKey(activeBinding) : undefined
-  const sidebarSecondaryKey = splitActive
-    ? effectiveFocusedSlot === 'secondary'
-      ? activeBinding && task?.id === sidebarTask?.id ? sessionBindingKey(activeBinding) : undefined
-      : secondaryBinding && secondaryTask?.id === sidebarTask?.id ? sessionBindingKey(secondaryBinding) : undefined
-    : undefined
+  const sidebarTaskBindings = taskBindings
+  const sidebarActiveKey = activeKey
+  const sidebarSecondaryKey = useMemo(() => {
+    if (!sidebarTask || !splitActive) return undefined
+    for (const group of paneGroups) {
+      if (group.id === focusedGroup.id || group.activeTaskId !== sidebarTask.id) continue
+      const { sessionKey } = resolveGroupActiveBinding(group, sidebarTask.id, sidebarTaskBindings, selection.sessions)
+      if (sessionKey && sessionKey !== sidebarActiveKey) return sessionKey
+    }
+    return undefined
+  }, [sidebarTask, splitActive, paneGroups, focusedGroup.id, sidebarTaskBindings, sidebarActiveKey, selection.sessions])
   const sidebarPopoutKeys = useMemo(() => {
     if (!sidebarTask) return undefined
     const keys = new Set<string>()
     for (const item of popoutWindows) {
-      if (item.taskId === sidebarTask.id) keys.add(`ahp:${agentHostKey(item.target)}`)
+      if (item.taskId === sidebarTask.id && item.target) keys.add(`ahp:${agentHostKey(item.target)}`)
     }
     return keys
   }, [sidebarTask, popoutWindows])
-  const sidebarAwaitingSyncCount = sidebarTask ? (gitSyncStatus?.awaitingSync ?? []).filter((marker) => marker.taskId === sidebarTask.id).length : 0
+  const awaitingSyncCountForTask = useCallback(
+    (taskId: string) => (gitSyncStatus?.awaitingSync ?? []).filter((marker) => marker.taskId === taskId).length,
+    [gitSyncStatus?.awaitingSync],
+  )
+  const sidebarAwaitingSyncCount = sidebarTask ? awaitingSyncCountForTask(sidebarTask.id) : 0
   const sidebarProvisional = Boolean(sidebarTask && gitSyncStatus?.provisionalTasks.includes(sidebarTask.id))
-  const panelKeys = new Set([
-    ...visitedSessions,
-    ...(activePanelKey ? [activePanelKey] : []),
-    ...(secondaryPanelKey ? [secondaryPanelKey] : []),
-  ])
-  const chatPanels = tasks.flatMap((item) => (bindings[item.id] ?? []).flatMap((binding) => {
-    const key = `${item.id}:${sessionBindingKey(binding)}`
-    return panelKeys.has(key) ? [{ task: item, binding, key }] : []
-  }))
+
   const reportPanelBusy = useCallback((value: boolean, key?: string) => {
     if (!key) return
     setBusyPanels((current) => {
@@ -316,10 +240,11 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
       return next
     })
   }, [])
-  const agentHostBusy = Boolean(
-    (activePanelKey && !primaryPoppedOut && busyPanels[activePanelKey])
-    || (secondaryPanelKey && !secondaryPoppedOut && busyPanels[secondaryPanelKey]),
-  )
+  const handleDraftSnapshot = useCallback((groupId: string, taskId: string, sessionKey: string, draft: string) => {
+    draftsRef.current[`${groupId}:${taskId}:${sessionKey}`] = draft
+  }, [])
+
+  const agentHostBusy = Object.keys(busyPanels).length > 0
   const [syncingLinks, setSyncingLinks] = useState(false)
   const [agentHostRevision, setAgentHostRevision] = useState(0)
   const [historyTransfers, setHistoryTransfers] = useState<Record<string, AgentHostHistoryTransfer>>({})
@@ -340,6 +265,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
       if (event.root === workspaceRoot) reportHistoryTransfer(event.target, event.progress)
     })
   }, [workspaceRoot, reportHistoryTransfer])
+
   const creationLifetime = useRef({ active: false })
   const sessionViewLifetime = useRef({ active: false })
   const currentTaskId = useRef(selectedId)
@@ -347,11 +273,24 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const sidebarVisible = compact ? compactPanel === 'tasks' : layout.sidebar
   const chatVisible = compact ? compactPanel === 'chat' : layout.chat
   const detailsVisible = compact ? compactPanel === 'details' : layout.details
-  const unifiedChatHeader = chatVisible && !taskAgentOpen && !splitActive && Boolean(activePanelKey) && !primaryPoppedOut
-  const focusedBinding = effectiveFocusedSlot === 'secondary' ? secondaryBinding ?? activeBinding : activeBinding
-  const sessionBusy = ((Boolean(agentHostBinding) || Boolean(secondaryBinding)) && agentHostBusy) || taskAgentBusy
+  const unifiedChatHeader = chatVisible && !taskAgentOpen && !splitActive && Boolean(activePanelKey)
+  const focusedBinding = activeBinding
+  const sessionBusy = agentHostBusy || taskAgentBusy
   const workspaceLocked = repositorySetupOpen || taskCreationMode !== null || links.busy || sessionBusy || dialog === 'remote-devices'
   const connectionError = (taskAgentOpen ? null : links.error) ?? actionError
+
+  const syncPaneSelection = selection.syncPaneSelection
+  const applyTreeChange = useCallback((updater: (current: PaneTreeState) => PaneTreeState) => {
+    setPaneTree((previous) => {
+      const base = reconcilePaneTreeWithTasks(previous, validTaskIds, userEmptiedTabsRef.current ? null : tasks[0]?.id ?? null)
+      const next = updater(base)
+      if (next === base) return previous
+      const nextFocused = activePaneGroup(next)
+      userEmptiedTabsRef.current = nextFocused.activeTaskId === null && listPaneGroups(next.root).length === 1
+      syncPaneSelection(nextFocused.activeTaskId, nextFocused.openTaskIds, nextFocused.sessions)
+      return next
+    })
+  }, [validTaskIds, tasks, syncPaneSelection])
 
   useEffect(() => {
     const scope = { active: true }
@@ -362,7 +301,8 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   useEffect(() => { currentSessionKey.current = activeKey }, [activeKey])
   const rememberDefaultSession = selection.rememberDefaultSession
   useEffect(() => {
-    if (task && activeBinding && links.ready) rememberDefaultSession(task.id, sessionBindingKey(activeBinding))
+    if (!task || !activeBinding || !links.ready) return
+    rememberDefaultSession(task.id, sessionBindingKey(activeBinding))
   }, [task, activeBinding, links.ready, rememberDefaultSession])
   useEffect(() => {
     const scope = { active: sidebarVisible && sidebarView === 'sessions' }
@@ -389,25 +329,58 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     return () => { mounted = false; unlisten?.() }
   }, [])
 
-  const activateDockedSession = useEffectEvent((event: { taskId: string; target: AgentHostTarget; draft?: string }) => {
-    if (!tasks.some((item) => item.id === event.taskId)) return
-    const key = `ahp:${agentHostKey(event.target)}`
-    const panelKey = `${event.taskId}:${key}`
-    if (event.draft) {
-      setRestoredDrafts((current) => ({
-        ...current,
-        [panelKey]: { nonce: (current[panelKey]?.nonce ?? 0) + 1, text: event.draft! },
-      }))
-    }
-    if (splitPane && secondaryPanelKey === panelKey) {
-      setFocusedSlot('secondary')
-      showTaskChat()
-      return
-    }
-    setFocusedSlot('primary')
-    currentTaskId.current = event.taskId
-    currentSessionKey.current = key
-    selection.selectSession(event.taskId, key, openTasks)
+  function showChat(): void {
+    setCompactPanel('chat')
+    if (!compact) setLayout((value) => ({ ...value, chat: true }))
+    const previousFocus = document.activeElement
+    requestAnimationFrame(() => {
+      const composer = document.getElementById('chat-composer')
+      const focused = document.activeElement
+      if (document.querySelector('dialog[open]') || focused !== previousFocus && focused !== document.body && focused !== composer) return
+      composer?.focus({ preventScroll: true })
+    })
+  }
+
+  function showTaskChat(): void {
+    setTaskAgentOpen(false)
+    showChat()
+  }
+
+  const activateDockedSession = useEffectEvent((event: SessionWindowActivatedEvent) => {
+    const pagesToDock = event.pages?.length
+      ? event.pages.filter((page) => tasks.some((item) => item.id === page.taskId))
+      : tasks.some((item) => item.id === event.taskId)
+        ? [{
+            taskId: event.taskId,
+            sessionKey: event.sessionKey ?? (event.target ? `ahp:${agentHostKey(event.target)}` : undefined),
+            draft: event.draft,
+          }]
+        : []
+    if (!pagesToDock.length) return
+
+    setRestoredDrafts((current) => {
+      let updated = current
+      for (const item of pagesToDock) {
+        if (!item.draft) continue
+        const resolvedKey = item.sessionKey
+        if (!resolvedKey) continue
+        const localKey = `${item.taskId}:${resolvedKey}`
+        updated = {
+          ...updated,
+          [localKey]: { nonce: (updated[localKey]?.nonce ?? 0) + 1, text: item.draft },
+        }
+      }
+      return updated
+    })
+
+    applyTreeChange((current) => {
+      let next = current
+      for (const item of pagesToDock) {
+        next = openTaskPageInGroup(next, next.activeGroupId, item.taskId, item.sessionKey)
+      }
+      const primary = pagesToDock.find((item) => item.taskId === event.taskId) ?? pagesToDock.at(-1)!
+      return openTaskPageInGroup(next, next.activeGroupId, primary.taskId, primary.sessionKey)
+    })
     showTaskChat()
   })
 
@@ -446,40 +419,33 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     const next = index < 0 ? event.key === 'PageDown' ? 0 : openTasks.length - 1
       : (index + (event.key === 'PageDown' ? 1 : openTasks.length - 1)) % openTasks.length
     selectTask(openTasks[next])
-    document.querySelectorAll<HTMLButtonElement>('.editor-tabs [role="tab"]')[next]?.focus()
+    const focusedTablist = document.querySelector<HTMLElement>(`.pane-group-unit[data-group-id="${CSS.escape(focusedGroup.id)}"] [role="tablist"]`)
+      ?? document.querySelector<HTMLElement>('.editor-tabs[role="tablist"]')
+    focusedTablist?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus()
   })
 
   const switchSessionFromShortcut = useEffectEvent((event: KeyboardEvent) => {
-    const targetTask = sidebarTask
-    if (event.defaultPrevented || workspaces.busy || taskAgentOpen || !targetTask
-      || !links.ready || !sidebarTaskBindings.length || document.querySelector('dialog[open]')) return
+    if (event.defaultPrevented || workspaces.busy || taskAgentOpen || !task
+      || !links.ready || !taskBindings.length || document.querySelector('dialog[open]')) return
     event.preventDefault()
-    if (sidebarTaskBindings.length === 1) return
-    const currentKey = effectiveFocusedSlot === 'secondary'
-      ? secondaryBinding && secondaryTask?.id === targetTask.id ? sessionBindingKey(secondaryBinding) : undefined
-      : currentTaskId.current === targetTask.id ? currentSessionKey.current : undefined
-    const index = sidebarTaskBindings.findIndex((binding) => sessionBindingKey(binding) === currentKey)
-    const step = event.key === 'PageDown' ? 1 : sidebarTaskBindings.length - 1
-    let next = index < 0 ? event.key === 'PageDown' ? 0 : sidebarTaskBindings.length - 1
-      : (index + step) % sidebarTaskBindings.length
-    if (splitActive && sidebarSecondaryKey && sidebarTaskBindings.length > 1 && sessionBindingKey(sidebarTaskBindings[next]) === sidebarSecondaryKey) {
-      next = (next + step) % sidebarTaskBindings.length
-    }
-    selectSession(targetTask.id, sidebarTaskBindings[next])
+    if (taskBindings.length === 1) return
+    const index = taskBindings.findIndex((binding) => sessionBindingKey(binding) === activeKey)
+    const step = event.key === 'PageDown' ? 1 : taskBindings.length - 1
+    const next = index < 0 ? event.key === 'PageDown' ? 0 : taskBindings.length - 1
+      : (index + step) % taskBindings.length
+    selectSession(task.id, taskBindings[next])
   })
 
   const handleSplitShortcut = useEffectEvent((event: KeyboardEvent) => {
     if (event.defaultPrevented || workspaces.busy || taskAgentOpen || !task || document.querySelector('dialog[open]')) return
     event.preventDefault()
     if (event.shiftKey) {
-      if (splitPane) closeSplitSlot('secondary')
+      if (paneGroups.length > 1) {
+        applyTreeChange((current) => removePaneGroup(current, current.activeGroupId))
+      }
       return
     }
-    if (!splitPane) {
-      splitSession('right', false)
-      return
-    }
-    setFocusedSlot((current) => current === 'primary' ? 'secondary' : 'primary')
+    applyTreeChange((current) => splitPaneGroup(current, current.activeGroupId, 'right', { sessionKey: activeKey }))
     showTaskChat()
   })
 
@@ -489,18 +455,22 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     chordUntilRef.current = 0
     const key = event.key.toLowerCase()
     if (key === 'o' && !event.altKey && !event.shiftKey) {
-      const targetTask = effectiveFocusedSlot === 'secondary' && secondaryTask ? secondaryTask : task
-      const targetBinding = effectiveFocusedSlot === 'secondary' && secondaryBinding ? secondaryBinding : activeBinding
-      if (targetTask && targetBinding && !workspaces.busy && !taskAgentOpen) {
+      if (task && !workspaces.busy && !taskAgentOpen) {
         event.preventDefault()
-        void popOutSession(targetTask.id, targetBinding, undefined, 'copy')
+        void popOutTaskPage({
+          groupId: focusedGroup.id,
+          taskId: task.id,
+          binding: activeBinding,
+          mode: 'copy',
+        })
         return true
       }
     }
     if ((event.code === 'Backslash' || event.key === '\\') && !event.altKey && !event.shiftKey) {
       if (task && !workspaces.busy && !taskAgentOpen) {
         event.preventDefault()
-        splitSession('down', false)
+        applyTreeChange((current) => splitPaneGroup(current, current.activeGroupId, 'down', { sessionKey: activeKey }))
+        showTaskChat()
         return true
       }
     }
@@ -539,10 +509,8 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   }, [compact, primaryPanel, dialog, taskCreationMode, repositorySetupOpen, workspace, workspaces.available, workspaces.busy, workspaceLocked, toggleChat, toggleDetails, toggleSidebar])
 
   function selectTask(id: string): void {
-    rememberChat()
-    setFocusedSlot('primary')
     currentTaskId.current = id
-    selection.selectTask(id, openTasks)
+    applyTreeChange((current) => openTaskPageInGroup(current, current.activeGroupId, id))
     showChat()
   }
 
@@ -565,25 +533,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   }
 
   function closeTask(id: string): void {
-    rememberChat()
-    selection.closeTask(id, openTasks, selectedId)
-  }
-
-  function showChat(): void {
-    setCompactPanel('chat')
-    if (!compact) setLayout((value) => ({ ...value, chat: true }))
-    const previousFocus = document.activeElement
-    requestAnimationFrame(() => {
-      const composer = document.getElementById('chat-composer')
-      const focused = document.activeElement
-      if (document.querySelector('dialog[open]') || focused !== previousFocus && focused !== document.body && focused !== composer) return
-      composer?.focus({ preventScroll: true })
-    })
-  }
-
-  function showTaskChat(): void {
-    setTaskAgentOpen(false)
-    showChat()
+    applyTreeChange((current) => closeTaskPageInGroup(current, current.activeGroupId, id))
   }
 
   function changePanelWidth(panel: LayoutPanel, width: number): void {
@@ -620,206 +570,69 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     setExpandSessionRequest((current) => ({ taskId, key, id: (current?.id ?? 0) + 1, active: true }))
   }
 
-  function rememberChat(): void {
-    const toRemember = [activePanelKey, secondaryPanelKey].filter((item): item is string => Boolean(item))
-    if (!toRemember.length) return
-    setVisitedSessions((current) => {
-      const missing = toRemember.filter((item) => !current.includes(item))
-      return missing.length ? [...current, ...missing] : current
-    })
-  }
-
-  function selectPrimarySession(taskId: string, binding: SessionBinding): void {
-    rememberChat()
-    const key = sessionBindingKey(binding)
-    currentTaskId.current = taskId
-    currentSessionKey.current = key
-    selection.selectSession(taskId, key, openTasks)
-    setFocusedSlot('primary')
-    showTaskChat()
-  }
-
   function selectSession(taskId: string, binding: SessionBinding): void {
     const key = sessionBindingKey(binding)
-    const targetPanelKey = `${taskId}:${key}`
-    if (splitActive) {
-      if (effectiveFocusedSlot === 'secondary') {
-        if (targetPanelKey === activePanelKey) {
-          if (secondaryTask && secondaryBinding) swapSplitPanes()
-          else setFocusedSlot('primary')
-        } else {
-          rememberChat()
-          setSplitPane({ taskId, sessionKey: key })
-          setFocusedSlot('secondary')
-        }
-        showTaskChat()
-        return
-      }
-      if (targetPanelKey === secondaryPanelKey) {
-        if (task && activeBinding) swapSplitPanes()
-        else setFocusedSlot('secondary')
-        showTaskChat()
-        return
-      }
-    }
-    selectPrimarySession(taskId, binding)
-  }
-
-  const splitCandidates = useMemo(() => {
-    const result: { task: TaskRecord; binding: SessionBinding; label: string; machine: string }[] = []
-    const seen = new Set<string>()
-    const candidateTasks = [
-      ...(task ? [task] : []),
-      ...openTasks.map((id) => tasks.find((item) => item.id === id)).filter((item): item is TaskRecord => Boolean(item && item.id !== task?.id)),
-    ]
-    for (const candidateTask of candidateTasks) {
-      const members = candidateTask.id === task?.id ? taskBindings : (bindings[candidateTask.id] ?? [])
-      for (const member of members) {
-        const panelKey = `${candidateTask.id}:${sessionBindingKey(member)}`
-        if (panelKey === activePanelKey || seen.has(panelKey) || movedPopoutPanelKeys.has(panelKey)) continue
-        seen.add(panelKey)
-        result.push({
-          task: candidateTask,
-          binding: member,
-          label: sessionBindingTitle(member, sessionTitles.titles),
-          machine: machineLabel(member.owner, aliases),
-        })
-      }
-    }
-    return result
-  }, [task, openTasks, tasks, taskBindings, bindings, activePanelKey, movedPopoutPanelKeys, sessionTitles.titles, aliases])
-
-  function setPrimarySlotSelection(taskId: string, sessionKey: string): void {
+    const ordered = orderedBindingsForTask(taskId)
+    const fallbackKey = Object.hasOwn(selection.sessions, taskId)
+      ? selection.sessions[taskId] ?? undefined
+      : ordered[0]
+        ? sessionBindingKey(ordered[0])
+        : undefined
     currentTaskId.current = taskId
-    currentSessionKey.current = sessionKey
-    selection.selectSession(taskId, sessionKey, openTasks)
+    currentSessionKey.current = key
+    selection.revealSessionGroup(taskId, key)
+    applyTreeChange((current) => selectSessionInGroup(current, current.activeGroupId, taskId, key, fallbackKey))
+    showTaskChat()
   }
 
-  function splitSession(
-    direction: SplitDirection,
-    moveSource: boolean,
-    sourceTaskId?: string,
-    sourceBinding?: SessionBinding,
-  ): void {
+  function splitFromSidebarSession(direction: SplitDirection, taskId: string, binding: SessionBinding): void {
     setActionError(null)
-    const nextOrientation = direction === 'up' || direction === 'down' ? 'vertical' : 'horizontal'
-    setLayout((current) => current.splitOrientation === nextOrientation ? current : { ...current, splitOrientation: nextOrientation })
-
-    const resolvedTask = sourceTaskId ? tasks.find((item) => item.id === sourceTaskId) : effectiveFocusedSlot === 'secondary' && secondaryTask ? secondaryTask : task
-    const resolvedBinding = sourceBinding ?? (effectiveFocusedSlot === 'secondary' && secondaryBinding ? secondaryBinding : activeBinding)
-    if (!resolvedTask) return
-
-    if (!resolvedBinding) {
-      rememberChat()
-      const candidate = splitCandidates[0]
-      setSplitPane(candidate ? { taskId: candidate.task.id, sessionKey: sessionBindingKey(candidate.binding) } : { taskId: resolvedTask.id })
-      setFocusedSlot('secondary')
-      showTaskChat()
-      return
-    }
-
-    const sourceKey = sessionBindingKey(resolvedBinding)
-    const sourcePanelKey = `${resolvedTask.id}:${sourceKey}`
-    if (!activeBinding && !moveSource) {
-      selectPrimarySession(resolvedTask.id, resolvedBinding)
-      return
-    }
-
-    rememberChat()
-    // Identify the companion session to occupy the opposite pane.
-    let anchor: { taskId: string; sessionKey: string } | undefined
-    if (task && activeBinding && activePanelKey !== sourcePanelKey) {
-      anchor = { taskId: task.id, sessionKey: sessionBindingKey(activeBinding) }
-    } else if (secondaryTask && secondaryBinding && secondaryPanelKey !== sourcePanelKey) {
-      anchor = { taskId: secondaryTask.id, sessionKey: sessionBindingKey(secondaryBinding) }
-    } else {
-      const other = splitCandidates.find((item) => `${item.task.id}:${sessionBindingKey(item.binding)}` !== sourcePanelKey)
-      if (other) anchor = { taskId: other.task.id, sessionKey: sessionBindingKey(other.binding) }
-    }
-
-    const placeFirst = direction === 'up' || direction === 'left'
-    if (!moveSource && sourcePanelKey === activePanelKey && !placeFirst) {
-      // Standard "Split Right" / "Split Down" on the primary session: keep source on left/top, open companion on right/bottom.
-      setSplitPane(anchor ? { taskId: anchor.taskId, sessionKey: anchor.sessionKey } : { taskId: resolvedTask.id })
-      setFocusedSlot('secondary')
-      showTaskChat()
-      return
-    }
-
-    if (placeFirst) {
-      setPrimarySlotSelection(resolvedTask.id, sourceKey)
-      setSplitPane(anchor ? { taskId: anchor.taskId, sessionKey: anchor.sessionKey } : { taskId: resolvedTask.id })
-      setFocusedSlot('primary')
-    } else if (anchor) {
-      setPrimarySlotSelection(anchor.taskId, anchor.sessionKey)
-      setSplitPane({ taskId: resolvedTask.id, sessionKey: sourceKey })
-      setFocusedSlot('secondary')
-    } else {
-      setPrimarySlotSelection(resolvedTask.id, sourceKey)
-      setSplitPane({ taskId: resolvedTask.id })
-      setFocusedSlot('secondary')
-    }
+    const sessionKey = sessionBindingKey(binding)
+    applyTreeChange((current) => splitPaneGroup(current, current.activeGroupId, direction, { taskId, sessionKey }))
     showTaskChat()
   }
 
-  function toggleSplitOrientation(): void {
-    setLayout((current) => ({
-      ...current,
-      splitOrientation: current.splitOrientation === 'vertical' ? 'horizontal' : 'vertical',
-    }))
-  }
-
-  function swapSplitPanes(): void {
-    if (!task || !activeBinding || !secondaryTask || !secondaryBinding) return
-    rememberChat()
-    const priorPrimaryTask = task.id
-    const priorPrimaryKey = sessionBindingKey(activeBinding)
-    const nextPrimaryKey = sessionBindingKey(secondaryBinding)
-    setPrimarySlotSelection(secondaryTask.id, nextPrimaryKey)
-    setSplitPane({ taskId: priorPrimaryTask, sessionKey: priorPrimaryKey })
-    showTaskChat()
-  }
-
-  function closeSplitSlot(slot: 'primary' | 'secondary'): void {
-    rememberChat()
-    if (slot === 'primary' && secondaryTask && secondaryBinding) {
-      setPrimarySlotSelection(secondaryTask.id, sessionBindingKey(secondaryBinding))
-    }
-    setSplitPane(null)
-    setFocusedSlot('primary')
-  }
-
-  async function popOutSession(taskId: string, binding: SessionBinding, draft?: string, mode: SessionWindowMode = 'move'): Promise<boolean> {
+  async function popOutTaskPage({
+    groupId,
+    taskId,
+    binding,
+    draft,
+    mode,
+  }: {
+    groupId: string
+    taskId: string
+    binding?: SessionBinding
+    draft?: string
+    mode: SessionWindowMode
+  }): Promise<boolean> {
     const windowsBridge = window.desktop?.windows
     if (!windowsBridge) {
-      setActionError('Opening a separate session window requires the desktop app.')
+      setActionError('Opening a separate task window requires the desktop app.')
       return false
     }
     setActionError(null)
     try {
-      const key = sessionBindingKey(binding)
-      const targetPanelKey = `${taskId}:${key}`
-      const trimmedDraft = draft?.trim() ? draft : undefined
+      const sessionKey = binding ? sessionBindingKey(binding) : undefined
+      const fallbackDraft = draft ?? (sessionKey ? draftsRef.current[`${groupId}:${taskId}:${sessionKey}`] : undefined)
+      const trimmedDraft = fallbackDraft?.trim() ? fallbackDraft : undefined
       const result = await windowsBridge.open({
         taskId,
-        target: binding.agentHost,
+        ...(binding ? { target: binding.agentHost, sessionKey } : {}),
         mode,
         ...(mode === 'move' && trimmedDraft ? { draft: trimmedDraft } : {}),
       })
       if (!result.opened) return false
-      if (mode === 'move' && splitActive) {
-        if (targetPanelKey === secondaryPanelKey) {
-          setSplitPane(null)
-          setFocusedSlot('primary')
-        } else if (targetPanelKey === activePanelKey && secondaryTask && secondaryBinding) {
-          setPrimarySlotSelection(secondaryTask.id, sessionBindingKey(secondaryBinding))
-          setSplitPane(null)
-          setFocusedSlot('primary')
-        }
+      if (mode === 'move') {
+        applyTreeChange((current) => {
+          const source = findPaneGroup(current.root, groupId)
+          if (!source) return current
+          return closeTaskPageInGroup(current, groupId, taskId)
+        })
+        return true
       }
-      return mode === 'move'
+      return false
     } catch (failure) {
-      setActionError(failure instanceof Error ? failure.message : 'The session window could not be opened.')
+      setActionError(failure instanceof Error ? failure.message : 'The task window could not be opened.')
       return false
     }
   }
@@ -827,57 +640,8 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   function focusPopOut(taskId: string, binding: SessionBinding): void {
     setActionError(null)
     void window.desktop?.windows?.focus({ taskId, target: binding.agentHost }).catch((failure: unknown) => {
-      setActionError(failure instanceof Error ? failure.message : 'The session window could not be focused.')
+      setActionError(failure instanceof Error ? failure.message : 'The task window could not be focused.')
     })
-  }
-
-  function dockPopOut(taskId: string, binding: SessionBinding): void {
-    setActionError(null)
-    void window.desktop?.windows?.dock({ taskId, target: binding.agentHost }).catch((failure: unknown) => {
-      setActionError(failure instanceof Error ? failure.message : 'The session window could not be docked.')
-    })
-  }
-
-  function onChatDragOver(event: DragEvent<HTMLDivElement>): void {
-    if (taskAgentOpen || !event.dataTransfer.types.includes(SESSION_BINDING_DRAG_MIME)) return
-    event.preventDefault()
-    event.dataTransfer.dropEffect = 'move'
-    const bounds = event.currentTarget.getBoundingClientRect()
-    if (!activeBinding || !bounds.width || !bounds.height) {
-      setChatDropZone((current) => current === 'center' ? current : 'center')
-      return
-    }
-    const nx = (event.clientX - bounds.left) / bounds.width
-    const ny = (event.clientY - bounds.top) / bounds.height
-    const zone: SplitDirection | 'center' = ny < 0.22 ? 'up' : ny > 0.78 ? 'down' : nx < 0.26 ? 'left' : nx > 0.74 ? 'right' : 'center'
-    setChatDropZone((current) => current === zone ? current : zone)
-  }
-
-  function onChatDragLeave(event: DragEvent<HTMLDivElement>): void {
-    if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return
-    const bounds = event.currentTarget.getBoundingClientRect()
-    if (event.clientX >= bounds.left && event.clientX < bounds.right && event.clientY >= bounds.top && event.clientY < bounds.bottom) return
-    setChatDropZone(undefined)
-  }
-
-  function onChatDrop(event: DragEvent<HTMLDivElement>): void {
-    const zone = chatDropZone
-    setChatDropZone(undefined)
-    if (taskAgentOpen || !event.dataTransfer.types.includes(SESSION_BINDING_DRAG_MIME)) return
-    event.preventDefault()
-    try {
-      const payload = JSON.parse(event.dataTransfer.getData(SESSION_BINDING_DRAG_MIME)) as { taskId?: string; key?: string }
-      if (!payload.taskId || !payload.key) return
-      const droppedBinding = (bindings[payload.taskId] ?? []).find((item) => sessionBindingKey(item) === payload.key)
-      if (!droppedBinding) return
-      if (zone && zone !== 'center' && activeBinding) {
-        splitSession(zone, true, payload.taskId, droppedBinding)
-      } else {
-        selectSession(payload.taskId, droppedBinding)
-      }
-    } catch {
-      // Ignore malformed drag payloads.
-    }
   }
 
   async function linkAgentHost(session: AgentHostSession): Promise<void> {
@@ -893,7 +657,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     if (!scope.active) throw new Error('The original workspace was closed. Reopen it to view the saved session link.')
     setAgentHostRevision((value) => value + 1)
     setActionError(null)
-    if (sessionView.active && (currentTaskId.current === taskId || (splitActive && effectiveFocusedSlot === 'secondary'))) selectSession(taskId, binding)
+    if (sessionView.active && currentTaskId.current === taskId) selectSession(taskId, binding)
   }
 
   async function agentHostCreated(taskId: string, session: AgentHostSession): Promise<void> {
@@ -905,20 +669,21 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     if (!snapshot) throw new Error('Reload the saved Agent Host binding before opening the created chat.')
     const linked = taskSessionLinks(snapshot.document.bindings, taskId).find((link) => agentHostKey(link) === agentHostKey(session))
     if (!linked) throw new Error('The task binding no longer includes the created chat. No replacement chat was selected.')
-    if (sessionView.active && (currentTaskId.current === taskId || (splitActive && effectiveFocusedSlot === 'secondary'))) selectSession(taskId, { id: session.sessionId, title: session.title, owner: session.owner, agentHost: linked })
+    if (sessionView.active && currentTaskId.current === taskId) selectSession(taskId, { id: session.sessionId, title: session.title, owner: session.owner, agentHost: linked })
   }
 
   async function detachSession(taskId: string, binding: SessionBinding): Promise<void> {
     setActionError(null)
     const key = sessionBindingKey(binding)
-    const panelKey = `${taskId}:${key}`
+    const panelSuffix = `:${taskId}:${key}`
     if (!bindings[taskId]?.some((current) => sessionBindingKey(current) === key)) throw new Error('The task binding changed. Review the current Agent Host chat before detaching.')
-    if (busyPanels[panelKey]) throw new Error('Wait for the current Agent Host operation to finish before detaching this session.')
-    if (popoutPanelKeys.has(panelKey)) await window.desktop?.windows?.dock({ taskId, target: binding.agentHost }).catch(() => undefined)
+    if (Object.keys(busyPanels).some((panelKey) => panelKey.endsWith(panelSuffix))) throw new Error('Wait for the current Agent Host operation to finish before detaching this session.')
+    const popoutKey = `${taskId}:${key}`
+    if (popoutPanelKeys.has(popoutKey)) await window.desktop?.windows?.dock({ taskId, target: binding.agentHost }).catch(() => undefined)
     await links.detach(taskId, binding)
     if (!creationLifetime.current.active) return
-    setSplitPane((current) => current?.taskId === taskId && current.sessionKey === key ? { taskId } : current)
-    selection.clearSession(taskId, key, selectedSessions[taskId] === key || taskId === selectedId && key === activeKey)
+    setPaneTree((current) => clearDetachedSessionFromTree(current, taskId, key))
+    selection.clearSession(taskId, key, focusedGroup.sessions[taskId] === key || taskId === selectedId && key === activeKey)
   }
 
   async function syncLinksNow(): Promise<void> {
@@ -947,6 +712,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   }
 
   const workspaceControls = <WorkspacePicker state={workspaces.state} busy={workspaces.busy} locked={!workspaces.available || workspaceLocked} onOpen={openWorkspace} onSelect={selectWorkspace} onRefresh={() => { if (!workspaceLocked) void workspaces.refresh() }} onPublish={() => { if (workspace && !workspaceLocked) onPublishRepository(workspace) }} />
+  const sidebarParentSplit = sidebarContextMenu ? findParentSplit(effectiveTree.root, sidebarContextMenu.groupId) : undefined
 
   return <div className="workbench" data-theme={layout.theme} data-compact={compact} aria-busy={workspaces.busy} inert={workspaces.busy} onFocusCapture={(event) => {
     if (!compact) {
@@ -994,15 +760,16 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
         localOwnerId={links.localOwner?.clientId} cachedTitles={sessionTitles.titles} sessionTimestamps={sessionTitles.timestamps} historyTransfers={historyTransfers}
         titleCacheError={sessionTitles.error} onTitles={sessionTitles.remember} busy={links.busy || syncingLinks}
         onSelect={sidebarTask ? (binding) => selectSession(sidebarTask.id, binding) : undefined}
-        onSplit={sidebarTask ? (binding, direction = 'right') => splitSession(direction, true, sidebarTask.id, binding) : undefined}
+        onSplit={sidebarTask ? (binding, direction = 'right') => splitFromSidebarSession(direction, sidebarTask.id, binding) : undefined}
         onPopOut={sidebarTask && window.desktop?.windows ? (binding) => {
           const panelKey = `${sidebarTask.id}:${sessionBindingKey(binding)}`
           if (popoutPanelKeys.has(panelKey)) focusPopOut(sidebarTask.id, binding)
-          else void popOutSession(sidebarTask.id, binding, undefined, 'move')
+          else void popOutTaskPage({ groupId: focusedGroup.id, taskId: sidebarTask.id, binding, mode: 'copy' })
         } : undefined}
-        onSessionContextMenu={sidebarTask ? (binding, anchor) => setContextMenu({
+        onSessionContextMenu={sidebarTask ? (binding, anchor) => setSidebarContextMenu({
           x: anchor.x,
           y: anchor.y,
+          groupId: focusedGroup.id,
           taskId: sidebarTask.id,
           binding,
         }) : undefined}
@@ -1013,172 +780,63 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
       {!compact && sidebarVisible && <WorkbenchSash layout={layout} panel="sidebar" onResize={(width) => changePanelWidth('sidebar', width)} onReset={() => changePanelWidth('sidebar', defaultLayout.sidebarWidth)} />}
 
       <Activity mode={compact && sidebarVisible ? 'hidden' : 'visible'}><main className="main-panel" aria-label="Task workspace" aria-keyshortcuts="Control+Shift+PageUp Control+Shift+PageDown">
-        <div className="editor-tabs" role="tablist" aria-label="Open tasks" aria-keyshortcuts="Control+PageUp Control+PageDown">
-          {openTasks.map((id, index) => {
-            const item = tasks.find((value) => value.id === id)!
-            return <div key={id} className={`editor-tab ${id === selectedId ? 'selected' : ''}`} onContextMenu={(event) => {
-              const list = bindings[id] ?? []
-              if (!list.length) return
-              const remembered = Object.hasOwn(selectedSessions, id) ? selectedSessions[id] : undefined
-              const tabBinding = (remembered ? list.find((entry) => sessionBindingKey(entry) === remembered) : undefined) ?? list[0]
-              if (!tabBinding) return
-              event.preventDefault()
-              setContextMenu({ x: event.clientX, y: event.clientY, taskId: id, binding: tabBinding })
-            }}>
-              <button type="button" role="tab" title={item.title} aria-selected={id === selectedId} aria-controls="active-task" tabIndex={id === selectedId ? 0 : -1} onClick={() => selectTask(id)} onKeyDown={(event) => {
-                if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
-                  event.preventDefault()
-                  const next = (index + (event.key === 'ArrowRight' ? 1 : openTasks.length - 1)) % openTasks.length
-                  selectTask(openTasks[next])
-                  const buttons = event.currentTarget.closest('[role="tablist"]')?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
-                  buttons?.[next]?.focus()
-                }
-              }}><Icon name={item.kind === 'epic' ? 'layers' : 'file-text'} /><span>{item.title}</span></button>
-              <IconButton icon="close" label={`Close ${item.title}`} onClick={() => closeTask(id)} />
-            </div>
-          })}
-        </div>
+        {(!chatVisible || taskAgentOpen) && (
+          <div className="editor-tabs" role="tablist" aria-label="Open tasks" aria-keyshortcuts="Control+PageUp Control+PageDown">
+            {openTasks.map((id, index) => {
+              const item = tasks.find((value) => value.id === id)
+              if (!item) return null
+              return <div key={id} className={`editor-tab ${id === selectedId ? 'selected' : ''}`}>
+                <button type="button" role="tab" title={item.title} aria-selected={id === selectedId} aria-controls="active-task" tabIndex={id === selectedId ? 0 : -1} onClick={() => selectTask(id)} onKeyDown={(event) => {
+                  if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+                    event.preventDefault()
+                    const next = (index + (event.key === 'ArrowRight' ? 1 : openTasks.length - 1)) % openTasks.length
+                    selectTask(openTasks[next])
+                    const buttons = event.currentTarget.closest('[role="tablist"]')?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+                    buttons?.[next]?.focus()
+                  }
+                }}><Icon name={item.kind === 'epic' ? 'layers' : 'file-text'} /><span>{item.title}</span></button>
+                <IconButton icon="close" label={`Close ${item.title}`} onClick={() => closeTask(id)} />
+              </div>
+            })}
+          </div>
+        )}
         <div id="active-task" className="active-task" data-chat-visible={chatVisible}>
-          <Activity mode={chatVisible ? 'visible' : 'hidden'}>
-            <div className="chat-workspace" data-split={splitLayoutActive || undefined} data-split-orientation={splitLayoutActive ? layout.splitOrientation : undefined}
-              style={splitLayoutActive ? { '--split-left-grow': layout.splitRatio, '--split-right-grow': 1 - layout.splitRatio } as CSSProperties : undefined}
-              onDragOver={onChatDragOver} onDragLeave={onChatDragLeave} onDrop={onChatDrop}>
-              {compact && splitActive && !taskAgentOpen && <div className="compact-split-switcher" role="tablist" aria-label="Split chat panes">
-                <button type="button" role="tab" aria-selected={effectiveFocusedSlot === 'primary'} onClick={() => setFocusedSlot('primary')}>
-                  <Icon name="layout-panel-left" /><span>{activeBinding ? sessionBindingTitle(activeBinding, sessionTitles.titles) : layout.splitOrientation === 'vertical' ? 'Top pane' : 'Left pane'}</span>
-                </button>
-                <button type="button" role="tab" aria-selected={effectiveFocusedSlot === 'secondary'} onClick={() => setFocusedSlot('secondary')}>
-                  <Icon name="layout-panel-right" /><span>{secondaryBinding ? sessionBindingTitle(secondaryBinding, sessionTitles.titles) : layout.splitOrientation === 'vertical' ? 'Bottom pane' : 'Right pane'}</span>
-                </button>
-                <IconButton icon="close" label="Close split pane" onClick={() => closeSplitSlot('secondary')} />
-              </div>}
-              {chatPanels.map((panel) => {
-                const isPrimary = !taskAgentOpen && panel.key === activePanelKey && !primaryPoppedOut
-                const isSecondary = !taskAgentOpen && splitActive && panel.key === secondaryPanelKey && !secondaryPoppedOut
-                const visible = compact && splitActive
-                  ? effectiveFocusedSlot === 'secondary' ? isSecondary : isPrimary
-                  : isPrimary || isSecondary
-                const slot: 'single' | 'primary' | 'secondary' = !splitLayoutActive ? 'single' : isSecondary ? 'secondary' : 'primary'
-                const slotFocused = isSecondary ? effectiveFocusedSlot === 'secondary' : effectiveFocusedSlot === 'primary'
-                return <Activity key={panel.key} mode={visible ? 'visible' : 'hidden'}>
-                  <AgentHostPanel
-                    task={panel.task}
-                    target={panel.binding.agentHost}
-                    paneSlot={slot}
-                    splitOrientation={layout.splitOrientation}
-                    showTaskBadge={splitActive && Boolean(secondaryTask && task && secondaryTask.id !== task.id)}
-                    closeLabel={splitActive ? 'Close split pane' : 'Hide chat panel'}
-                    restoredDraft={restoredDrafts[panel.key]}
-                    headerTarget={unifiedChatHeader && isPrimary ? chatHeaderTarget : undefined}
-                    cachedTitle={sessionTitles.titles[agentHostKey(panel.binding.agentHost)]}
-                    onTitles={sessionTitles.remember}
-                    active={visible && (!splitActive || slotFocused)}
-                    connectionRevision={agentHostRevision}
-                    onActivatePane={splitActive ? () => setFocusedSlot(isSecondary ? 'secondary' : 'primary') : undefined}
-                    onSplitRight={!splitActive ? () => splitSession('right', false, panel.task.id, panel.binding) : undefined}
-                    onSplitDown={!splitActive ? () => splitSession('down', false, panel.task.id, panel.binding) : undefined}
-                    onToggleSplitOrientation={splitActive ? toggleSplitOrientation : undefined}
-                    onSwapSplit={splitActive && activeBinding && secondaryBinding ? swapSplitPanes : undefined}
-                    onPopOut={window.desktop?.windows ? (draft) => popOutSession(panel.task.id, panel.binding, draft, 'move') : undefined}
-                    onHeaderContextMenu={(anchor, getDraft, clearDraft) => setContextMenu({
-                      x: anchor.x,
-                      y: anchor.y,
-                      taskId: panel.task.id,
-                      binding: panel.binding,
-                      slot,
-                      getDraft,
-                      clearDraft,
-                    })}
-                    onDetach={() => openSessionDetach(panel.task.id, panel.binding)}
-                    onClose={() => { if (splitActive) closeSplitSlot(isSecondary ? 'secondary' : 'primary'); else toggleChat() }}
-                    onDevices={window.remoteVSCode ? () => setDialog('remote-devices') : undefined}
-                    onSessions={() => { if (splitActive) setFocusedSlot(isSecondary ? 'secondary' : 'primary'); openAgentHostSessions() }}
-                    panelKey={panel.key}
-                    onBusy={reportPanelBusy}
-                  />
-                </Activity>
-              })}
-              {splitLayoutActive && <ChatSplitSash ratio={layout.splitRatio} orientation={layout.splitOrientation} onResize={(ratio) => setLayout((current) => ({ ...current, splitRatio: ratio }))} onReset={() => setLayout((current) => ({ ...current, splitRatio: defaultLayout.splitRatio }))} />}
-              {!taskAgentOpen && task && activeBinding && primaryPoppedOut && (!compact || !splitActive || effectiveFocusedSlot === 'primary') && <PoppedOutSessionPane
-                slot={splitLayoutActive ? 'primary' : 'single'}
-                focused={effectiveFocusedSlot === 'primary'}
-                task={task}
-                binding={activeBinding}
-                title={sessionTitles.titles[agentHostKey(activeBinding.agentHost)] || (activeBinding.title !== 'Agent Host' ? activeBinding.title : 'Original Host chat')}
-                ownerDisplay={machineLabel(activeBinding.owner, aliases)}
-                alternatives={taskBindings.filter((item) => !movedPopoutPanelKeys.has(`${task.id}:${sessionBindingKey(item)}`) && `${task.id}:${sessionBindingKey(item)}` !== secondaryPanelKey).map((item) => ({ binding: item, label: sessionBindingTitle(item, sessionTitles.titles) }))}
-                onActivate={splitActive ? () => setFocusedSlot('primary') : undefined}
-                onFocusWindow={() => focusPopOut(task.id, activeBinding)}
-                onDockHere={() => dockPopOut(task.id, activeBinding)}
-                onSelectAlternative={(candidate) => selectPrimarySession(task.id, candidate)}
-                onClose={() => { if (splitActive) closeSplitSlot('primary'); else toggleChat() }}
-                closeLabel={splitActive ? 'Close split pane' : 'Hide chat panel'}
-              />}
-              {!taskAgentOpen && splitActive && secondaryTask && secondaryBinding && secondaryPoppedOut && (!compact || effectiveFocusedSlot === 'secondary') && <PoppedOutSessionPane
-                slot={splitLayoutActive ? 'secondary' : 'single'}
-                focused={effectiveFocusedSlot === 'secondary'}
-                task={secondaryTask}
-                binding={secondaryBinding}
-                title={sessionTitles.titles[agentHostKey(secondaryBinding.agentHost)] || (secondaryBinding.title !== 'Agent Host' ? secondaryBinding.title : 'Original Host chat')}
-                ownerDisplay={machineLabel(secondaryBinding.owner, aliases)}
-                alternatives={(bindings[secondaryTask.id] ?? []).filter((item) => !movedPopoutPanelKeys.has(`${secondaryTask.id}:${sessionBindingKey(item)}`) && `${secondaryTask.id}:${sessionBindingKey(item)}` !== activePanelKey).map((item) => ({ binding: item, label: sessionBindingTitle(item, sessionTitles.titles) }))}
-                onActivate={() => setFocusedSlot('secondary')}
-                onFocusWindow={() => focusPopOut(secondaryTask.id, secondaryBinding)}
-                onDockHere={() => dockPopOut(secondaryTask.id, secondaryBinding)}
-                onSelectAlternative={(candidate) => setSplitPane({ taskId: secondaryTask.id, sessionKey: sessionBindingKey(candidate) })}
-                onClose={() => closeSplitSlot('secondary')}
-                closeLabel="Close split pane"
-              />}
-              {!taskAgentOpen && splitActive && !secondaryBinding && (!compact || effectiveFocusedSlot === 'secondary') && <SplitSessionPickerPane
-                slot={splitLayoutActive ? 'secondary' : 'single'}
-                focused={effectiveFocusedSlot === 'secondary'}
-                orientation={layout.splitOrientation}
-                task={secondaryTask}
-                candidates={splitCandidates}
-                onActivate={() => setFocusedSlot('secondary')}
-                onPick={(pickedTaskId, pickedBinding) => {
-                  rememberChat()
-                  setSplitPane({ taskId: pickedTaskId, sessionKey: sessionBindingKey(pickedBinding) })
-                  setFocusedSlot('secondary')
-                  showTaskChat()
-                }}
-                onBrowseSessions={() => { setFocusedSlot('secondary'); openAgentHostSessions() }}
-                onClose={() => closeSplitSlot('secondary')}
-              />}
-              {taskAgentOpen && workspace && <LocalTaskAgent workspace={workspace} workspaces={workspaces} onCreated={taskCreated} onReviewDraft={() => setTaskCreationMode('draft')} onTaskChat={task ? showTaskChat : undefined} onClose={toggleChat} onBusy={setTaskAgentBusy} />}
-              {!taskAgentOpen && !agentHostBinding && (!compact || !splitActive || effectiveFocusedSlot === 'primary') && <aside className="chat-panel empty-chat" data-pane-slot={splitLayoutActive ? 'primary' : undefined} aria-label="Task chat" onPointerDownCapture={splitActive ? () => setFocusedSlot('primary') : undefined}>
-                <header className="panel-header"><span>AGENT HOST</span><IconButton icon="close" label={splitActive ? 'Close split pane' : 'Hide chat panel'} onClick={() => { if (splitActive) closeSplitSlot('primary'); else toggleChat() }} /></header>
-                <div className="chat-context"><Icon name="server-environment" /><div><strong>{task?.title ?? 'Native Agent Host chats'}</strong><span>{task?.id ?? 'No task selected'}</span></div></div>
-                <div className="empty-workbench">
-                  <span className="chat-welcome-icon"><Icon name={task && taskAwaitingSyncCount > 0 ? 'sync' : 'comment-discussion'} /></span>
-                  {task && taskAwaitingSyncCount > 0 ? <>
-                    <h2>Session links waiting for Git sync</h2>
-                    <p role="status">{taskBindings.length
-                      ? `A remote session binding change for ${task.id} is waiting for the publishing device to finish Git synchronization. ${taskBindings.length} confirmed ${taskBindings.length === 1 ? 'session remains' : 'sessions remain'} available in the Agent Host sessions sidebar.`
-                      : `A remote session binding change for ${task.id} is waiting for the publishing device to finish Git synchronization. Existing links were not deleted; inspect or cancel pending changes in Remote devices if the publishing device is unavailable.`}</p>
-                    {gitSyncStatus?.error && <p className="copilot-error" role="alert">{gitSyncStatus.error}</p>}
-                    <div className="workspace-welcome-actions">
-                      {window.remoteVSCode?.gitSync && <button type="button" className="secondary-button" disabled={links.busy || syncingLinks} onClick={() => { void syncLinksNow() }}><Icon name="sync" /><span>{syncingLinks ? 'Syncing...' : 'Sync now'}</span></button>}
-                      {workspace && window.remoteVSCode && <button type="button" className="secondary-button" onClick={() => setDialog('remote-devices')}><Icon name="remote" /><span>Remote devices</span></button>}
-                      {workspace && <button type="button" className="primary-button" disabled={links.busy} onClick={openAgentHostSessions}>Browse Agent Host sessions</button>}
-                    </div>
-                  </> : <>
-                    <h2>{task ? 'Keep the conversation moving' : 'Your task conversations, front and center'}</h2>
-                    <p>{!task ? 'Select a task to open its Agent Host chat.' : taskBindings.length ? `Choose a linked session for ${task.id} in the Agent Host sessions sidebar.` : `No Agent Host chat is linked to ${task.id}. Link an existing chat or create one from the Agent Host sessions sidebar.`}</p>
-                    {missingSelectedSession && <p role="status">The last selected session is no longer linked to this task. Choose a current session; no replacement was opened.</p>}
-                    <p className="muted">Local SDK and Companion sessions are not supported. Existing session data is left untouched.</p>
-                    {task && workspace && <button type="button" className="primary-button" disabled={links.busy} onClick={openAgentHostSessions}>Browse Agent Host sessions</button>}
-                  </>}
-                </div>
-              </aside>}
-              {chatDropZone && <div className="chat-drop-overlay" data-zone={chatDropZone} aria-hidden="true">
-                <div className="chat-drop-badge">
-                  <Icon name={chatDropZone === 'up' || chatDropZone === 'down' ? 'split-vertical' : chatDropZone === 'left' || chatDropZone === 'right' ? 'split-horizontal' : 'comment-discussion'} />
-                  <span>{chatDropZone === 'up' ? 'Split Up' : chatDropZone === 'down' ? 'Split Down' : chatDropZone === 'left' ? 'Split Left' : chatDropZone === 'right' ? 'Split Right' : 'Open here'}</span>
-                </div>
-              </div>}
-            </div>
+          <Activity mode={chatVisible && !taskAgentOpen ? 'visible' : 'hidden'}>
+            <PaneWorkspaceGrid
+              tree={effectiveTree}
+              onTreeChange={applyTreeChange}
+              tasks={tasks}
+              bindings={bindings}
+              rememberedSessions={selection.sessions}
+              orderedBindingsForTask={orderedBindingsForTask}
+              awaitingSyncCountForTask={awaitingSyncCountForTask}
+              gitSyncError={gitSyncStatus?.error}
+              syncingLinks={syncingLinks}
+              linksBusy={links.busy}
+              linksReady={links.ready}
+              workspaceAvailable={Boolean(workspace)}
+              theme={layout.theme}
+              compact={compact}
+              isPopupWindow={false}
+              unifiedHeaderTarget={unifiedChatHeader ? chatHeaderTarget : null}
+              connectionRevision={agentHostRevision}
+              cachedTitles={sessionTitles.titles}
+              restoredDrafts={restoredDrafts}
+              onTitles={sessionTitles.remember}
+              onDraftSnapshot={handleDraftSnapshot}
+              onBusyChange={reportPanelBusy}
+              onPopOutTaskPage={popOutTaskPage}
+              onBrowseSessions={() => openAgentHostSessions()}
+              onOpenSessionDetach={openSessionDetach}
+              onSyncNow={window.remoteVSCode?.gitSync ? () => { void syncLinksNow() } : undefined}
+              onOpenDevices={workspace && window.remoteVSCode ? () => setDialog('remote-devices') : undefined}
+              onCloseSingleChat={toggleChat}
+              onTaskChatActivated={showTaskChat}
+            />
           </Activity>
+          {taskAgentOpen && workspace && chatVisible && (
+            <LocalTaskAgent workspace={workspace} workspaces={workspaces} onCreated={taskCreated} onReviewDraft={() => setTaskCreationMode('draft')} onTaskChat={task ? showTaskChat : undefined} onClose={toggleChat} onBusy={setTaskAgentBusy} />
+          )}
           {!compact && chatVisible && detailsVisible && <WorkbenchSash layout={layout} panel="details" onResize={(width) => changePanelWidth('details', width)} onReset={() => changePanelWidth('details', defaultLayout.detailsWidth)} />}
           <Activity mode={detailsVisible ? 'visible' : 'hidden'}><aside className="task-details-panel" aria-label="Task details">
             <header className="panel-header"><span>TASK DETAILS</span><IconButton icon="layout-sidebar-right-off" label="Hide task details" onClick={toggleDetails} /></header>
@@ -1198,34 +856,40 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
       </main></Activity>
     </WorkbenchBody>
 
-    <footer className="statusbar" aria-label="Workbench status"><span className="local-status"><Icon name={taskAgentOpen || focusedBinding?.agentHost ? 'server-environment' : workspace ? 'folder' : 'repo'} />{taskAgentOpen ? 'TASK CREATION' : splitActive ? 'SPLIT CHAT' : focusedBinding?.agentHost ? 'AGENT HOST' : workspace ? 'LOCAL WORKSPACE' : 'NO WORKSPACE'}</span><span><Icon name="checklist" />{tasks.length} tasks</span><span>{selectedId ?? 'No task selected'}</span>{popoutWindows.length > 0 && <span><Icon name="multiple-windows" />{popoutWindows.length} {popoutWindows.length === 1 ? 'window' : 'windows'}</span>}<span className="statusbar-spacer" /><span className="response-status" role="status" title={taskAgentOpen ? undefined : focusedBinding?.agentHost.owner.machineName}>{workspaces.busy ? 'Loading workspace...' : links.busy ? 'Saving or loading session links...' : sessionBusy ? 'Agent Host active' : taskAgentOpen ? 'Local task creation chat' : focusedBinding?.agentHost ? `Agent Host @ ${machineLabel(focusedBinding.agentHost.owner, aliases)}` : workspace ? 'Select an Agent Host chat' : 'Create or open a task repository'}</span><button type="button" onClick={taskAgentOpen ? showChat : openAgentHostSessions}><Icon name={taskAgentOpen ? 'comment-discussion' : focusedBinding?.agentHost ? 'link' : 'plug'} />{taskAgentOpen ? 'Task creation chat' : focusedBinding?.agentHost ? 'Agent Host linked' : 'No Agent Host linked'}</button><span className="platform-status">{desktopError ? 'Desktop bridge error' : desktop ? `Desktop · ${desktop.version}` : 'Browser preview'}</span></footer>
+    <footer className="statusbar" aria-label="Workbench status"><span className="local-status"><Icon name={taskAgentOpen || focusedBinding?.agentHost ? 'server-environment' : workspace ? 'folder' : 'repo'} />{taskAgentOpen ? 'TASK CREATION' : splitActive ? `SPLIT (${paneGroups.length})` : focusedBinding?.agentHost ? 'AGENT HOST' : workspace ? 'LOCAL WORKSPACE' : 'NO WORKSPACE'}</span><span><Icon name="checklist" />{tasks.length} tasks</span><span>{selectedId ?? 'No task selected'}</span>{popoutWindows.length > 0 && <span><Icon name="multiple-windows" />{popoutWindows.length} {popoutWindows.length === 1 ? 'window' : 'windows'}</span>}<span className="statusbar-spacer" /><span className="response-status" role="status" title={taskAgentOpen ? undefined : focusedBinding?.agentHost.owner.machineName}>{workspaces.busy ? 'Loading workspace...' : links.busy ? 'Saving or loading session links...' : sessionBusy ? 'Agent Host active' : taskAgentOpen ? 'Local task creation chat' : focusedBinding?.agentHost ? `Agent Host @ ${machineLabel(focusedBinding.agentHost.owner, aliases)}` : workspace ? 'Select an Agent Host chat' : 'Create or open a task repository'}</span><button type="button" onClick={taskAgentOpen ? showChat : openAgentHostSessions}><Icon name={taskAgentOpen ? 'comment-discussion' : focusedBinding?.agentHost ? 'link' : 'plug'} />{taskAgentOpen ? 'Task creation chat' : focusedBinding?.agentHost ? 'Agent Host linked' : 'No Agent Host linked'}</button><span className="platform-status">{desktopError ? 'Desktop bridge error' : desktop ? `Desktop · ${desktop.version}` : 'Browser preview'}</span></footer>
 
     <UpdateNotice updates={updates} />
     {dialog === 'updates' && <Dialog title="About and updates" onClose={() => setDialog(null)}><UpdateSettings updates={updates} /></Dialog>}
     {taskCreationMode && workspace && <div data-update-blocker="Finish or close task creation before updating."><TaskCreationDialog workspace={workspace} workspaces={workspaces} initialMode={taskCreationMode} onCreated={taskCreated} onAgent={() => { setTaskCreationMode(null); setTaskAgentOpen(true); showChat() }} onClose={() => setTaskCreationMode(null)} /></div>}
     {dialog === 'quick-open' && <Dialog title="Quick open" className="quick-open" onClose={() => setDialog(null)}><input className="quick-input" aria-label="Find a task" placeholder="Type a task name or ID…" value={quickQuery} onChange={(event) => setQuickQuery(event.target.value)} autoFocus /><div className="quick-results">{filterTasks(tasks, quickQuery, 'all').map((item) => <button type="button" key={item.id} onClick={() => { selectTask(item.id); setDialog(null) }}><Icon name="file-text" /><strong>{item.title}</strong><span>{item.id}</span></button>)}{!filterTasks(tasks, quickQuery, 'all').length && <p>No matching tasks.</p>}</div><p className="dialog-hint">Tab to a result · Enter to open · Esc to close</p></Dialog>}
 
-    {dialog === 'settings' && <Dialog title="Preferences" onClose={() => setDialog(null)}><section className="settings-section"><h3>Appearance</h3><div className="theme-options">{(['dark', 'light'] as const).map((theme) => <label key={theme}><input type="radio" name="theme" checked={layout.theme === theme} onChange={() => setLayout((value) => ({ ...value, theme }))} /><span>{theme === 'dark' ? 'Dark' : 'Light'}</span></label>)}</div><button type="button" className="secondary-button" onClick={() => { setLayout((value) => ({ ...defaultLayout, theme: value.theme })); setSplitPane(null); setFocusedSlot('primary'); setCompactPanel(primaryPanel) }}>Reset panel layout</button></section><section className="settings-section"><h3>Integrations</h3><div className="integration-row"><span>Native Agent Host (AHP)</span><span className="integration-state">{window.agentHost ? 'Desktop API available' : 'Desktop API unavailable'}</span></div><div className="integration-row"><span>Remote devices and automatic workspace links</span><span className="integration-state">{window.remoteVSCode ? 'Desktop API available' : 'Desktop API unavailable'}</span></div></section><section className="settings-section"><h3>Keyboard shortcuts</h3><div className="shortcut-row"><span>New task</span><kbd>Ctrl / ⌘ N</kbd></div><div className="shortcut-row"><span>Quick open</span><kbd>Ctrl / ⌘ P</kbd></div><div className="shortcut-row"><span>Previous task tab</span><kbd>Ctrl PgUp</kbd></div><div className="shortcut-row"><span>Next task tab</span><kbd>Ctrl PgDown</kbd></div><div className="shortcut-row"><span>Previous session in current task</span><kbd>Ctrl Shift PgUp</kbd></div><div className="shortcut-row"><span>Next session in current task</span><kbd>Ctrl Shift PgDown</kbd></div><div className="shortcut-row"><span>Split chat right or switch split focus</span><kbd>Ctrl / ⌘ \</kbd></div><div className="shortcut-row"><span>Split chat down</span><kbd>Ctrl / ⌘ K Ctrl / ⌘ \</kbd></div><div className="shortcut-row"><span>Copy session into new window</span><kbd>Ctrl / ⌘ K O</kbd></div><div className="shortcut-row"><span>Close split chat pane</span><kbd>Ctrl / ⌘ Shift \</kbd></div><div className="shortcut-row"><span>Move session up or down</span><kbd>Alt ↑ / ↓</kbd></div><div className="shortcut-row"><span>Reconnect Agent Host and retry models</span><kbd>F5</kbd></div><div className="shortcut-row"><span>Toggle task sidebar</span><kbd>Ctrl / ⌘ B</kbd></div><div className="shortcut-row"><span>Toggle chat</span><kbd>Ctrl / ⌘ Alt B</kbd></div><div className="shortcut-row"><span>Toggle task details</span><kbd>Ctrl / ⌘ Alt D</kbd></div></section><p className="dialog-hint">{workspace ? `Workspace: ${workspace.root}. Create new tasks in the Explorer; existing task views remain read-only. Session links: immutable Agent Host metadata.` : 'No workspace is selected. Create or open a task repository to get started; nothing is published automatically.'} Icons: Microsoft Codicons · CC BY 4.0.</p></Dialog>}
+    {dialog === 'settings' && <Dialog title="Preferences" onClose={() => setDialog(null)}><section className="settings-section"><h3>Appearance</h3><div className="theme-options">{(['dark', 'light'] as const).map((theme) => <label key={theme}><input type="radio" name="theme" checked={layout.theme === theme} onChange={() => setLayout((value) => ({ ...value, theme }))} /><span>{theme === 'dark' ? 'Dark' : 'Light'}</span></label>)}</div><button type="button" className="secondary-button" onClick={() => { setLayout((value) => ({ ...defaultLayout, theme: value.theme })); applyTreeChange(() => createInitialPaneTree(focusedGroup.openTaskIds, focusedGroup.activeTaskId, focusedGroup.sessions)); setCompactPanel(primaryPanel) }}>Reset panel layout</button></section><section className="settings-section"><h3>Integrations</h3><div className="integration-row"><span>Native Agent Host (AHP)</span><span className="integration-state">{window.agentHost ? 'Desktop API available' : 'Desktop API unavailable'}</span></div><div className="integration-row"><span>Remote devices and automatic workspace links</span><span className="integration-state">{window.remoteVSCode ? 'Desktop API available' : 'Desktop API unavailable'}</span></div></section><section className="settings-section"><h3>Keyboard shortcuts</h3><div className="shortcut-row"><span>New task</span><kbd>Ctrl / ⌘ N</kbd></div><div className="shortcut-row"><span>Quick open</span><kbd>Ctrl / ⌘ P</kbd></div><div className="shortcut-row"><span>Previous task tab</span><kbd>Ctrl PgUp</kbd></div><div className="shortcut-row"><span>Next task tab</span><kbd>Ctrl PgDown</kbd></div><div className="shortcut-row"><span>Previous session in current task</span><kbd>Ctrl Shift PgUp</kbd></div><div className="shortcut-row"><span>Next session in current task</span><kbd>Ctrl Shift PgDown</kbd></div><div className="shortcut-row"><span>Split focused task page right</span><kbd>Ctrl / ⌘ \</kbd></div><div className="shortcut-row"><span>Split focused task page down</span><kbd>Ctrl / ⌘ K Ctrl / ⌘ \</kbd></div><div className="shortcut-row"><span>Copy task page into new window</span><kbd>Ctrl / ⌘ K O</kbd></div><div className="shortcut-row"><span>Close focused split pane</span><kbd>Ctrl / ⌘ Shift \</kbd></div><div className="shortcut-row"><span>Move session up or down</span><kbd>Alt ↑ / ↓</kbd></div><div className="shortcut-row"><span>Reconnect Agent Host and retry models</span><kbd>F5</kbd></div><div className="shortcut-row"><span>Toggle task sidebar</span><kbd>Ctrl / ⌘ B</kbd></div><div className="shortcut-row"><span>Toggle chat</span><kbd>Ctrl / ⌘ Alt B</kbd></div><div className="shortcut-row"><span>Toggle task details</span><kbd>Ctrl / ⌘ Alt D</kbd></div></section><p className="dialog-hint">{workspace ? `Workspace: ${workspace.root}. Create new tasks in the Explorer; existing task views remain read-only. Session links: immutable Agent Host metadata.` : 'No workspace is selected. Create or open a task repository to get started; nothing is published automatically.'} Icons: Microsoft Codicons · CC BY 4.0.</p></Dialog>}
 
     {dialog === 'remote-devices' && workspace && <RemoteDevicesDialog onClose={() => setDialog(null)} />}
 
-    {contextMenu && <SessionContextMenu
-      target={contextMenu}
+    {sidebarContextMenu && <SessionContextMenu
+      target={sidebarContextMenu}
       theme={layout.theme}
-      splitActive={splitActive}
-      splitOrientation={layout.splitOrientation}
-      canSwap={Boolean(splitActive && activeBinding && secondaryBinding)}
-      onSplit={(direction, moveSource) => splitSession(direction, moveSource, contextMenu.taskId, contextMenu.binding)}
-      onToggleOrientation={toggleSplitOrientation}
-      onSwap={swapSplitPanes}
-      onCloseSplit={() => closeSplitSlot(contextMenu.slot === 'primary' ? 'primary' : 'secondary')}
+      splitActive={Boolean(sidebarParentSplit)}
+      splitOrientation={sidebarParentSplit?.orientation ?? 'horizontal'}
+      canSwap={Boolean(sidebarParentSplit)}
+      allowOpenWindow={true}
+      onSplit={(direction) => {
+        if (sidebarContextMenu.binding) splitFromSidebarSession(direction, sidebarContextMenu.taskId, sidebarContextMenu.binding)
+        else applyTreeChange((current) => splitPaneGroup(current, sidebarContextMenu.groupId, direction, { taskId: sidebarContextMenu.taskId }))
+      }}
+      onToggleOrientation={() => applyTreeChange((current) => toggleParentSplitOrientation(current, sidebarContextMenu.groupId))}
+      onSwap={() => applyTreeChange((current) => swapParentSplitChildren(current, sidebarContextMenu.groupId))}
+      onCloseSplit={() => applyTreeChange((current) => removePaneGroup(current, sidebarContextMenu.groupId))}
       onOpenWindow={(mode) => {
-        const draftSnapshot = mode === 'move' ? contextMenu.getDraft?.() : undefined
-        void popOutSession(contextMenu.taskId, contextMenu.binding, draftSnapshot, mode).then((moved) => {
-          if (moved && draftSnapshot !== undefined) contextMenu.clearDraft?.(draftSnapshot)
+        void popOutTaskPage({
+          groupId: sidebarContextMenu.groupId,
+          taskId: sidebarContextMenu.taskId,
+          binding: sidebarContextMenu.binding,
+          mode,
         })
       }}
-      onClose={() => setContextMenu(null)}
+      onClose={() => setSidebarContextMenu(null)}
     />}
 
   </div>

@@ -12,29 +12,43 @@ import { isTrustedRendererUrl } from './security'
 export const MAX_SESSION_WINDOWS = 12
 
 const taskIdSchema = z.string().regex(/^T-[0-9]{4,}$/).max(128)
+const sessionKeySchema = z.string().startsWith('ahp:').max(2048).nullable().optional()
 const draftSchema = z.string().max(MAX_CHAT_TEXT_LENGTH).optional()
 
 const openSessionWindowSchema = z.object({
   taskId: taskIdSchema,
-  target: agentHostTargetSchema,
+  target: agentHostTargetSchema.optional(),
+  sessionKey: sessionKeySchema,
   draft: draftSchema,
   mode: z.enum(['move', 'copy']).optional(),
 }).strict()
 
 const focusSessionWindowSchema = z.object({
+  windowId: z.string().uuid().optional(),
+  taskId: taskIdSchema.optional(),
+  target: agentHostTargetSchema.optional(),
+}).strict()
+
+const dockedPageSchema = z.object({
   taskId: taskIdSchema,
-  target: agentHostTargetSchema,
+  sessionKey: sessionKeySchema,
+  target: agentHostTargetSchema.optional(),
+  draft: draftSchema,
 }).strict()
 
 const dockSessionWindowSchema = z.object({
+  windowId: z.string().uuid().optional(),
   taskId: taskIdSchema.optional(),
   target: agentHostTargetSchema.optional(),
+  sessionKey: sessionKeySchema,
   draft: draftSchema,
+  pages: z.array(dockedPageSchema).max(32).optional(),
 }).strict().optional()
 
 type SessionContext = Extract<DesktopWindowContext, { kind: 'session' }>
 
 interface PopoutEntry {
+  readonly windowId: string
   readonly entryKey: string
   readonly panelKey: string
   readonly workspaceRoot: string
@@ -47,8 +61,8 @@ type RegisteredWindow =
   | { readonly kind: 'main'; readonly window: BrowserWindow }
   | { readonly kind: 'session'; readonly entry: PopoutEntry; readonly window: BrowserWindow }
 
-export function sessionWindowPanelKey(taskId: string, target: AgentHostTarget): string {
-  return `${taskId}:ahp:${agentHostKey(target)}`
+export function sessionWindowPanelKey(taskId: string, target?: AgentHostTarget): string {
+  return target ? `${taskId}:ahp:${agentHostKey(target)}` : `${taskId}:task`
 }
 
 export interface SessionWindowManagerOptions {
@@ -139,11 +153,13 @@ export class SessionWindowManager {
       if (context.initialDraft !== undefined) {
         item.entry.context = {
           kind: 'session',
+          windowId: context.windowId,
           workspaceId: context.workspaceId,
           workspaceName: context.workspaceName,
           workspaceRoot: context.workspaceRoot,
           task: context.task,
-          target: context.target,
+          ...(context.target ? { target: context.target } : {}),
+          ...(context.sessionKey !== undefined ? { sessionKey: context.sessionKey } : {}),
         }
       }
       return context
@@ -159,7 +175,7 @@ export class SessionWindowManager {
       summaries.push({
         key: entry.panelKey,
         taskId: entry.context.task.id,
-        target: entry.context.target,
+        ...(entry.context.target ? { target: entry.context.target } : {}),
         mode: entry.mode,
       })
     }
@@ -210,11 +226,13 @@ export class SessionWindowManager {
     const request = openSessionWindowSchema.parse(requestInput)
     const state = await this.options.getWorkspaceState()
     const workspace = state.current
-    if (!workspace) throw new Error('Open a task workspace before popping out a session.')
+    if (!workspace) throw new Error('Open a task workspace before popping out a task page.')
     this.activeWorkspaceRoot = workspace.root
     const task = workspace.tasks.find((item) => item.id === request.taskId)
     if (!task) throw new Error(`Task ${request.taskId} is unavailable in the current workspace.`)
-    await this.options.authorizeSession(workspace.root, request.target)
+    if (request.target) {
+      await this.options.authorizeSession(workspace.root, request.target)
+    }
 
     const requestedMode: SessionWindowMode = request.mode ?? 'move'
     const panelKey = sessionWindowPanelKey(task.id, request.target)
@@ -236,20 +254,24 @@ export class SessionWindowManager {
       throw new Error(`Up to ${MAX_SESSION_WINDOWS} popped-out session windows can be open at once. Close one before opening another.`)
     }
 
+    const windowId = randomUUID()
+    const resolvedSessionKey = request.sessionKey ?? (request.target ? `ahp:${agentHostKey(request.target)}` : undefined)
     const context: SessionContext = {
       kind: 'session',
+      windowId,
       workspaceId: workspace.id,
       workspaceName: workspace.name,
       workspaceRoot: workspace.root,
       task,
-      target: request.target,
+      ...(request.target ? { target: request.target } : {}),
+      ...(resolvedSessionKey !== undefined ? { sessionKey: resolvedSessionKey } : {}),
       ...(request.draft ? { initialDraft: request.draft } : {}),
     }
 
     const creation = (async () => {
       const window = this.options.createBrowserWindow(context, this.cascadeCounter++)
       const senderId = window.webContents.id
-      const entry: PopoutEntry = { entryKey, panelKey, workspaceRoot: workspace.root, mode: requestedMode, context, window }
+      const entry: PopoutEntry = { windowId, entryKey, panelKey, workspaceRoot: workspace.root, mode: requestedMode, context, window }
       this.popouts.set(entryKey, entry)
       this.bySenderId.set(senderId, { kind: 'session', entry, window })
       const cleanup = () => {
@@ -285,6 +307,13 @@ export class SessionWindowManager {
 
   async focus(requestInput: unknown): Promise<boolean> {
     const request = focusSessionWindowSchema.parse(requestInput)
+    if (request.windowId) {
+      const byId = [...this.popouts.values()].find((entry) => entry.windowId === request.windowId && !entry.window.isDestroyed())
+      if (!byId) return false
+      this.focusBrowserWindow(byId.window)
+      return true
+    }
+    if (!request.taskId) return false
     const state = await this.options.getWorkspaceState()
     const root = state.current?.root
     if (!root) return false
@@ -301,26 +330,32 @@ export class SessionWindowManager {
     const registered = [...this.bySenderId.values()].find((item) => item.window === caller)
     if (registered?.kind === 'session') {
       entry = registered.entry
-    } else if (request?.taskId && request.target) {
+    } else if (request?.windowId) {
+      entry = [...this.popouts.values()].find((item) => item.windowId === request.windowId)
+    } else if (request?.taskId) {
       const state = await this.options.getWorkspaceState()
       const root = state.current?.root
       if (root) entry = this.popouts.get(`${root}::${sessionWindowPanelKey(request.taskId, request.target)}`)
     }
     const taskId = entry?.context.task.id ?? request?.taskId
     const target = entry?.context.target ?? request?.target
+    const sessionKey = request?.sessionKey
     const draft = request?.draft
+    const pages = request?.pages
     const main = this.main
     if (entry) {
       this.popouts.delete(entry.entryKey)
       if (!entry.window.isDestroyed()) entry.window.close()
       this.publishChanged()
     }
-    if (main && !main.webContents.isDestroyed() && taskId && target) {
+    if (main && !main.webContents.isDestroyed() && taskId) {
       this.focusBrowserWindow(main)
       main.webContents.send('desktop:activate-session', {
         taskId,
-        target,
+        ...(target ? { target } : {}),
+        ...(sessionKey !== undefined ? { sessionKey } : {}),
         ...(draft ? { draft } : {}),
+        ...(pages?.length ? { pages } : {}),
       })
     }
   }

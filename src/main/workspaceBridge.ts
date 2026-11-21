@@ -11,6 +11,8 @@ export function registerWorkspaceBridge(
   verifyAgentHost?: (root: string, target: AgentHostTarget) => Promise<AgentHostTarget>,
   onOpen?: (root: string) => Promise<void>,
   onWorkspaceRootChanged?: (root: string | undefined) => void,
+  requireReadWindow: (event: IpcMainInvokeEvent) => BrowserWindow = requireWindow,
+  onBindingsMutated?: () => void,
 ) {
   const store = new WorkspaceStore(app.getPath('userData'), process.env.TASKCONTINUUM_WORKSPACE, verifyAgentHost)
   const taskCli = app.isPackaged
@@ -21,10 +23,10 @@ export function registerWorkspaceBridge(
     onWorkspaceRootChanged?.(state.current?.root)
     return state
   }
-  function handle<Result>(channel: string, action: (window: BrowserWindow, value: unknown) => Promise<Result>): void {
-    handleDesktopOperation(ipcMain, `workspace:${channel}`, (event, value: unknown) => action(requireWindow(event), value))
+  function handle<Result>(channel: string, action: (window: BrowserWindow, value: unknown) => Promise<Result>, guard = requireWindow): void {
+    handleDesktopOperation(ipcMain, `workspace:${channel}`, (event, value: unknown) => action(guard(event), value))
   }
-  handle('state', async () => authorize(await store.getState()))
+  handle('state', async () => authorize(await store.getState()), requireReadWindow)
   handle('open-folder', async (window) => {
     const state = await store.getState()
     const chosen = await dialog.showOpenDialog(window, { title: 'Open AgentDesk workspace', properties: ['openDirectory'], defaultPath: state.current?.root ?? process.cwd() })
@@ -42,16 +44,21 @@ export function registerWorkspaceBridge(
   })
   handle('create-repository', async (_window, request) => authorize(await store.createRepository(request)))
   handle('task-creation-context', async (_window, id) => store.getTaskCreationContext(id))
-  handle('create-task', async (_window, request) => store.createTask(request))
+  handle('create-task', async (_window, request) => { const created = await store.createTask(request); onBindingsMutated?.(); return created })
   handle('task-agent-instructions', async (_window, request) => store.getTaskAgentInstructions(request, taskCli))
   handle('repository-status', async (_window, id) => store.getRepositoryStatus(id))
   handle('open-repository-creation', async (_window, id) => { await shell.openExternal(await store.getRepositoryCreationUrl(id)) })
   handle('repository-push-plan', async (_window, request) => store.getRepositoryPushPlan(request))
   handle('verify-repository-publication', async (_window, request) => store.verifyRepositoryPublication(request))
   handle('open-recent', async (_window, id) => authorize(await store.openRecent(id)))
-  handle('refresh', async () => authorize(await store.refresh()))
+  handle('refresh', async () => { const refreshed = await authorize(await store.refresh()); onBindingsMutated?.(); return refreshed })
   handle('close', async () => { const state = await store.closeWorkspace(); onWorkspaceRootChanged?.(undefined); return state })
-  handle('session-links', async (_window, id) => { await authorize(await store.getState()); return store.getSessionLinks(id) })
-  handle('update-session-link', async (_window, request) => { await authorize(await store.getState()); return store.updateSessionLink(request) })
+  handle('session-links', async (_window, id) => { await authorize(await store.getState()); return store.getSessionLinks(id) }, requireReadWindow)
+  handle('update-session-link', async (_window, request) => {
+    await authorize(await store.getState())
+    const updated = await store.updateSessionLink(request)
+    onBindingsMutated?.()
+    return updated
+  })
   return { currentRoot: () => store.getCurrentRoot(), getState: () => store.getState() }
 }

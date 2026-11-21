@@ -116,12 +116,12 @@ function registerDesktopBridge(): void {
     return sessionWindows?.list() ?? []
   })
   handleDesktopOperation(ipcMain, 'desktop:session-window-open', (event, request: unknown) => {
-    requireMainWindow(event)
+    requireTrustedWindow(event)
     if (!sessionWindows) throw new Error('Session windows are unavailable.')
     return sessionWindows.open(request)
   })
   handleDesktopOperation(ipcMain, 'desktop:session-window-focus', (event, request: unknown) => {
-    requireMainWindow(event)
+    requireTrustedWindow(event)
     if (!sessionWindows) return Promise.resolve(false)
     return sessionWindows.focus(request)
   })
@@ -270,6 +270,8 @@ void app.whenReady().then(async () => {
     return remoteVSCode.agentHosts.verifyLink(root, target)
   }, async (root) => { await remoteVSCode?.gitSync.open(root) }, (root) => {
     sessionWindows?.syncWorkspace(root)
+  }, requireTrustedWindow, () => {
+    sessionWindows?.broadcast('remote-vscode:git-bindings-changed')
   })
   sessionWindows = new SessionWindowManager({
     devUrl,

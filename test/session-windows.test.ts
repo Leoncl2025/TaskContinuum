@@ -176,6 +176,34 @@ describe('SessionWindowManager', () => {
     manager.unregisterMainWindow(main.window)
     expect(manager.liveWindows()).toEqual([])
   })
+
+  it('supports opening a Task-Page popup window without an active session and docking multi-page split state back to main', async () => {
+    const { manager, main, created, authorizeSession } = setupManager()
+    const opened = await manager.open({ taskId: 'T-0001' })
+    expect(opened).toEqual({ opened: true, reused: false })
+    expect(authorizeSession).not.toHaveBeenCalled()
+    expect(manager.list()).toEqual([{
+      key: 'T-0001:task',
+      taskId: 'T-0001',
+      mode: 'move',
+    }])
+
+    const popout = created[0]
+    await manager.dock(popout.window, {
+      taskId: 'T-0001',
+      pages: [
+        { taskId: 'T-0001', sessionKey: null },
+        { taskId: 'T-0001', sessionKey: 'ahp:secondary', draft: 'Draft from split pane' },
+      ],
+    })
+    expect(main.webContents.send).toHaveBeenCalledWith('desktop:activate-session', {
+      taskId: 'T-0001',
+      pages: [
+        { taskId: 'T-0001', sessionKey: null },
+        { taskId: 'T-0001', sessionKey: 'ahp:secondary', draft: 'Draft from split pane' },
+      ],
+    })
+  })
 })
 
 describe('MultiWindowInstallCoordinator', () => {

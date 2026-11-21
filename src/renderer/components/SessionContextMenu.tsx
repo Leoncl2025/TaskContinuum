@@ -9,9 +9,9 @@ import { Icon } from './Primitives'
 export interface SessionContextMenuTarget {
   readonly x: number
   readonly y: number
+  readonly groupId: string
   readonly taskId: string
-  readonly binding: SessionBinding
-  readonly slot?: 'single' | 'primary' | 'secondary'
+  readonly binding?: SessionBinding
   readonly getDraft?: () => string
   readonly clearDraft?: (snapshot: string) => void
 }
@@ -22,11 +22,12 @@ interface Props {
   readonly splitActive: boolean
   readonly splitOrientation: SplitOrientation
   readonly canSwap: boolean
+  readonly allowOpenWindow?: boolean
   onSplit(direction: SplitDirection, moveSource: boolean): void
   onToggleOrientation(): void
   onSwap(): void
   onCloseSplit(): void
-  onOpenWindow(mode: SessionWindowMode): void
+  onOpenWindow?(mode: SessionWindowMode): void
   onClose(): void
 }
 
@@ -43,6 +44,7 @@ export function SessionContextMenu({
   splitActive,
   splitOrientation,
   canSwap,
+  allowOpenWindow = true,
   onSplit,
   onToggleOrientation,
   onSwap,
@@ -184,6 +186,12 @@ export function SessionContextMenu({
           <span>Split Down</span>
           <span className="session-context-shortcut">Ctrl+K Ctrl+\</span>
         </button>
+        <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(() => onSplit('up', false))}>
+          <span>Split Up</span>
+        </button>
+        <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(() => onSplit('left', false))}>
+          <span>Split Left</span>
+        </button>
 
         <div className="session-context-submenu-anchor" onMouseEnter={() => scheduleSubmenu(true)} onMouseLeave={() => scheduleSubmenu(false)}>
           <button
@@ -236,14 +244,16 @@ export function SessionContextMenu({
           </button>
         </>}
 
-        <div className="session-context-separator" role="separator" />
-        <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(() => onOpenWindow('move'))}>
-          <span>Move into New Window</span>
-        </button>
-        <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(() => onOpenWindow('copy'))}>
-          <span>Copy into New Window</span>
-          <span className="session-context-shortcut">Ctrl+K O</span>
-        </button>
+        {allowOpenWindow && onOpenWindow && <>
+          <div className="session-context-separator" role="separator" />
+          <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(() => onOpenWindow('move'))}>
+            <span>Move into New Window</span>
+          </button>
+          <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(() => onOpenWindow('copy'))}>
+            <span>Copy into New Window</span>
+            <span className="session-context-shortcut">Ctrl+K O</span>
+          </button>
+        </>}
       </div>
     </div>,
     document.body,

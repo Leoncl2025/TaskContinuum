@@ -1,4 +1,5 @@
 import { memo, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import stripAnsi from 'strip-ansi'
 import type { ResponsePart, TerminalState } from '@microsoft/agent-host-protocol'
@@ -225,6 +226,7 @@ type AgentHostPanelProps = {
   target: AgentHostTarget
   connectionRevision?: number
   active?: boolean
+  visible?: boolean
   paneSlot?: 'single' | 'primary' | 'secondary'
   splitOrientation?: 'horizontal' | 'vertical'
   showTaskBadge?: boolean
@@ -232,6 +234,7 @@ type AgentHostPanelProps = {
   hideClose?: boolean
   restoredDraft?: { readonly nonce: number; readonly text: string }
   headerTarget?: HTMLElement | null
+  sessionSwitcher?: ReactNode
   cachedTitle?: string
   onTitles?(sessions: readonly SessionTitleUpdate[]): void
   onDraftChange?(draft: string): void
@@ -251,7 +254,7 @@ type AgentHostPanelProps = {
   prepareFirstMessage?(text: string): Promise<string>
 } & ({ task: TaskRecord; workspace?: never; onDetach(): void } | { task?: never; workspace: Pick<WorkspaceSnapshot, 'id' | 'name'>; onDetach?: never })
 
-export function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, paneSlot, splitOrientation = 'horizontal', showTaskBadge = false, closeLabel = 'Hide chat panel', hideClose = false, restoredDraft, headerTarget, cachedTitle, onTitles, onDraftChange, onActivatePane, onSplitRight, onSplitDown, onToggleSplitOrientation, onSwapSplit, onPopOut, onHeaderContextMenu, onDetach, onClose, onDevices, onSessions, onBusy, panelKey, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
+export function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, visible = true, paneSlot, splitOrientation = 'horizontal', showTaskBadge = false, closeLabel = 'Hide chat panel', hideClose = false, restoredDraft, headerTarget, sessionSwitcher, cachedTitle, onTitles, onDraftChange, onActivatePane, onSplitRight, onSplitDown, onToggleSplitOrientation, onSwapSplit, onPopOut, onHeaderContextMenu, onDetach, onClose, onDevices, onSessions, onBusy, panelKey, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
   const bridge = window.agentHost
   const { sessionId, chatId } = target
   const { clientId, machineName } = target.owner
@@ -594,7 +597,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       (snapshot) => setDraft((current) => current === snapshot ? '' : current),
     )
   } : undefined}>
-    <div className="ahp-chat-title"><Icon name="copilot" />{showTaskBadge && task && <span className="ahp-chat-task-badge" title={task.title}>{task.id}</span>}<strong title={displayTitle}>{displayTitle}</strong></div>
+    <div className="ahp-chat-title"><Icon name="copilot" />{showTaskBadge && task && <span className="ahp-chat-task-badge" title={task.title}>{task.id}</span>}<strong title={displayTitle}>{displayTitle}</strong>{sessionSwitcher}</div>
     <div className="ahp-chat-meta">
       <span className="ahp-chat-status" role="status" data-state={stateLabel} title={stateLabel}><span aria-hidden="true" /><span className="ahp-chat-state-label">{stateLabel}</span></span>
       <span className="ahp-chat-machine" title={ownerLabel}><Icon name="server" /><span>Copilot @ {ownerLabel}</span></span>
@@ -605,7 +608,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     </div>
   </HeaderTag>
   return <ChatLinkTargetContext.Provider value={linkTarget}><aside ref={panel} className="chat-panel ahp-panel" data-pane-slot={paneSlot} data-pane-focused={paneSlot && paneSlot !== 'single' ? active || undefined : undefined} aria-label={workspace ? 'Agent Host task creation chat' : paneSlot === 'secondary' ? 'Secondary split Agent Host task chat' : 'Agent Host task chat'} aria-keyshortcuts="F5" data-update-blocker={updateBlocker} onPointerDownCapture={onActivatePane ? () => onActivatePane() : undefined} onFocusCapture={onActivatePane ? () => onActivatePane() : undefined}>
-    {headerTarget ? active && createPortal(header, headerTarget) : header}
+    {headerTarget ? active && createPortal(header, headerTarget) : visible && header}
     {detailsOpen && <Dialog title="Chat details" className="ahp-chat-details" onClose={() => setDetailsKey(undefined)}>
       <dl>
         <dt>Conversation</dt><dd>{displayTitle}</dd>
