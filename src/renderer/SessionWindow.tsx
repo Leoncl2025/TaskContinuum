@@ -6,7 +6,7 @@ import { AgentHostPanel } from './components/AgentHostPanel'
 import { Icon, IconButton } from './components/Primitives'
 import { UpdateNotice } from './components/UpdateSettings'
 import type { useUpdates } from './components/UpdateSettings'
-import { readLayout, saveLayout } from './layout'
+import { readLayout } from './layout'
 import { machineLabel, useMachineAliases } from './machineAliases'
 import { MachineAliasesProvider } from './MachineAliasesProvider'
 import appIcon from '../../build/icon.png'
@@ -66,13 +66,6 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
     return () => { mounted = false; unlisten?.() }
   }, [])
 
-  function toggleTheme(): void {
-    const current = readLayout()
-    const nextTheme = current.theme === 'dark' ? 'light' : 'dark'
-    saveLayout({ ...current, theme: nextTheme })
-    setTheme(nextTheme)
-  }
-
   function windowAction(action: 'minimize' | 'toggleMaximize' | 'toggleFullScreen' | 'close'): void {
     void window.desktop?.[action]().catch(() => setDesktopError(true))
   }
@@ -105,7 +98,6 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
           <Icon name="layout-panel-dock" />
           <span>Dock</span>
         </button>
-        <IconButton icon="color-mode" label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'} title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'} onClick={toggleTheme} />
       </div>
       {window.desktop && <div className="window-controls">
         <IconButton icon={fullScreen ? 'screen-normal' : 'screen-full'} label={fullScreen ? 'Exit full screen' : 'Enter full screen'} title={`${fullScreen ? 'Exit' : 'Enter'} full screen (F11 / Shift+Alt+Enter)`} aria-pressed={fullScreen} onClick={() => windowAction('toggleFullScreen')} />
