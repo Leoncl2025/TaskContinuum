@@ -83,7 +83,7 @@ test('starts empty, creates a separate task Git repository, and restores it afte
   await git(parent, 'init', '--initial-branch=parent-branch')
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Create your task repository')
   await expect(page.getByRole('tab')).toHaveCount(0)
-  await expect(page.getByRole('contentinfo', { name: 'Workbench status' })).toContainText('0 tasks')
+  await expect(page.getByRole('contentinfo')).toHaveCount(0)
   await page.getByRole('button', { name: 'Create task repository', exact: true }).click()
   await chooseParent()
   await page.getByRole('textbox', { name: 'Repository name' }).fill('task-notes')

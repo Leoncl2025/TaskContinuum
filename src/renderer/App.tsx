@@ -1,6 +1,6 @@
 import { Activity, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
-import type { DesktopInfo, DesktopWindowContext, SessionWindowActivatedEvent, SessionWindowMode, SessionWindowSummary } from '../shared/desktop'
+import type { DesktopWindowContext, SessionWindowActivatedEvent, SessionWindowMode, SessionWindowSummary } from '../shared/desktop'
 import { filterTasks } from '../shared/tasks'
 import type { WorkspaceSnapshot } from '../shared/workspace'
 import { useSessionLinks } from './chat/useSessionLinks'
@@ -47,7 +47,7 @@ import { AgentHostSessionsSidebar } from './components/AgentHostSessionsSidebar'
 import type { AgentHostHistoryTransfer, AgentHostSession, AgentHostTarget } from '../shared/agentHost'
 import { agentHostKey } from '../shared/agentHost'
 import { useSessionTitles } from './chat/useSessionTitles'
-import { machineLabel, useMachineAliases, useWorkspaceGitSync } from './machineAliases'
+import { useMachineAliases, useWorkspaceGitSync } from './machineAliases'
 import { MachineAliasesProvider } from './MachineAliasesProvider'
 import { UpdateNotice, UpdateSettings, UpdateStatus, useUpdates } from './components/UpdateSettings'
 import { registerInstallSafety } from './installSafety'
@@ -169,7 +169,6 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const [taskAgentBusy, setTaskAgentBusy] = useState(false)
   const [createdTaskId, setCreatedTaskId] = useState<string | null>(null)
   const [compactPanel, setCompactPanel] = useState<'tasks' | 'chat' | 'details'>(() => workspace?.tasks.length ? 'chat' : 'details')
-  const [desktop, setDesktop] = useState<DesktopInfo>()
   const [fullScreen, setFullScreen] = useState(false)
   const [desktopError, setDesktopError] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -275,7 +274,6 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const chatVisible = compact ? compactPanel === 'chat' : layout.chat
   const detailsVisible = compact ? compactPanel === 'details' : layout.details
   const unifiedChatHeader = chatVisible && !taskAgentOpen && !splitActive && Boolean(activePanelKey)
-  const focusedBinding = activeBinding
   const sessionBusy = agentHostBusy || taskAgentBusy
   const workspaceLocked = repositorySetupOpen || taskCreationMode !== null || links.busy || sessionBusy || dialog === 'remote-devices'
   const connectionError = (taskAgentOpen ? null : links.error) ?? actionError
@@ -325,7 +323,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     let changed = false
     const bridge = window.desktop
     const unlisten = bridge?.onFullScreenChanged((value) => { changed = true; if (mounted) setFullScreen(value) })
-    void bridge?.getInfo().then((info) => { if (mounted) setDesktop(info) }).catch(() => { if (mounted) setDesktopError(true) })
+    void bridge?.getInfo().catch(() => { if (mounted) setDesktopError(true) })
     void bridge?.getFullScreen().then((value) => { if (mounted && !changed) setFullScreen(value) }).catch(() => { if (mounted) setDesktopError(true) })
     return () => { mounted = false; unlisten?.() }
   }, [])
@@ -736,6 +734,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
       <button type="button" aria-label="Toggle task details" aria-pressed={detailsVisible} onClick={toggleDetails}><Icon name="file-text" />Details</button>
     </nav>}
 
+    {desktopError && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>Desktop bridge error</span></div>}
     {updateSafetyError && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{updateSafetyError}</span></div>}
     {workspaces.error && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{workspaces.error}</span><IconButton icon="close" label="Dismiss workspace error" onClick={() => workspaces.setError(null)} /></div>}
     {selection.error && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{selection.error}</span><IconButton icon="close" label="Dismiss selection memory error" onClick={selection.dismissError} /></div>}
@@ -867,8 +866,6 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
         </div>
       </main></Activity>
     </WorkbenchBody>
-
-    <footer className="statusbar" aria-label="Workbench status"><span className="local-status"><Icon name={taskAgentOpen || focusedBinding?.agentHost ? 'server-environment' : workspace ? 'folder' : 'repo'} />{taskAgentOpen ? 'TASK CREATION' : splitActive ? `SPLIT (${paneGroups.length})` : focusedBinding?.agentHost ? 'AGENT HOST' : workspace ? 'LOCAL WORKSPACE' : 'NO WORKSPACE'}</span><span><Icon name="checklist" />{tasks.length} tasks</span><span>{selectedId ?? 'No task selected'}</span>{popoutWindows.length > 0 && <span><Icon name="multiple-windows" />{popoutWindows.length} {popoutWindows.length === 1 ? 'window' : 'windows'}</span>}<span className="statusbar-spacer" /><span className="response-status" role="status" title={taskAgentOpen ? undefined : focusedBinding?.agentHost.owner.machineName}>{workspaces.busy ? 'Loading workspace...' : links.busy ? 'Saving or loading session links...' : sessionBusy ? 'Agent Host active' : taskAgentOpen ? 'Local task creation chat' : focusedBinding?.agentHost ? `Agent Host @ ${machineLabel(focusedBinding.agentHost.owner, aliases)}` : workspace ? 'Select an Agent Host chat' : 'Create or open a task repository'}</span><button type="button" onClick={taskAgentOpen ? showChat : openAgentHostSessions}><Icon name={taskAgentOpen ? 'comment-discussion' : focusedBinding?.agentHost ? 'link' : 'plug'} />{taskAgentOpen ? 'Task creation chat' : focusedBinding?.agentHost ? 'Agent Host linked' : 'No Agent Host linked'}</button><span className="platform-status">{desktopError ? 'Desktop bridge error' : desktop ? `Desktop · ${desktop.version}` : 'Browser preview'}</span></footer>
 
     <UpdateNotice updates={updates} />
     {dialog === 'updates' && <Dialog title="About and updates" onClose={() => setDialog(null)}><UpdateSettings updates={updates} /></Dialog>}

@@ -293,7 +293,7 @@ for (const scenario of [
       document.body.style.zoom = String(zoom)
       document.querySelector<HTMLElement>('.workbench')!.style.height = `${innerHeight / zoom}px`
     }, scenario.zoom)
-    await page.getByRole('button', { name: 'Agent Host linked', exact: true }).click()
+    await page.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
     const sidebar = page.getByRole('complementary', { name: 'Agent Host sessions', exact: true })
     const row = sidebar.getByRole('treeitem', { name: 'A focused release plan', exact: true })
     const line = row.locator('.session-tree-row')

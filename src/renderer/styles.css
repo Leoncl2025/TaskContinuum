@@ -409,15 +409,6 @@ kbd { font-family: inherit; font-size: 10px; color: var(--muted); border: 1px so
 .empty-chat { color: var(--muted); }
 .empty-chat p { width: 100%; line-height: 1.7; }
 
-.statusbar { height: 24px; flex-shrink: 0; display: flex; align-items: center; gap: 16px; padding-right: 12px; border-top: 1px solid var(--border); background: var(--panel); color: var(--muted); font-size: 10px; white-space: nowrap; overflow: hidden; }
-.statusbar > span, .statusbar button { display: inline-flex; align-items: center; gap: 5px; }
-.statusbar .codicon { font-size: 12px; }
-.statusbar .local-status { align-self: stretch; padding: 0 12px; color: var(--muted); background: var(--raised); font-size: 9px; letter-spacing: .3px; }
-.statusbar button { font-size: inherit; color: inherit; height: 100%; padding: 0 5px; }
-.statusbar button:hover { background: var(--hover); }
-.statusbar-spacer { flex: 1; }
-.response-status { color: var(--green); }
-
 .dialog { width: min(510px, calc(100vw - 40px)); max-height: calc(100vh - 70px); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 0; background: var(--bg); color: var(--text); box-shadow: 0 18px 80px var(--shadow); overflow: auto; }
 .dialog::backdrop { background: #0007; }
 .dialog-inner { padding: 20px 24px; }
@@ -456,7 +447,6 @@ kbd { font-family: inherit; font-size: 10px; color: var(--muted); border: 1px so
 @media (max-width: 1100px) {
   .app-brand { width: auto; }
   .command-center kbd { display: none; }
-  .platform-status { display: none !important; }
 }
 @media (max-width: 1000px) {
   .titlebar[data-chat-header='true'] .command-center { flex: 0 0 24px; min-width: 24px; padding: 0; }
@@ -480,8 +470,6 @@ kbd { font-family: inherit; font-size: 10px; color: var(--muted); border: 1px so
   .command-center > .codicon { display: none; }
   .task-document { padding: 22px; }
   .detail-tabs { margin: 0 20px; }
-  .statusbar { gap: 10px; }
-  .statusbar > span:nth-child(3), .response-status { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }

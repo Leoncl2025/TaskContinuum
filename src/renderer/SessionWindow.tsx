@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { agentHostKey } from '../shared/agentHost'
-import type { DesktopInfo, DesktopWindowContext, DockedTaskPage, SessionWindowMode } from '../shared/desktop'
+import type { DesktopWindowContext, DockedTaskPage, SessionWindowMode } from '../shared/desktop'
 import type { TaskRecord } from '../shared/tasks'
 import type { WorkspaceSnapshot } from '../shared/workspace'
 import { sessionBindingKey } from './chat/sessionBindings'
@@ -14,7 +14,7 @@ import { Icon, IconButton } from './components/Primitives'
 import { UpdateNotice } from './components/UpdateSettings'
 import type { useUpdates } from './components/UpdateSettings'
 import { readLayout } from './layout'
-import { machineLabel, useMachineAliases } from './machineAliases'
+import { useMachineAliases } from './machineAliases'
 import { MachineAliasesProvider } from './MachineAliasesProvider'
 import {
   activePaneGroup,
@@ -84,11 +84,9 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
   )
 
   const [chatHeaderTarget, setChatHeaderTarget] = useState<HTMLDivElement | null>(null)
-  const [desktop, setDesktop] = useState<DesktopInfo>()
   const [fullScreen, setFullScreen] = useState(false)
   const [desktopError, setDesktopError] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
-  const [busyPanels, setBusyPanels] = useState<Record<string, boolean>>({})
   const [docking, setDocking] = useState(false)
   const chordUntilRef = useRef(0)
   const draftsRef = useRef<Record<string, string>>(
@@ -181,18 +179,6 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
     draftsRef.current[`${groupId}:${taskId}:${sessionKey}`] = draft
   }, [])
 
-  const reportPanelBusy = useCallback((value: boolean, key?: string) => {
-    if (!key) return
-    setBusyPanels((current) => {
-      if (Boolean(current[key]) === value) return current
-      const next = { ...current }
-      if (value) next[key] = true
-      else delete next[key]
-      return next
-    })
-  }, [])
-  const busy = Object.keys(busyPanels).length > 0
-
   const applyTreeChange = useCallback((updater: (current: PaneTreeState) => PaneTreeState) => {
     setPaneTree((previous) => {
       const base = reconcilePaneTreeWithTasks(previous, validTaskIds, context.task.id)
@@ -214,7 +200,7 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
     let changed = false
     const bridge = window.desktop
     const unlisten = bridge?.onFullScreenChanged((value) => { changed = true; if (mounted) setFullScreen(value) })
-    void bridge?.getInfo().then((info) => { if (mounted) setDesktop(info) }).catch(() => { if (mounted) setDesktopError(true) })
+    void bridge?.getInfo().catch(() => { if (mounted) setDesktopError(true) })
     void bridge?.getFullScreen().then((value) => { if (mounted && !changed) setFullScreen(value) }).catch(() => { if (mounted) setDesktopError(true) })
     return () => { mounted = false; unlisten?.() }
   }, [])
@@ -371,7 +357,6 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
   }, [])
 
   const unifiedChatHeader = !isMultiPane && Boolean(activeBinding)
-  const ownerDisplay = activeBinding ? machineLabel(activeBinding.owner, aliases) : undefined
 
   return <div className="workbench session-window" data-theme={theme} data-compact={false}>
     <header className="titlebar session-window-titlebar" aria-label="Session window toolbar" data-chat-header={unifiedChatHeader}>
@@ -395,6 +380,7 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
       </div>}
     </header>
 
+    {desktopError && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>Desktop bridge error</span></div>}
     {updateSafetyError && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{updateSafetyError}</span></div>}
     {actionError && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{actionError}</span><IconButton icon="close" label="Dismiss session window error" onClick={() => setActionError(null)} /></div>}
 
@@ -418,22 +404,9 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
         onTitles={sessionTitles.remember}
         onRenameSession={sessionTitles.rename}
         onDraftSnapshot={handleDraftSnapshot}
-        onBusyChange={reportPanelBusy}
         onPopOutTaskPage={window.desktop?.windows ? popOutAnotherWindow : undefined}
       />
     </main>
-
-    <footer className="statusbar" aria-label="Session window status">
-      <span className="local-status"><Icon name="multiple-windows" />{isMultiPane ? `POPUP SPLIT (${paneGroups.length})` : 'TASK WINDOW'}</span>
-      <span title={context.workspaceRoot}><Icon name="folder" />{context.workspaceName}</span>
-      <span className="session-window-status-task" title={activeTask.title}>{activeTask.id} · {activeTask.title}</span>
-      <span className="statusbar-spacer" />
-      <span className="response-status" role="status" title={activeBinding?.owner.machineName}>
-        {busy ? 'Agent Host active' : ownerDisplay ? `Agent Host @ ${ownerDisplay}` : 'Select a session'}
-      </span>
-      <button type="button" disabled={docking} onClick={() => { void dockToMainWindow() }}><Icon name="layout-panel-dock" />Dock to main window</button>
-      <span className="platform-status">{desktopError ? 'Desktop bridge error' : desktop ? `Desktop · ${desktop.version}` : 'Desktop'}</span>
-    </footer>
 
     <UpdateNotice updates={updates} />
   </div>
