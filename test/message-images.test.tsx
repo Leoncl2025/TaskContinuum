@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Message, MessageEmbeddedResourceAttachment, MessageResourceAttachment, SimpleMessageAttachment } from '@microsoft/agent-host-protocol'
@@ -108,5 +108,98 @@ describe('Host screenshot representations', () => {
     await user.click(screen.getByRole('link', { name: 'Preview image.png' }))
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('no longer on the owner'))
     expect(screen.getByRole('link', { name: 'Preview image.png' })).toBeInTheDocument()
+  })
+
+  it('supports fullscreen toggle, zoom controls, wheel, double-click, and keyboard shortcuts in linked file previews', async () => {
+    const target = agentHostTargetFixture('chart-owner')
+    const fileId = crypto.randomUUID()
+    const transferId = crypto.randomUUID()
+    const status = {
+      transferId, deviceId: crypto.randomUUID(), state: 'delivered' as const, receivedBytes: 68,
+      files: [{ fileId, name: 'pas-356-vs-main-20rounds-stats.png', sizeBytes: 68, sha256: 'a'.repeat(64), mediaType: 'image/png' }],
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    }
+    const api: ChatLinkBridge = {
+      open: vi.fn<ChatLinkBridge['open']>(async () => ({ ok: true, result: { kind: 'file', target, status } })),
+      status: vi.fn<ChatLinkBridge['status']>(async () => ({ ok: true, result: status })),
+      preview: vi.fn<ChatLinkBridge['preview']>(async () => ({
+        ok: true,
+        result: { kind: 'image', image: { id: fileId, name: 'pas-356-vs-main-20rounds-stats.png', mimeType: 'image/png', data: png } },
+      })),
+      save: vi.fn<ChatLinkBridge['save']>(async () => ({ ok: true, result: { saved: true } })),
+      cancel: vi.fn<ChatLinkBridge['cancel']>(async () => ({ ok: true, result: { ...status, state: 'cancelled' } })),
+    }
+    window.desktop = {
+      links: api, getInfo: vi.fn(), minimize: vi.fn(), toggleMaximize: vi.fn(), close: vi.fn(), copyText: vi.fn(),
+      getFullScreen: vi.fn(async () => false), toggleFullScreen: vi.fn(), onFullScreenChanged: vi.fn(() => () => {}),
+    }
+    const user = userEvent.setup()
+    render(
+      <ChatLinkTargetContext.Provider value={{ target, active: true }}>
+        <ChatImages images={messageImages(turn([resource({ label: 'pas-356-vs-main-20rounds-stats.png' })]))} />
+      </ChatLinkTargetContext.Provider>,
+    )
+
+    await user.click(screen.getByRole('link', { name: 'Preview pas-356-vs-main-20rounds-stats.png' }))
+    const dialog = await screen.findByRole('dialog', { name: 'pas-356-vs-main-20rounds-stats.png' })
+    const image = await within(dialog).findByRole('img', { name: 'pas-356-vs-main-20rounds-stats.png' })
+    const viewport = image.closest('.image-preview-viewport') as HTMLElement
+    expect(viewport).toHaveAttribute('data-zoom', '100')
+    expect(dialog).not.toHaveClass('is-fullscreen')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Full screen preview' }))
+    expect(dialog).toHaveClass('is-fullscreen')
+    expect(within(dialog).getByRole('button', { name: 'Exit full screen preview' })).toHaveAttribute('aria-pressed', 'true')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Zoom in' }))
+    expect(viewport).toHaveAttribute('data-zoom', '125')
+    expect(within(dialog).getByRole('button', { name: 'Reset zoom' })).toHaveTextContent('125%')
+
+    fireEvent.keyDown(dialog, { key: '+' })
+    expect(viewport).toHaveAttribute('data-zoom', '150')
+
+    fireEvent.wheel(viewport, { deltaY: -100, clientX: 40, clientY: 40 })
+    expect(Number(viewport.getAttribute('data-zoom'))).toBeGreaterThan(150)
+
+    await user.click(within(dialog).getByRole('button', { name: 'Reset zoom' }))
+    expect(viewport).toHaveAttribute('data-zoom', '100')
+
+    fireEvent.doubleClick(viewport, { clientX: 50, clientY: 50 })
+    expect(viewport).toHaveAttribute('data-zoom', '200')
+    fireEvent.doubleClick(viewport, { clientX: 50, clientY: 50 })
+    expect(viewport).toHaveAttribute('data-zoom', '100')
+
+    // First Escape exits fullscreen without closing the dialog; second Escape closes it.
+    fireEvent(dialog, new Event('cancel', { cancelable: true }))
+    expect(dialog).not.toHaveClass('is-fullscreen')
+    expect(screen.getByRole('dialog', { name: 'pas-356-vs-main-20rounds-stats.png' })).toBeInTheDocument()
+
+    fireEvent.keyDown(dialog, { key: 'f' })
+    expect(dialog).toHaveClass('is-fullscreen')
+    fireEvent.keyDown(dialog, { key: 'f' })
+    expect(dialog).not.toHaveClass('is-fullscreen')
+
+    fireEvent(dialog, new Event('cancel', { cancelable: true }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('supports fullscreen and zoom controls for embedded screenshot previews and resets state on reopen', async () => {
+    const user = userEvent.setup()
+    render(<ChatImages images={messageImages(turn([embedded()]))} />)
+
+    await user.click(screen.getByRole('button', { name: 'Preview Screenshot.png' }))
+    const dialog = screen.getByRole('dialog', { name: 'Screenshot.png' })
+    await user.click(within(dialog).getByRole('button', { name: 'Full screen preview' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Zoom in' }))
+    expect(dialog).toHaveClass('is-fullscreen')
+    expect(within(dialog).getByRole('button', { name: 'Reset zoom' })).toHaveTextContent('125%')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Close Screenshot.png' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Preview Screenshot.png' }))
+    const reopened = screen.getByRole('dialog', { name: 'Screenshot.png' })
+    expect(reopened).not.toHaveClass('is-fullscreen')
+    expect(within(reopened).getByRole('button', { name: 'Reset zoom' })).toHaveTextContent('100%')
   })
 })
