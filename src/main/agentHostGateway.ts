@@ -473,18 +473,24 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
               step = 'authorization'
               const access = await requestAuthorization(true)
               const params = dispatchSchema.parse(request.params)
-              if (params.channel !== target.chatId) throw new Error('Only the selected chat can receive input.')
-              if (params.action.type === 'chat/turnStarted') {
-                const action = z.object({ type: z.literal('chat/turnStarted'), turnId: z.uuid(), startedAt: z.iso.datetime(), message: z.object({ text: z.string().max(MAX_CHAT_TEXT_LENGTH), origin: z.object({ kind: z.literal('user') }).strict(), attachments: z.array(z.object({ type: z.literal('embeddedResource'), label: z.string().max(200), displayKind: z.literal('image'), contentType: z.string(), data: z.string(), _meta: z.object({ taskcontinuumImageId: z.uuid() }).strict() }).strict()).max(4).optional(), agent: z.unknown().optional(), model: z.unknown().optional(), _meta: z.unknown().optional() }).strict() }).strict().parse(params.action)
-                const images = action.message.attachments?.map((image) => ({ id: image._meta.taskcontinuumImageId, name: image.label, mimeType: image.contentType, data: image.data })) as ChatImageAttachment[] | undefined
-                const command = chatSubmissionSchema.parse({ id: action.turnId, text: action.message.text, ...(images?.length ? { images } : {}) })
-                const model = agentHostModelSelectionSchema.optional().parse(action.message.model)
+              if (params.channel === target.sessionId && params.action.type === 'session/titleChanged') {
+                const action = z.object({ type: z.literal('session/titleChanged'), title: z.string().trim().min(1).max(200) }).strict().parse(params.action)
                 step = 'native'
-                await connection.send(command.id, command.text, command.images, async () => { await requestAuthorization(true) }, access.actor, model)
-              } else if (params.action.type === 'chat/turnCancelled') {
-                const action = z.object({ type: z.literal('chat/turnCancelled'), turnId: z.string().min(1).max(200), duration: z.number().nonnegative() }).strict().parse(params.action)
-                await connection.cancel(action.turnId, async () => { await requestAuthorization(true) })
-              } else throw new Error('This action is not available through the session gateway.')
+                await connection.rename(action.title, async () => { await requestAuthorization(true) })
+              } else {
+                if (params.channel !== target.chatId) throw new Error('Only the selected chat can receive input.')
+                if (params.action.type === 'chat/turnStarted') {
+                  const action = z.object({ type: z.literal('chat/turnStarted'), turnId: z.uuid(), startedAt: z.iso.datetime(), message: z.object({ text: z.string().max(MAX_CHAT_TEXT_LENGTH), origin: z.object({ kind: z.literal('user') }).strict(), attachments: z.array(z.object({ type: z.literal('embeddedResource'), label: z.string().max(200), displayKind: z.literal('image'), contentType: z.string(), data: z.string(), _meta: z.object({ taskcontinuumImageId: z.uuid() }).strict() }).strict()).max(4).optional(), agent: z.unknown().optional(), model: z.unknown().optional(), _meta: z.unknown().optional() }).strict() }).strict().parse(params.action)
+                  const images = action.message.attachments?.map((image) => ({ id: image._meta.taskcontinuumImageId, name: image.label, mimeType: image.contentType, data: image.data })) as ChatImageAttachment[] | undefined
+                  const command = chatSubmissionSchema.parse({ id: action.turnId, text: action.message.text, ...(images?.length ? { images } : {}) })
+                  const model = agentHostModelSelectionSchema.optional().parse(action.message.model)
+                  step = 'native'
+                  await connection.send(command.id, command.text, command.images, async () => { await requestAuthorization(true) }, access.actor, model)
+                } else if (params.action.type === 'chat/turnCancelled') {
+                  const action = z.object({ type: z.literal('chat/turnCancelled'), turnId: z.string().min(1).max(200), duration: z.number().nonnegative() }).strict().parse(params.action)
+                  await connection.cancel(action.turnId, async () => { await requestAuthorization(true) })
+                } else throw new Error('This action is not available through the session gateway.')
+              }
               result = {}
             } else if (request.method === SNAPSHOT_TRANSFER_METHODS.prepare) {
               const params = snapshotPrepareRequestSchema.parse(request.params)

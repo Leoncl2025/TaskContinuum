@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import stripAnsi from 'strip-ansi'
 import type { ResponsePart, TerminalState } from '@microsoft/agent-host-protocol'
-import { agentHostKey } from '../../shared/agentHost'
+import { agentHostKey, MAX_SESSION_TITLE_LENGTH } from '../../shared/agentHost'
 import type { AgentHostBridge, AgentHostHistoryTransfer, AgentHostTarget, AgentHostView } from '../../shared/agentHost'
 import type { TaskRecord } from '../../shared/tasks'
 import type { WorkspaceSnapshot } from '../../shared/workspace'
@@ -236,7 +236,9 @@ type AgentHostPanelProps = {
   headerTarget?: HTMLElement | null
   sessionSwitcher?: ReactNode
   cachedTitle?: string
+  customTitle?: string
   onTitles?(sessions: readonly SessionTitleUpdate[]): void
+  onRenameTitle?(nextName: string | null): void
   onDraftChange?(draft: string): void
   onActivatePane?(): void
   onSplitRight?(): void
@@ -244,7 +246,7 @@ type AgentHostPanelProps = {
   onToggleSplitOrientation?(): void
   onSwapSplit?(): void
   onPopOut?(draft: string): Promise<boolean> | boolean | void
-  onHeaderContextMenu?(anchor: { x: number; y: number }, getDraft: () => string, clearDraft: (snapshot: string) => void): void
+  onHeaderContextMenu?(anchor: { x: number; y: number }, getDraft: () => string, clearDraft: (snapshot: string) => void, beginRename?: () => void): void
   onClose(): void
   onDevices?(): void
   onSessions?(): void
@@ -254,7 +256,44 @@ type AgentHostPanelProps = {
   prepareFirstMessage?(text: string): Promise<string>
 } & ({ task: TaskRecord; workspace?: never; onDetach(): void } | { task?: never; workspace: Pick<WorkspaceSnapshot, 'id' | 'name'>; onDetach?: never })
 
-export function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, visible = true, paneSlot, splitOrientation = 'horizontal', showTaskBadge = false, closeLabel = 'Hide chat panel', hideClose = false, restoredDraft, headerTarget, sessionSwitcher, cachedTitle, onTitles, onDraftChange, onActivatePane, onSplitRight, onSplitDown, onToggleSplitOrientation, onSwapSplit, onPopOut, onHeaderContextMenu, onDetach, onClose, onDevices, onSessions, onBusy, panelKey, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
+function HeaderTitleInput({ value, onFinish }: { value: string; onFinish(next: string | undefined): void }) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  const finishedRef = useRef(false)
+  useEffect(() => {
+    inputRef.current?.focus()
+    inputRef.current?.select()
+  }, [])
+  function finish(next: string | undefined): void {
+    if (finishedRef.current) return
+    finishedRef.current = true
+    onFinish(next)
+  }
+  return <input
+    ref={inputRef}
+    type="text"
+    className="ahp-chat-title-input"
+    aria-label="Session name"
+    maxLength={MAX_SESSION_TITLE_LENGTH}
+    defaultValue={value}
+    onPointerDown={(event) => event.stopPropagation()}
+    onClick={(event) => event.stopPropagation()}
+    onBlur={(event) => finish(event.currentTarget.value)}
+    onKeyDown={(event) => {
+      if (event.nativeEvent.isComposing) return
+      if (event.key === 'Enter') {
+        event.preventDefault()
+        event.stopPropagation()
+        finish(event.currentTarget.value)
+      } else if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        finish(undefined)
+      }
+    }}
+  />
+}
+
+export function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, visible = true, paneSlot, splitOrientation = 'horizontal', showTaskBadge = false, closeLabel = 'Hide chat panel', hideClose = false, restoredDraft, headerTarget, sessionSwitcher, cachedTitle, customTitle, onTitles, onRenameTitle, onDraftChange, onActivatePane, onSplitRight, onSplitDown, onToggleSplitOrientation, onSwapSplit, onPopOut, onHeaderContextMenu, onDetach, onClose, onDevices, onSessions, onBusy, panelKey, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
   const bridge = window.agentHost
   const { sessionId, chatId } = target
   const { clientId, machineName } = target.owner
@@ -281,6 +320,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const [images, setImages] = useState<ChatImageAttachment[]>([])
   const [busy, setBusy] = useState(false)
   const [detailsKey, setDetailsKey] = useState<string>()
+  const [editingTitleKey, setEditingTitleKey] = useState<string>()
   const [revision, setRevision] = useState(0)
   const catalogKey = `${key}:${revision}:${connectionRevision}`
   const watchKey = `${contextId}:${catalogKey}`
@@ -565,7 +605,9 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const historyFailure = view?.history?.error ?? (historyLoadError?.key === watchKey ? historyLoadError.message : undefined)
   const stateLabel = !bridge ? 'Desktop update required' : !view && (error || currentCatalog?.error) ? 'Connection failed' : !view || view.state === 'connecting' ? view?.historyTransfer ? historyTransferLabel(view.historyTransfer) : 'Connecting...' : view.state === 'offline' ? 'Offline history' : pending ? 'Delivery pending' : activeTurn ? 'Agent responding' : historyBusy ? 'Loading earlier history...' : view.readOnly ? 'Read only' : 'Connected'
   const modelStatus = !bridge ? 'Desktop update required.' : view?.state !== 'connected' ? undefined : !currentCatalog ? 'Loading models from the owner Host...' : currentCatalog.error ? undefined : !modelId ? 'Choose a model below to enable sending.' : !modelReady ? 'The selected model is unavailable. Choose another model or retry loading models.' : undefined
-  const displayTitle = sessionTitle(target, view?.target && agentHostKey(view.target) === key ? view.chat?.title : undefined) || cachedTitle || 'Original Host chat'
+  const liveHostTitle = view?.target && agentHostKey(view.target) === key ? (view.chat?.title || view.sessionTitle) : undefined
+  const displayTitle = customTitle || sessionTitle(target, liveHostTitle) || cachedTitle || 'Original Host chat'
+  const editingTitle = editingTitleKey === key
   const detailsOpen = active && detailsKey === key
   const updateBlocker = busy || activeTurn || pending || imageInput.reading
     ? 'Wait for Agent Host work and image processing to finish before updating.'
@@ -595,9 +637,34 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       { x: event.clientX, y: event.clientY },
       () => draftSnapshotRef.current,
       (snapshot) => setDraft((current) => current === snapshot ? '' : current),
+      onRenameTitle ? () => setEditingTitleKey(key) : undefined,
     )
   } : undefined}>
-    <div className="ahp-chat-title"><Icon name="copilot" />{showTaskBadge && task && <span className="ahp-chat-task-badge" title={task.title}>{task.id}</span>}<strong title={displayTitle}>{displayTitle}</strong>{sessionSwitcher}</div>
+    <div className="ahp-chat-title">
+      <Icon name="copilot" />
+      {showTaskBadge && task && <span className="ahp-chat-task-badge" title={task.title}>{task.id}</span>}
+      {editingTitle && onRenameTitle ? (
+        <HeaderTitleInput
+          value={displayTitle}
+          onFinish={(next) => {
+            setEditingTitleKey(undefined)
+            if (next !== undefined) {
+              const trimmed = next.trim()
+              if (trimmed !== displayTitle) onRenameTitle(trimmed ? trimmed : null)
+            }
+          }}
+        />
+      ) : (
+        <strong
+          title={displayTitle}
+          onDoubleClick={onRenameTitle ? (event) => {
+            event.stopPropagation()
+            setEditingTitleKey(key)
+          } : undefined}
+        >{displayTitle}</strong>
+      )}
+      {sessionSwitcher}
+    </div>
     <div className="ahp-chat-meta">
       <span className="ahp-chat-status" role="status" data-state={stateLabel} title={stateLabel}><span aria-hidden="true" /><span className="ahp-chat-state-label">{stateLabel}</span></span>
       <span className="ahp-chat-machine" title={ownerLabel}><Icon name="server" /><span>Copilot @ {ownerLabel}</span></span>

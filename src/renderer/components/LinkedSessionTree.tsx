@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import type { DragEvent, KeyboardEvent } from 'react'
-import { agentHostKey } from '../../shared/agentHost'
+import { agentHostKey, MAX_SESSION_TITLE_LENGTH } from '../../shared/agentHost'
 import type { AgentHostHistoryTransfer, AgentHostSession } from '../../shared/agentHost'
 import { sessionBindingTitle } from '../chat/sessionBindings'
 import type { SessionBinding } from '../chat/sessionBindings'
@@ -25,6 +25,7 @@ interface Props {
   secondaryKey?: string
   popoutKeys?: ReadonlySet<string>
   expandSession?: SessionExpandRequest
+  renameSession?: SessionExpandRequest
   sessions: readonly AgentHostSession[]
   cachedTitles?: Readonly<Record<string, string>>
   historyTransfers?: Readonly<Record<string, AgentHostHistoryTransfer>>
@@ -33,6 +34,7 @@ interface Props {
   onSplit?(binding: SessionBinding, direction?: 'right' | 'down'): void
   onPopOut?(binding: SessionBinding): void
   onSessionContextMenu?(binding: SessionBinding, anchor: { x: number; y: number }): void
+  onRenameSession?(binding: SessionBinding, nextName: string | null): void
   onLayoutChange?(layout: SessionGroupLayout, makeManual: boolean): void
   onUnlink?(binding: SessionBinding): void
 }
@@ -52,7 +54,13 @@ function transferProgress(progress: AgentHostHistoryTransfer) {
   return { value, percent, label, description }
 }
 
-function GroupNameEditor({ title, onFinish }: { title: string; onFinish(value: string | undefined, restoreFocus: boolean): void }) {
+function InlineNameEditor({ title, label, maxLength, className, onFinish }: {
+  title: string
+  label: string
+  maxLength: number
+  className: string
+  onFinish(value: string | undefined, restoreFocus: boolean): void
+}) {
   const input = useRef<HTMLInputElement>(null)
   const finished = useRef(false)
   useEffect(() => { input.current?.focus(); input.current?.select() }, [])
@@ -61,7 +69,7 @@ function GroupNameEditor({ title, onFinish }: { title: string; onFinish(value: s
     finished.current = true
     onFinish(value, restoreFocus)
   }
-  return <input ref={input} className="session-group-name-input" aria-label="Group name" maxLength={MAX_SESSION_GROUP_NAME} defaultValue={title}
+  return <input ref={input} className={className} aria-label={label} maxLength={maxLength} defaultValue={title}
     onBlur={(event) => finish(event.currentTarget.value, false)} onKeyDown={(event) => {
       if (event.nativeEvent.isComposing || (event.key !== 'Enter' && event.key !== 'Escape')) return
       event.preventDefault()
@@ -70,14 +78,19 @@ function GroupNameEditor({ title, onFinish }: { title: string; onFinish(value: s
     }} />
 }
 
-export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, secondaryKey, popoutKeys, expandSession, sessions, cachedTitles, historyTransfers, unlinkDisabled, onSelect, onSplit, onPopOut, onSessionContextMenu, onLayoutChange, onUnlink }: Props) {
+export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, secondaryKey, popoutKeys, expandSession, renameSession, sessions, cachedTitles, historyTransfers, unlinkDisabled, onSelect, onSplit, onPopOut, onSessionContextMenu, onRenameSession, onLayoutChange, onUnlink }: Props) {
   const aliases = useMachineAliases()
   const [expansion, setExpansion] = useState(() => ({ keys: new Set(expandSession ? [expandSession.key] : []), request: expandSession?.id }))
   if (expandSession && expandSession.id !== expansion.request) {
     setExpansion({ keys: new Set([...expansion.keys, expandSession.key]), request: expandSession.id })
   }
   const [focused, setFocused] = useState<string>()
-  const [editing, setEditing] = useState<string>()
+  const [editing, setEditing] = useState<string | undefined>(() => renameSession?.key)
+  const [seenRenameId, setSeenRenameId] = useState(renameSession?.id)
+  if (renameSession && renameSession.id !== seenRenameId) {
+    setSeenRenameId(renameSession.id)
+    setEditing(renameSession.key)
+  }
   const [dragged, setDragged] = useState<string>()
   const [marker, setMarker] = useState<SessionDropTarget>()
   const [peekGroup, setPeekGroup] = useState<string>()
@@ -277,7 +290,11 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
           })
         }
         return
-      case 'F2': if (entry.kind === 'group' && onLayoutChange) setEditing(key); else return; break
+      case 'F2':
+        if (entry.kind === 'group' && onLayoutChange) setEditing(key)
+        else if (entry.kind === 'session' && onRenameSession) setEditing(key)
+        else return
+        break
       default: return
     }
     event.preventDefault()
@@ -295,20 +312,22 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
     const progress = historyTransfers?.[hostKey]
     const transfer = progress && transferProgress(progress)
     const open = expansion.keys.has(key)
+    const renaming = editing === key
     const detailsId = `${detailsPrefix}-${rowIndices.get(key)}`
     const position = dropPosition(key)
     const dropHint = position === 'group' ? 'Create group' : position === 'into' ? 'Add to group' : undefined
     const isPoppedOut = Boolean(popoutKeys?.has(key))
     const isSplit = !isPoppedOut && key === secondaryKey
-    const canDragRow = canArrange || Boolean(onSplit)
+    const canDragRow = !renaming && (canArrange || Boolean(onSplit))
     return <li key={key} role="treeitem" className="session-tree-item" data-session-key={key} data-drop={position}
       aria-label={label} aria-description={binding.id} aria-selected={key === activeKey} aria-expanded={open} aria-level={parent ? 2 : 1}
+      aria-keyshortcuts={onRenameSession ? 'F2' : undefined}
       tabIndex={tabStop === key ? 0 : -1} ref={refFor(key)}
       onFocus={(event) => { if (event.target === event.currentTarget) setFocused(key) }} onKeyDown={(event) => navigate(event, byKey.get(key)!)}>
       <div className={`session-tree-row ${key === activeKey ? 'is-selected' : ''}${isSplit ? ' is-split-pane' : ''}`} data-transferring={Boolean(transfer)}
         data-dragging={dragged === key || undefined} draggable={canDragRow || undefined}
         onDragStart={(event) => startDrag(event, node)} onDragEnd={clearDrag}
-        onContextMenu={onSessionContextMenu ? (event) => {
+        onContextMenu={onSessionContextMenu && !renaming ? (event) => {
           event.preventDefault()
           event.stopPropagation()
           focus(key)
@@ -316,7 +335,25 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
         } : undefined}>
         {transfer && <progress className="session-transfer-mask" aria-label={`History transfer for ${label}`} max={100} value={transfer.value} aria-valuetext={transfer.description} />}
         {canArrange && <span className="session-drag-grip" aria-hidden="true"><Icon name="gripper" /></span>}
-        <button type="button" tabIndex={-1} className="session-row" draggable={canDragRow || undefined} aria-label={`Open ${label}`} title={label}
+        {renaming ? <div className="session-row session-row-editing">
+          <InlineNameEditor
+            title={label}
+            label="Session name"
+            maxLength={MAX_SESSION_TITLE_LENGTH}
+            className="session-name-input"
+            onFinish={(value, restoreFocus) => {
+              setEditing(undefined)
+              if (value !== undefined) {
+                const next = value.trim()
+                if (next !== label) onRenameSession?.(binding, next ? next : null)
+              }
+              if (restoreFocus) requestAnimationFrame(() => focus(key))
+            }}
+          />
+          <span className="session-machine" title={binding.owner.machineName}>
+            <span title={binding.owner.machineName}>{machineLabel(binding.owner, aliases)}</span>
+          </span>
+        </div> : <button type="button" tabIndex={-1} className="session-row" draggable={canDragRow || undefined} aria-label={`Open ${label}`} title={label}
           onClick={() => { if (suppressClick.current) return; focus(key); onSelect?.(binding) }}>
           <strong title={cached && !discovered ? 'Last known title saved on this device' : undefined}>{label}</strong>
           {dropHint ? <span className="session-drop-hint"><Icon name="add" />{dropHint}</span>
@@ -327,13 +364,13 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
               {isPoppedOut && <span className="session-state-pill" title="Open in separate window"><Icon name="multiple-windows" />Window</span>}
               {isSplit && <span className="session-state-pill" title="Open in split pane"><Icon name="split-horizontal" />Split</span>}
             </span>}
-        </button>
-        {(onSplit || onPopOut) && <div className="session-row-actions">
+        </button>}
+        {!renaming && (onSplit || onPopOut) && <div className="session-row-actions">
           {onSplit && <IconButton icon="split-horizontal" label={`Split ${label} right`} title="Split right (Alt+Click to split down)" tabIndex={-1} onClick={(event) => { focus(key); onSplit(binding, event.altKey ? 'down' : 'right') }} />}
           {onPopOut && <IconButton icon={isPoppedOut ? 'multiple-windows' : 'empty-window'} label={isPoppedOut ? `Focus ${label} window` : `Pop out ${label}`} title={isPoppedOut ? 'Focus session window' : 'Open in new window'} tabIndex={-1} onClick={() => { focus(key); onPopOut(binding) }} />}
         </div>}
-        <IconButton icon={open ? 'chevron-up' : 'chevron-down'} label={`${open ? 'Hide' : 'Show'} details for ${label}`} tabIndex={-1} aria-expanded={open} aria-controls={open ? detailsId : undefined}
-          onClick={() => { focus(key); showDetails(key, !open) }} />
+        {!renaming && <IconButton icon={open ? 'chevron-up' : 'chevron-down'} label={`${open ? 'Hide' : 'Show'} details for ${label}`} tabIndex={-1} aria-expanded={open} aria-controls={open ? detailsId : undefined}
+          onClick={() => { focus(key); showDetails(key, !open) }} />}
       </div>
       {open && <div id={detailsId} className="session-details" role="group" aria-label={`Details for ${label}`}>
         <dl>
@@ -373,7 +410,7 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
         {showGrip && <span className="session-drag-grip" aria-hidden="true"><Icon name="gripper" /></span>}
         {renaming ? <div className="session-group-edit">
           <Icon name={open ? 'chevron-down' : 'chevron-right'} />
-          <GroupNameEditor title={group.title} onFinish={(value, restoreFocus) => {
+          <InlineNameEditor title={group.title} label="Group name" maxLength={MAX_SESSION_GROUP_NAME} className="session-group-name-input" onFinish={(value, restoreFocus) => {
             setEditing(undefined)
             const title = value?.trim()
             if (title && title !== group.title) editGroup(key, { title })

@@ -124,8 +124,10 @@ export interface PaneWorkspaceGridProps {
   readonly unifiedHeaderTarget?: HTMLElement | null
   readonly connectionRevision?: number
   readonly cachedTitles: Readonly<Record<string, string>>
+  readonly customTitles?: Readonly<Record<string, string>>
   readonly restoredDrafts?: Readonly<Record<string, { readonly nonce: number; readonly text: string }>>
   readonly onTitles?: (sessions: readonly SessionTitleUpdate[]) => void
+  readonly onRenameSession?: (target: SessionBinding['agentHost'], nextName: string | null) => void
   readonly onDraftSnapshot?: (groupId: string, taskId: string, sessionKey: string, draft: string) => void
   readonly onBusyChange?: (busy: boolean, panelKey?: string) => void
   readonly onPopOutTaskPage?: (request: {
@@ -162,8 +164,10 @@ export function PaneWorkspaceGrid({
   unifiedHeaderTarget,
   connectionRevision = 0,
   cachedTitles,
+  customTitles,
   restoredDrafts,
   onTitles,
+  onRenameSession,
   onDraftSnapshot,
   onBusyChange,
   onPopOutTaskPage,
@@ -337,9 +341,11 @@ export function PaneWorkspaceGrid({
         unifiedHeaderTarget={!isMultiGroup ? unifiedHeaderTarget : null}
         connectionRevision={connectionRevision}
         cachedTitles={cachedTitles}
+        customTitles={customTitles}
         aliases={aliases}
         restoredDrafts={restoredDrafts}
         onTitles={onTitles}
+        onRenameSession={onRenameSession}
         onDraftSnapshot={onDraftSnapshot}
         onBusyChange={onBusyChange}
         onActivateGroup={() => activateGroup(group.id)}
@@ -367,6 +373,10 @@ export function PaneWorkspaceGrid({
       splitOrientation={contextParentSplit?.orientation ?? 'horizontal'}
       canSwap={Boolean(contextParentSplit)}
       allowOpenWindow={Boolean(onPopOutTaskPage)}
+      onRename={contextMenu.beginRename}
+      onResetName={contextMenu.binding && onRenameSession && customTitles?.[agentHostKey(contextMenu.binding.agentHost)]
+        ? () => onRenameSession(contextMenu.binding!.agentHost, null)
+        : undefined}
       onSplit={(direction, moveSource) => {
         const sessionKey = contextMenu.binding ? sessionBindingKey(contextMenu.binding) : undefined
         handleSplit(contextMenu.groupId, direction, moveSource, contextMenu.taskId, sessionKey)
@@ -888,9 +898,11 @@ function PaneGroupBody({
   unifiedHeaderTarget,
   connectionRevision,
   cachedTitles,
+  customTitles,
   aliases,
   restoredDrafts,
   onTitles,
+  onRenameSession,
   onDraftSnapshot,
   onBusyChange,
   onActivateGroup,
@@ -922,9 +934,11 @@ function PaneGroupBody({
   readonly unifiedHeaderTarget?: HTMLElement | null
   readonly connectionRevision: number
   readonly cachedTitles: Readonly<Record<string, string>>
+  readonly customTitles?: Readonly<Record<string, string>>
   readonly aliases: Readonly<Record<string, string>>
   readonly restoredDrafts?: Readonly<Record<string, { readonly nonce: number; readonly text: string }>>
   readonly onTitles?: (sessions: readonly SessionTitleUpdate[]) => void
+  readonly onRenameSession?: (target: SessionBinding['agentHost'], nextName: string | null) => void
   readonly onDraftSnapshot?: (groupId: string, taskId: string, sessionKey: string, draft: string) => void
   readonly onBusyChange?: (busy: boolean, panelKey?: string) => void
   readonly onActivateGroup: () => void
@@ -1015,7 +1029,9 @@ function PaneGroupBody({
           headerTarget={!isMultiGroup && unifiedHeaderTarget ? unifiedHeaderTarget : undefined}
           sessionSwitcher={visible ? popupSessionSwitcher : undefined}
           cachedTitle={cachedTitles[agentHostKey(panel.binding.agentHost)]}
+          customTitle={customTitles?.[agentHostKey(panel.binding.agentHost)]}
           onTitles={onTitles}
+          onRenameTitle={onRenameSession ? (nextName) => onRenameSession(panel.binding.agentHost, nextName) : undefined}
           onDraftChange={onDraftSnapshot ? (value) => onDraftSnapshot(group.id, panel.task.id, panel.sessionKey, value) : undefined}
           visible={visible}
           active={visible && groupFocused}
@@ -1024,7 +1040,7 @@ function PaneGroupBody({
           onSplitRight={!isMultiGroup && canSplitMore ? () => onSplit('right', false, panel.task.id, panel.sessionKey) : undefined}
           onSplitDown={!isMultiGroup && canSplitMore ? () => onSplit('down', false, panel.task.id, panel.sessionKey) : undefined}
           onPopOut={onPopOut ? (draft) => onPopOut(panel.task.id, panel.binding, draft, 'move') : undefined}
-          onHeaderContextMenu={(anchor, getDraft, clearDraft) => onOpenContextMenu({
+          onHeaderContextMenu={(anchor, getDraft, clearDraft, beginRename) => onOpenContextMenu({
             x: anchor.x,
             y: anchor.y,
             groupId: group.id,
@@ -1032,6 +1048,7 @@ function PaneGroupBody({
             binding: panel.binding,
             getDraft,
             clearDraft,
+            beginRename,
           })}
           onDetach={() => {
             if (onOpenSessionDetach) onOpenSessionDetach(panel.task.id, panel.binding)

@@ -345,6 +345,16 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
       return await connection.cancel(turnId, () => current(event, window, root, target))
     } finally { release() }
   })
+  handleDesktopOperation(ipcMain, 'agent-host:rename', async (event, value: unknown, titleValue: unknown) => {
+    const window = requireWindow(event)
+    const root = await currentRoot()
+    const target = agentHostTargetSchema.parse(value)
+    const title = z.string().trim().min(1).max(200).parse(titleValue)
+    const { connection, release } = await acquire(event, window, root, target)
+    try {
+      await connection.rename(title, () => current(event, window, root, target))
+    } finally { release() }
+  })
   return {
     close: () => {
       for (const watch of watches.values()) watch.close()

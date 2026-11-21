@@ -44,10 +44,13 @@ export interface AgentHostHistoryTransferEvent {
   progress?: AgentHostHistoryTransfer
 }
 
+export const MAX_SESSION_TITLE_LENGTH = 200
+
 export interface AgentHostView {
   target: AgentHostTarget
   state: 'connecting' | 'connected' | 'offline'
   protocolVersion?: AgentHostProtocolVersion
+  sessionTitle?: string
   chat?: ChatState
   historyTransfer?: AgentHostHistoryTransfer
   history?: AgentHostHistory
@@ -82,6 +85,7 @@ export interface AgentHostBridge {
   send(target: AgentHostTarget, id: string, text: string, images?: ChatImageAttachment[], model?: ModelSelection): Promise<void>
   resolveDelivery(target: AgentHostTarget, turnId: string, action: 'check' | 'abandon', acknowledged?: boolean): Promise<'confirmed' | 'not-found' | 'abandoned'>
   cancel(target: AgentHostTarget, turnId: string): Promise<void>
+  rename?(target: AgentHostTarget, title: string): Promise<void>
   onView(listener: (event: { id: string; view: AgentHostView }) => void): () => void
   onHistoryTransfer(listener: (event: AgentHostHistoryTransferEvent) => void): () => void
 }

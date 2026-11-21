@@ -4,9 +4,9 @@ import { z } from 'zod'
 import { AhpClient } from '@microsoft/agent-host-protocol/client'
 import type { AhpTransport, Subscription } from '@microsoft/agent-host-protocol/client'
 import { MessageKind, sessionReducer, terminalReducer } from '@microsoft/agent-host-protocol'
-import type { ActionEnvelope, ChatTurnStartedAction, ChatTurnCancelledAction, InitializeResult, MessageEmbeddedResourceAttachment, ModelSelection, SessionModelInfo, SessionState, Snapshot, TerminalState } from '@microsoft/agent-host-protocol'
+import type { ActionEnvelope, ChatTurnStartedAction, ChatTurnCancelledAction, InitializeResult, MessageEmbeddedResourceAttachment, ModelSelection, SessionModelInfo, SessionState, SessionTitleChangedAction, Snapshot, TerminalState } from '@microsoft/agent-host-protocol'
 import type { AgentHostHistoryTransfer, AgentHostProtocolVersion, AgentHostTarget, AgentHostView } from '../shared/agentHost'
-import { agentHostProtocolVersions } from '../shared/agentHost'
+import { agentHostProtocolVersions, MAX_SESSION_TITLE_LENGTH } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
 import { modelConfigErrors } from '../shared/agentHostModelConfig'
@@ -135,9 +135,12 @@ export class AgentHostConnection {
 
   get view(): AgentHostView {
     const chat = this.chat.value
+    const sessionState = this.snapshots.get(this.target.sessionId)?.state as SessionState | undefined
     const pending = this.commands.find((command) => command.state === 'pending' || command.state === 'uncertain')
     const readOnly = this.readOnly
-    return { target: this.target, state: this.state, protocolVersion: this.initialized?.protocolVersion, chat,
+    return { target: this.target, state: this.state, protocolVersion: this.initialized?.protocolVersion,
+      ...(sessionState?.title ? { sessionTitle: sessionState.title } : {}),
+      chat,
       ...(this.historyTransfer ? { historyTransfer: { ...this.historyTransfer } } : {}),
       ...(this.historyPage || this.chat.nativeHistoryCursor ? { history: {
         hasMore: Boolean(this.historyPage?.beforeTurnId || this.chat.nativeHistoryCursor),
@@ -952,6 +955,20 @@ export class AgentHostConnection {
     const active = this.current
     if (!active || !this.connected || this.readOnly || this.chat.sendState.activeTurnId !== turnId) throw new Error('This exact turn is no longer running or control is not permitted.')
     active.client.dispatch(this.target.chatId, { type: 'chat/turnCancelled' as ChatTurnCancelledAction['type'], turnId, duration: 0 })
+  }
+
+  async rename(title: string, authorize: () => Promise<void>): Promise<void> {
+    const trimmed = z.string().trim().min(1).max(MAX_SESSION_TITLE_LENGTH).parse(title)
+    await this.open()
+    await authorize()
+    const active = this.current
+    if (!active || !this.connected || this.readOnly) {
+      throw new Error('The original Agent Host is offline or read-only.')
+    }
+    active.client.dispatch(this.target.sessionId, {
+      type: 'session/titleChanged' as SessionTitleChangedAction['type'],
+      title: trimmed,
+    })
   }
 
   private offline(active: NonNullable<typeof this.current>, reason: NonNullable<AgentHostDiagnosticDetails['reason']>, error?: unknown): void {

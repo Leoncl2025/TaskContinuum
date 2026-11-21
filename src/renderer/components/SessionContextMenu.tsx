@@ -14,6 +14,7 @@ export interface SessionContextMenuTarget {
   readonly binding?: SessionBinding
   readonly getDraft?: () => string
   readonly clearDraft?: (snapshot: string) => void
+  readonly beginRename?: () => void
 }
 
 interface Props {
@@ -23,6 +24,8 @@ interface Props {
   readonly splitOrientation: SplitOrientation
   readonly canSwap: boolean
   readonly allowOpenWindow?: boolean
+  onRename?(): void
+  onResetName?(): void
   onSplit(direction: SplitDirection, moveSource: boolean): void
   onToggleOrientation(): void
   onSwap(): void
@@ -45,6 +48,8 @@ export function SessionContextMenu({
   splitOrientation,
   canSwap,
   allowOpenWindow = true,
+  onRename,
+  onResetName,
   onSplit,
   onToggleOrientation,
   onSwap,
@@ -178,6 +183,20 @@ export function SessionContextMenu({
         onContextMenu={(event) => event.preventDefault()}
         onKeyDown={onRootKeyDown}
       >
+        {(onRename || onResetName) && <>
+          {onRename && (
+            <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(onRename)}>
+              <span>Rename Session...</span>
+              <span className="session-context-shortcut">F2</span>
+            </button>
+          )}
+          {onResetName && (
+            <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(onResetName)}>
+              <span>Reset Session Name</span>
+            </button>
+          )}
+          <div className="session-context-separator" role="separator" />
+        </>}
         <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(() => onSplit('right', false))}>
           <span>Split Right</span>
           <span className="session-context-shortcut">Ctrl+\</span>

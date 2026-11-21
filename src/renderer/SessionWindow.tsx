@@ -413,8 +413,10 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
         isPopupWindow={true}
         unifiedHeaderTarget={unifiedChatHeader ? chatHeaderTarget : null}
         cachedTitles={sessionTitles.titles}
+        customTitles={sessionTitles.customTitles}
         restoredDrafts={restoredDrafts}
         onTitles={sessionTitles.remember}
+        onRenameSession={sessionTitles.rename}
         onDraftSnapshot={handleDraftSnapshot}
         onBusyChange={reportPanelBusy}
         onPopOutTaskPage={window.desktop?.windows ? popOutAnotherWindow : undefined}

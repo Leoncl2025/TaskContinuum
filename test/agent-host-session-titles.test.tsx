@@ -209,4 +209,34 @@ describe('cached titles in the session sidebar and chat header', () => {
     expect(await screen.findByText('No available Agent Host sessions.')).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: /^Host session / })).not.toBeInTheDocument()
   })
+
+  it('supports custom user session rename (persisting over host updates & LRU eviction, dispatching AHP rename, and resetting back to host title)', () => {
+    const first = session('Original Host name')
+    const target = { sessionId: first.sessionId, chatId: first.chatId, owner: first.owner }
+    const renameSpy = vi.fn(async () => {})
+    window.agentHost = { ...fixture().bridge, rename: renameSpy }
+
+    const hook = renderHook(() => useSessionTitles('workspace-rename'))
+    act(() => hook.result.current.remember([first]))
+    act(() => hook.result.current.rename(target, '测试新session · 主排障'))
+
+    expect(hook.result.current.titles[agentHostKey(target)]).toBe('测试新session · 主排障')
+    expect(hook.result.current.customTitles[agentHostKey(target)]).toBe('测试新session · 主排障')
+    expect(renameSpy).toHaveBeenCalledWith(target, '测试新session · 主排障')
+
+    // Subsequent host title refreshes preserve customTitle while updating the underlying host fallback title.
+    act(() => hook.result.current.remember([{ ...first, title: 'Auto-generated host title', updatedAt: '2026-09-24T15:00:00.000Z' }]))
+    expect(hook.result.current.titles[agentHostKey(target)]).toBe('测试新session · 主排障')
+
+    // 300 un-renamed sessions do not evict a custom-named session.
+    const bulk = Array.from({ length: 300 }, (_, index) => ({ ...session(`Bulk ${index}`), sessionId: `copilotcli:/b-${index}`, chatId: `ahp-chat:/b-${index}` }))
+    act(() => hook.result.current.remember(bulk))
+    expect(hook.result.current.titles[agentHostKey(target)]).toBe('测试新session · 主排障')
+
+    // Resetting customTitle restores the latest underlying host title and syncs back to AHP.
+    act(() => hook.result.current.rename(target, null))
+    expect(hook.result.current.customTitles[agentHostKey(target)]).toBeUndefined()
+    expect(hook.result.current.titles[agentHostKey(target)]).toBe('Auto-generated host title')
+    expect(renameSpy).toHaveBeenLastCalledWith(target, 'Auto-generated host title')
+  })
 })

@@ -156,6 +156,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const [layout, setLayout] = useState(readLayout)
   const [sidebarView, setSidebarView] = useState<'tasks' | 'sessions'>('tasks')
   const [expandSessionRequest, setExpandSessionRequest] = useState<{ taskId: string; key: string; id: number; active: boolean }>()
+  const [renameSessionRequest, setRenameSessionRequest] = useState<{ taskId: string; key: string; id: number }>()
   const [popoutWindows, setPopoutWindows] = useState<SessionWindowSummary[]>([])
   const [restoredDrafts, setRestoredDrafts] = useState<Record<string, { nonce: number; text: string }>>({})
   const [sidebarContextMenu, setSidebarContextMenu] = useState<SessionContextMenuTarget | null>(null)
@@ -757,6 +758,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
         provisional={sidebarProvisional} awaitingSyncCount={sidebarAwaitingSyncCount}
         onSyncNow={window.remoteVSCode?.gitSync ? syncLinksNow : undefined}
         expandSession={expandSessionRequest?.active && expandSessionRequest.taskId === sidebarTask?.id ? expandSessionRequest : undefined}
+        renameSession={renameSessionRequest && renameSessionRequest.taskId === sidebarTask?.id ? renameSessionRequest : undefined}
         localOwnerId={links.localOwner?.clientId} cachedTitles={sessionTitles.titles} sessionTimestamps={sessionTitles.timestamps} historyTransfers={historyTransfers}
         titleCacheError={sessionTitles.error} onTitles={sessionTitles.remember} busy={links.busy || syncingLinks}
         onSelect={sidebarTask ? (binding) => selectSession(sidebarTask.id, binding) : undefined}
@@ -766,13 +768,21 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
           if (popoutPanelKeys.has(panelKey)) focusPopOut(sidebarTask.id, binding)
           else void popOutTaskPage({ groupId: focusedGroup.id, taskId: sidebarTask.id, binding, mode: 'copy' })
         } : undefined}
-        onSessionContextMenu={sidebarTask ? (binding, anchor) => setSidebarContextMenu({
-          x: anchor.x,
-          y: anchor.y,
-          groupId: focusedGroup.id,
-          taskId: sidebarTask.id,
-          binding,
-        }) : undefined}
+        onSessionContextMenu={sidebarTask ? (binding, anchor) => {
+          const key = sessionBindingKey(binding)
+          setSidebarContextMenu({
+            x: anchor.x,
+            y: anchor.y,
+            groupId: focusedGroup.id,
+            taskId: sidebarTask.id,
+            binding,
+            beginRename: () => {
+              selection.revealSessionGroup(sidebarTask.id, key)
+              setRenameSessionRequest((current) => ({ taskId: sidebarTask.id, key, id: (current?.id ?? 0) + 1 }))
+            },
+          })
+        } : undefined}
+        onRenameSession={(binding, nextName) => sessionTitles.rename(binding.agentHost, nextName)}
         onLayoutChange={sidebarTask ? (next, makeManual) => selection.setSessionLayout(sidebarTask.id, next, makeManual, selectedId, openTasks) : undefined}
         onSortMode={sidebarTask ? (mode) => selection.setSessionSort(sidebarTask.id, mode, selectedId, openTasks) : undefined}
         onDetach={sidebarTask ? (binding) => detachSession(sidebarTask.id, binding) : undefined} onLink={linkAgentHost} onCreated={agentHostCreated}
@@ -821,8 +831,10 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
               unifiedHeaderTarget={unifiedChatHeader ? chatHeaderTarget : null}
               connectionRevision={agentHostRevision}
               cachedTitles={sessionTitles.titles}
+              customTitles={sessionTitles.customTitles}
               restoredDrafts={restoredDrafts}
               onTitles={sessionTitles.remember}
+              onRenameSession={sessionTitles.rename}
               onDraftSnapshot={handleDraftSnapshot}
               onBusyChange={reportPanelBusy}
               onPopOutTaskPage={popOutTaskPage}
@@ -874,6 +886,10 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
       splitOrientation={sidebarParentSplit?.orientation ?? 'horizontal'}
       canSwap={Boolean(sidebarParentSplit)}
       allowOpenWindow={true}
+      onRename={sidebarContextMenu.beginRename}
+      onResetName={sidebarContextMenu.binding && sessionTitles.customTitles[agentHostKey(sidebarContextMenu.binding.agentHost)]
+        ? () => sessionTitles.rename(sidebarContextMenu.binding!.agentHost, null)
+        : undefined}
       onSplit={(direction) => {
         if (sidebarContextMenu.binding) splitFromSidebarSession(direction, sidebarContextMenu.taskId, sidebarContextMenu.binding)
         else applyTreeChange((current) => splitPaneGroup(current, sidebarContextMenu.groupId, direction, { taskId: sidebarContextMenu.taskId }))

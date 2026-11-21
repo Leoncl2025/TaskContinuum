@@ -144,6 +144,41 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(pane3).toHaveAttribute('data-pane-focused', 'true')
       await expect(sidebar).toContainText('T-0003')
 
+      // Focus Pane 1 (T-0002) and right-click a session in the left sidebar -> Rename Session...
+      await pane1.getByLabel('Chat header').click()
+      const targetSessionRow = sidebar.getByRole('tree', { name: 'Sessions for T-0002' })
+        .getByRole('treeitem', { name: 'A focused release plan', exact: true })
+        .locator('.session-tree-row')
+      await targetSessionRow.click({ button: 'right' })
+      const renameMenu = page.getByRole('menu', { name: 'Session view actions', exact: true })
+      await expect(renameMenu.getByRole('menuitem', { name: /^Rename Session/ })).toBeVisible()
+      await renameMenu.getByRole('menuitem', { name: /^Rename Session/ }).click()
+
+      const renameInput = sidebar.getByRole('textbox', { name: 'Session name', exact: true })
+      await expect(renameInput).toBeFocused()
+      await expect(renameInput).toHaveValue('A focused release plan')
+      await page.screenshot({
+        path: testInfo.outputPath(`session-rename-inline-${theme}.png`),
+        animations: 'disabled',
+      })
+      await renameInput.fill('测试新session · 线上排障')
+      await renameInput.press('Enter')
+
+      // Both the left sidebar row AND BOTH split panes (Pane 1 & Pane 2) immediately reflect the renamed session!
+      await expect(sidebar.getByRole('tree', { name: 'Sessions for T-0002' })
+        .getByRole('treeitem', { name: '测试新session · 线上排障', exact: true })).toBeVisible()
+      await expect(pane1.getByLabel('Chat header')).toContainText('测试新session · 线上排障')
+      await expect(pane2.getByLabel('Chat header')).toContainText('测试新session · 线上排障')
+
+      // Right-click -> Reset Session Name restores the original Host title!
+      await sidebar.getByRole('tree', { name: 'Sessions for T-0002' })
+        .getByRole('treeitem', { name: '测试新session · 线上排障', exact: true })
+        .locator('.session-tree-row')
+        .click({ button: 'right' })
+      await page.getByRole('menu', { name: 'Session view actions', exact: true })
+        .getByRole('menuitem', { name: 'Reset Session Name', exact: true }).click()
+      await expect(pane1.getByLabel('Chat header')).toContainText('A focused release plan')
+
       expect(errors).toEqual([])
     } finally {
       await context.close()

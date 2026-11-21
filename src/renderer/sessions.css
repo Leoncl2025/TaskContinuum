@@ -60,6 +60,11 @@
 .session-group-actions .codicon { font-size: 13px; }
 .session-sidebar .session-group-name-input { flex: 1; width: 100%; min-width: 0; height: 26px; padding: 2px 6px; font-size: 12px; font-weight: 600; }
 .session-group-name-input:focus-visible { outline: 1px solid var(--link); outline-offset: -1px; }
+.session-row.session-row-editing { cursor: default; gap: 3px; }
+.session-sidebar .session-name-input { width: 100%; min-width: 0; height: 24px; padding: 1px 6px; border: 1px solid var(--link); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-size: 12px; font-weight: 600; line-height: 18px; }
+.session-sidebar .session-name-input:focus-visible { outline: 2px solid color-mix(in srgb, var(--link) 28%, transparent); outline-offset: 0; }
+.ahp-chat-title-input { flex: 0 1 260px; min-width: 120px; height: 22px; padding: 0 7px; border: 1px solid var(--link); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-size: 12px; font-weight: 600; line-height: 20px; -webkit-app-region: no-drag; }
+.ahp-chat-title-input:focus-visible { outline: 2px solid color-mix(in srgb, var(--link) 28%, transparent); outline-offset: 0; }
 .session-group-members { margin: 2px 0 0 11px; padding-inline-start: 5px; border-inline-start: 1px solid var(--border); list-style: none; }
 .session-tree-item[data-drop="group"] > .session-tree-row,
 .session-tree-item[data-drop="into"] > :is(.session-tree-row, .session-group-row) { background: color-mix(in srgb, var(--link) 9%, var(--panel)); outline: 1px solid color-mix(in srgb, var(--link) 70%, var(--border)); outline-offset: -1px; }

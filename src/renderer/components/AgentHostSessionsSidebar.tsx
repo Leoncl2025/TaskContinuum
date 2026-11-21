@@ -37,6 +37,7 @@ interface Props {
   provisional?: boolean
   awaitingSyncCount?: number
   expandSession?: SessionExpandRequest
+  renameSession?: SessionExpandRequest
   localOwnerId?: string
   busy?: boolean
   initialView?: SessionView
@@ -49,6 +50,7 @@ interface Props {
   onSplit?(binding: SessionBinding, direction?: 'right' | 'down'): void
   onPopOut?(binding: SessionBinding): void
   onSessionContextMenu?(binding: SessionBinding, anchor: { x: number; y: number }): void
+  onRenameSession?(binding: SessionBinding, nextName: string | null): void
   onLayoutChange?(layout: SessionGroupLayout, makeManual: boolean): void
   onSortMode?(mode: SessionSortMode): void
   onSyncNow?(): Promise<void>
@@ -134,13 +136,18 @@ function SessionSortMenu({ count, groupCount = 0, modes = sessionSortModes, valu
   </div>
 }
 
-export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, orderedKeys, sessionLayout, sortMode, activeKey, secondaryKey, popoutKeys, provisional = false, awaitingSyncCount = 0, expandSession, localOwnerId, busy = false, initialView = 'current', cachedTitles, sessionTimestamps, historyTransfers, titleCacheError, onTitles, onSelect, onSplit, onPopOut, onSessionContextMenu, onLayoutChange, onSortMode, onSyncNow, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
+export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, orderedKeys, sessionLayout, sortMode, activeKey, secondaryKey, popoutKeys, provisional = false, awaitingSyncCount = 0, expandSession, renameSession, localOwnerId, busy = false, initialView = 'current', cachedTitles, sessionTimestamps, historyTransfers, titleCacheError, onTitles, onSelect, onSplit, onPopOut, onSessionContextMenu, onRenameSession, onLayoutChange, onSortMode, onSyncNow, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
   const bridge = window.agentHost
   const aliases = useMachineAliases()
-  const [view, setView] = useState<SessionView>(() => expandSession ? 'current' : initialView)
+  const [view, setView] = useState<SessionView>(() => expandSession || renameSession ? 'current' : initialView)
   const [seenExpandId, setSeenExpandId] = useState(expandSession?.id)
   if (expandSession && expandSession.id !== seenExpandId) {
     setSeenExpandId(expandSession.id)
+    if (view !== 'current') setView('current')
+  }
+  const [seenRenameId, setSeenRenameId] = useState(renameSession?.id)
+  if (renameSession && renameSession.id !== seenRenameId) {
+    setSeenRenameId(renameSession.id)
     if (view !== 'current') setView('current')
   }
   const [seenTaskId, setSeenTaskId] = useState(taskId)
@@ -298,7 +305,7 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
     return decorated.map((item) => item.session)
   }, [sessions, location, localOwnerId, query, cachedTitles, aliases, mergedTimestamps, linkSortMode])
   return <aside className="sidebar session-sidebar" aria-label="Agent Host sessions">
-    <header className="panel-header"><div className="header-actions"><IconButton icon="refresh" label="Refresh Agent Host sessions" disabled={loading || operating} onClick={() => { setLoading(true); setRevision((value) => value + 1) }} /><IconButton icon="layout-sidebar-left-off" label="Hide session sidebar" onClick={onClose} /></div></header>
+    <header className="panel-header"><div className="header-actions"><IconButton icon="refresh" label="Refresh Agent Host sessions" disabled={loading || operating} onClick={() => { setLoading(true); setSessions([]); setRevision((value) => value + 1) }} /><IconButton icon="layout-sidebar-left-off" label="Hide session sidebar" onClick={onClose} /></div></header>
     <div className="session-task-context"><strong>{taskId ? `${taskId} - ${taskTitle ?? taskId}` : 'No task selected'}</strong></div>
     <div className="session-view-tabs" role="tablist" aria-label="Session management">
       {(['current', 'link', 'create'] as const).map((name, index) => <button type="button" key={name} role="tab" aria-selected={view === name} aria-controls="session-management-content" tabIndex={view === name ? 0 : -1} onClick={() => { setView(name); setError(undefined) }} onKeyDown={(event) => {
@@ -326,8 +333,8 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
           if (sortMode === undefined) setLocalSortMode(next)
           onSortMode?.(next)
         }} />}
-        {taskId && <LinkedSessionTree taskId={taskId} entries={entries} manualLayout={manual} activeKey={activeKey} secondaryKey={secondaryKey} popoutKeys={popoutKeys} expandSession={expandSession}
-          sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} unlinkDisabled={!taskReady || awaitingSyncCount > 0 || busy || operating} onSelect={onSelect} onSplit={onSplit} onPopOut={onPopOut} onSessionContextMenu={onSessionContextMenu}
+        {taskId && <LinkedSessionTree taskId={taskId} entries={entries} manualLayout={manual} activeKey={activeKey} secondaryKey={secondaryKey} popoutKeys={popoutKeys} expandSession={expandSession} renameSession={renameSession}
+          sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} unlinkDisabled={!taskReady || awaitingSyncCount > 0 || busy || operating} onSelect={onSelect} onSplit={onSplit} onPopOut={onPopOut} onSessionContextMenu={onSessionContextMenu} onRenameSession={onRenameSession}
           onLayoutChange={onLayoutChange ? (next, makeManual) => {
             if (sortMode === undefined && makeManual) setLocalSortMode('manual')
             onLayoutChange(next, makeManual)
