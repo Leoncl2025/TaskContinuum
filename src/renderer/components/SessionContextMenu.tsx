@@ -15,6 +15,9 @@ export interface SessionContextMenuTarget {
   readonly getDraft?: () => string
   readonly clearDraft?: (snapshot: string) => void
   readonly beginRename?: () => void
+  readonly detailsOpen?: boolean
+  readonly toggleDetails?: () => void
+  readonly unlink?: () => void
 }
 
 interface Props {
@@ -26,10 +29,12 @@ interface Props {
   readonly allowOpenWindow?: boolean
   onRename?(): void
   onResetName?(): void
-  onSplit(direction: SplitDirection, moveSource: boolean): void
-  onToggleOrientation(): void
-  onSwap(): void
-  onCloseSplit(): void
+  onToggleDetails?(): void
+  onUnlink?(): void
+  onSplit?(direction: SplitDirection, moveSource: boolean): void
+  onToggleOrientation?(): void
+  onSwap?(): void
+  onCloseSplit?(): void
   onOpenWindow?(mode: SessionWindowMode): void
   onClose(): void
 }
@@ -50,6 +55,8 @@ export function SessionContextMenu({
   allowOpenWindow = true,
   onRename,
   onResetName,
+  onToggleDetails,
+  onUnlink,
   onSplit,
   onToggleOrientation,
   onSwap,
@@ -66,10 +73,14 @@ export function SessionContextMenu({
   useLayoutEffect(() => {
     const menu = menuRef.current
     if (!menu) return
+    const zoom = Number.parseFloat(getComputedStyle(document.body).zoom) || 1
+    const viewportW = window.innerWidth / zoom
+    const viewportH = window.innerHeight / zoom
+    menu.style.maxHeight = `${Math.max(120, viewportH - 16)}px`
     const width = menu.offsetWidth
     const height = menu.offsetHeight
-    const clampedX = Math.max(8, Math.min(window.innerWidth - width - 8, target.x))
-    const clampedY = Math.max(8, Math.min(window.innerHeight - height - 8, target.y))
+    const clampedX = Math.max(8, Math.min(viewportW - width - 8, target.x / zoom))
+    const clampedY = Math.max(8, Math.min(viewportH - height - 8, target.y / zoom))
     menu.style.left = `${clampedX}px`
     menu.style.top = `${clampedY}px`
   }, [target.x, target.y, splitActive, canSwap])
@@ -183,7 +194,7 @@ export function SessionContextMenu({
         onContextMenu={(event) => event.preventDefault()}
         onKeyDown={onRootKeyDown}
       >
-        {(onRename || onResetName) && <>
+        {(onRename || onResetName || onToggleDetails) && <>
           {onRename && (
             <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(onRename)}>
               <span>Rename Session...</span>
@@ -195,64 +206,71 @@ export function SessionContextMenu({
               <span>Reset Session Name</span>
             </button>
           )}
-          <div className="session-context-separator" role="separator" />
-        </>}
-        <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(() => onSplit('right', false))}>
-          <span>Split Right</span>
-          <span className="session-context-shortcut">Ctrl+\</span>
-        </button>
-        <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(() => onSplit('down', false))}>
-          <span>Split Down</span>
-          <span className="session-context-shortcut">Ctrl+K Ctrl+\</span>
-        </button>
-        <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(() => onSplit('up', false))}>
-          <span>Split Up</span>
-        </button>
-        <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(() => onSplit('left', false))}>
-          <span>Split Left</span>
-        </button>
-
-        <div className="session-context-submenu-anchor" onMouseEnter={() => scheduleSubmenu(true)} onMouseLeave={() => scheduleSubmenu(false)}>
-          <button
-            ref={triggerRef}
-            type="button"
-            role="menuitem"
-            className="session-context-item"
-            aria-haspopup="menu"
-            aria-expanded={submenuOpen}
-            onClick={() => {
-              const next = !submenuOpen
-              setSubmenuOpen(next)
-              if (next) requestAnimationFrame(() => moveFocusInContainer(submenuRef.current, 'first'))
-            }}
-          >
-            <span>Split &amp; Move</span>
-            <Icon name="chevron-right" className="session-context-chevron" />
-          </button>
-          {submenuOpen && (
-            <div
-              ref={submenuRef}
-              className="session-context-menu session-context-submenu"
-              data-side="right"
-              role="menu"
-              aria-label="Split and Move"
-              onKeyDown={onSubmenuKeyDown}
-            >
-              {SUBMENU_DIRECTIONS.map((item) => (
-                <button key={item.direction} type="button" role="menuitem" className="session-context-item" onClick={() => run(() => onSplit(item.direction, true))}>
-                  <span>{item.label}</span>
-                </button>
-              ))}
-            </div>
+          {onToggleDetails && (
+            <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(onToggleDetails)}>
+              <span>{target.detailsOpen ? 'Hide Session Details' : 'Session Details'}</span>
+            </button>
           )}
-        </div>
+          {(onSplit || (allowOpenWindow && onOpenWindow) || onUnlink) && <div className="session-context-separator" role="separator" />}
+        </>}
+        {onSplit && <>
+          <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(() => onSplit('right', false))}>
+            <span>Split Right</span>
+            <span className="session-context-shortcut">Ctrl+\</span>
+          </button>
+          <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(() => onSplit('down', false))}>
+            <span>Split Down</span>
+            <span className="session-context-shortcut">Ctrl+K Ctrl+\</span>
+          </button>
+          <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(() => onSplit('up', false))}>
+            <span>Split Up</span>
+          </button>
+          <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(() => onSplit('left', false))}>
+            <span>Split Left</span>
+          </button>
 
-        {splitActive && <>
+          <div className="session-context-submenu-anchor" onMouseEnter={() => scheduleSubmenu(true)} onMouseLeave={() => scheduleSubmenu(false)}>
+            <button
+              ref={triggerRef}
+              type="button"
+              role="menuitem"
+              className="session-context-item"
+              aria-haspopup="menu"
+              aria-expanded={submenuOpen}
+              onClick={() => {
+                const next = !submenuOpen
+                setSubmenuOpen(next)
+                if (next) requestAnimationFrame(() => moveFocusInContainer(submenuRef.current, 'first'))
+              }}
+            >
+              <span>Split &amp; Move</span>
+              <Icon name="chevron-right" className="session-context-chevron" />
+            </button>
+            {submenuOpen && (
+              <div
+                ref={submenuRef}
+                className="session-context-menu session-context-submenu"
+                data-side="right"
+                role="menu"
+                aria-label="Split and Move"
+                onKeyDown={onSubmenuKeyDown}
+              >
+                {SUBMENU_DIRECTIONS.map((item) => (
+                  <button key={item.direction} type="button" role="menuitem" className="session-context-item" onClick={() => run(() => onSplit(item.direction, true))}>
+                    <span>{item.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </>}
+
+        {splitActive && onToggleOrientation && onCloseSplit && <>
           <div className="session-context-separator" role="separator" />
           <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(onToggleOrientation)}>
             <span>{splitOrientation === 'vertical' ? 'Switch to Left/Right Split' : 'Switch to Top/Bottom Split'}</span>
           </button>
-          {canSwap && (
+          {canSwap && onSwap && (
             <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(onSwap)}>
               <span>Swap Split Panes</span>
             </button>
@@ -271,6 +289,13 @@ export function SessionContextMenu({
           <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(() => onOpenWindow('copy'))}>
             <span>Copy into New Window</span>
             <span className="session-context-shortcut">Ctrl+K O</span>
+          </button>
+        </>}
+
+        {onUnlink && <>
+          {(onSplit || (allowOpenWindow && onOpenWindow)) && <div className="session-context-separator" role="separator" />}
+          <button type="button" role="menuitem" className="session-context-item" onMouseEnter={() => scheduleSubmenu(false)} onClick={() => run(onUnlink)}>
+            <span>Unlink Session</span>
           </button>
         </>}
       </div>

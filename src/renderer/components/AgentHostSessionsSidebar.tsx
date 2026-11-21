@@ -8,7 +8,7 @@ import type { SessionGroupLayout } from '../chat/sessionGroups'
 import { Icon, IconButton } from './Primitives'
 import { AgentHostCreationControls } from './AgentHostCreationControls'
 import { LinkedSessionTree } from './LinkedSessionTree'
-import type { SessionExpandRequest } from './LinkedSessionTree'
+import type { SessionExpandRequest, SessionRowContextAnchor } from './LinkedSessionTree'
 import type { SessionTimestamps, SessionTitleUpdate } from '../chat/useSessionTitles'
 import { machineLabel, useMachineAliases } from '../machineAliases'
 
@@ -49,7 +49,7 @@ interface Props {
   onSelect?(binding: SessionBinding): void
   onSplit?(binding: SessionBinding, direction?: 'right' | 'down'): void
   onPopOut?(binding: SessionBinding): void
-  onSessionContextMenu?(binding: SessionBinding, anchor: { x: number; y: number }): void
+  onSessionContextMenu?(binding: SessionBinding, anchor: SessionRowContextAnchor & { readonly unlink?: () => void }): void
   onRenameSession?(binding: SessionBinding, nextName: string | null): void
   onLayoutChange?(layout: SessionGroupLayout, makeManual: boolean): void
   onSortMode?(mode: SessionSortMode): void
@@ -334,7 +334,14 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
           onSortMode?.(next)
         }} />}
         {taskId && <LinkedSessionTree taskId={taskId} entries={entries} manualLayout={manual} activeKey={activeKey} secondaryKey={secondaryKey} popoutKeys={popoutKeys} expandSession={expandSession} renameSession={renameSession}
-          sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} unlinkDisabled={!taskReady || awaitingSyncCount > 0 || busy || operating} onSelect={onSelect} onSplit={onSplit} onPopOut={onPopOut} onSessionContextMenu={onSessionContextMenu} onRenameSession={onRenameSession}
+          sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} unlinkDisabled={!taskReady || awaitingSyncCount > 0 || busy || operating} onSelect={onSelect} onSplit={onSplit} onPopOut={onPopOut}
+          onSessionContextMenu={onSessionContextMenu ? (binding, anchor) => onSessionContextMenu(binding, {
+            ...anchor,
+            unlink: onDetach && taskReady && awaitingSyncCount === 0 && !busy && !operating
+              ? () => { setDetach(binding); setError(undefined) }
+              : undefined,
+          }) : undefined}
+          onRenameSession={onRenameSession}
           onLayoutChange={onLayoutChange ? (next, makeManual) => {
             if (sortMode === undefined && makeManual) setLocalSortMode('manual')
             onLayoutChange(next, makeManual)

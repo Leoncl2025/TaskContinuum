@@ -7,7 +7,10 @@ import type { SessionBinding } from '../chat/sessionBindings'
 import { MAX_SESSION_GROUP_NAME, moveSessionNode, ungroupSessions, visibleSessionLayout } from '../chat/sessionGroups'
 import type { SessionDropTarget, SessionGroup, SessionGroupLayout, SessionGroupNode, SessionListEntry, SessionTreeNode } from '../chat/sessionGroups'
 import { machineLabel, useMachineAliases } from '../machineAliases'
+import { readLayout } from '../layout'
 import { Icon, IconButton } from './Primitives'
+import { SessionContextMenu } from './SessionContextMenu'
+import type { SessionContextMenuTarget } from './SessionContextMenu'
 
 const SESSION_DRAG_MIME = 'application/x-taskcontinuum-session-key'
 export const SESSION_BINDING_DRAG_MIME = 'application/x-taskcontinuum-session-binding'
@@ -15,6 +18,13 @@ export const SESSION_BINDING_DRAG_MIME = 'application/x-taskcontinuum-session-bi
 export interface SessionExpandRequest {
   readonly key: string
   readonly id: number
+}
+
+export interface SessionRowContextAnchor {
+  readonly x: number
+  readonly y: number
+  readonly detailsOpen: boolean
+  readonly toggleDetails: () => void
 }
 
 interface Props {
@@ -33,7 +43,7 @@ interface Props {
   onSelect?(binding: SessionBinding): void
   onSplit?(binding: SessionBinding, direction?: 'right' | 'down'): void
   onPopOut?(binding: SessionBinding): void
-  onSessionContextMenu?(binding: SessionBinding, anchor: { x: number; y: number }): void
+  onSessionContextMenu?(binding: SessionBinding, anchor: SessionRowContextAnchor): void
   onRenameSession?(binding: SessionBinding, nextName: string | null): void
   onLayoutChange?(layout: SessionGroupLayout, makeManual: boolean): void
   onUnlink?(binding: SessionBinding): void
@@ -78,7 +88,7 @@ function InlineNameEditor({ title, label, maxLength, className, onFinish }: {
     }} />
 }
 
-export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, secondaryKey, popoutKeys, expandSession, renameSession, sessions, cachedTitles, historyTransfers, unlinkDisabled, onSelect, onSplit, onPopOut, onSessionContextMenu, onRenameSession, onLayoutChange, onUnlink }: Props) {
+export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, secondaryKey, popoutKeys, expandSession, renameSession, sessions, cachedTitles, historyTransfers, unlinkDisabled, onSelect, onSplit, onSessionContextMenu, onRenameSession, onLayoutChange, onUnlink }: Props) {
   const aliases = useMachineAliases()
   const [expansion, setExpansion] = useState(() => ({ keys: new Set(expandSession ? [expandSession.key] : []), request: expandSession?.id }))
   if (expandSession && expandSession.id !== expansion.request) {
@@ -86,6 +96,7 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
   }
   const [focused, setFocused] = useState<string>()
   const [editing, setEditing] = useState<string | undefined>(() => renameSession?.key)
+  const [localMenu, setLocalMenu] = useState<SessionContextMenuTarget | null>(null)
   const [seenRenameId, setSeenRenameId] = useState(renameSession?.id)
   if (renameSession && renameSession.id !== seenRenameId) {
     setSeenRenameId(renameSession.id)
@@ -280,14 +291,16 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
       case 'ContextMenu':
       case 'F10':
         if (event.key === 'F10' && !event.shiftKey) return
-        if (entry.kind === 'session' && onSessionContextMenu) {
+        if (entry.kind === 'session') {
           event.preventDefault()
           event.stopPropagation()
           const rect = elements.current.get(key)?.firstElementChild?.getBoundingClientRect()
-          onSessionContextMenu(entry.binding, {
-            x: rect ? Math.round(rect.left + Math.min(80, rect.width * 0.4)) : 120,
-            y: rect ? Math.round(rect.bottom - 4) : 120,
-          })
+          openRowMenu(
+            key,
+            entry.binding,
+            rect ? Math.round(rect.left + Math.min(80, rect.width * 0.4)) : 120,
+            rect ? Math.round(rect.bottom - 4) : 120,
+          )
         }
         return
       case 'F2':
@@ -302,6 +315,25 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
     if (destination) focus(destination)
   }
 
+  function openRowMenu(key: string, binding: SessionBinding, x: number, y: number): void {
+    const detailsOpen = expansion.keys.has(key)
+    const toggleDetails = () => showDetails(key, !detailsOpen)
+    if (onSessionContextMenu) {
+      onSessionContextMenu(binding, { x, y, detailsOpen, toggleDetails })
+      return
+    }
+    setLocalMenu({
+      x,
+      y,
+      groupId: 'sidebar-local',
+      taskId,
+      binding,
+      detailsOpen,
+      toggleDetails,
+      beginRename: onRenameSession ? () => setEditing(key) : undefined,
+      unlink: onUnlink && !unlinkDisabled ? () => onUnlink(binding) : undefined,
+    })
+  }
   function dropPosition(key: string) { return dragged && byKey.has(dragged) && marker?.key === key ? marker.position : undefined }
   function renderSession(node: SessionTreeNode, parent?: SessionGroupNode) {
     const { key, binding } = node
@@ -327,11 +359,11 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
       <div className={`session-tree-row ${key === activeKey ? 'is-selected' : ''}${isSplit ? ' is-split-pane' : ''}`} data-transferring={Boolean(transfer)}
         data-dragging={dragged === key || undefined} draggable={canDragRow || undefined}
         onDragStart={(event) => startDrag(event, node)} onDragEnd={clearDrag}
-        onContextMenu={onSessionContextMenu && !renaming ? (event) => {
+        onContextMenu={!renaming ? (event) => {
           event.preventDefault()
           event.stopPropagation()
           focus(key)
-          onSessionContextMenu(binding, { x: event.clientX, y: event.clientY })
+          openRowMenu(key, binding, event.clientX, event.clientY)
         } : undefined}>
         {transfer && <progress className="session-transfer-mask" aria-label={`History transfer for ${label}`} max={100} value={transfer.value} aria-valuetext={transfer.description} />}
         {canArrange && <span className="session-drag-grip" aria-hidden="true"><Icon name="gripper" /></span>}
@@ -365,12 +397,6 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
               {isSplit && <span className="session-state-pill" title="Open in split pane"><Icon name="split-horizontal" />Split</span>}
             </span>}
         </button>}
-        {!renaming && (onSplit || onPopOut) && <div className="session-row-actions">
-          {onSplit && <IconButton icon="split-horizontal" label={`Split ${label} right`} title="Split right (Alt+Click to split down)" tabIndex={-1} onClick={(event) => { focus(key); onSplit(binding, event.altKey ? 'down' : 'right') }} />}
-          {onPopOut && <IconButton icon={isPoppedOut ? 'multiple-windows' : 'empty-window'} label={isPoppedOut ? `Focus ${label} window` : `Pop out ${label}`} title={isPoppedOut ? 'Focus session window' : 'Open in new window'} tabIndex={-1} onClick={() => { focus(key); onPopOut(binding) }} />}
-        </div>}
-        {!renaming && <IconButton icon={open ? 'chevron-up' : 'chevron-down'} label={`${open ? 'Hide' : 'Show'} details for ${label}`} tabIndex={-1} aria-expanded={open} aria-controls={open ? detailsId : undefined}
-          onClick={() => { focus(key); showDetails(key, !open) }} />}
       </div>
       {open && <div id={detailsId} className="session-details" role="group" aria-label={`Details for ${label}`}>
         <dl>
@@ -384,11 +410,16 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
           {isSplit && <><dt>Split</dt><dd>Right split pane</dd></>}
           {isPoppedOut && <><dt>Window</dt><dd>Separate window</dd></>}
         </dl>
-        {onUnlink && <div className="session-details-actions">
-          <button type="button" className="secondary-button session-unlink-button" aria-label={`Unlink ${label}`} disabled={unlinkDisabled} onClick={() => onUnlink(binding)}>
-            <Icon name="debug-disconnect" /><span>Unlink</span>
+        <div className="session-details-actions">
+          <button type="button" className="secondary-button" aria-label={`Hide details for ${label}`} onClick={() => showDetails(key, false)}>
+            <span>Hide details</span>
           </button>
-        </div>}
+          {onUnlink && (
+            <button type="button" className="secondary-button session-unlink-button" aria-label={`Unlink ${label}`} disabled={unlinkDisabled} onClick={() => onUnlink(binding)}>
+              <Icon name="debug-disconnect" /><span>Unlink</span>
+            </button>
+          )}
+        </div>
       </div>}
     </li>
   }
@@ -436,8 +467,22 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
     </li>
   }
 
-  return <ul role="tree" aria-label={`Sessions for ${taskId}`} aria-keyshortcuts={canArrange ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
-    className="task-list task-tree session-tree" onDragOver={dragOver} onDragLeave={dragLeave} onDrop={drop}>
-    {entries.map((entry) => entry.kind === 'group' ? renderGroup(entry) : renderSession(entry))}
-  </ul>
+  return <>
+    <ul role="tree" aria-label={`Sessions for ${taskId}`} aria-keyshortcuts={canArrange ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
+      className="task-list task-tree session-tree" onDragOver={dragOver} onDragLeave={dragLeave} onDrop={drop}>
+      {entries.map((entry) => entry.kind === 'group' ? renderGroup(entry) : renderSession(entry))}
+    </ul>
+    {localMenu && <SessionContextMenu
+      target={localMenu}
+      theme={readLayout().theme}
+      splitActive={false}
+      splitOrientation="horizontal"
+      canSwap={false}
+      allowOpenWindow={false}
+      onRename={localMenu.beginRename}
+      onToggleDetails={localMenu.toggleDetails}
+      onUnlink={localMenu.unlink}
+      onClose={() => setLocalMenu(null)}
+    />}
+  </>
 }

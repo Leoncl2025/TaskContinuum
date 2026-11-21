@@ -280,17 +280,22 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const workspaceLocked = repositorySetupOpen || taskCreationMode !== null || links.busy || sessionBusy || dialog === 'remote-devices'
   const connectionError = (taskAgentOpen ? null : links.error) ?? actionError
 
+  const paneTreeRef = useRef(effectiveTree)
+  useEffect(() => { paneTreeRef.current = effectiveTree }, [effectiveTree])
+
   const syncPaneSelection = selection.syncPaneSelection
-  const applyTreeChange = useCallback((updater: (current: PaneTreeState) => PaneTreeState) => {
-    setPaneTree((previous) => {
-      const base = reconcilePaneTreeWithTasks(previous, validTaskIds, userEmptiedTabsRef.current ? null : tasks[0]?.id ?? null)
-      const next = updater(base)
-      if (next === base) return previous
-      const nextFocused = activePaneGroup(next)
-      userEmptiedTabsRef.current = nextFocused.activeTaskId === null && listPaneGroups(next.root).length === 1
+  const applyTreeChange = useCallback((updater: (current: PaneTreeState) => PaneTreeState, options?: { skipSync?: boolean }) => {
+    const base = reconcilePaneTreeWithTasks(paneTreeRef.current, validTaskIds, userEmptiedTabsRef.current ? null : tasks[0]?.id ?? null)
+    const next = updater(base)
+    paneTreeRef.current = next
+    const nextFocused = activePaneGroup(next)
+    userEmptiedTabsRef.current = nextFocused.activeTaskId === null && listPaneGroups(next.root).length === 1
+    currentTaskId.current = nextFocused.activeTaskId
+    if (!options?.skipSync) {
       syncPaneSelection(nextFocused.activeTaskId, nextFocused.openTaskIds, nextFocused.sessions)
-      return next
-    })
+    }
+    if (next !== base) setPaneTree(next)
+    return next
   }, [validTaskIds, tasks, syncPaneSelection])
 
   useEffect(() => {
@@ -430,7 +435,8 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
       || !links.ready || !taskBindings.length || document.querySelector('dialog[open]')) return
     event.preventDefault()
     if (taskBindings.length === 1) return
-    const index = taskBindings.findIndex((binding) => sessionBindingKey(binding) === activeKey)
+    const currentKey = currentTaskId.current === task.id ? currentSessionKey.current : activeKey
+    const index = taskBindings.findIndex((binding) => sessionBindingKey(binding) === currentKey)
     const step = event.key === 'PageDown' ? 1 : taskBindings.length - 1
     const next = index < 0 ? event.key === 'PageDown' ? 0 : taskBindings.length - 1
       : (index + step) % taskBindings.length
@@ -581,8 +587,9 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
         : undefined
     currentTaskId.current = taskId
     currentSessionKey.current = key
-    selection.revealSessionGroup(taskId, key)
-    applyTreeChange((current) => selectSessionInGroup(current, current.activeGroupId, taskId, key, fallbackKey))
+    const nextTree = applyTreeChange((current) => selectSessionInGroup(current, current.activeGroupId, taskId, key, fallbackKey), { skipSync: true })
+    const nextFocused = activePaneGroup(nextTree)
+    selection.selectSession(taskId, key, nextFocused.openTaskIds)
     showTaskChat()
   }
 
@@ -776,6 +783,9 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
             groupId: focusedGroup.id,
             taskId: sidebarTask.id,
             binding,
+            detailsOpen: anchor.detailsOpen,
+            toggleDetails: anchor.toggleDetails,
+            unlink: anchor.unlink,
             beginRename: () => {
               selection.revealSessionGroup(sidebarTask.id, key)
               setRenameSessionRequest((current) => ({ taskId: sidebarTask.id, key, id: (current?.id ?? 0) + 1 }))
@@ -890,6 +900,8 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
       onResetName={sidebarContextMenu.binding && sessionTitles.customTitles[agentHostKey(sidebarContextMenu.binding.agentHost)]
         ? () => sessionTitles.rename(sidebarContextMenu.binding!.agentHost, null)
         : undefined}
+      onToggleDetails={sidebarContextMenu.toggleDetails}
+      onUnlink={sidebarContextMenu.unlink}
       onSplit={(direction) => {
         if (sidebarContextMenu.binding) splitFromSidebarSession(direction, sidebarContextMenu.taskId, sidebarContextMenu.binding)
         else applyTreeChange((current) => splitPaneGroup(current, sidebarContextMenu.groupId, direction, { taskId: sidebarContextMenu.taskId }))
