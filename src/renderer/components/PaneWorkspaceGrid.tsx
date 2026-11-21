@@ -960,8 +960,8 @@ function PaneGroupBody({
     [activeTask, orderedBindingsForTask],
   )
   const { sessionKey: activeSessionKey, binding: activeBinding, missingSelectedSession } = useMemo(
-    () => resolveGroupActiveBinding(group, activeTask?.id ?? null, activeTaskBindings, rememberedSessions),
-    [group, activeTask, activeTaskBindings, rememberedSessions],
+    () => resolveGroupActiveBinding(group, activeTask?.id ?? null, activeTaskBindings, rememberedSessions, linksReady),
+    [group, activeTask, activeTaskBindings, rememberedSessions, linksReady],
   )
   const activeLocalKey = activeTask && activeBinding ? `${activeTask.id}:${sessionBindingKey(activeBinding)}` : undefined
 

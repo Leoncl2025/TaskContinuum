@@ -261,11 +261,15 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
 
   const setSessionSort = useCallback((taskId: string, mode: SessionSortMode, activeTaskId?: string | null, shown?: readonly string[]) => {
     update((selection) => {
+      const hasSavedManualLayout = Boolean(selection?.sessionGroups?.[taskId] || selection?.sessionOrders?.[taskId])
       const currentDefault = selection?.sessionSort ?? DEFAULT_SESSION_SORT_MODE
-      const currentTaskSort = selection?.sessionSorts?.[taskId] ?? currentDefault
+      const currentTaskSort = selection?.sessionSorts?.[taskId] ?? (selection?.sessionSort ?? (hasSavedManualLayout ? 'manual' : DEFAULT_SESSION_SORT_MODE))
       if (selection && currentDefault === mode && currentTaskSort === mode) return selection
       const resolvedTaskId = activeTaskId !== undefined ? activeTaskId : selection ? selection.taskId : taskId
-      const nextSorts = rememberTaskSort(selection, taskId, null, mode)
+      const baseSorts = rememberTaskSort(selection, taskId, null, mode)
+      const nextSorts = hasSavedManualLayout && mode === DEFAULT_SESSION_SORT_MODE
+        ? { ...baseSorts, [taskId]: mode }
+        : baseSorts
       return {
         version: 2,
         taskId: resolvedTaskId,
@@ -288,16 +292,22 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
 
   const saved = state.workspaceId === workspaceId ? state : undefined
   const sessionSort: SessionSortMode = saved?.selection?.sessionSort ?? DEFAULT_SESSION_SORT_MODE
+  const explicitGlobalSort = saved?.selection?.sessionSort
   const sessionSorts = saved?.selection?.sessionSorts ?? emptySessionSorts
+  const sessionOrders = saved?.selection?.sessionOrders ?? emptySessionOrders
+  const sessionGroups = saved?.selection?.sessionGroups ?? emptySessionGroups
   const taskSortMode = useCallback((taskId: string | null | undefined): SessionSortMode => {
-    return (taskId ? sessionSorts[taskId] : undefined) ?? sessionSort
-  }, [sessionSort, sessionSorts])
+    if (taskId && sessionSorts[taskId]) return sessionSorts[taskId]
+    if (explicitGlobalSort) return explicitGlobalSort
+    if (taskId && (sessionGroups[taskId] || sessionOrders[taskId])) return 'manual'
+    return DEFAULT_SESSION_SORT_MODE
+  }, [sessionSorts, explicitGlobalSort, sessionGroups, sessionOrders])
 
   return {
     taskId: saved?.selection?.taskId, openTaskIds: saved?.selection?.openTaskIds,
     sessions: saved?.selection?.sessions ?? emptySessions,
-    sessionOrders: saved?.selection?.sessionOrders ?? emptySessionOrders,
-    sessionGroups: saved?.selection?.sessionGroups ?? emptySessionGroups,
+    sessionOrders,
+    sessionGroups,
     sessionSort, sessionSorts, taskSortMode,
     error: saved?.error, selectTask, closeTask, selectSession, syncPaneSelection, rememberDefaultSession, clearSession, setSessionLayout, revealSessionGroup, setSessionSort, dismissError,
   }

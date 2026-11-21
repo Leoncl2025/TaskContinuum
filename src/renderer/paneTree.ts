@@ -475,6 +475,7 @@ export function resolveGroupActiveBinding(
   taskId: string | null,
   orderedTaskBindings: readonly SessionBinding[],
   rememberedSessions?: Readonly<Record<string, string | null>>,
+  linksReady = true,
 ): {
   readonly sessionKey: string | undefined
   readonly binding: SessionBinding | undefined
@@ -496,7 +497,7 @@ export function resolveGroupActiveBinding(
   const binding = sessionKey
     ? orderedTaskBindings.find((entry) => sessionBindingKey(entry) === sessionKey)
     : undefined
-  const missingSelectedSession = Boolean((hasGroupExplicit || hasRemembered) && explicit && !binding && orderedTaskBindings.length === 0)
+  const missingSelectedSession = Boolean(linksReady && (hasGroupExplicit || hasRemembered) && typeof explicit === 'string' && !binding)
   return { sessionKey, binding, missingSelectedSession }
 }
 
