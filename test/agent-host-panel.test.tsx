@@ -421,6 +421,96 @@ describe('Compact chat activity', () => {
     expect(setup.bridge.terminal).toHaveBeenCalledOnce()
     expect(screen.queryByLabelText('Grouped output on Owner-B')).not.toBeInTheDocument()
   })
+
+  it('streams interleaved reasoning and tool steps inside one fixed rolling window with auto-scroll and Expand all', async () => {
+    const setup = fixture()
+    setup.view.chat!.activeTurn = {
+      id: 'live-thinking',
+      startedAt: '',
+      message: { text: 'Investigate cross-session sync', origin: { kind: MessageKind.User } },
+      responseParts: [
+        { kind: 'reasoning' as ResponsePartKind.Reasoning, id: 'r1', content: 'First detailed paragraph.\nInspecting session collaboration service.' },
+        completedTool('t1', 'Read'),
+        completedTool('t2', 'Edit File'),
+        { kind: 'reasoning' as ResponsePartKind.Reasoning, id: 'r2', content: 'Checking owner readiness edge cases.' },
+      ],
+      usage: undefined,
+    }
+    const user = userEvent.setup()
+    const rendered = render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+
+    const card = await screen.findByRole('region', { name: 'Agent thinking process' })
+    expect(rendered.container.querySelectorAll('.ahp-thinking-card')).toHaveLength(1)
+    expect(card).toHaveAttribute('data-mode', 'rolling')
+    expect(within(card).getByRole('button', { name: 'Thinking · 2 tool calls, in progress' })).toHaveAttribute('aria-expanded', 'true')
+
+    const viewport = card.querySelector('.ahp-thinking-viewport') as HTMLDivElement
+    expect(viewport).toHaveAttribute('data-rolling', 'true')
+    // Earlier thought is compacted to a single preview line while latest thought renders in full.
+    expect(within(card).queryByText('First detailed paragraph.')).not.toBeInTheDocument()
+    expect(within(card).getByText('Inspecting session collaboration service.')).toBeInTheDocument()
+    expect(within(card).getAllByText('Checking owner readiness edge cases.').length).toBeGreaterThanOrEqual(1)
+
+    // Mock scrollable dimensions to verify auto-scroll to latest status and manual scroll pause/resume.
+    let scrollHeight = 420
+    Object.defineProperty(viewport, 'scrollHeight', { configurable: true, get: () => scrollHeight })
+    Object.defineProperty(viewport, 'clientHeight', { configurable: true, get: () => 150 })
+
+    act(() => {
+      setup.view.chat!.activeTurn!.responseParts.push(
+        runningTool('t3'),
+        { kind: 'reasoning' as ResponsePartKind.Reasoning, id: 'r3', content: 'Verifying updated client timeout.' },
+      )
+      setup.emit()
+    })
+    expect(viewport.scrollTop).toBe(420)
+
+    // User scrolls up manually: auto-scroll pauses and surfaces the Latest button.
+    viewport.scrollTop = 60
+    fireEvent.scroll(viewport)
+    expect(within(card).getByRole('button', { name: 'Scroll to latest thinking status' })).toBeInTheDocument()
+
+    scrollHeight = 560
+    act(() => {
+      const latest = setup.view.chat!.activeTurn!.responseParts.at(-1) as { kind: 'reasoning'; content: string }
+      latest.content += '\nAdding final verification check.'
+      setup.emit()
+    })
+    expect(viewport.scrollTop).toBe(60)
+
+    await user.click(within(card).getByRole('button', { name: 'Scroll to latest thinking status' }))
+    expect(viewport.scrollTop).toBe(560)
+    expect(within(card).queryByRole('button', { name: 'Scroll to latest thinking status' })).not.toBeInTheDocument()
+
+    // Expand all shows full unclipped reasoning across all steps.
+    await user.click(within(card).getByRole('button', { name: 'Expand full thinking process' }))
+    expect(card).toHaveAttribute('data-mode', 'expanded')
+    expect(viewport).not.toHaveAttribute('data-rolling')
+    expect(within(card).getByText(/First detailed paragraph\./)).toBeVisible()
+
+    // Return to rolling view, then finish the turn: auto mode collapses completed thinking into one compact bar.
+    await user.click(within(card).getByRole('button', { name: 'Restore rolling thinking window' }))
+    expect(card).toHaveAttribute('data-mode', 'rolling')
+
+    act(() => {
+      responseHistory(setup.view, [
+        { kind: 'reasoning' as ResponsePartKind.Reasoning, id: 'r1', content: 'First detailed paragraph.\nInspecting session collaboration service.' },
+        completedTool('t1', 'Read'),
+        completedTool('t2', 'Edit File'),
+        { kind: 'reasoning' as ResponsePartKind.Reasoning, id: 'r2', content: 'Checking owner readiness edge cases.' },
+        { kind: 'markdown' as ResponsePartKind.Markdown, id: 'final', content: 'All checks passed.' },
+      ])
+      setup.view.chat!.activeTurn = undefined
+      setup.emit()
+    })
+
+    const completedCard = screen.getByRole('region', { name: 'Agent thinking process' })
+    expect(completedCard).toHaveAttribute('data-mode', 'collapsed')
+    expect(within(completedCard).queryByText('Checking owner readiness edge cases.')).not.toBeInTheDocument()
+    await user.click(within(completedCard).getByRole('button', { name: 'Expand full thinking process' }))
+    expect(completedCard).toHaveAttribute('data-mode', 'expanded')
+    expect(within(completedCard).getByText(/First detailed paragraph\./)).toBeVisible()
+  })
 })
 
 describe('Agent Host chat UI', () => {
