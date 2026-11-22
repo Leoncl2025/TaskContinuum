@@ -3,16 +3,19 @@ import { CHAT_IMAGE_TYPES, chatImageDataUrl } from '../../shared/chatAttachments
 import type { DisplayedChatImage } from '../../shared/chatAttachments'
 import type { useChatImageInput } from '../chat/useChatImageInput'
 import { Dialog, Icon, IconButton } from './Primitives'
+import { ImagePreviewStage, PreviewFullScreenButton } from './ImagePreviewStage'
 import { MarkdownLink, MarkdownLinks } from './MarkdownLinks'
 
 export function ChatImages({ images = [], onRemove, disabled = false }: { images?: DisplayedChatImage[]; onRemove?(id: string): void; disabled?: boolean }) {
   const [selected, setSelected] = useState<string>()
+  const [fullScreen, setFullScreen] = useState(false)
   const preview = images.find((image) => image.id === selected)
   if (!images.length) return null
+  const toggleFullScreen = () => setFullScreen((current) => !current)
   return <>
     <div className="chat-images" aria-label={onRemove ? 'Attached images' : 'Message images'}>
       {images.map((image) => <figure className="chat-image" key={image.id}>
-        {'data' in image ? <button type="button" className="chat-image-preview" title={`Preview ${image.name}`} aria-label={`Preview ${image.name}`} onClick={() => setSelected(image.id)}><img src={chatImageDataUrl(image)} alt={image.name} /></button>
+        {'data' in image ? <button type="button" className="chat-image-preview" title={`Preview ${image.name}`} aria-label={`Preview ${image.name}`} onClick={() => { setFullScreen(false); setSelected(image.id) }}><img src={chatImageDataUrl(image)} alt={image.name} /></button>
           : 'uri' in image ? <MarkdownLinks><MarkdownLink href={image.uri} className="chat-image-preview chat-image-reference"><Icon name="file-media" /><span>Preview {image.name}</span></MarkdownLink></MarkdownLinks>
           : <span className="chat-image-placeholder" title={'error' in image ? image.error : 'Image stored on the execution machine'}><Icon name={'error' in image ? 'warning' : 'file-media'} /></span>}
         {onRemove && <IconButton icon="close" label={`Remove ${image.name}`} disabled={disabled} onClick={() => onRemove(image.id)} />}
@@ -20,7 +23,27 @@ export function ChatImages({ images = [], onRemove, disabled = false }: { images
         {'error' in image && <p className="chat-image-unavailable" role="status">{image.error}</p>}
       </figure>)}
     </div>
-    {preview && 'data' in preview && <Dialog title={preview.name} className="chat-image-dialog" onClose={() => setSelected(undefined)}><img src={chatImageDataUrl(preview)} alt={preview.name} /></Dialog>}
+    {preview && 'data' in preview && <Dialog
+      title={preview.name}
+      className={`chat-image-dialog${fullScreen ? ' is-fullscreen' : ''}`}
+      headerActions={<PreviewFullScreenButton fullScreen={fullScreen} onToggle={toggleFullScreen} />}
+      onEscape={() => {
+        if (!fullScreen) return false
+        setFullScreen(false)
+        return true
+      }}
+      onKeyDown={(event) => {
+        if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return
+        if (event.target instanceof HTMLElement && (event.target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName))) return
+        if (event.key === 'f' || event.key === 'F') {
+          event.preventDefault()
+          toggleFullScreen()
+        }
+      }}
+      onClose={() => { setFullScreen(false); setSelected(undefined) }}
+    >
+      <ImagePreviewStage key={preview.id} src={chatImageDataUrl(preview)} alt={preview.name} fullScreen={fullScreen} />
+    </Dialog>}
   </>
 }
 

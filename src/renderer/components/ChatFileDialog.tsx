@@ -6,10 +6,16 @@ import type { ChatFilePreview, ChatLinkBridge, OpenChatLinkResult } from '../../
 import { canOpenChatDocument } from '../../shared/chatLinks'
 import { ChatLinkFailure, chatLinkResult } from '../chat/chatLinkResults'
 import { machineLabel, useMachineAliases } from '../machineAliases'
+import { ImagePreviewStage, PreviewFullScreenButton } from './ImagePreviewStage'
 import { Dialog, Icon } from './Primitives'
 
 type LinkedFile = Extract<OpenChatLinkResult, { kind: 'file' }>
 const previewLimit = 256 * 1024
+
+function isInteractiveInput(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  return target.isContentEditable || target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT'
+}
 
 export function ChatFileDialog({ file, api, onClose }: {
   file: LinkedFile; api: ChatLinkBridge; onClose(status: TransferStatus): void
@@ -23,6 +29,7 @@ export function ChatFileDialog({ file, api, onClose }: {
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [opened, setOpened] = useState(false)
+  const [fullScreen, setFullScreen] = useState(false)
   const line = useRef<HTMLSpanElement>(null)
   const located = useRef(false)
   const scope = useRef({ active: false })
@@ -93,7 +100,27 @@ export function ChatFileDialog({ file, api, onClose }: {
   }
 
   const total = status.files.reduce((size, item) => size + item.sizeBytes, 0) || FILE_TRANSFER_LIMITS.batchBytes
-  return <Dialog title={title} className="chat-file-dialog" closeDisabled={saving} onClose={() => onClose(status)}>
+  const toggleFullScreen = () => setFullScreen((current) => !current)
+  return <Dialog
+    title={title}
+    className={`chat-file-dialog${fullScreen ? ' is-fullscreen' : ''}`}
+    closeDisabled={saving}
+    headerActions={<PreviewFullScreenButton fullScreen={fullScreen} onToggle={toggleFullScreen} />}
+    onEscape={() => {
+      if (!fullScreen) return false
+      setFullScreen(false)
+      return true
+    }}
+    onKeyDown={(event) => {
+      if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return
+      if (isInteractiveInput(event.target)) return
+      if (event.key === 'f' || event.key === 'F') {
+        event.preventDefault()
+        toggleFullScreen()
+      }
+    }}
+    onClose={() => onClose(status)}
+  >
     <p className="chat-file-origin"><Icon name="server" />{status.deviceId === 'local' ? 'This computer' : machineLabel(file.target.owner, aliases)}
       {file.line && <span>Line {file.line}{file.column ? `, column ${file.column}` : ''}</span>}</p>
     {loading && !preview && <div className="chat-file-progress" role="status">
@@ -101,7 +128,7 @@ export function ChatFileDialog({ file, api, onClose }: {
       {status.state === 'transferring' && <progress aria-label="Receiving linked file" value={status.receivedBytes} max={total} />}
     </div>}
     {error && <p className="copilot-error" role="alert">{error}</p>}
-    {preview?.kind === 'image' && <img className="chat-file-image" src={chatImageDataUrl(preview.image)} alt={metadata?.name ?? 'Received image'} />}
+    {preview?.kind === 'image' && <ImagePreviewStage key={preview.image.id} src={chatImageDataUrl(preview.image)} alt={metadata?.name ?? 'Received image'} fullScreen={fullScreen} />}
     {preview?.kind === 'text' && <pre className="chat-file-text" aria-label="Received file content" tabIndex={0}><code>{text.split('\n').map((value, index, lines) =>
       <span key={index} ref={index + 1 === file.line ? line : undefined} className={index + 1 === file.line ? 'chat-file-line-target' : undefined}>{value}{index + 1 < lines.length ? '\n' : ''}</span>)}</code></pre>}
     {preview?.kind === 'text' && !preview.page.eof && <p className="muted">
