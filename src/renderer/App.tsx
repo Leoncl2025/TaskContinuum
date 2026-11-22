@@ -208,17 +208,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const sidebarSortMode = selection.taskSortMode(sidebarTask?.id)
   const sidebarOrderedKeys = sidebarTask ? selection.sessionOrders[sidebarTask.id] : undefined
   const sidebarSessionLayout = sidebarTask ? selection.sessionGroups[sidebarTask.id] : undefined
-  const sidebarTaskBindings = taskBindings
   const sidebarActiveKey = activeKey
-  const sidebarSecondaryKey = useMemo(() => {
-    if (!sidebarTask || !splitActive) return undefined
-    for (const group of paneGroups) {
-      if (group.id === focusedGroup.id || group.activeTaskId !== sidebarTask.id) continue
-      const { sessionKey } = resolveGroupActiveBinding(group, sidebarTask.id, sidebarTaskBindings, selection.sessions)
-      if (sessionKey && sessionKey !== sidebarActiveKey) return sessionKey
-    }
-    return undefined
-  }, [sidebarTask, splitActive, paneGroups, focusedGroup.id, sidebarTaskBindings, sidebarActiveKey, selection.sessions])
   const sidebarPopoutKeys = useMemo(() => {
     if (!sidebarTask) return undefined
     const keys = new Set<string>()
@@ -764,7 +754,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
 
       {sidebarVisible && (sidebarView === 'sessions' ? <AgentHostSessionsSidebar taskId={sidebarTask?.id} taskTitle={sidebarTask?.title}
         taskReady={Boolean(sidebarTask && links.ready)} bindings={bindings} orderedKeys={sidebarOrderedKeys} sessionLayout={sidebarSessionLayout}
-        sortMode={sidebarSortMode} activeKey={sidebarActiveKey} secondaryKey={sidebarSecondaryKey} popoutKeys={sidebarPopoutKeys}
+        sortMode={sidebarSortMode} activeKey={sidebarActiveKey} popoutKeys={sidebarPopoutKeys}
         provisional={sidebarProvisional} awaitingSyncCount={sidebarAwaitingSyncCount}
         onSyncNow={window.remoteVSCode?.gitSync ? syncLinksNow : undefined}
         expandSession={expandSessionRequest?.active && expandSessionRequest.taskId === sidebarTask?.id ? expandSessionRequest : undefined}

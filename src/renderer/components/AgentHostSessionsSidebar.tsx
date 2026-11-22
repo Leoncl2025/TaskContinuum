@@ -32,7 +32,6 @@ interface Props {
   sessionLayout?: SessionGroupLayout
   sortMode?: SessionSortMode
   activeKey?: string
-  secondaryKey?: string
   popoutKeys?: ReadonlySet<string>
   provisional?: boolean
   awaitingSyncCount?: number
@@ -136,7 +135,7 @@ function SessionSortMenu({ count, groupCount = 0, modes = sessionSortModes, valu
   </div>
 }
 
-export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, orderedKeys, sessionLayout, sortMode, activeKey, secondaryKey, popoutKeys, provisional = false, awaitingSyncCount = 0, expandSession, renameSession, localOwnerId, busy = false, initialView = 'current', cachedTitles, sessionTimestamps, historyTransfers, titleCacheError, onTitles, onSelect, onSplit, onPopOut, onSessionContextMenu, onRenameSession, onLayoutChange, onSortMode, onSyncNow, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
+export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false, bindings = {}, orderedKeys, sessionLayout, sortMode, activeKey, popoutKeys, provisional = false, awaitingSyncCount = 0, expandSession, renameSession, localOwnerId, busy = false, initialView = 'current', cachedTitles, sessionTimestamps, historyTransfers, titleCacheError, onTitles, onSelect, onSplit, onPopOut, onSessionContextMenu, onRenameSession, onLayoutChange, onSortMode, onSyncNow, onDetach, onLink, onCreated, onDevices, onClose }: Props) {
   const bridge = window.agentHost
   const aliases = useMachineAliases()
   const [view, setView] = useState<SessionView>(() => expandSession || renameSession ? 'current' : initialView)
@@ -333,7 +332,7 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
           if (sortMode === undefined) setLocalSortMode(next)
           onSortMode?.(next)
         }} />}
-        {taskId && <LinkedSessionTree taskId={taskId} entries={entries} manualLayout={manual} activeKey={activeKey} secondaryKey={secondaryKey} popoutKeys={popoutKeys} expandSession={expandSession} renameSession={renameSession}
+        {taskId && <LinkedSessionTree taskId={taskId} entries={entries} manualLayout={manual} activeKey={activeKey} popoutKeys={popoutKeys} expandSession={expandSession} renameSession={renameSession}
           sessions={sessions} cachedTitles={cachedTitles} historyTransfers={historyTransfers} unlinkDisabled={!taskReady || awaitingSyncCount > 0 || busy || operating} onSelect={onSelect} onSplit={onSplit} onPopOut={onPopOut}
           onSessionContextMenu={onSessionContextMenu ? (binding, anchor) => onSessionContextMenu(binding, {
             ...anchor,

@@ -32,7 +32,6 @@ interface Props {
   entries: readonly SessionListEntry[]
   manualLayout: SessionGroupLayout
   activeKey?: string
-  secondaryKey?: string
   popoutKeys?: ReadonlySet<string>
   expandSession?: SessionExpandRequest
   renameSession?: SessionExpandRequest
@@ -88,7 +87,7 @@ function InlineNameEditor({ title, label, maxLength, className, onFinish }: {
     }} />
 }
 
-export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, secondaryKey, popoutKeys, expandSession, renameSession, sessions, cachedTitles, historyTransfers, unlinkDisabled, onSelect, onSplit, onSessionContextMenu, onRenameSession, onLayoutChange, onUnlink }: Props) {
+export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, popoutKeys, expandSession, renameSession, sessions, cachedTitles, historyTransfers, unlinkDisabled, onSelect, onSplit, onSessionContextMenu, onRenameSession, onLayoutChange, onUnlink }: Props) {
   const aliases = useMachineAliases()
   const [expansion, setExpansion] = useState(() => ({ keys: new Set(expandSession ? [expandSession.key] : []), request: expandSession?.id }))
   if (expandSession && expandSession.id !== expansion.request) {
@@ -349,14 +348,13 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
     const position = dropPosition(key)
     const dropHint = position === 'group' ? 'Create group' : position === 'into' ? 'Add to group' : undefined
     const isPoppedOut = Boolean(popoutKeys?.has(key))
-    const isSplit = !isPoppedOut && key === secondaryKey
     const canDragRow = !renaming && (canArrange || Boolean(onSplit))
     return <li key={key} role="treeitem" className="session-tree-item" data-session-key={key} data-drop={position}
       aria-label={label} aria-description={binding.id} aria-selected={key === activeKey} aria-expanded={open} aria-level={parent ? 2 : 1}
       aria-keyshortcuts={onRenameSession ? 'F2' : undefined}
       tabIndex={tabStop === key ? 0 : -1} ref={refFor(key)}
       onFocus={(event) => { if (event.target === event.currentTarget) setFocused(key) }} onKeyDown={(event) => navigate(event, byKey.get(key)!)}>
-      <div className={`session-tree-row ${key === activeKey ? 'is-selected' : ''}${isSplit ? ' is-split-pane' : ''}`} data-transferring={Boolean(transfer)}
+      <div className={`session-tree-row ${key === activeKey ? 'is-selected' : ''}`} data-transferring={Boolean(transfer)}
         data-dragging={dragged === key || undefined} draggable={canDragRow || undefined}
         onDragStart={(event) => startDrag(event, node)} onDragEnd={clearDrag}
         onContextMenu={!renaming ? (event) => {
@@ -393,8 +391,6 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
               <Icon name="loading" className="codicon-modifier-spin" /><span>{transfer.label}</span><strong>{transfer.percent}%</strong>
             </span> : <span className="session-machine" title={binding.owner.machineName}>
               <span title={binding.owner.machineName}>{machineLabel(binding.owner, aliases)}</span>
-              {isPoppedOut && <span className="session-state-pill" title="Open in separate window"><Icon name="multiple-windows" />Window</span>}
-              {isSplit && <span className="session-state-pill" title="Open in split pane"><Icon name="split-horizontal" />Split</span>}
             </span>}
         </button>}
       </div>
@@ -407,7 +403,6 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, se
           <dt>Location</dt><dd>{binding.ownerIsRemote ? 'Remote' : 'Local'}</dd>
           <dt>Access</dt><dd>{discovered ? discovered.canSend ? 'Read and send' : 'Read only' : 'Not in discovery list'}</dd>
           {key === activeKey && <><dt>Selection</dt><dd>Current session</dd></>}
-          {isSplit && <><dt>Split</dt><dd>Right split pane</dd></>}
           {isPoppedOut && <><dt>Window</dt><dd>Separate window</dd></>}
         </dl>
         <div className="session-details-actions">
