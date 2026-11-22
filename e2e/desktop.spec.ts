@@ -84,7 +84,6 @@ test.beforeEach(async () => {
   await page.evaluate(async () => { await window.workspace!.closeWorkspace(); localStorage.clear() })
   await page.reload()
   await expect(page.getByRole('heading', { level: 1, name: 'Create your task repository' })).toBeVisible()
-  await expect(page.getByText(`Desktop · ${manifest.version}`, { exact: true })).toBeVisible()
   await expect(page.locator('.workbench')).toHaveAttribute('aria-busy', 'false')
 })
 
@@ -101,6 +100,7 @@ test.afterAll(async () => {
 test('launches the production workbench with a sandboxed renderer', async () => {
   expect(page.url()).toBe('taskcontinuum://app/index.html')
   const info = await page.evaluate(() => window.desktop!.getInfo())
+  expect(info.version).toBe(manifest.version)
   expect(info.security).toEqual({ contextIsolated: true, sandboxed: true })
   const surface = await page.evaluate(() => ({
     require: typeof Reflect.get(window, 'require'),
@@ -112,7 +112,7 @@ test('launches the production workbench with a sandboxed renderer', async () => 
   await expect(page.getByRole('complementary', { name: 'Task explorer' })).toBeVisible()
   await expect(page.getByRole('complementary', { name: 'Task chat' })).toBeVisible()
   await expect(page.getByRole('complementary', { name: 'Task chat' })).toContainText('Select a task to open its Agent Host chat.')
-  await expect(page.getByRole('contentinfo', { name: 'Workbench status' })).toContainText('0 tasks')
+  await expect(page.getByRole('contentinfo')).toHaveCount(0)
   await expect(page.getByRole('tab')).toHaveCount(0)
   await expect(page.getByText(/Local demo workspace|Demo data|LOCAL DEMO/)).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Create task repository', exact: true })).toBeVisible()

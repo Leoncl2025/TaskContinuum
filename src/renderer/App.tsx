@@ -48,7 +48,7 @@ import type { AgentHostHistoryTransfer, AgentHostSession, AgentHostTarget } from
 import { agentHostKey } from '../shared/agentHost'
 import { useSessionTitles } from './chat/useSessionTitles'
 import { createSessionDraftStore, nextRestoredDraftNonce } from './chat/sessionDraftStore'
-import { machineLabel, useMachineAliases, useWorkspaceGitSync } from './machineAliases'
+import { useMachineAliases, useWorkspaceGitSync } from './machineAliases'
 import { MachineAliasesProvider } from './MachineAliasesProvider'
 import { USER_DISPLAY_NAME_MAX_LENGTH, UserProfileContext, useUserProfileState } from './userProfile'
 import { UpdateNotice, UpdateSettings, UpdateStatus, useUpdates } from './components/UpdateSettings'
@@ -302,7 +302,6 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const chatVisible = compact ? compactPanel === 'chat' : layout.chat
   const detailsVisible = compact ? compactPanel === 'details' : layout.details
   const unifiedChatHeader = chatVisible && !taskAgentOpen && !splitActive && Boolean(activePanelKey)
-  const focusedBinding = activeBinding
   const sessionBusy = agentHostBusy || taskAgentBusy
   const workspaceLocked = repositorySetupOpen || taskCreationMode !== null || links.busy || sessionBusy || dialog === 'remote-devices'
   const connectionError = (taskAgentOpen ? null : links.error) ?? actionError
@@ -871,6 +870,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
       <button type="button" aria-label="Toggle task details" aria-pressed={detailsVisible} onClick={toggleDetails}><Icon name="file-text" />Details</button>
     </nav>}
 
+    {desktopError && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>Desktop bridge error</span></div>}
     {updateSafetyError && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{updateSafetyError}</span></div>}
     {workspaces.error && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{workspaces.error}</span><IconButton icon="close" label="Dismiss workspace error" onClick={() => workspaces.setError(null)} /></div>}
     {selection.error && <div className="copilot-banner copilot-error" role="alert"><Icon name="error" /><span>{selection.error}</span><IconButton icon="close" label="Dismiss selection memory error" onClick={selection.dismissError} /></div>}
@@ -1011,8 +1011,6 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
         </div>
       </main></Activity>
     </WorkbenchBody>
-
-    <footer className="statusbar" aria-label="Workbench status"><span className="local-status"><Icon name={taskAgentOpen || focusedBinding?.agentHost ? 'server-environment' : workspace ? 'folder' : 'repo'} />{taskAgentOpen ? 'TASK CREATION' : splitActive ? `SPLIT (${paneGroups.length})` : focusedBinding?.agentHost ? 'AGENT HOST' : workspace ? 'LOCAL WORKSPACE' : 'NO WORKSPACE'}</span><span><Icon name="checklist" />{tasks.length} tasks</span><span>{selectedId ?? 'No task selected'}</span>{popoutWindows.length > 0 && <span><Icon name="multiple-windows" />{popoutWindows.length} {popoutWindows.length === 1 ? 'window' : 'windows'}</span>}<span className="statusbar-spacer" /><span className="response-status" role="status" title={taskAgentOpen ? undefined : focusedBinding?.agentHost.owner.machineName}>{workspaces.busy ? 'Loading workspace...' : links.busy ? 'Saving or loading session links...' : sessionBusy ? 'Agent Host active' : taskAgentOpen ? 'Local task creation chat' : focusedBinding?.agentHost ? `Agent Host @ ${machineLabel(focusedBinding.agentHost.owner, aliases)}` : workspace ? 'Select an Agent Host chat' : 'Create or open a task repository'}</span><button type="button" onClick={taskAgentOpen ? showChat : openAgentHostSessions}><Icon name={taskAgentOpen ? 'comment-discussion' : focusedBinding?.agentHost ? 'link' : 'plug'} />{taskAgentOpen ? 'Task creation chat' : focusedBinding?.agentHost ? 'Agent Host linked' : 'No Agent Host linked'}</button><span className="platform-status">{desktopError ? 'Desktop bridge error' : desktop ? `Desktop · ${desktop.version}` : 'Browser preview'}</span></footer>
 
     <UpdateNotice updates={updates} />
     {dialog === 'updates' && <Dialog title="About and updates" onClose={() => setDialog(null)}><UpdateSettings updates={updates} /></Dialog>}

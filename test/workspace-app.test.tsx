@@ -738,7 +738,7 @@ describe('workspace switching in the desktop workbench', () => {
     expect(bridge.updateSessionLink).not.toHaveBeenCalled()
   })
 
-  it('shares updated aliases with the statusbar and chat without rebinding, restarting watches, or losing drafts', async () => {
+  it('shares updated aliases with chat without rebinding, restarting watches, or losing drafts', async () => {
     const { first, repository, target, bridge, agentHost } = creationFixture()
     repository[first.id] = { document: { schemaVersion: '2.1', bindings: { 'T-0002': [{ provider: 'agent-host', ...target }] } }, revision: 'a'.repeat(64) }
     const git = gitSyncUiFixture()
@@ -749,14 +749,12 @@ describe('workspace switching in the desktop workbench', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
     expect(git.api.status).not.toHaveBeenCalled()
     await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
-    await screen.findByText('Agent Host @ Office')
     await screen.findByText('Copilot @ Office')
     await user.selectOptions(screen.getByRole('combobox', { name: 'Agent Host model' }), await screen.findByRole('option', { name: 'UI model' }))
     await user.type(screen.getByRole('textbox', { name: 'Message Agent Host' }), 'Keep this workspace draft')
     repository[first.id] = { ...repository[first.id], revision: 'b'.repeat(64) }
     git.setStatus({ ...git.getStatus(), machineAliases: { [target.owner.clientId]: 'Build desk' } })
     await act(async () => git.notify())
-    expect(screen.getByText('Agent Host @ Build desk')).toHaveAttribute('title', target.owner.machineName)
     expect(screen.getByText('Copilot @ Build desk')).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Keep this workspace draft')
     expect(screen.getByRole('combobox', { name: 'Agent Host model' })).toHaveValue('ui-model')
@@ -770,7 +768,7 @@ describe('workspace switching in the desktop workbench', () => {
     expect(agentHost.create).not.toHaveBeenCalled()
     git.setStatus({ ...git.getStatus(), machineAliases: {} })
     await act(async () => git.notify())
-    expect(screen.getByText('Agent Host @ Creation-worker')).toBeInTheDocument()
+    expect(screen.getByText('Copilot @ Creation-worker')).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Keep this workspace draft')
     expect(agentHost.watch).toHaveBeenCalledOnce()
   })
@@ -787,16 +785,16 @@ describe('workspace switching in the desktop workbench', () => {
     render(<App />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
-    await screen.findByText('Agent Host @ First workspace name')
+    await screen.findByText('Copilot @ First workspace name')
     git.setStatus({ ...git.getStatus(), machineAliases: { [target.owner.clientId]: 'Second workspace name' } })
     await user.selectOptions(screen.getByRole('combobox', { name: 'Workspace' }), second.id)
-    await screen.findByText('Agent Host @ Second workspace name')
+    await screen.findByText('Copilot @ Second workspace name')
     expect(screen.queryByText(/First workspace name/)).not.toBeInTheDocument()
     expect(agentHost.watch).toHaveBeenNthCalledWith(1, target)
     expect(agentHost.watch).toHaveBeenNthCalledWith(2, other)
     git.setStatus({ ...git.getStatus(), machineAliases: {} })
     await user.selectOptions(screen.getByRole('combobox', { name: 'Workspace' }), first.id)
-    await screen.findByText('Agent Host @ Creation-worker')
+    await screen.findByText('Copilot @ Creation-worker')
     expect(screen.queryByText(/Second workspace name/)).not.toBeInTheDocument()
     expect(agentHost.watch).toHaveBeenCalledTimes(3)
     expect(agentHost.send).not.toHaveBeenCalled()
@@ -1020,7 +1018,7 @@ describe('workspace switching in the desktop workbench', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
     await waitFor(() => expect(agentHost.onHistoryTransfer).toHaveBeenCalledOnce())
-    await user.click(await screen.findByRole('button', { name: 'Agent Host linked' }))
+    await user.click(await screen.findByRole('button', { name: 'Agent Host sessions' }))
     const sidebar = await screen.findByRole('complementary', { name: 'Agent Host sessions' })
     const notify = vi.mocked(agentHost.onHistoryTransfer).mock.calls[0][0]
     const progress = { receivedBytes: 1024 * 1024, totalBytes: 117.1 * 1024 * 1024, kind: 'recent' as const }
@@ -1094,7 +1092,7 @@ describe('workspace switching in the desktop workbench', () => {
     const unwatches = vi.mocked(agentHost.unwatch).mock.calls.length
     git.setStatus({ ...git.getStatus(), machineAliases: { [sessionA.owner.clientId]: 'Renamed desk', [sessionB.owner.clientId]: 'Renamed desk' } })
     await act(async () => git.notify())
-    expect(screen.getByText('Agent Host @ Renamed desk')).toBeInTheDocument()
+    expect(screen.getByText('Copilot @ Renamed desk')).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Draft for session B')
     expect(within(tree).getByRole('treeitem', { name: 'Session B' })).toHaveAttribute('aria-selected', 'true')
     expect(agentHost.watch).toHaveBeenCalledTimes(watches)
@@ -1105,7 +1103,7 @@ describe('workspace switching in the desktop workbench', () => {
     await user.click(screen.getByRole('button', { name: 'Open Session A' }))
     expect(await screen.findByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Draft for session A')
     expect(screen.getByRole('textbox', { name: 'Message Agent Host' })).toHaveFocus()
-    expect(screen.getByText('Agent Host @ Renamed desk')).toBeInTheDocument()
+    expect(screen.getByText('Copilot @ Renamed desk')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Agent Host sessions' }))
     await user.click(screen.getByRole('tab', { name: 'Link' }))
