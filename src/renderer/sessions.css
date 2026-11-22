@@ -275,8 +275,43 @@
 .ahp-activity[data-running="true"] > summary > .codicon:first-child { color: var(--accent); }
 .ahp-activity-details { margin: 0 8px 8px; padding-left: 8px; border-left: 1px solid var(--border); }
 .ahp-activity-details .ahp-tool { margin-block: 0; }
+.ahp-thinking-card { min-width: 0; margin-block: 8px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--raised); overflow: hidden; }
+.ahp-thinking-card[data-live="true"] { border-color: color-mix(in srgb, var(--link) 34%, var(--border)); }
+.ahp-thinking-header { display: flex; align-items: center; gap: 4px; min-width: 0; min-height: 34px; padding: 3px 6px 3px 4px; }
+.ahp-thinking-card:not(.mode-collapsed) > .ahp-thinking-header { border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--raised) 82%, var(--bg)); }
+.ahp-thinking-summary { flex: 1; display: flex; align-items: center; gap: 7px; min-width: 0; min-height: 28px; padding: 3px 6px; border-radius: var(--radius-sm); color: var(--muted); text-align: left; }
+.ahp-thinking-summary:hover { background: var(--hover); color: var(--text); }
+.ahp-thinking-summary:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+.ahp-thinking-live-icon { color: var(--accent); }
+.ahp-thinking-done-icon { color: var(--muted); }
+.ahp-thinking-summary > .ahp-disclosure.is-open { transform: rotate(90deg); }
+.ahp-thinking-expand-btn { flex-shrink: 0; display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 7px; border: 1px solid transparent; border-radius: var(--radius-sm); color: var(--muted); font-size: 10.5px; font-weight: 500; line-height: 16px; white-space: nowrap; }
+.ahp-thinking-expand-btn > .codicon { font-size: 13px; }
+.ahp-thinking-expand-btn:hover { background: var(--hover); border-color: var(--border); color: var(--text); }
+.ahp-thinking-expand-btn[data-active='true'] { background: color-mix(in srgb, var(--link) 12%, var(--bg)); border-color: color-mix(in srgb, var(--link) 35%, var(--border)); color: var(--link); }
+.ahp-thinking-expand-btn[data-active='true']:hover { background: color-mix(in srgb, var(--link) 18%, var(--bg)); }
+.ahp-thinking-body { position: relative; min-width: 0; }
+.ahp-thinking-viewport { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 8px 10px; background: color-mix(in srgb, var(--bg) 55%, var(--raised)); font-size: 11.5px; }
+.ahp-thinking-viewport[data-rolling="true"] { max-height: 156px; overflow-y: auto; scroll-behavior: auto; }
+.ahp-thinking-viewport .ahp-activity { margin-block: 2px; border: 1px solid color-mix(in srgb, var(--border) 70%, transparent); background: var(--bg); }
+.ahp-thinking-viewport .ahp-tool-entry { margin-block: 1px; }
+.ahp-thinking-thought { display: flex; align-items: flex-start; gap: 7px; min-width: 0; padding: 4px 6px; border-radius: var(--radius-sm); color: var(--muted); font-size: 11.5px; line-height: 1.55; }
+.ahp-thinking-thought > .codicon:first-child { margin-top: 3px; font-size: 13px; color: var(--subtle); }
+button.ahp-thinking-thought.is-compact { width: 100%; align-items: center; padding: 3px 6px; text-align: left; }
+button.ahp-thinking-thought.is-compact > .codicon:first-child { margin-top: 0; }
+button.ahp-thinking-thought.is-compact > span:not(.codicon) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+button.ahp-thinking-thought.is-compact:hover { background: var(--hover); color: var(--text); }
+.ahp-thinking-thought-body { flex: 1; min-width: 0; color: var(--muted); }
+.ahp-thinking-thought-body .message-markdown p { margin: 4px 0; }
+.ahp-thinking-thought-body .message-markdown > :first-child { margin-top: 0; }
+.ahp-thinking-thought-body .message-markdown > :last-child { margin-bottom: 0; }
+.ahp-thinking-thought-fold { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: var(--radius-sm); color: var(--muted); }
+.ahp-thinking-thought-fold:hover { background: var(--hover); color: var(--text); }
+.ahp-thinking-placeholder { margin: 0; font-size: 11px; }
+.ahp-thinking-follow-btn { position: absolute; right: 12px; bottom: 8px; display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--link) 40%, var(--border)); border-radius: 999px; background: var(--panel); color: var(--link); box-shadow: 0 4px 12px var(--shadow); font-size: 10.5px; font-weight: 500; }
+.ahp-thinking-follow-btn:hover { background: var(--hover); }
 @media (prefers-reduced-motion: reduce) {
-  .ahp-activity .codicon-modifier-spin, .session-transfer-status .codicon-modifier-spin, .session-group-sync .codicon-modifier-spin, .ahp-history-pagination .codicon-modifier-spin { animation: none; }
+  .ahp-activity .codicon-modifier-spin, .ahp-thinking-card .codicon-modifier-spin, .session-transfer-status .codicon-modifier-spin, .session-group-sync .codicon-modifier-spin, .ahp-history-pagination .codicon-modifier-spin { animation: none; }
   .session-transfer-mask::-webkit-progress-value { transition: none; }
 }
 .ahp-terminal { max-width: 100%; max-height: 240px; overflow: auto; margin-block: 8px; padding: 8px; border-radius: var(--radius-sm); font: 12px/1.5 Consolas, monospace; white-space: pre; background: var(--editor-bg); }

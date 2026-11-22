@@ -131,12 +131,30 @@ function chatActivityTimestamps(chat: NonNullable<AgentHostView['chat']>, hasMor
 
 type TerminalStatus = NonNullable<AgentHostView['terminalStatus']>
 type ToolPart = Extract<ResponsePart, { kind: 'toolCall' }>
+type ReasoningPart = Extract<ResponsePart, { kind: 'reasoning' }>
+type ThinkingStepPart = ReasoningPart | ToolPart
 type ResponseContext = {
   terminals: Record<string, TerminalState>
   terminalStatus: TerminalStatus
   owner: string
   bridge: AgentHostBridge | undefined
   watchId: string | undefined
+}
+
+function latestReasoningPreview(content: string): string {
+  const lines = content
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith('```'))
+  const candidate = lines.at(-1)
+  if (!candidate) return 'Thinking...'
+  const cleaned = candidate
+    .replace(/^#{1,6}\s+/, '')
+    .replace(/^[-*>]\s+/, '')
+    .replace(/[*_`~]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return (cleaned || 'Thinking...').slice(0, 140)
 }
 
 function toolFailed(tool: ToolPart['toolCall']): boolean {
@@ -255,6 +273,263 @@ function ToolResponse({ part, terminals, terminalStatus, owner, bridge, watchId 
   </div>
 }
 
+function ThinkingThoughtItem({ part, compact }: { part: ReasoningPart; compact: boolean }) {
+  const [manualOpen, setManualOpen] = useState(false)
+  const trimmed = part.content.trim()
+  if (!trimmed) {
+    return (
+      <div className="ahp-thinking-thought">
+        <Icon name="lightbulb" />
+        <p className="ahp-thinking-placeholder muted">Thinking...</p>
+      </div>
+    )
+  }
+  if (compact && !manualOpen) {
+    const preview = latestReasoningPreview(trimmed)
+    return (
+      <button
+        type="button"
+        className="ahp-thinking-thought is-compact"
+        title="Click to expand this reasoning step"
+        onClick={() => setManualOpen(true)}
+      >
+        <Icon name="lightbulb" />
+        <span>{preview}</span>
+        <Icon name="chevron-right" className="ahp-disclosure" />
+      </button>
+    )
+  }
+  return (
+    <div className="ahp-thinking-thought">
+      <Icon name="lightbulb" />
+      <div className="ahp-thinking-thought-body">
+        <ChatMarkdown source={part.content} />
+      </div>
+      {compact && manualOpen && (
+        <button
+          type="button"
+          className="ahp-thinking-thought-fold"
+          aria-label="Collapse reasoning step"
+          title="Collapse reasoning step"
+          onClick={() => setManualOpen(false)}
+        >
+          <Icon name="fold" />
+        </button>
+      )}
+    </div>
+  )
+}
+
+function ThinkingActivity({
+  steps,
+  isLive,
+  ...context
+}: ResponseContext & { steps: ThinkingStepPart[]; isLive: boolean }) {
+  const viewportRef = useRef<HTMLDivElement>(null)
+  const stickToBottomRef = useRef(true)
+  const lastScrollTopRef = useRef(0)
+  const [modeChoice, setModeChoice] = useState<'auto' | 'rolling' | 'expanded' | 'collapsed'>('auto')
+  const [pausedFollow, setPausedFollow] = useState(false)
+
+  const effectiveMode: 'rolling' | 'expanded' | 'collapsed' =
+    modeChoice === 'auto' ? (isLive ? 'rolling' : 'collapsed') : modeChoice
+
+  const reasoningParts = steps.filter((step): step is ReasoningPart => step.kind === 'reasoning')
+  const toolParts = steps.filter((step): step is ToolPart => step.kind === 'toolCall')
+  const runningTools = toolParts.filter((part) => part.toolCall.status !== 'completed')
+  const currentRunning = runningTools.at(-1)?.toolCall
+
+  const counts = new Map<string, number>()
+  for (const { toolCall } of toolParts) {
+    const name = toolCall.displayName || toolCall.toolName
+    counts.set(name, (counts.get(name) ?? 0) + 1)
+  }
+  const toolBreakdown = [...counts]
+    .map(([name, count]) => (count > 1 ? `${name} (${count})` : name))
+    .join(', ')
+
+  const lastStep = steps.at(-1)
+  const statusText = currentRunning
+    ? `Running: ${toolDescription(currentRunning) || currentRunning.displayName || currentRunning.toolName}`
+    : isLive && lastStep?.kind === 'reasoning'
+      ? latestReasoningPreview(lastStep.content)
+      : toolBreakdown || latestReasoningPreview(reasoningParts.at(-1)?.content ?? '')
+
+  const primaryLabel = isLive
+    ? toolParts.length > 0
+      ? `Thinking · ${toolParts.length} ${toolParts.length === 1 ? 'tool call' : 'tool calls'}`
+      : 'Thinking'
+    : toolParts.length > 0
+      ? `Thought · ${toolParts.length} ${toolParts.length === 1 ? 'tool call' : 'tool calls'}`
+      : `Thought · ${reasoningParts.length} ${reasoningParts.length === 1 ? 'step' : 'steps'}`
+
+  const summaryAriaLabel = `${primaryLabel}, ${isLive ? 'in progress' : 'completed'}`
+
+  const entries: (
+    | { key: string; kind: 'reasoning'; part: ReasoningPart; isLatestReasoning: boolean }
+    | { key: string; kind: 'tools'; parts: ToolPart[] }
+  )[] = []
+  let seenReasoning = 0
+  for (const [index, step] of steps.entries()) {
+    if (step.kind === 'reasoning') {
+      seenReasoning += 1
+      const id = 'id' in step && typeof step.id === 'string' && step.id ? step.id : String(index)
+      entries.push({
+        key: `reasoning:${id}`,
+        kind: 'reasoning',
+        part: step,
+        isLatestReasoning: seenReasoning === reasoningParts.length,
+      })
+    } else {
+      const previous = entries.at(-1)
+      if (previous?.kind === 'tools') previous.parts.push(step)
+      else entries.push({ key: `tools:${step.toolCall.toolCallId}`, kind: 'tools', parts: [step] })
+    }
+  }
+
+  const scrollSignal = steps
+    .map((item) =>
+      item.kind === 'reasoning'
+        ? `r:${item.content.length}`
+        : `t:${item.toolCall.toolCallId}:${item.toolCall.status}:${'content' in item.toolCall ? item.toolCall.content?.length ?? 0 : 0}`,
+    )
+    .join('|')
+
+  useLayoutEffect(() => {
+    if (effectiveMode !== 'rolling' || !stickToBottomRef.current) return
+    const viewport = viewportRef.current
+    if (!viewport) return
+    viewport.scrollTop = viewport.scrollHeight
+    lastScrollTopRef.current = viewport.scrollTop
+  }, [effectiveMode, scrollSignal])
+
+  function resumeFollow(): void {
+    stickToBottomRef.current = true
+    setPausedFollow(false)
+    const viewport = viewportRef.current
+    if (viewport) {
+      viewport.scrollTop = viewport.scrollHeight
+      lastScrollTopRef.current = viewport.scrollTop
+    }
+  }
+
+  function toggleHeader(): void {
+    if (effectiveMode === 'collapsed') {
+      stickToBottomRef.current = true
+      setPausedFollow(false)
+      setModeChoice(isLive ? 'auto' : 'expanded')
+    } else {
+      setModeChoice('collapsed')
+    }
+  }
+
+  function toggleExpandAll(): void {
+    if (effectiveMode === 'expanded') {
+      if (isLive) {
+        stickToBottomRef.current = true
+        setPausedFollow(false)
+        setModeChoice('auto')
+      } else {
+        setModeChoice('collapsed')
+      }
+    } else {
+      setModeChoice('expanded')
+    }
+  }
+
+  return (
+    <section
+      className={`ahp-thinking-card mode-${effectiveMode}`}
+      data-live={isLive || undefined}
+      data-mode={effectiveMode}
+      aria-label="Agent thinking process"
+    >
+      <div className="ahp-thinking-header">
+        <button
+          type="button"
+          className="ahp-thinking-summary"
+          aria-label={summaryAriaLabel}
+          aria-expanded={effectiveMode !== 'collapsed'}
+          onClick={toggleHeader}
+        >
+          <Icon
+            name={isLive ? 'loading' : 'lightbulb'}
+            className={isLive ? 'codicon-modifier-spin ahp-thinking-live-icon' : 'ahp-thinking-done-icon'}
+          />
+          <span className="ahp-activity-label">{primaryLabel}</span>
+          <span className="ahp-activity-description" title={statusText}>{statusText}</span>
+          <Icon name="chevron-right" className={`ahp-disclosure${effectiveMode !== 'collapsed' ? ' is-open' : ''}`} />
+        </button>
+        <button
+          type="button"
+          className="markdown-expand-button ahp-thinking-expand-btn"
+          data-active={effectiveMode === 'expanded' || undefined}
+          aria-label={
+            effectiveMode === 'expanded'
+              ? isLive
+                ? 'Restore rolling thinking window'
+                : 'Collapse thinking process'
+              : 'Expand full thinking process'
+          }
+          aria-pressed={effectiveMode === 'expanded'}
+          onClick={toggleExpandAll}
+        >
+          <Icon name={effectiveMode === 'expanded' ? 'fold' : 'unfold'} />
+          <span>{effectiveMode === 'expanded' ? (isLive ? 'Rolling view' : 'Collapse') : 'Expand all'}</span>
+        </button>
+      </div>
+      {effectiveMode !== 'collapsed' && (
+        <div className="ahp-thinking-body">
+          <div
+            ref={viewportRef}
+            className="ahp-thinking-viewport"
+            data-rolling={effectiveMode === 'rolling' || undefined}
+            onScroll={(event) => {
+              if (effectiveMode !== 'rolling') return
+              const element = event.currentTarget
+              const distance = element.scrollHeight - element.scrollTop - element.clientHeight
+              const scrolledUp = element.scrollTop < lastScrollTopRef.current - 2
+              lastScrollTopRef.current = element.scrollTop
+              if (scrolledUp && distance > 24) {
+                stickToBottomRef.current = false
+                setPausedFollow(true)
+              } else if (distance <= 20) {
+                stickToBottomRef.current = true
+                if (pausedFollow) setPausedFollow(false)
+              }
+            }}
+          >
+            {entries.map((entry) =>
+              entry.kind === 'reasoning' ? (
+                <ThinkingThoughtItem
+                  key={entry.key}
+                  part={entry.part}
+                  compact={effectiveMode === 'rolling' && !entry.isLatestReasoning}
+                />
+              ) : entry.parts.length > 1 ? (
+                <ToolActivity key={entry.key} parts={entry.parts} {...context} />
+              ) : (
+                <ToolResponse key={entry.key} part={entry.parts[0]} {...context} />
+              ),
+            )}
+          </div>
+          {effectiveMode === 'rolling' && isLive && pausedFollow && (
+            <button
+              type="button"
+              className="ahp-thinking-follow-btn"
+              aria-label="Scroll to latest thinking status"
+              onClick={resumeFollow}
+            >
+              <Icon name="arrow-down" />
+              <span>Latest</span>
+            </button>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
 function Response({ part, ...context }: ResponseContext & { part: ResponsePart }) {
   if (part.kind === 'markdown') return <ChatMarkdown source={part.content} />
   if (part.kind === 'reasoning') return <details className="ahp-tool ahp-reasoning"><summary><Icon name="lightbulb" /><span>Reasoning</span><Icon name="chevron-right" className="ahp-disclosure" /></summary><ChatMarkdown source={part.content} /></details>
@@ -265,20 +540,37 @@ function Response({ part, ...context }: ResponseContext & { part: ResponsePart }
   return <ToolResponse part={part} {...context} />
 }
 
-function Responses({ parts, ...context }: ResponseContext & { parts: ResponsePart[] }) {
-  const blocks: ({ key: string; tools: ToolPart[] } | { key: string; part: ResponsePart })[] = []
+function Responses({ parts, isActiveTurn = false, ...context }: ResponseContext & { parts: ResponsePart[]; isActiveTurn?: boolean }) {
+  const blocks: ({ key: string; steps: ThinkingStepPart[] } | { key: string; part: ResponsePart })[] = []
   for (const [index, part] of parts.entries()) {
-    if (part.kind === 'toolCall' && routineTool(part.toolCall)) {
+    if (part.kind === 'reasoning' || part.kind === 'toolCall' && routineTool(part.toolCall)) {
+      const stepKey = part.kind === 'toolCall'
+        ? `tool:${part.toolCall.toolCallId}`
+        : `reasoning:${'id' in part && typeof part.id === 'string' && part.id ? part.id : index}`
       const previous = blocks.at(-1)
-      if (previous && 'tools' in previous) previous.tools.push(part)
-      else blocks.push({ key: `tool:${part.toolCall.toolCallId}`, tools: [part] })
+      if (previous && 'steps' in previous) previous.steps.push(part)
+      else blocks.push({ key: stepKey, steps: [part] })
     } else {
       blocks.push({ key: part.kind === 'toolCall' ? `tool:${part.toolCall.toolCallId}` : `part:${index}`, part })
     }
   }
-  return blocks.map((block) => 'tools' in block && block.tools.length > 1
-    ? <ToolActivity key={block.key} parts={block.tools} {...context} />
-    : <Response key={block.key} part={'tools' in block ? block.tools[0] : block.part} {...context} />)
+  return blocks.map((block, index) => {
+    if (!('steps' in block)) return <Response key={block.key} part={block.part} {...context} />
+    const { steps } = block
+    const reasoningCount = steps.filter((step) => step.kind === 'reasoning').length
+    const toolSteps = steps.filter((step): step is ToolPart => step.kind === 'toolCall')
+    const hasRunningTool = toolSteps.some((step) => step.toolCall.status !== 'completed')
+    const isLive = isActiveTurn && index === blocks.length - 1 || hasRunningTool
+    if (reasoningCount === 0) {
+      return toolSteps.length > 1
+        ? <ToolActivity key={block.key} parts={toolSteps} {...context} />
+        : <Response key={block.key} part={toolSteps[0]} {...context} />
+    }
+    if (!isLive && reasoningCount === 1 && toolSteps.length === 0) {
+      return <Response key={block.key} part={steps[0]} {...context} />
+    }
+    return <ThinkingActivity key={block.key} steps={steps} isLive={isLive} {...context} />
+  })
 }
 
 const ChatTurnItem = memo(function ChatTurnItem({
@@ -351,7 +643,7 @@ const ChatTurnItem = memo(function ChatTurnItem({
         <strong className="turn-actor-name">Copilot</strong>
         <span className="turn-machine-badge is-assistant" title={machineName}>{ownerDisplay}</span>
       </header>
-      <Responses parts={turn.responseParts} terminals={terminals} terminalStatus={terminalStatus} owner={owner} bridge={bridge} watchId={watchId} />
+      <Responses parts={turn.responseParts} isActiveTurn={isResponding} terminals={terminals} terminalStatus={terminalStatus} owner={owner} bridge={bridge} watchId={watchId} />
       {isResponding && <p className="message-notice" role="status">Responding...</p>}
     </article>
     {times.assistant && (
