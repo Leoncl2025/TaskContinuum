@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import type { TaskRecord } from '../../shared/tasks'
 import { statusLabels, taskProgress } from '../../shared/tasks'
 import { Icon } from './Primitives'
@@ -6,7 +6,9 @@ import { WorkspaceDocument } from './WorkspaceDocument'
 
 const tabs = ['Overview', 'Requirements', 'Plan', 'Checklist'] as const
 
-export function TaskViewer({ task, onChat, workspaceName = 'Task Continuum' }: { task: TaskRecord; onChat(): void; workspaceName?: string }) {
+type TaskViewerProps = { task: TaskRecord; onChat(): void; workspaceName?: string }
+
+const TaskViewerBody = memo(function TaskViewerBody({ task, onChat, workspaceName = 'Task Continuum' }: TaskViewerProps) {
   const [tab, setTab] = useState<typeof tabs[number]>('Overview')
   const progress = taskProgress(task)
   const checked = task.checklist.filter((item) => item.done).length
@@ -44,4 +46,8 @@ export function TaskViewer({ task, onChat, workspaceName = 'Task Continuum' }: {
       {tab === 'Checklist' && <section className="document-section"><h2>Acceptance checklist</h2><p>{checked} of {task.checklist.length} criteria checked.</p>{checklist()}{!task.checklist.length && <p className="muted">No acceptance criteria recorded.</p>}</section>}
     </article>
   </div>
+})
+
+export function TaskViewer(props: TaskViewerProps) {
+  return <TaskViewerBody {...props} />
 }

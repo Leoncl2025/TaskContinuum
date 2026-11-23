@@ -181,17 +181,30 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const task = tasks.find((item) => item.id === selectedId)
   const primaryPanel = task || taskAgentOpen ? 'chat' : 'details'
 
-  const orderedBindingsForTask = useCallback((taskId: string): readonly SessionBinding[] => {
-    const raw = bindings[taskId] ?? []
-    if (!raw.length) return raw
-    return treeSessionBindings(buildSessionTree(raw, {
-      mode: selection.taskSortMode(taskId),
-      orderedKeys: selection.sessionOrders[taskId],
-      titles: sessionTitles.titles,
-      timestamps: sessionTitles.timestamps,
-      aliases,
-    }, selection.sessionGroups[taskId]).entries)
-  }, [bindings, selection, sessionTitles.titles, sessionTitles.timestamps, aliases])
+  const taskSortMode = selection.taskSortMode
+  const sessionOrders = selection.sessionOrders
+  const sessionGroups = selection.sessionGroups
+  const orderedBindingsForTask = useMemo(() => {
+    const cache = new Map<string, readonly SessionBinding[]>()
+    return (taskId: string): readonly SessionBinding[] => {
+      const cached = cache.get(taskId)
+      if (cached) return cached
+      const raw = bindings[taskId] ?? []
+      if (!raw.length) {
+        cache.set(taskId, raw)
+        return raw
+      }
+      const ordered = treeSessionBindings(buildSessionTree(raw, {
+        mode: taskSortMode(taskId),
+        orderedKeys: sessionOrders[taskId],
+        titles: sessionTitles.titles,
+        timestamps: sessionTitles.timestamps,
+        aliases,
+      }, sessionGroups[taskId]).entries)
+      cache.set(taskId, ordered)
+      return ordered
+    }
+  }, [bindings, taskSortMode, sessionOrders, sessionGroups, sessionTitles.titles, sessionTitles.timestamps, aliases])
 
   const taskBindings = useMemo(
     () => task ? orderedBindingsForTask(task.id) : [],
@@ -328,9 +341,9 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     return () => { mounted = false; unlisten?.() }
   }, [])
 
-  function showChat(): void {
+  const showChat = useCallback(() => {
     setCompactPanel('chat')
-    if (!compact) setLayout((value) => ({ ...value, chat: true }))
+    if (!compact) setLayout((value) => value.chat ? value : { ...value, chat: true })
     const previousFocus = document.activeElement
     requestAnimationFrame(() => {
       const composer = document.getElementById('chat-composer')
@@ -338,12 +351,12 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
       if (document.querySelector('dialog[open]') || focused !== previousFocus && focused !== document.body && focused !== composer) return
       composer?.focus({ preventScroll: true })
     })
-  }
+  }, [compact])
 
-  function showTaskChat(): void {
+  const showTaskChat = useCallback(() => {
     setTaskAgentOpen(false)
     showChat()
-  }
+  }, [showChat])
 
   const activateDockedSession = useEffectEvent((event: SessionWindowActivatedEvent) => {
     const pagesToDock = event.pages?.length
@@ -544,7 +557,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   function openSidebar(): void {
     setSidebarView('tasks')
     if (compact) setCompactPanel('tasks')
-    else setLayout((value) => ({ ...value, sidebar: true }))
+    else setLayout((value) => value.sidebar ? value : { ...value, sidebar: true })
   }
 
   function windowAction(action: 'minimize' | 'toggleMaximize' | 'toggleFullScreen' | 'close'): void {
@@ -559,7 +572,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     setExpandSessionRequest((current) => current ? { ...current, active: false } : undefined)
     setSidebarView('sessions')
     if (compact) setCompactPanel('tasks')
-    else setLayout((value) => ({ ...value, sidebar: true }))
+    else setLayout((value) => value.sidebar ? value : { ...value, sidebar: true })
   }
 
   function openSessionDetach(taskId: string, binding: SessionBinding): void {

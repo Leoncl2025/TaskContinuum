@@ -2,7 +2,7 @@ import { memo, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useS
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import stripAnsi from 'strip-ansi'
-import type { ResponsePart, TerminalState } from '@microsoft/agent-host-protocol'
+import type { ResponsePart, TerminalState, Turn } from '@microsoft/agent-host-protocol'
 import { agentHostKey, MAX_SESSION_TITLE_LENGTH } from '../../shared/agentHost'
 import type { AgentHostBridge, AgentHostHistoryTransfer, AgentHostTarget, AgentHostView } from '../../shared/agentHost'
 import type { TaskRecord } from '../../shared/tasks'
@@ -10,7 +10,7 @@ import type { WorkspaceSnapshot } from '../../shared/workspace'
 import { MAX_CHAT_TEXT_LENGTH } from '../../shared/chatAttachments'
 import type { ChatImageAttachment } from '../../shared/chatAttachments'
 import { ChatMarkdown } from './ChatMarkdown'
-import { ChatLinkTargetContext } from '../chat/chatLinkContext'
+import { ChatLinkActiveContext, ChatLinkTargetContext } from '../chat/chatLinkContext'
 import { copyMarkdownSelection } from '../chat/copyMarkdownSelection'
 import { ChatImages, ChatImageStatus } from './ChatImages'
 import { messageImages as imagesFor } from '../chat/messageImages'
@@ -28,8 +28,78 @@ function terminalText(state: TerminalState | undefined): string {
   return state ? stripAnsi(state.content.map((part) => part.type === 'command' ? part.output : part.value).join('')) : ''
 }
 
+const EMPTY_TERMINALS: Record<string, TerminalState> = Object.freeze({})
+const EMPTY_TERMINAL_STATUS: NonNullable<AgentHostView['terminalStatus']> = Object.freeze({})
+
+function turnPartsEquivalent(left: Turn, right: Turn): boolean {
+  if (left === right) return true
+  if (left.id !== right.id || left.state !== 'complete' || right.state !== 'complete') return false
+  if (left.duration !== right.duration || left.message.text !== right.message.text) return false
+  if (left.responseParts.length !== right.responseParts.length) return false
+  for (let index = 0; index < left.responseParts.length; index++) {
+    const lp = left.responseParts[index]
+    const rp = right.responseParts[index]
+    if (lp.kind !== rp.kind) return false
+    if ((lp.kind === 'markdown' || lp.kind === 'reasoning') && rp.kind === lp.kind) {
+      if (lp.content !== rp.content) return false
+    } else if (lp.kind === 'toolCall' && rp.kind === 'toolCall') {
+      if (lp.toolCall.toolCallId !== rp.toolCall.toolCallId
+        || lp.toolCall.status !== rp.toolCall.status
+        || lp.toolCall.invocationMessage !== rp.toolCall.invocationMessage
+        || ('success' in lp.toolCall ? lp.toolCall.success : undefined) !== ('success' in rp.toolCall ? rp.toolCall.success : undefined)
+        || ('error' in lp.toolCall ? lp.toolCall.error?.message : undefined) !== ('error' in rp.toolCall ? rp.toolCall.error?.message : undefined)) {
+        return false
+      }
+      const lc = 'content' in lp.toolCall ? lp.toolCall.content?.length ?? 0 : 0
+      const rc = 'content' in rp.toolCall ? rp.toolCall.content?.length ?? 0 : 0
+      if (lc !== rc) return false
+    }
+  }
+  return true
+}
+
+type DisplayedTurn = Turn | NonNullable<NonNullable<AgentHostView['chat']>['activeTurn']>
+
+function turnReferencesTerminal(turn: DisplayedTurn): boolean {
+  for (const part of turn.responseParts) {
+    if (part.kind === 'toolCall' && 'content' in part.toolCall && part.toolCall.content?.some((item) => item.type === 'terminal')) {
+      return true
+    }
+  }
+  return false
+}
+
 function retainChatHistory(previous: AgentHostView | undefined, value: AgentHostView): AgentHostView {
-  return value.chat === undefined && previous?.chat ? { ...value, chat: previous.chat } : value
+  if (value.chat === undefined && previous?.chat) return { ...value, chat: previous.chat }
+  if (value.chat && previous?.chat && previous.chat.turns.length > 0 && value.chat.turns.length > 0) {
+    const prevById = new Map<string, Turn>()
+    for (const turn of previous.chat.turns) prevById.set(turn.id, turn)
+    let reusedAny = false
+    let allIdentical = value.chat.turns.length === previous.chat.turns.length
+    const mergedTurns = value.chat.turns.map((turn, idx) => {
+      const prior = prevById.get(turn.id)
+      if (prior && turnPartsEquivalent(prior, turn)) {
+        reusedAny = true
+        if (previous.chat!.turns[idx] !== prior) allIdentical = false
+        return prior
+      }
+      allIdentical = false
+      return turn
+    })
+    if (allIdentical
+      && !value.chat.activeTurn && !previous.chat.activeTurn
+      && value.chat.title === previous.chat.title
+      && value.chat.modifiedAt === previous.chat.modifiedAt
+      && value.chat.turnsNextCursor === previous.chat.turnsNextCursor
+      && value.chat.draft?.text === previous.chat.draft?.text
+      && (value.chat.queuedMessages?.length ?? 0) === (previous.chat.queuedMessages?.length ?? 0)) {
+      return { ...value, chat: previous.chat }
+    }
+    if (reusedAny) {
+      return { ...value, chat: { ...value.chat, turns: mergedTurns } }
+    }
+  }
+  return value
 }
 
 function historyTransferLabel(progress: AgentHostHistoryTransfer): string {
@@ -206,6 +276,52 @@ function Responses({ parts, ...context }: ResponseContext & { parts: ResponsePar
     : <Response key={block.key} part={'tools' in block ? block.tools[0] : block.part} {...context} />)
 }
 
+const ChatTurnItem = memo(function ChatTurnItem({
+  turn,
+  isResponding,
+  machineName,
+  aliases,
+  terminals,
+  terminalStatus,
+  owner,
+  bridge,
+  watchId,
+}: ResponseContext & {
+  turn: DisplayedTurn
+  isResponding: boolean
+  machineName: string
+  aliases: Readonly<Record<string, string>>
+}) {
+  const actor = turn.message._meta?.taskcontinuumActor as { username?: string; machineName?: string; clientId?: string } | undefined
+  const images = useMemo(() => imagesFor(turn), [turn])
+  return <div data-turn-id={turn.id}>
+    <article className="message message-user">
+      <header><Icon name="account" /><strong>{typeof actor?.username === 'string' ? actor.username : 'User'}</strong>{typeof actor?.machineName === 'string' && <span className="message-model" title={actor.machineName}>{machineLabel({ machineName: actor.machineName, clientId: typeof actor.clientId === 'string' ? actor.clientId : undefined }, aliases)}</span>}</header>
+      {turn.message.model && <><p className="message-notice">Requested model: {turn.message.model.id}</p>{Object.keys(turn.message.model.config ?? {}).length > 0 && <p className="message-notice">Requested config: {JSON.stringify(turn.message.model.config)}</p>}</>}
+      <div className="message-text">{turn.message.text}</div>
+      <ChatImages images={images} />
+    </article>
+    <article className="message message-assistant">
+      <header><Icon name="copilot" /><strong title={machineName}>Copilot @ {owner}</strong></header>
+      <Responses parts={turn.responseParts} terminals={terminals} terminalStatus={terminalStatus} owner={owner} bridge={bridge} watchId={watchId} />
+      {isResponding && <p className="message-notice" role="status">Responding...</p>}
+    </article>
+  </div>
+}, (prev, next) => {
+  if (prev.turn !== next.turn
+    || prev.isResponding !== next.isResponding
+    || prev.owner !== next.owner
+    || prev.machineName !== next.machineName
+    || prev.aliases !== next.aliases
+    || prev.bridge !== next.bridge) {
+    return false
+  }
+  if (!turnReferencesTerminal(next.turn)) return true
+  return prev.watchId === next.watchId
+    && prev.terminals === next.terminals
+    && prev.terminalStatus === next.terminalStatus
+})
+
 const ChatTranscript = memo(function ChatTranscript({ view, machineName, aliases, ...context }: Pick<ResponseContext, 'owner' | 'bridge' | 'watchId'> & {
   view: AgentHostView | undefined
   machineName: string
@@ -213,12 +329,22 @@ const ChatTranscript = memo(function ChatTranscript({ view, machineName, aliases
 }) {
   const activeTurn = view?.chat?.activeTurn
   const turns = [...view?.chat?.turns ?? [], ...activeTurn ? [activeTurn] : []]
+  const terminals = view?.terminals && Object.keys(view.terminals).length > 0 ? view.terminals : EMPTY_TERMINALS
+  const terminalStatus = view?.terminalStatus && Object.keys(view.terminalStatus).length > 0 ? view.terminalStatus : EMPTY_TERMINAL_STATUS
   return <>
     {!turns.length && <p className="ahp-chat-placeholder muted">{view?.state === 'connected' ? 'No messages.' : view?.historyTransfer ? historyTransferLabel(view.historyTransfer) : 'Waiting for original history...'}</p>}
-    {turns.map((turn) => {
-      const actor = turn.message._meta?.taskcontinuumActor as { username?: string; machineName?: string; clientId?: string } | undefined
-      return <div key={turn.id} data-turn-id={turn.id}><article className="message message-user"><header><Icon name="account" /><strong>{typeof actor?.username === 'string' ? actor.username : 'User'}</strong>{typeof actor?.machineName === 'string' && <span className="message-model" title={actor.machineName}>{machineLabel({ machineName: actor.machineName, clientId: typeof actor.clientId === 'string' ? actor.clientId : undefined }, aliases)}</span>}</header>{turn.message.model && <><p className="message-notice">Requested model: {turn.message.model.id}</p>{Object.keys(turn.message.model.config ?? {}).length > 0 && <p className="message-notice">Requested config: {JSON.stringify(turn.message.model.config)}</p>}</>}<div className="message-text">{turn.message.text}</div><ChatImages images={imagesFor(turn)} /></article><article className="message message-assistant"><header><Icon name="copilot" /><strong title={machineName}>Copilot @ {context.owner}</strong></header><Responses parts={turn.responseParts} terminals={view?.terminals ?? {}} terminalStatus={view?.terminalStatus ?? {}} {...context} />{activeTurn?.id === turn.id && <p className="message-notice" role="status">Responding...</p>}</article></div>
-    })}
+    {turns.map((turn) => (
+      <ChatTurnItem
+        key={turn.id}
+        turn={turn}
+        isResponding={activeTurn?.id === turn.id}
+        machineName={machineName}
+        aliases={aliases}
+        terminals={terminals}
+        terminalStatus={terminalStatus}
+        {...context}
+      />
+    ))}
   </>
 })
 
@@ -293,14 +419,17 @@ function HeaderTitleInput({ value, onFinish }: { value: string; onFinish(next: s
   />
 }
 
-export function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, visible = true, paneSlot, splitOrientation = 'horizontal', showTaskBadge = false, closeLabel = 'Hide chat panel', hideClose = false, restoredDraft, headerTarget, sessionSwitcher, cachedTitle, customTitle, onTitles, onRenameTitle, onDraftChange, onActivatePane, onSplitRight, onSplitDown, onToggleSplitOrientation, onSwapSplit, onPopOut, onHeaderContextMenu, onDetach, onClose, onDevices, onSessions, onBusy, panelKey, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
+export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, visible = true, paneSlot, splitOrientation = 'horizontal', showTaskBadge = false, closeLabel = 'Hide chat panel', hideClose = false, restoredDraft, headerTarget, sessionSwitcher, cachedTitle, customTitle, onTitles, onRenameTitle, onDraftChange, onActivatePane, onSplitRight, onSplitDown, onToggleSplitOrientation, onSwapSplit, onPopOut, onHeaderContextMenu, onDetach, onClose, onDevices, onSessions, onBusy, panelKey, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
   const bridge = window.agentHost
   const { sessionId, chatId } = target
   const { clientId, machineName } = target.owner
   const aliases = useMachineAliases()
   const ownerLabel = machineLabel(target.owner, aliases)
   const key = agentHostKey(target)
-  const linkTarget = useMemo(() => ({ target, active }), [target, active])
+  const stableTarget = useMemo(
+    () => ({ sessionId, chatId, owner: { clientId, machineName } }),
+    [sessionId, chatId, clientId, machineName],
+  )
   const contextId = task ? task.id : workspace.id
   const contextLabel = task ? task.id : workspace.name
   const viewKey = `${contextId}:${key}`
@@ -327,6 +456,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
   const [catalog, setCatalog] = useState<{ key: string; models: Awaited<ReturnType<AgentHostBridge['models']>>; error?: string }>()
   const [selection, setSelection] = useState<{ key: string; provider: string; id: string; config?: ModelConfig; preferenceError?: string }>()
   const currentCatalog = catalog?.key === catalogKey ? catalog : undefined
+  const loadedCatalogKeyRef = useRef<string | undefined>(undefined)
   const watchId = watch?.key === watchKey ? watch.id : undefined
   const models = currentCatalog?.models ?? []
   const modelId = selection?.key === key ? selection.id : ''
@@ -363,7 +493,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
     let connected = false
     let connectionGeneration = 0
     let loadingModels = false
-    let loadedModels = false
+    let loadedModels = loadedCatalogKeyRef.current === catalogKey
     const pendingViews = new Map<string, AgentHostView>()
     const selected = { sessionId, chatId, owner: { clientId, machineName } }
     if (!bridge) return
@@ -376,6 +506,8 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       void bridge.models(selected).then((models) => {
         loadedModels = true
         if (active) {
+          if (models.length > 0) loadedCatalogKeyRef.current = catalogKey
+          else if (loadedCatalogKeyRef.current === catalogKey) loadedCatalogKeyRef.current = undefined
           setCatalog({ key: catalogKey, models, ...(!models.length ? { error: 'No available models. Check model access on the owner device, then reconnect.' } : {}) })
           const provider = models[0]?.provider
           if (provider) {
@@ -388,6 +520,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       }).catch((failure: unknown) => {
         failed = true
         loadedModels = false
+        if (loadedCatalogKeyRef.current === catalogKey) loadedCatalogKeyRef.current = undefined
         if (active) setCatalog({ key: catalogKey, models: [], error: failure instanceof Error ? failure.message : 'The owner model catalog is unavailable. Reconnect to retry.' })
       }).finally(() => {
         loadingModels = false
@@ -415,7 +548,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       if (!watchId) { pendingViews.set(event.id, retainChatHistory(pendingViews.get(event.id), event.view)); return }
       if (event.id === watchId) applyView(event.view)
     })
-    loadModels()
+    if (!loadedModels) loadModels()
     void bridge.watch(selected).then((id) => {
       if (!active) { void bridge.unwatch(id).catch(() => undefined); return }
       watchId = id
@@ -674,7 +807,7 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
       <div className="ahp-chat-secondary-actions">{chatActions}</div>
     </div>
   </HeaderTag>
-  return <ChatLinkTargetContext.Provider value={linkTarget}><aside ref={panel} className="chat-panel ahp-panel" data-pane-slot={paneSlot} data-pane-focused={paneSlot && paneSlot !== 'single' ? active || undefined : undefined} aria-label={workspace ? 'Agent Host task creation chat' : paneSlot === 'secondary' ? 'Secondary split Agent Host task chat' : 'Agent Host task chat'} aria-keyshortcuts="F5" data-update-blocker={updateBlocker} onPointerDownCapture={onActivatePane ? () => onActivatePane() : undefined} onFocusCapture={onActivatePane ? () => onActivatePane() : undefined}>
+  return <ChatLinkTargetContext.Provider value={stableTarget}><ChatLinkActiveContext.Provider value={active}><aside ref={panel} className="chat-panel ahp-panel" data-pane-slot={paneSlot} data-pane-focused={paneSlot && paneSlot !== 'single' ? active || undefined : undefined} aria-label={workspace ? 'Agent Host task creation chat' : paneSlot === 'secondary' ? 'Secondary split Agent Host task chat' : 'Agent Host task chat'} aria-keyshortcuts="F5" data-update-blocker={updateBlocker} onPointerDownCapture={onActivatePane ? () => onActivatePane() : undefined} onFocusCapture={onActivatePane ? () => onActivatePane() : undefined}>
     {headerTarget ? active && createPortal(header, headerTarget) : visible && header}
     {detailsOpen && <Dialog title="Chat details" className="ahp-chat-details" onClose={() => setDetailsKey(undefined)}>
       <dl>
@@ -744,5 +877,5 @@ export function AgentHostPanel({ task, workspace, target, connectionRevision = 0
         </div>
       </div>
     </form>
-  </aside></ChatLinkTargetContext.Provider>
-}
+  </aside></ChatLinkActiveContext.Provider></ChatLinkTargetContext.Provider>
+})

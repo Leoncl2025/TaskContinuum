@@ -1434,4 +1434,41 @@ describe('Agent Host chat UI', () => {
     expect(setup.bridge.watch).toHaveBeenCalledTimes(2)
     expect(setup.bridge.models).toHaveBeenCalledTimes(initialModelCalls + 1)
   })
+
+  it('skips completed-turn re-renders and duplicate model fetches when switching active focus or resuming Activity visibility', async () => {
+    const setup = fixture()
+    responseHistory(setup.view, [
+      { kind: 'markdown' as ResponsePartKind.Markdown, id: 'rich-answer', content: 'Review [Report](file:///C:/Work/report.txt) and `inlineCode`' },
+    ])
+    const imageSpy = vi.spyOn(messageImages, 'messageImages')
+    const onDetach = vi.fn()
+    const onClose = vi.fn()
+    const renderInActivity = (visible: boolean, active: boolean) => (
+      <Activity mode={visible ? 'visible' : 'hidden'}>
+        <AgentHostPanel task={demoTasks[1]} target={setup.target} visible={visible} active={active} onDetach={onDetach} onClose={onClose} />
+      </Activity>
+    )
+
+    const mounted = render(renderInActivity(true, true))
+    const link = await screen.findByRole('link', { name: 'Report' })
+    await screen.findByRole('option', { name: 'GPT-6' })
+    const turnNode = mounted.container.querySelector('[data-turn-id="activity-turn"]')
+    expect(setup.bridge.models).toHaveBeenCalledTimes(1)
+    imageSpy.mockClear()
+
+    mounted.rerender(renderInActivity(true, false))
+    mounted.rerender(renderInActivity(true, true))
+    expect(imageSpy).not.toHaveBeenCalled()
+    expect(mounted.container.querySelector('[data-turn-id="activity-turn"]')).toBe(turnNode)
+    expect(screen.getByRole('link', { name: 'Report' })).toBe(link)
+
+    mounted.rerender(renderInActivity(false, false))
+    mounted.rerender(renderInActivity(true, true))
+    await waitFor(() => expect(setup.bridge.watch).toHaveBeenCalledTimes(2))
+    expect(setup.bridge.models).toHaveBeenCalledTimes(1)
+    expect(imageSpy).not.toHaveBeenCalled()
+    expect(mounted.container.querySelector('[data-turn-id="activity-turn"]')).toBe(turnNode)
+    expect(screen.getByRole('link', { name: 'Report' })).toBe(link)
+    imageSpy.mockRestore()
+  })
 })

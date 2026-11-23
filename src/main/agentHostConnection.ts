@@ -103,9 +103,9 @@ export class AgentHostConnection {
   private get readOnly(): boolean { return this.initialized?._meta?.taskcontinuumCanSend === false || this.chat.sendState.readOnly }
 
   get hasActiveWork(): boolean {
-    const chat = this.chat.value
+    const send = this.chat.sendState
     return this.sending || this.reviewing || this.commands.some(command => command.state === 'pending' || command.state === 'uncertain')
-      || !!chat?.activeTurn || !!chat?.draft?.text || !!chat?.draft?.attachments?.length || !!chat?.queuedMessages?.length
+      || Boolean(send.activeTurnId) || send.hasDraft || send.hasQueuedMessages
   }
 
   retain(): () => void {
@@ -127,7 +127,7 @@ export class AgentHostConnection {
     if (options?.protectNativeEmptySession && this.connected) {
       const sessionState = this.snapshots.get(this.target.sessionId)?.state as SessionState | undefined
       if (!this.chat.loaded || sessionState?.lifecycle === 'creating'
-        || (this.chat.completedTurns === 0 && !this.chat.nativeHistoryCursor && !this.chat.value?.activeTurn)) return false
+        || (this.chat.completedTurns === 0 && !this.chat.nativeHistoryCursor && !this.chat.sendState.activeTurnId)) return false
     }
     if (!options?.allowRemoteChatActivity && (this.hasActiveWork || this.activeTerminals.size > 0 || this.terminalSubscriptions.size > 0)) return false
     return true

@@ -149,24 +149,22 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
     setSeenRenameId(renameSession.id)
     if (view !== 'current') setView('current')
   }
-  const [seenTaskId, setSeenTaskId] = useState(taskId)
   const [localSortMode, setLocalSortMode] = useState<SessionSortMode>(DEFAULT_SESSION_SORT_MODE)
   const [linkSortMode, setLinkSortMode] = useState<Exclude<SessionSortMode, 'manual'>>('updated-desc')
   const [sessions, setSessions] = useState<AgentHostSession[]>([])
   const [warnings, setWarnings] = useState<string[]>([])
   const [catalogueError, setCatalogueError] = useState<string>()
-  const [error, setError] = useState<string>()
+  const [scopedError, setScopedError] = useState<{ taskId?: string; message: string }>()
   const [query, setQuery] = useState('')
   const [location, setLocation] = useState<'local' | 'all'>('local')
   const [loading, setLoading] = useState(true)
   const [operating, setOperating] = useState(false)
   const [revision, setRevision] = useState(0)
-  const [detach, setDetach] = useState<SessionBinding>()
-  if (taskId !== seenTaskId) {
-    setSeenTaskId(taskId)
-    if (detach) setDetach(undefined)
-    if (error) setError(undefined)
-  }
+  const [scopedDetach, setScopedDetach] = useState<{ taskId?: string; binding: SessionBinding }>()
+  const detach = scopedDetach && scopedDetach.taskId === taskId ? scopedDetach.binding : undefined
+  const error = scopedError && scopedError.taskId === taskId ? scopedError.message : undefined
+  const setDetach = (binding: SessionBinding | undefined) => setScopedDetach(binding ? { taskId, binding } : undefined)
+  const setError = (message: string | undefined) => setScopedError(message ? { taskId, message } : undefined)
   const running = useRef(false)
   const localOwnerIdRef = useRef(localOwnerId)
   useEffect(() => { localOwnerIdRef.current = localOwnerId }, [localOwnerId])
@@ -240,6 +238,7 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
     setView('current')
   }
   const filtered = useMemo(() => {
+    if (view !== 'link') return []
     const needle = query.trim().toLowerCase()
     const decorated = sessions
       .filter((session) => (location === 'all' || !localOwnerId || session.owner.clientId === localOwnerId)
@@ -302,7 +301,7 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
       }
     })
     return decorated.map((item) => item.session)
-  }, [sessions, location, localOwnerId, query, cachedTitles, aliases, mergedTimestamps, linkSortMode])
+  }, [view, sessions, location, localOwnerId, query, cachedTitles, aliases, mergedTimestamps, linkSortMode])
   return <aside className="sidebar session-sidebar" aria-label="Agent Host sessions">
     <header className="panel-header"><div className="header-actions"><IconButton icon="refresh" label="Refresh Agent Host sessions" disabled={loading || operating} onClick={() => { setLoading(true); setSessions([]); setRevision((value) => value + 1) }} /><IconButton icon="layout-sidebar-left-off" label="Hide session sidebar" onClick={onClose} /></div></header>
     <div className="session-task-context"><strong>{taskId ? `${taskId} - ${taskTitle ?? taskId}` : 'No task selected'}</strong></div>

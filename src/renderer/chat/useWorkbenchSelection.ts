@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { z } from 'zod'
 import { persistedPaneTreeSchema } from '../../shared/paneTreeSchema'
 import type { PersistedPaneTreeNode, PersistedPaneTreeState } from '../../shared/paneTreeSchema'
@@ -371,13 +371,53 @@ export function useWorkbenchSelection(workspaceId: string | undefined) {
     return DEFAULT_SESSION_SORT_MODE
   }, [sessionSorts, explicitGlobalSort, sessionGroups, sessionOrders])
 
-  return {
-    taskId: saved?.selection?.taskId, openTaskIds: saved?.selection?.openTaskIds,
-    paneTree: saved?.selection?.paneTree,
-    sessions: saved?.selection?.sessions ?? emptySessions,
+  const taskId = saved?.selection?.taskId
+  const openTaskIds = saved?.selection?.openTaskIds
+  const paneTree = saved?.selection?.paneTree
+  const sessions = saved?.selection?.sessions ?? emptySessions
+  const error = saved?.error
+
+  return useMemo(() => ({
+    taskId,
+    openTaskIds,
+    paneTree,
+    sessions,
     sessionOrders,
     sessionGroups,
-    sessionSort, sessionSorts, taskSortMode,
-    error: saved?.error, selectTask, closeTask, selectSession, syncPaneSelection, rememberDefaultSession, clearSession, setSessionLayout, revealSessionGroup, setSessionSort, dismissError,
-  }
+    sessionSort,
+    sessionSorts,
+    taskSortMode,
+    error,
+    selectTask,
+    closeTask,
+    selectSession,
+    syncPaneSelection,
+    rememberDefaultSession,
+    clearSession,
+    setSessionLayout,
+    revealSessionGroup,
+    setSessionSort,
+    dismissError,
+  }), [
+    taskId,
+    openTaskIds,
+    paneTree,
+    sessions,
+    sessionOrders,
+    sessionGroups,
+    sessionSort,
+    sessionSorts,
+    taskSortMode,
+    error,
+    selectTask,
+    closeTask,
+    selectSession,
+    syncPaneSelection,
+    rememberDefaultSession,
+    clearSession,
+    setSessionLayout,
+    revealSessionGroup,
+    setSessionSort,
+    dismissError,
+  ])
 }

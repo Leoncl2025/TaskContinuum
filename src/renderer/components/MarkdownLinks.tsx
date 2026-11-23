@@ -1,14 +1,26 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { parseChatLink } from '../../shared/chatLinks'
 import type { OpenChatLinkResult } from '../../shared/chatLinks'
 import type { TransferStatus } from '../../shared/fileTransfer'
-import { ChatLinkTargetContext } from '../chat/chatLinkContext'
+import { ChatLinkActiveContext, ChatLinkTargetContext, resolveChatLinkTarget } from '../chat/chatLinkContext'
 import { ChatFileDialog } from './ChatFileDialog'
 import { chatLinkResult } from '../chat/chatLinkResults'
 import { copyMarkdownSelection } from '../chat/copyMarkdownSelection'
 
 const LinkActions = createContext<{ open(href: string): void; menu(href: string): void; opening?: string } | undefined>(undefined)
+
+function ActiveChatFileDialog({ file, api, onClose }: {
+  file: Extract<OpenChatLinkResult, { kind: 'file' }>
+  api: NonNullable<NonNullable<Window['desktop']>['links']>
+  onClose(status: TransferStatus): void
+}) {
+  const rawTarget = useContext(ChatLinkTargetContext)
+  const contextActive = useContext(ChatLinkActiveContext)
+  const active = rawTarget && !('owner' in rawTarget) && typeof rawTarget.active === 'boolean' ? rawTarget.active : contextActive
+  if (!active) return null
+  return <ChatFileDialog file={file} api={api} onClose={onClose} />
+}
 
 export function MarkdownLink({ href, children, className = 'message-link' }: { href?: string; children?: ReactNode; className?: string }) {
   const actions = useContext(LinkActions)
@@ -20,7 +32,9 @@ export function MarkdownLink({ href, children, className = 'message-link' }: { h
 }
 
 export function MarkdownLinks({ children }: { children: ReactNode }) {
-  const context = useContext(ChatLinkTargetContext)
+  const target = resolveChatLinkTarget(useContext(ChatLinkTargetContext))
+  const targetRef = useRef(target)
+  useEffect(() => { targetRef.current = target }, [target])
   const [opening, setOpening] = useState<string>()
   const [file, setFile] = useState<Extract<OpenChatLinkResult, { kind: 'file' }>>()
   const [error, setError] = useState<string>()
@@ -35,12 +49,13 @@ export function MarkdownLinks({ children }: { children: ReactNode }) {
   const open = useCallback((href: string) => {
     if (running.current) return
     const current = scope.current
+    const currentTarget = targetRef.current
     running.current = true
     setOpening(href)
     setError(undefined)
     void (async () => {
       if (!api) throw new Error('Update and open Task Continuum in the desktop app to open links.')
-      const result = chatLinkResult(await api.open({ href, requestId: crypto.randomUUID(), ...(context ? { target: context.target } : {}) }))
+      const result = chatLinkResult(await api.open({ href, requestId: crypto.randomUUID(), ...(currentTarget ? { target: currentTarget } : {}) }))
       if (!current.active) {
         if (result.kind === 'file' && result.status.state === 'transferring') {
           const cancelled = chatLinkResult(await api.cancel({ target: result.target, transferId: result.status.transferId }))
@@ -53,7 +68,7 @@ export function MarkdownLinks({ children }: { children: ReactNode }) {
       if (current.active) setError(failure instanceof Error ? failure.message : 'The link could not be opened.')
       else console.error('Inactive chat link operation failed.')
     }).finally(() => { running.current = false; setOpening(undefined) })
-  }, [api, context])
+  }, [api])
 
   const menu = useCallback((href: string) => {
     setError(undefined)
@@ -73,13 +88,15 @@ export function MarkdownLinks({ children }: { children: ReactNode }) {
     }).catch((failure: unknown) => { setError(failure instanceof Error ? failure.message : 'The file transfer could not be cancelled.') })
   }
 
-  return <LinkActions.Provider value={{ open, menu, opening }}>
+  const actions = useMemo(() => ({ open, menu, opening }), [open, menu, opening])
+
+  return <LinkActions.Provider value={actions}>
     <div onCopy={(event) => {
       try { copyMarkdownSelection(event) }
       catch { event.preventDefault(); setError('The selected links could not be copied. Try copying a smaller selection or a link address.') }
     }}>{children}</div>
     {opening && <p className="message-notice" role="status">Opening link...</p>}
     {error && <p className="message-notice error" role="alert">{error}</p>}
-    {file && api && context?.active !== false && <ChatFileDialog file={file} api={api} onClose={close} />}
+    {file && api && <ActiveChatFileDialog file={file} api={api} onClose={close} />}
   </LinkActions.Provider>
 }

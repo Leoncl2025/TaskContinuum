@@ -1,5 +1,5 @@
-import { Activity, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, DragEvent, MouseEvent as ReactMouseEvent } from 'react'
+import { Activity, memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties, DragEvent, MouseEvent as ReactMouseEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { agentHostKey } from '../../shared/agentHost'
 import type { SessionWindowMode } from '../../shared/desktop'
@@ -879,6 +879,148 @@ function PaneGroupFrame({
   </section>
 }
 
+const MountedChatPanel = memo(function MountedChatPanel({
+  groupId,
+  panelKey,
+  task,
+  binding,
+  sessionKey,
+  slot,
+  splitOrientation,
+  closeLabel,
+  hideClose,
+  restoredDraft,
+  headerTarget,
+  sessionSwitcher,
+  cachedTitle,
+  customTitle,
+  visible,
+  active,
+  connectionRevision,
+  isMultiGroup,
+  canSplitMore,
+  onTitles,
+  onRenameSession,
+  onDraftSnapshot,
+  onActivateGroup,
+  onSplit,
+  onPopOut,
+  onOpenContextMenu,
+  onOpenSessionDetach,
+  onCloseGroup,
+  onOpenDevices,
+  onBrowseSessions,
+  onBusyChange,
+}: {
+  readonly groupId: string
+  readonly panelKey: string
+  readonly task: TaskRecord
+  readonly binding: SessionBinding
+  readonly sessionKey: string
+  readonly slot: 'single' | 'primary' | 'secondary'
+  readonly splitOrientation: 'horizontal' | 'vertical'
+  readonly closeLabel: string
+  readonly hideClose: boolean
+  readonly restoredDraft?: { readonly nonce: number; readonly text: string }
+  readonly headerTarget?: HTMLElement | null
+  readonly sessionSwitcher?: ReactNode
+  readonly cachedTitle?: string
+  readonly customTitle?: string
+  readonly visible: boolean
+  readonly active: boolean
+  readonly connectionRevision: number
+  readonly isMultiGroup: boolean
+  readonly canSplitMore: boolean
+  readonly onTitles?: (sessions: readonly SessionTitleUpdate[]) => void
+  readonly onRenameSession?: (target: SessionBinding['agentHost'], nextName: string | null) => void
+  readonly onDraftSnapshot?: (groupId: string, taskId: string, sessionKey: string, draft: string) => void
+  readonly onActivateGroup: () => void
+  readonly onSplit: (direction: SplitDirection, moveSource: boolean, taskId?: string, sessionKey?: string | null) => void
+  readonly onPopOut?: (taskId: string, binding: SessionBinding | undefined, draft: string | undefined, mode: SessionWindowMode) => Promise<boolean> | boolean
+  readonly onOpenContextMenu: (target: SessionContextMenuTarget) => void
+  readonly onOpenSessionDetach?: (taskId: string, binding: SessionBinding) => void
+  readonly onCloseGroup: () => void
+  readonly onOpenDevices?: () => void
+  readonly onBrowseSessions?: (taskId: string) => void
+  readonly onBusyChange?: (busy: boolean, panelKey?: string) => void
+}) {
+  const handleRenameTitle = useCallback(
+    (nextName: string | null) => onRenameSession?.(binding.agentHost, nextName),
+    [onRenameSession, binding.agentHost],
+  )
+  const handleDraftChange = useCallback(
+    (value: string) => onDraftSnapshot?.(groupId, task.id, sessionKey, value),
+    [onDraftSnapshot, groupId, task.id, sessionKey],
+  )
+  const handleSplitRight = useCallback(
+    () => onSplit('right', false, task.id, sessionKey),
+    [onSplit, task.id, sessionKey],
+  )
+  const handleSplitDown = useCallback(
+    () => onSplit('down', false, task.id, sessionKey),
+    [onSplit, task.id, sessionKey],
+  )
+  const handlePopOut = useCallback(
+    (draft: string) => onPopOut?.(task.id, binding, draft, 'move'),
+    [onPopOut, task.id, binding],
+  )
+  const handleHeaderContextMenu = useCallback(
+    (anchor: { x: number; y: number }, getDraft: () => string, clearDraft: (snapshot: string) => void, beginRename?: () => void) => {
+      onOpenContextMenu({
+        x: anchor.x,
+        y: anchor.y,
+        groupId,
+        taskId: task.id,
+        binding,
+        getDraft,
+        clearDraft,
+        beginRename,
+      })
+    },
+    [onOpenContextMenu, groupId, task.id, binding],
+  )
+  const handleDetach = useCallback(() => {
+    if (onOpenSessionDetach) onOpenSessionDetach(task.id, binding)
+    else onCloseGroup()
+  }, [onOpenSessionDetach, onCloseGroup, task.id, binding])
+  const handleSessions = useCallback(
+    () => onBrowseSessions?.(task.id),
+    [onBrowseSessions, task.id],
+  )
+
+  return <AgentHostPanel
+    task={task}
+    target={binding.agentHost}
+    paneSlot={slot}
+    splitOrientation={splitOrientation}
+    showTaskBadge={false}
+    closeLabel={closeLabel}
+    hideClose={hideClose}
+    restoredDraft={restoredDraft}
+    headerTarget={headerTarget}
+    sessionSwitcher={sessionSwitcher}
+    cachedTitle={cachedTitle}
+    customTitle={customTitle}
+    onTitles={onTitles}
+    onRenameTitle={onRenameSession ? handleRenameTitle : undefined}
+    onDraftChange={onDraftSnapshot ? handleDraftChange : undefined}
+    visible={visible}
+    active={active}
+    connectionRevision={connectionRevision}
+    onActivatePane={isMultiGroup ? onActivateGroup : undefined}
+    onSplitRight={!isMultiGroup && canSplitMore ? handleSplitRight : undefined}
+    onSplitDown={!isMultiGroup && canSplitMore ? handleSplitDown : undefined}
+    onPopOut={onPopOut ? handlePopOut : undefined}
+    onHeaderContextMenu={handleHeaderContextMenu}
+    onDetach={handleDetach}
+    onClose={onCloseGroup}
+    onDevices={onOpenDevices}
+    onSessions={onBrowseSessions ? handleSessions : undefined}
+    panelKey={panelKey}
+    onBusy={onBusyChange}
+  />
+})
+
 function PaneGroupBody({
   group,
   groupIndex,
@@ -965,14 +1107,13 @@ function PaneGroupBody({
   )
   const activeLocalKey = activeTask && activeBinding ? `${activeTask.id}:${sessionBindingKey(activeBinding)}` : undefined
 
-  const [visitedKeys, setVisitedKeys] = useState<string[]>([])
+  const [visitedKeys, setVisitedKeys] = useState<string[]>(() => activeLocalKey ? [activeLocalKey] : [])
   if (activeLocalKey && !visitedKeys.includes(activeLocalKey)) {
-    setVisitedKeys((current) => [...current, activeLocalKey])
+    setVisitedKeys((current) => current.includes(activeLocalKey) ? current : [...current, activeLocalKey])
   }
 
   const mountedPanels = useMemo(() => {
-    const keys = [...visitedKeys]
-    if (activeLocalKey && !keys.includes(activeLocalKey)) keys.push(activeLocalKey)
+    const keys = activeLocalKey && !visitedKeys.includes(activeLocalKey) ? [...visitedKeys, activeLocalKey] : visitedKeys
     const openSet = new Set(group.openTaskIds)
     const resolved: { localKey: string; panelKey: string; task: TaskRecord; binding: SessionBinding; sessionKey: string }[] = []
     for (const localKey of keys) {
@@ -1011,18 +1152,24 @@ function PaneGroupBody({
     </select>
   ) : undefined
 
+  const handleCloseGroup = useCallback(() => {
+    onCloseGroup()
+  }, [onCloseGroup])
+
   return <>
     {mountedPanels.map((panel) => {
       const visible = panel.localKey === activeLocalKey
       const slot: 'single' | 'primary' | 'secondary' = !isMultiGroup ? 'single' : groupIndex === 0 ? 'primary' : 'secondary'
       const draftLookup = restoredDrafts?.[panel.panelKey] ?? restoredDrafts?.[panel.localKey]
       return <Activity key={panel.panelKey} mode={visible ? 'visible' : 'hidden'}>
-        <AgentHostPanel
+        <MountedChatPanel
+          groupId={group.id}
+          panelKey={panel.panelKey}
           task={panel.task}
-          target={panel.binding.agentHost}
-          paneSlot={slot}
+          binding={panel.binding}
+          sessionKey={panel.sessionKey}
+          slot={slot}
           splitOrientation={parentSplit?.orientation ?? 'horizontal'}
-          showTaskBadge={false}
           closeLabel={isMultiGroup ? 'Close split pane' : 'Hide chat panel'}
           hideClose={isPopupWindow && !isMultiGroup}
           restoredDraft={draftLookup}
@@ -1030,35 +1177,23 @@ function PaneGroupBody({
           sessionSwitcher={visible ? popupSessionSwitcher : undefined}
           cachedTitle={cachedTitles[agentHostKey(panel.binding.agentHost)]}
           customTitle={customTitles?.[agentHostKey(panel.binding.agentHost)]}
-          onTitles={onTitles}
-          onRenameTitle={onRenameSession ? (nextName) => onRenameSession(panel.binding.agentHost, nextName) : undefined}
-          onDraftChange={onDraftSnapshot ? (value) => onDraftSnapshot(group.id, panel.task.id, panel.sessionKey, value) : undefined}
           visible={visible}
           active={visible && groupFocused}
           connectionRevision={connectionRevision}
-          onActivatePane={isMultiGroup ? onActivateGroup : undefined}
-          onSplitRight={!isMultiGroup && canSplitMore ? () => onSplit('right', false, panel.task.id, panel.sessionKey) : undefined}
-          onSplitDown={!isMultiGroup && canSplitMore ? () => onSplit('down', false, panel.task.id, panel.sessionKey) : undefined}
-          onPopOut={onPopOut ? (draft) => onPopOut(panel.task.id, panel.binding, draft, 'move') : undefined}
-          onHeaderContextMenu={(anchor, getDraft, clearDraft, beginRename) => onOpenContextMenu({
-            x: anchor.x,
-            y: anchor.y,
-            groupId: group.id,
-            taskId: panel.task.id,
-            binding: panel.binding,
-            getDraft,
-            clearDraft,
-            beginRename,
-          })}
-          onDetach={() => {
-            if (onOpenSessionDetach) onOpenSessionDetach(panel.task.id, panel.binding)
-            else onCloseGroup()
-          }}
-          onClose={onCloseGroup}
-          onDevices={onOpenDevices}
-          onSessions={onBrowseSessions ? () => onBrowseSessions(panel.task.id) : undefined}
-          panelKey={panel.panelKey}
-          onBusy={onBusyChange}
+          isMultiGroup={isMultiGroup}
+          canSplitMore={canSplitMore}
+          onTitles={onTitles}
+          onRenameSession={onRenameSession}
+          onDraftSnapshot={onDraftSnapshot}
+          onActivateGroup={onActivateGroup}
+          onSplit={onSplit}
+          onPopOut={onPopOut}
+          onOpenContextMenu={onOpenContextMenu}
+          onOpenSessionDetach={onOpenSessionDetach}
+          onCloseGroup={handleCloseGroup}
+          onOpenDevices={onOpenDevices}
+          onBrowseSessions={onBrowseSessions}
+          onBusyChange={onBusyChange}
         />
       </Activity>
     })}
