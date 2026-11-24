@@ -88,29 +88,37 @@ export function SessionContextMenu({
   useLayoutEffect(() => {
     const menu = menuRef.current
     const sub = submenuRef.current
-    if (!submenuOpen || !menu || !sub) return
+    const trigger = triggerRef.current
+    if (!submenuOpen || !menu || !sub || !trigger) return
+    const zoom = Number.parseFloat(getComputedStyle(document.body).zoom) || 1
+    const viewportW = window.innerWidth / zoom
+    const viewportH = window.innerHeight / zoom
     const menuRect = menu.getBoundingClientRect()
+    const triggerRect = trigger.getBoundingClientRect()
     const subWidth = sub.offsetWidth || 184
-    const subHeight = sub.offsetHeight || 140
-    const flipLeft = menuRect.right + subWidth + 8 > window.innerWidth && menuRect.left - subWidth >= 8
+    const subHeight = sub.offsetHeight || 132
+    const menuRight = menuRect.right / zoom
+    const menuLeft = menuRect.left / zoom
+    const flipLeft = menuRight + 3 + subWidth + 8 > viewportW && menuLeft - 3 - subWidth >= 8
+    const left = flipLeft
+      ? Math.max(8, menuLeft - subWidth - 3)
+      : Math.min(viewportW - subWidth - 8, menuRight + 3)
+    const top = Math.max(8, Math.min(viewportH - subHeight - 8, triggerRect.top / zoom - 4))
     sub.dataset.side = flipLeft ? 'left' : 'right'
-    const triggerRect = triggerRef.current?.getBoundingClientRect()
-    if (triggerRect) {
-      const overflowBottom = triggerRect.top + subHeight - (window.innerHeight - 8)
-      sub.style.top = overflowBottom > 0 ? `${Math.max(-menuRect.top + 8, -overflowBottom)}px` : '-4px'
-    }
+    sub.style.left = `${left}px`
+    sub.style.top = `${top}px`
   }, [submenuOpen])
 
   useEffect(() => {
     const first = menuRef.current?.querySelector<HTMLButtonElement>(':scope > [role="menuitem"]:not(:disabled)')
     first?.focus()
     const onPointerDown = (event: PointerEvent) => {
-      if (event.target instanceof Node && menuRef.current?.contains(event.target)) return
+      if (event.target instanceof Node && (menuRef.current?.contains(event.target) || submenuRef.current?.contains(event.target))) return
       onClose()
     }
     const onWindowBlur = () => onClose()
     const onScroll = (event: Event) => {
-      if (event.target instanceof Node && menuRef.current?.contains(event.target)) return
+      if (event.target instanceof Node && (menuRef.current?.contains(event.target) || submenuRef.current?.contains(event.target))) return
       onClose()
     }
     document.addEventListener('pointerdown', onPointerDown, true)
@@ -246,22 +254,6 @@ export function SessionContextMenu({
               <span>Split &amp; Move</span>
               <Icon name="chevron-right" className="session-context-chevron" />
             </button>
-            {submenuOpen && (
-              <div
-                ref={submenuRef}
-                className="session-context-menu session-context-submenu"
-                data-side="right"
-                role="menu"
-                aria-label="Split and Move"
-                onKeyDown={onSubmenuKeyDown}
-              >
-                {SUBMENU_DIRECTIONS.map((item) => (
-                  <button key={item.direction} type="button" role="menuitem" className="session-context-item" onClick={() => run(() => onSplit(item.direction, true))}>
-                    <span>{item.label}</span>
-                  </button>
-                ))}
-              </div>
-            )}
           </div>
         </>}
 
@@ -299,6 +291,26 @@ export function SessionContextMenu({
           </button>
         </>}
       </div>
+
+      {submenuOpen && onSplit && (
+        <div
+          ref={submenuRef}
+          className="session-context-menu session-context-submenu"
+          data-side="right"
+          role="menu"
+          aria-label="Split and Move"
+          onContextMenu={(event) => event.preventDefault()}
+          onMouseEnter={() => scheduleSubmenu(true)}
+          onMouseLeave={() => scheduleSubmenu(false)}
+          onKeyDown={onSubmenuKeyDown}
+        >
+          {SUBMENU_DIRECTIONS.map((item) => (
+            <button key={item.direction} type="button" role="menuitem" className="session-context-item" onClick={() => run(() => onSplit(item.direction, true))}>
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>,
     document.body,
   )

@@ -52,6 +52,20 @@ for (const theme of ['light', 'dark'] as const) {
       for (const label of ['Split Right', 'Split Down', 'Split Up', 'Split Left', 'Split & Move', 'Move into New Window', 'Copy into New Window']) {
         await expect(menu.getByRole('menuitem', { name: new RegExp(`^${label}`) })).toBeVisible()
       }
+      // Hovering "Split & Move" must reveal an unclipped flyout submenu whose items pass real elementFromPoint hit-testing!
+      await menu.getByRole('menuitem', { name: /^Split & Move/ }).hover()
+      const submenu = page.getByRole('menu', { name: 'Split and Move', exact: true })
+      await expect(submenu).toBeVisible()
+      const subItem = submenu.getByRole('menuitem', { name: 'Split Right', exact: true })
+      await expect(subItem).toBeVisible()
+      const subBox = (await subItem.boundingBox())!
+      expect(subBox.width).toBeGreaterThanOrEqual(150)
+      const hitSubmenu = await subItem.evaluate((el) => {
+        const rect = el.getBoundingClientRect()
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+        return Boolean(hit && (hit === el || el.contains(hit)))
+      })
+      expect(hitSubmenu).toBe(true)
       await page.screenshot({
         path: testInfo.outputPath(`task-page-context-menu-${theme}.png`),
         animations: 'disabled',
