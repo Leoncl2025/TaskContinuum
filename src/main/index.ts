@@ -154,6 +154,11 @@ function registerDesktopBridge(): void {
     requireMainWindow(event)
     return Promise.resolve(sessionWindows?.navigate(request) ?? false)
   })
+  handleDesktopOperation(ipcMain, 'desktop:session-window-handoff-ack', (event, ack: unknown) => {
+    const window = requireTrustedWindow(event)
+    sessionWindows?.acknowledgeDraftHandoff(window, ack)
+    return Promise.resolve()
+  })
 }
 
 function configureRendererSession(webSession: Electron.Session): void {

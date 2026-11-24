@@ -1453,4 +1453,53 @@ describe('workspace switching in the desktop workbench', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Cancel pending for T-0002' }))
     expect(git.api.cancelPendingBinding).toHaveBeenCalledExactlyOnceWith('T-0002', [pendingOp], 'a'.repeat(64))
   })
+
+  it('preserves unsent drafts when closing a Task Page tab (including the last tab or a split pane) and reopening it', async () => {
+    const { first, repository, target } = creationFixture()
+    const secondTarget = agentHostTargetFixture('second-task-session')
+    first.tasks.push({ ...first.tasks[0], id: 'T-0003', title: 'Companion task' })
+    repository[first.id] = {
+      document: {
+        schemaVersion: '2.1',
+        bindings: {
+          'T-0002': [{ provider: 'agent-host', ...target }],
+          'T-0003': [{ provider: 'agent-host', ...secondTarget }],
+        },
+      },
+      revision: 'a'.repeat(64),
+    }
+
+    const user = userEvent.setup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open workspace folder' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Open workspace folder' }))
+
+    // Type an unsent draft in T-0002 ("Actual UI task"), then close its tab completely (last open tab -> empty tabs).
+    const composer = await screen.findByRole('textbox', { name: 'Message Agent Host' })
+    await user.type(composer, 'Keep this unsent draft across tab close')
+    await user.click(screen.getByRole('button', { name: 'Close Actual UI task' }))
+    expect(within(screen.getByRole('tablist', { name: 'Open tasks' })).queryAllByRole('tab')).toEqual([])
+
+    // Reopen T-0002 from Quick Open -> unsent draft is intact!
+    await user.keyboard('{Control>}p{/Control}')
+    await user.click(within(screen.getByRole('dialog', { name: 'Quick open' })).getByRole('button', { name: /Actual UI task/ }))
+    expect(await screen.findByRole('textbox', { name: 'Message Agent Host' }))
+      .toHaveValue('Keep this unsent draft across tab close')
+
+    // Also open T-0003 in a split pane, type a draft in Split Pane 2, close Split Pane 2, and open T-0003 in Pane 1 -> draft is intact!
+    await user.keyboard('{Control>}\\{/Control}')
+    const pane2 = await screen.findByRole('region', { name: 'Screen pane 2' })
+    await user.click(within(pane2).getByLabelText('Chat header'))
+    await user.keyboard('{Control>}p{/Control}')
+    await user.click(within(screen.getByRole('dialog', { name: 'Quick open' })).getByRole('button', { name: /Companion task/ }))
+    const pane2Composer = within(pane2).getByRole('textbox', { name: 'Message Agent Host' })
+    await user.type(pane2Composer, 'Draft written inside split pane before close')
+    await user.click(within(pane2).getByRole('button', { name: 'Close split pane' }))
+    expect(screen.queryByRole('region', { name: 'Screen pane 2' })).not.toBeInTheDocument()
+
+    await user.keyboard('{Control>}p{/Control}')
+    await user.click(within(screen.getByRole('dialog', { name: 'Quick open' })).getByRole('button', { name: /Companion task/ }))
+    expect(await screen.findByRole('textbox', { name: 'Message Agent Host' }))
+      .toHaveValue('Draft written inside split pane before close')
+  })
 })

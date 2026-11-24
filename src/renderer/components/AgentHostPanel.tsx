@@ -422,6 +422,7 @@ type AgentHostPanelProps = {
   minimalHeader?: boolean
   closeLabel?: string
   hideClose?: boolean
+  initialDraft?: string
   restoredDraft?: { readonly nonce: number; readonly text: string }
   headerTarget?: HTMLElement | null
   sessionSwitcher?: ReactNode
@@ -483,7 +484,7 @@ function HeaderTitleInput({ value, onFinish }: { value: string; onFinish(next: s
   />
 }
 
-export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, visible = true, paneSlot, splitOrientation = 'horizontal', showTaskBadge = false, minimalHeader = false, closeLabel = 'Hide chat panel', hideClose = false, restoredDraft, headerTarget, sessionSwitcher, cachedTitle, customTitle, onTitles, onRenameTitle, onDraftChange, onActivatePane, onSplitRight, onSplitDown, onToggleSplitOrientation, onSwapSplit, onPopOut, onHeaderContextMenu, onDetach, onClose, onDevices, onSessions, onBusy, panelKey, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
+export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, visible = true, paneSlot, splitOrientation = 'horizontal', showTaskBadge = false, minimalHeader = false, closeLabel = 'Hide chat panel', hideClose = false, initialDraft, restoredDraft, headerTarget, sessionSwitcher, cachedTitle, customTitle, onTitles, onRenameTitle, onDraftChange, onActivatePane, onSplitRight, onSplitDown, onToggleSplitOrientation, onSwapSplit, onPopOut, onHeaderContextMenu, onDetach, onClose, onDevices, onSessions, onBusy, panelKey, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
   const bridge = window.agentHost
   const { sessionId, chatId } = target
   const { clientId, machineName } = target.owner
@@ -505,7 +506,7 @@ export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, ta
   const [error, setError] = useState<string>()
   const [historyLoadError, setHistoryLoadError] = useState<{ key: string; message: string }>()
   const [deliveryReview, setDeliveryReview] = useState<{ id: string; status: 'checking' | 'not-found' | 'abandoning' | 'failed'; acknowledged: boolean; error?: string }>()
-  const [draft, setDraft] = useState(() => restoredDraft?.text ?? '')
+  const [draft, setDraft] = useState(() => restoredDraft?.text ?? initialDraft ?? '')
   const draftSnapshotRef = useRef(draft)
   const [seenDraftNonce, setSeenDraftNonce] = useState(restoredDraft?.nonce)
   if (restoredDraft && restoredDraft.nonce !== seenDraftNonce) {

@@ -68,6 +68,18 @@ export interface SessionWindowNavigateEvent {
   readonly sessionKey?: string | null
 }
 
+export interface SessionWindowHandoffEvent {
+  readonly requestId: string
+  readonly taskId: string
+  readonly sessionKey?: string | null
+  readonly draft: string
+}
+
+export interface SessionWindowHandoffAck {
+  readonly requestId: string
+  readonly status: 'accepted' | 'conflict'
+}
+
 export interface SessionWindowBounds {
   readonly x: number
   readonly y: number
@@ -99,11 +111,13 @@ export interface DesktopSessionWindowsBridge {
   savePaneTree?(tree: PersistedPaneTreeState): Promise<void>
   reportState?(state: { taskId: string | null; sessionKey?: string | null; activated?: boolean }): Promise<void>
   navigate?(request: SessionWindowNavigateRequest): Promise<boolean>
+  acknowledgeHandoff?(ack: SessionWindowHandoffAck): Promise<void>
   list(): Promise<SessionWindowSummary[]>
   onChanged(listener: (windows: SessionWindowSummary[]) => void): () => void
   onActivateSession(listener: (event: SessionWindowActivatedEvent) => void): () => void
   onFocusSync?(listener: (event: SessionWindowFocusSyncEvent) => void): () => void
   onNavigate?(listener: (event: SessionWindowNavigateEvent) => void): () => void
+  onHandoff?(listener: (event: SessionWindowHandoffEvent) => void): () => void
 }
 
 export interface DesktopBridge {

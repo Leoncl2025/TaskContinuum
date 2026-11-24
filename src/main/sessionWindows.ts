@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { agentHostKey } from '../shared/agentHost'
 import type { AgentHostTarget } from '../shared/agentHost'
 import { MAX_CHAT_TEXT_LENGTH } from '../shared/chatAttachments'
-import type { DesktopWindowContext, SessionWindowBounds, SessionWindowFocusSyncEvent, SessionWindowMode, SessionWindowNavigateEvent, SessionWindowSummary } from '../shared/desktop'
+import type { DesktopWindowContext, SessionWindowBounds, SessionWindowFocusSyncEvent, SessionWindowHandoffEvent, SessionWindowMode, SessionWindowNavigateEvent, SessionWindowSummary } from '../shared/desktop'
 import { persistedPaneTreeSchema } from '../shared/paneTreeSchema'
 import type { PersistedPaneTreeNode, PersistedPaneTreeState } from '../shared/paneTreeSchema'
 import type { WorkspaceState } from '../shared/workspace'
@@ -90,6 +90,11 @@ const navigateSessionWindowSchema = z.object({
   sessionKey: sessionKeySchema,
 }).strict()
 
+const acknowledgeHandoffSchema = z.object({
+  requestId: z.string().uuid(),
+  status: z.enum(['accepted', 'conflict']),
+}).strict()
+
 type SessionContext = Extract<DesktopWindowContext, { kind: 'session' }>
 
 interface PopoutEntry {
@@ -125,6 +130,24 @@ function collectPaneTreeTaskIds(node: PersistedPaneTreeNode, target = new Set<st
   return target
 }
 
+function paneTreeDisplaysTaskSession(node: PersistedPaneTreeNode, taskId: string, sessionKey?: string): boolean {
+  if (node.kind === 'group') {
+    if (!node.openTaskIds.includes(taskId)) return false
+    if (!sessionKey) return true
+    const groupSession = node.sessions[taskId]
+    return groupSession === undefined || groupSession === sessionKey
+  }
+  return paneTreeDisplaysTaskSession(node.first, taskId, sessionKey)
+    || paneTreeDisplaysTaskSession(node.second, taskId, sessionKey)
+}
+
+function popoutContainsTaskSession(entry: PopoutEntry, taskId: string, sessionKey?: string): boolean {
+  if (entry.activeTaskId === taskId && (!sessionKey || !entry.activeSessionKey || entry.activeSessionKey === sessionKey)) {
+    return true
+  }
+  return entry.paneTree ? paneTreeDisplaysTaskSession(entry.paneTree.root, taskId, sessionKey) : false
+}
+
 function readBrowserWindowBounds(window: BrowserWindow): SessionWindowBounds | undefined {
   if (window.isDestroyed()) return undefined
   const maximized = typeof window.isMaximized === 'function' ? window.isMaximized() : false
@@ -148,6 +171,7 @@ function readBrowserWindowBounds(window: BrowserWindow): SessionWindowBounds | u
 export interface SessionWindowManagerOptions {
   readonly devUrl?: string
   readonly storageFile?: string
+  readonly handoffTimeoutMs?: number
   getWorkspaceState(): Promise<WorkspaceState>
   prepareWorkspace?(root: string): Promise<void>
   authorizeSession(root: string, target: AgentHostTarget): Promise<void>
@@ -163,6 +187,12 @@ export class SessionWindowManager {
   private readonly bySenderId = new Map<number, RegisteredWindow>()
   private readonly popouts = new Map<string, PopoutEntry>()
   private readonly opening = new Map<string, Promise<{ opened: boolean; reused: boolean }>>()
+  private readonly pendingHandoffs = new Map<string, {
+    readonly window: BrowserWindow
+    resolve(status: 'accepted' | 'conflict'): void
+    reject(error: Error): void
+    readonly timer: ReturnType<typeof setTimeout>
+  }>()
   private readonly persistedByWorkspace = new Map<string, PersistedSessionWindowRecord[]>()
   private activeWorkspaceRoot: string | undefined
   private cascadeCounter = 0
@@ -394,6 +424,50 @@ export class SessionWindowManager {
     return true
   }
 
+  acknowledgeDraftHandoff(caller: BrowserWindow, ackInput: unknown): void {
+    const parsed = acknowledgeHandoffSchema.parse(ackInput)
+    const pending = this.pendingHandoffs.get(parsed.requestId)
+    if (!pending || pending.window !== caller) return
+    clearTimeout(pending.timer)
+    this.pendingHandoffs.delete(parsed.requestId)
+    pending.resolve(parsed.status)
+  }
+
+  private rejectWindowHandoffs(window: BrowserWindow): void {
+    for (const [requestId, pending] of this.pendingHandoffs) {
+      if (pending.window !== window) continue
+      clearTimeout(pending.timer)
+      this.pendingHandoffs.delete(requestId)
+      pending.reject(new Error('The open task window closed before confirming draft transfer. Nothing was closed or overwritten.'))
+    }
+  }
+
+  private requestDraftHandoff(
+    entry: PopoutEntry,
+    payload: { taskId: string; sessionKey: string | null; draft: string },
+  ): Promise<'accepted' | 'conflict'> {
+    const { window } = entry
+    if (window.isDestroyed() || window.webContents.isDestroyed()) {
+      return Promise.reject(new Error('The open task window is unavailable to receive the unsent draft.'))
+    }
+    const requestId = randomUUID()
+    const timeoutMs = this.options.handoffTimeoutMs ?? 5000
+    return new Promise<'accepted' | 'conflict'>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (!this.pendingHandoffs.delete(requestId)) return
+        reject(new Error('The open task window did not confirm receiving the unsent draft. Nothing was closed or overwritten.'))
+      }, timeoutMs)
+      this.pendingHandoffs.set(requestId, { window, resolve, reject, timer })
+      const event: SessionWindowHandoffEvent = {
+        requestId,
+        taskId: payload.taskId,
+        sessionKey: payload.sessionKey,
+        draft: payload.draft,
+      }
+      window.webContents.send('desktop:session-window-handoff', event)
+    })
+  }
+
   list(workspaceRoot = this.activeWorkspaceRoot): SessionWindowSummary[] {
     if (!workspaceRoot) return []
     const summaries: SessionWindowSummary[] = []
@@ -506,10 +580,46 @@ export class SessionWindowManager {
     }
 
     const requestedMode: SessionWindowMode = request.mode ?? 'move'
+    const resolvedSessionKey = request.sessionKey ?? (request.target ? `ahp:${agentHostKey(request.target)}` : undefined)
     const panelKey = sessionWindowPanelKey(task.id, request.target)
     const entryKey = `${workspace.root}::${panelKey}`
     const existing = this.popouts.get(entryKey)
+      ?? [...this.popouts.values()].find((candidate) =>
+        candidate.workspaceRoot === workspace.root
+        && !candidate.window.isDestroyed()
+        && popoutContainsTaskSession(candidate, task.id, resolvedSessionKey ?? undefined))
     if (existing && !existing.window.isDestroyed()) {
+      const hasSourceDraft = Boolean(request.draft && request.draft.trim().length > 0)
+      if (requestedMode === 'move' && hasSourceDraft) {
+        if (existing.window.isMinimized()) existing.window.restore()
+        const status = await this.requestDraftHandoff(existing, {
+          taskId: task.id,
+          sessionKey: resolvedSessionKey ?? null,
+          draft: request.draft!,
+        })
+        this.focusBrowserWindow(existing.window)
+        if (status === 'conflict') {
+          this.publishFocusSync({
+            windowId: existing.windowId,
+            taskId: task.id,
+            sessionKey: resolvedSessionKey ?? existing.activeSessionKey,
+            activated: true,
+          })
+          throw new Error('Both this pane and the open task window have unsent drafts. Send or clear one draft before moving.')
+        }
+        existing.activeTaskId = task.id
+        existing.activeSessionKey = resolvedSessionKey ?? existing.activeSessionKey
+      } else if (requestedMode === 'move') {
+        existing.activeTaskId = task.id
+        if (resolvedSessionKey !== undefined) existing.activeSessionKey = resolvedSessionKey
+        if (!existing.window.webContents.isDestroyed()) {
+          const navPayload: SessionWindowNavigateEvent = {
+            taskId: task.id,
+            ...(resolvedSessionKey !== undefined ? { sessionKey: resolvedSessionKey } : {}),
+          }
+          existing.window.webContents.send('desktop:session-window-navigate', navPayload)
+        }
+      }
       if (existing.mode !== requestedMode) {
         existing.mode = requestedMode
         this.persistEntry(existing)
@@ -533,7 +643,6 @@ export class SessionWindowManager {
     }
 
     const windowId = randomUUID()
-    const resolvedSessionKey = request.sessionKey ?? (request.target ? `ahp:${agentHostKey(request.target)}` : undefined)
     const context: SessionContext = {
       kind: 'session',
       windowId,
@@ -722,6 +831,7 @@ export class SessionWindowManager {
         })
       }
       const cleanup = () => {
+        this.rejectWindowHandoffs(window)
         const removed = this.popouts.get(entryKey) === entry
         if (removed) this.popouts.delete(entryKey)
         this.bySenderId.delete(senderId)
@@ -741,7 +851,10 @@ export class SessionWindowManager {
           this.publishChanged()
         }
       }
-      window.webContents.once('render-process-gone', () => this.options.onSessionWindowClosed?.(window))
+      window.webContents.once('render-process-gone', () => {
+        this.rejectWindowHandoffs(window)
+        this.options.onSessionWindowClosed?.(window)
+      })
       window.once('closed', cleanup)
       try {
         await this.options.loadWindow(window)

@@ -47,6 +47,7 @@ import { AgentHostSessionsSidebar } from './components/AgentHostSessionsSidebar'
 import type { AgentHostHistoryTransfer, AgentHostSession, AgentHostTarget } from '../shared/agentHost'
 import { agentHostKey } from '../shared/agentHost'
 import { useSessionTitles } from './chat/useSessionTitles'
+import { createSessionDraftStore, nextRestoredDraftNonce } from './chat/sessionDraftStore'
 import { machineLabel, useMachineAliases, useWorkspaceGitSync } from './machineAliases'
 import { MachineAliasesProvider } from './MachineAliasesProvider'
 import { USER_DISPLAY_NAME_MAX_LENGTH, UserProfileContext, useUserProfileState } from './userProfile'
@@ -166,7 +167,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const [restoredDrafts, setRestoredDrafts] = useState<Record<string, { nonce: number; text: string }>>({})
   const [sidebarContextMenu, setSidebarContextMenu] = useState<SessionContextMenuTarget | null>(null)
   const [busyPanels, setBusyPanels] = useState<Record<string, boolean>>({})
-  const draftsRef = useRef<Record<string, string>>({})
+  const [draftStore] = useState(() => createSessionDraftStore())
   const chordUntilRef = useRef(0)
   const [dialog, setDialog] = useState<DialogName>(null)
   const [chatHeaderTarget, setChatHeaderTarget] = useState<HTMLDivElement | null>(null)
@@ -268,8 +269,8 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     })
   }, [])
   const handleDraftSnapshot = useCallback((groupId: string, taskId: string, sessionKey: string, draft: string) => {
-    draftsRef.current[`${groupId}:${taskId}:${sessionKey}`] = draft
-  }, [])
+    draftStore.record(groupId, taskId, sessionKey, draft)
+  }, [draftStore])
 
   const agentHostBusy = Object.keys(busyPanels).length > 0
   const [syncingLinks, setSyncingLinks] = useState(false)
@@ -313,6 +314,23 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const applyTreeChange = useCallback((updater: (current: PaneTreeState) => PaneTreeState, options?: { skipSync?: boolean }) => {
     const base = reconcilePaneTreeWithTasks(paneTreeRef.current, validTaskIds, userEmptiedTabsRef.current ? null : tasks[0]?.id ?? null)
     const next = updater(base)
+    const nextGroupIds = new Set(listPaneGroups(next.root).map((group) => group.id))
+    const orphanedDrafts: Array<{ localKey: string; draft: string }> = []
+    for (const group of listPaneGroups(base.root)) {
+      if (!nextGroupIds.has(group.id)) {
+        orphanedDrafts.push(...draftStore.removeGroup(group.id))
+      }
+    }
+    if (orphanedDrafts.length > 0) {
+      setRestoredDrafts((current) => {
+        const updated = { ...current }
+        let nonce = nextRestoredDraftNonce(updated)
+        for (const item of orphanedDrafts) {
+          updated[item.localKey] = { nonce: nonce++, text: item.draft }
+        }
+        return updated
+      })
+    }
     paneTreeRef.current = next
     const nextFocused = activePaneGroup(next)
     userEmptiedTabsRef.current = nextFocused.activeTaskId === null && listPaneGroups(next.root).length === 1
@@ -322,7 +340,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     }
     if (next !== base) setPaneTree(next)
     return next
-  }, [validTaskIds, tasks, syncPaneSelection])
+  }, [validTaskIds, tasks, syncPaneSelection, draftStore])
 
   useEffect(() => {
     const scope = { active: true }
@@ -390,28 +408,34 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
         : []
     if (!pagesToDock.length) return
 
-    setRestoredDrafts((current) => {
-      let updated = current
-      for (const item of pagesToDock) {
-        if (!item.draft) continue
-        const resolvedKey = item.sessionKey
-        if (!resolvedKey) continue
-        const localKey = `${item.taskId}:${resolvedKey}`
-        updated = {
-          ...updated,
-          [localKey]: { nonce: (updated[localKey]?.nonce ?? 0) + 1, text: item.draft },
-        }
-      }
-      return updated
-    })
-
+    let targetGroupId = focusedGroup.id
     applyTreeChange((current) => {
+      targetGroupId = current.activeGroupId
       let next = current
       for (const item of pagesToDock) {
         next = openTaskPageInGroup(next, next.activeGroupId, item.taskId, item.sessionKey)
       }
       const primary = pagesToDock.find((item) => item.taskId === event.taskId) ?? pagesToDock.at(-1)!
       return openTaskPageInGroup(next, next.activeGroupId, primary.taskId, primary.sessionKey)
+    })
+
+    setRestoredDrafts((current) => {
+      let updated = current
+      let nonce = nextRestoredDraftNonce(updated)
+      for (const item of pagesToDock) {
+        if (!item.draft) continue
+        const resolvedKey = item.sessionKey
+        if (!resolvedKey) continue
+        const localKey = `${item.taskId}:${resolvedKey}`
+        const panelKey = `${targetGroupId}:${localKey}`
+        draftStore.record(targetGroupId, item.taskId, resolvedKey, item.draft)
+        const nextNonce = nonce++
+        updated = {
+          ...updated,
+          [panelKey]: { nonce: nextNonce, text: item.draft },
+        }
+      }
+      return updated
     })
     setActivePopup(null)
     showTaskChat()
@@ -706,17 +730,34 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     }
     setActionError(null)
     try {
-      const sessionKey = binding ? sessionBindingKey(binding) : undefined
-      const fallbackDraft = draft ?? (sessionKey ? draftsRef.current[`${groupId}:${taskId}:${sessionKey}`] : undefined)
-      const trimmedDraft = fallbackDraft?.trim() ? fallbackDraft : undefined
+      const resolvedBinding = binding ?? (() => {
+        const group = findPaneGroup(effectiveTree.root, groupId) ?? focusedGroup
+        return resolveGroupActiveBinding(group, taskId, orderedBindingsForTask(taskId), selection.sessions).binding
+      })()
+      const sessionKey = resolvedBinding ? sessionBindingKey(resolvedBinding) : undefined
+      const fallbackDraft = draft ?? draftStore.readForMove(groupId, taskId, sessionKey)
+      const hasDraft = Boolean(fallbackDraft && fallbackDraft.trim().length > 0)
       const result = await windowsBridge.open({
         taskId,
-        ...(binding ? { target: binding.agentHost, sessionKey } : {}),
+        ...(resolvedBinding ? { target: resolvedBinding.agentHost, sessionKey } : {}),
         mode,
-        ...(mode === 'move' && trimmedDraft ? { draft: trimmedDraft } : {}),
+        ...(mode === 'move' && hasDraft ? { draft: fallbackDraft } : {}),
       })
       if (!result.opened) return false
       if (mode === 'move') {
+        if (sessionKey) {
+          const localKey = `${taskId}:${sessionKey}`
+          const panelKey = `${groupId}:${localKey}`
+          const { clearedSessionDraft } = draftStore.clearMovedPanel(groupId, taskId, sessionKey)
+          setRestoredDrafts((current) => {
+            const nonce = nextRestoredDraftNonce(current)
+            return {
+              ...current,
+              [panelKey]: { nonce, text: '' },
+              ...(clearedSessionDraft ? { [localKey]: { nonce, text: '' } } : {}),
+            }
+          })
+        }
         applyTreeChange((current) => {
           const source = findPaneGroup(current.root, groupId)
           if (!source) return current
@@ -776,6 +817,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     if (popoutPanelKeys.has(popoutKey)) await window.desktop?.windows?.dock({ taskId, target: binding.agentHost }).catch(() => undefined)
     await links.detach(taskId, binding)
     if (!creationLifetime.current.active) return
+    draftStore.forgetSession(taskId, key)
     setPaneTree((current) => clearDetachedSessionFromTree(current, taskId, key))
     selection.clearSession(taskId, key, focusedGroup.sessions[taskId] === key || taskId === selectedId && key === activeKey)
   }
@@ -933,6 +975,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
               connectionRevision={agentHostRevision}
               cachedTitles={sessionTitles.titles}
               customTitles={sessionTitles.customTitles}
+              draftStore={draftStore}
               restoredDrafts={restoredDrafts}
               onTitles={sessionTitles.remember}
               onRenameSession={sessionTitles.rename}

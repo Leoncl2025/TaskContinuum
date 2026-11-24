@@ -8,6 +8,7 @@ import { sessionBindingKey, sessionBindingTitle } from '../chat/sessionBindings'
 import type { SessionBinding, SessionBindings } from '../chat/sessionBindings'
 import { SESSION_BINDING_DRAG_MIME } from './LinkedSessionTree'
 import type { SessionTitleUpdate } from '../chat/useSessionTitles'
+import type { SessionDraftStore } from '../chat/sessionDraftStore'
 import { defaultLayout } from '../layout'
 import type { SplitDirection } from '../layout'
 import { machineLabel, useMachineAliases } from '../machineAliases'
@@ -126,6 +127,7 @@ export interface PaneWorkspaceGridProps {
   readonly connectionRevision?: number
   readonly cachedTitles: Readonly<Record<string, string>>
   readonly customTitles?: Readonly<Record<string, string>>
+  readonly draftStore?: SessionDraftStore
   readonly restoredDrafts?: Readonly<Record<string, { readonly nonce: number; readonly text: string }>>
   readonly onTitles?: (sessions: readonly SessionTitleUpdate[]) => void
   readonly onRenameSession?: (target: SessionBinding['agentHost'], nextName: string | null) => void
@@ -167,6 +169,7 @@ export function PaneWorkspaceGrid({
   connectionRevision = 0,
   cachedTitles,
   customTitles,
+  draftStore,
   restoredDrafts,
   onTitles,
   onRenameSession,
@@ -326,6 +329,7 @@ export function PaneWorkspaceGrid({
         cachedTitles={cachedTitles}
         customTitles={customTitles}
         aliases={aliases}
+        draftStore={draftStore}
         restoredDrafts={restoredDrafts}
         onTitles={onTitles}
         onRenameSession={onRenameSession}
@@ -790,6 +794,7 @@ const MountedChatPanel = memo(function MountedChatPanel({
   closeLabel,
   hideClose,
   minimalHeader,
+  initialDraft,
   restoredDraft,
   headerTarget,
   cachedTitle,
@@ -822,6 +827,7 @@ const MountedChatPanel = memo(function MountedChatPanel({
   readonly closeLabel: string
   readonly hideClose: boolean
   readonly minimalHeader: boolean
+  readonly initialDraft?: string
   readonly restoredDraft?: { readonly nonce: number; readonly text: string }
   readonly headerTarget?: HTMLElement | null
   readonly cachedTitle?: string
@@ -897,6 +903,7 @@ const MountedChatPanel = memo(function MountedChatPanel({
     minimalHeader={minimalHeader}
     closeLabel={closeLabel}
     hideClose={hideClose}
+    initialDraft={initialDraft}
     restoredDraft={restoredDraft}
     headerTarget={headerTarget}
     cachedTitle={cachedTitle}
@@ -942,6 +949,7 @@ function PaneGroupBody({
   cachedTitles,
   customTitles,
   aliases,
+  draftStore,
   restoredDrafts,
   onTitles,
   onRenameSession,
@@ -978,6 +986,7 @@ function PaneGroupBody({
   readonly cachedTitles: Readonly<Record<string, string>>
   readonly customTitles?: Readonly<Record<string, string>>
   readonly aliases: Readonly<Record<string, string>>
+  readonly draftStore?: SessionDraftStore
   readonly restoredDrafts?: Readonly<Record<string, { readonly nonce: number; readonly text: string }>>
   readonly onTitles?: (sessions: readonly SessionTitleUpdate[]) => void
   readonly onRenameSession?: (target: SessionBinding['agentHost'], nextName: string | null) => void
@@ -996,7 +1005,9 @@ function PaneGroupBody({
 }) {
   const isMultiGroup = totalGroups > 1
   const canSplitMore = totalGroups < MAX_PANE_GROUPS
-  const activeTask = group.activeTaskId ? taskById.get(group.activeTaskId) : undefined
+  const activeTask = group.activeTaskId && group.openTaskIds.includes(group.activeTaskId)
+    ? taskById.get(group.activeTaskId)
+    : undefined
   const activeTaskBindings = useMemo(
     () => activeTask ? orderedBindingsForTask(activeTask.id) : [],
     [activeTask, orderedBindingsForTask],
@@ -1014,13 +1025,11 @@ function PaneGroupBody({
 
   const mountedPanels = useMemo(() => {
     const keys = activeLocalKey && !visitedKeys.includes(activeLocalKey) ? [...visitedKeys, activeLocalKey] : visitedKeys
-    const openSet = new Set(group.openTaskIds)
     const resolved: { localKey: string; panelKey: string; task: TaskRecord; binding: SessionBinding; sessionKey: string }[] = []
     for (const localKey of keys) {
       const separator = localKey.indexOf(':')
       if (separator <= 0) continue
       const taskId = localKey.slice(0, separator)
-      if (!openSet.has(taskId)) continue
       const task = taskById.get(taskId)
       if (!task) continue
       const sessionKey = localKey.slice(separator + 1)
@@ -1029,7 +1038,7 @@ function PaneGroupBody({
       resolved.push({ localKey, panelKey: `${group.id}:${localKey}`, task, binding, sessionKey })
     }
     return resolved
-  }, [visitedKeys, activeLocalKey, group.openTaskIds, group.id, taskById, orderedBindingsForTask])
+  }, [visitedKeys, activeLocalKey, group.id, taskById, orderedBindingsForTask])
 
   const awaitingSyncCount = activeTask && awaitingSyncCountForTask ? awaitingSyncCountForTask(activeTask.id) : 0
 
@@ -1041,7 +1050,12 @@ function PaneGroupBody({
     {mountedPanels.map((panel) => {
       const visible = panel.localKey === activeLocalKey
       const slot: 'single' | 'primary' | 'secondary' = !isMultiGroup ? 'single' : groupIndex === 0 ? 'primary' : 'secondary'
-      const draftLookup = restoredDrafts?.[panel.panelKey] ?? restoredDrafts?.[panel.localKey]
+      const panelDraft = restoredDrafts?.[panel.panelKey]
+      const localDraft = restoredDrafts?.[panel.localKey]
+      const draftLookup = panelDraft && localDraft
+        ? (panelDraft.nonce >= localDraft.nonce ? panelDraft : localDraft)
+        : (panelDraft ?? localDraft)
+      const initialDraft = draftStore?.readInitial(panel.panelKey, panel.localKey)
       return <Activity key={panel.panelKey} mode={visible ? 'visible' : 'hidden'}>
         <MountedChatPanel
           groupId={group.id}
@@ -1054,6 +1068,7 @@ function PaneGroupBody({
           closeLabel={isMultiGroup ? 'Close split pane' : 'Hide chat panel'}
           hideClose={isPopupWindow && !isMultiGroup}
           minimalHeader={isPopupWindow}
+          initialDraft={initialDraft}
           restoredDraft={draftLookup}
           headerTarget={!isMultiGroup && unifiedHeaderTarget ? unifiedHeaderTarget : undefined}
           cachedTitle={cachedTitles[agentHostKey(panel.binding.agentHost)]}

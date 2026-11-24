@@ -52,7 +52,7 @@ function mockWindow(id: number, url = APP_URL) {
   return { window: window as unknown as BrowserWindow & { setMinimized(v: boolean): void; emitCrash(): void }, webContents, ipcEvent }
 }
 
-function setupManager(storageFile?: string) {
+function setupManager(storageFile?: string, handoffTimeoutMs?: number) {
   let nextId = 10
   let workspaceRoot: string | null = 'Q:\\workspace'
   const created: ReturnType<typeof mockWindow>[] = []
@@ -62,6 +62,7 @@ function setupManager(storageFile?: string) {
   const onAnyWindowClosedDuringInstall = vi.fn()
   const manager = new SessionWindowManager({
     storageFile,
+    handoffTimeoutMs,
     getWorkspaceState: async () => ({
       current: workspaceRoot ? {
         id: 'a'.repeat(64),
@@ -283,6 +284,73 @@ describe('SessionWindowManager', () => {
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
+  })
+
+  it('requires target window confirmation before completing draft handoff on Move into an existing Popup Window, and refuses to overwrite conflicting drafts', async () => {
+    const { manager, created } = setupManager(undefined, 80)
+    const target = agentHostTargetFixture('popout-handoff')
+
+    // 1. Open popup via Copy into New Window.
+    await manager.open({ taskId: 'T-0001', target, mode: 'copy' })
+    const popout = created[0]
+
+    // 2. Move into New Window with an unsent source draft -> must wait for target window's handoff ack!
+    let settled = false
+    const movePromise = manager.open({
+      taskId: 'T-0001',
+      target,
+      draft: 'Draft written in Main Window after Copy',
+      mode: 'move',
+    }).then((res) => { settled = true; return res })
+
+    await vi.waitFor(() => {
+      expect(popout.webContents.send).toHaveBeenCalledWith(
+        'desktop:session-window-handoff',
+        expect.objectContaining({
+          taskId: 'T-0001',
+          draft: 'Draft written in Main Window after Copy',
+        }),
+      )
+    })
+    expect(settled).toBe(false)
+
+    const handoffCall = popout.webContents.send.mock.calls.find((call) => call[0] === 'desktop:session-window-handoff')!
+    const requestId = (handoffCall[1] as { requestId: string }).requestId
+
+    manager.acknowledgeDraftHandoff(popout.window, { requestId, status: 'accepted' })
+    await expect(movePromise).resolves.toEqual({ opened: true, reused: true })
+    expect(manager.list()).toEqual([{
+      key: sessionWindowPanelKey('T-0001', target),
+      taskId: 'T-0001',
+      target,
+      mode: 'move',
+    }])
+
+    // 3. Conflicting drafts on both sides -> rejects with clear error without silently overwriting!
+    popout.webContents.send.mockClear()
+    const conflictPromise = manager.open({
+      taskId: 'T-0001',
+      target,
+      draft: 'Different Main Window draft',
+      mode: 'move',
+    })
+    await vi.waitFor(() => {
+      expect(popout.webContents.send).toHaveBeenCalledWith(
+        'desktop:session-window-handoff',
+        expect.objectContaining({ draft: 'Different Main Window draft' }),
+      )
+    })
+    const conflictReqId = (popout.webContents.send.mock.calls[0][1] as { requestId: string }).requestId
+    manager.acknowledgeDraftHandoff(popout.window, { requestId: conflictReqId, status: 'conflict' })
+    await expect(conflictPromise).rejects.toThrow('Both this pane and the open task window have unsent drafts')
+
+    // 4. Unconfirmed handoff timeout -> rejects so source page is never closed without confirmation!
+    await expect(manager.open({
+      taskId: 'T-0001',
+      target,
+      draft: 'Unconfirmed draft',
+      mode: 'move',
+    })).rejects.toThrow('did not confirm receiving the unsent draft')
   })
 })
 

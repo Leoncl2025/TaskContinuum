@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { agentHostKey } from '../shared/agentHost'
-import type { DesktopInfo, DesktopWindowContext, DockedTaskPage, SessionWindowMode } from '../shared/desktop'
+import type { DesktopInfo, DesktopWindowContext, DockedTaskPage, SessionWindowHandoffEvent, SessionWindowMode } from '../shared/desktop'
 import type { TaskRecord } from '../shared/tasks'
 import type { WorkspaceSnapshot } from '../shared/workspace'
 import { sessionBindingKey } from './chat/sessionBindings'
 import type { SessionBinding, SessionBindings } from './chat/sessionBindings'
+import { createSessionDraftStore, nextRestoredDraftNonce } from './chat/sessionDraftStore'
 import { buildSessionTree, treeSessionBindings } from './chat/sessionGroups'
 import { useSessionLinks } from './chat/useSessionLinks'
 import { useSessionTitles } from './chat/useSessionTitles'
@@ -91,17 +92,22 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
   const [actionError, setActionError] = useState<string | null>(null)
   const [docking, setDocking] = useState(false)
   const chordUntilRef = useRef(0)
-  const draftsRef = useRef<Record<string, string>>(
-    context.initialDraft && initialSessionKey
-      ? { [`${ROOT_PANE_GROUP_ID}:${context.task.id}:${initialSessionKey}`]: context.initialDraft }
-      : {},
+  const [draftStore] = useState(() =>
+    createSessionDraftStore(
+      context.initialDraft && initialSessionKey
+        ? { groupId: ROOT_PANE_GROUP_ID, taskId: context.task.id, sessionKey: initialSessionKey, draft: context.initialDraft }
+        : undefined,
+    ),
   )
-
-  const restoredDrafts = useMemo(() => {
-    if (!context.initialDraft || !initialSessionKey) return undefined
-    const key = `${ROOT_PANE_GROUP_ID}:${context.task.id}:${initialSessionKey}`
-    return { [key]: { nonce: 1, text: context.initialDraft } }
-  }, [context.initialDraft, context.task.id, initialSessionKey])
+  const [restoredDrafts, setRestoredDrafts] = useState<Record<string, { nonce: number; text: string }>>(() => {
+    if (!context.initialDraft || !initialSessionKey) return {}
+    const localKey = `${context.task.id}:${initialSessionKey}`
+    const panelKey = `${ROOT_PANE_GROUP_ID}:${localKey}`
+    return {
+      [panelKey]: { nonce: 1, text: context.initialDraft },
+      [localKey]: { nonce: 1, text: context.initialDraft },
+    }
+  })
 
   // Load full workspace task list so Popup Windows can also open/switch other Task Pages without a sidebar.
   useEffect(() => {
@@ -178,17 +184,34 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
   )
 
   const handleDraftSnapshot = useCallback((groupId: string, taskId: string, sessionKey: string, draft: string) => {
-    draftsRef.current[`${groupId}:${taskId}:${sessionKey}`] = draft
-  }, [])
+    draftStore.record(groupId, taskId, sessionKey, draft)
+  }, [draftStore])
 
   const applyTreeChange = useCallback((updater: (current: PaneTreeState) => PaneTreeState) => {
     setPaneTree((previous) => {
       const base = reconcilePaneTreeWithTasks(previous, validTaskIds, context.task.id)
       const next = updater(base)
+      const nextGroupIds = new Set(listPaneGroups(next.root).map((group) => group.id))
+      const orphanedDrafts: Array<{ localKey: string; draft: string }> = []
+      for (const group of listPaneGroups(base.root)) {
+        if (!nextGroupIds.has(group.id)) {
+          orphanedDrafts.push(...draftStore.removeGroup(group.id))
+        }
+      }
+      if (orphanedDrafts.length > 0) {
+        setRestoredDrafts((current) => {
+          const updated = { ...current }
+          let nonce = nextRestoredDraftNonce(updated)
+          for (const item of orphanedDrafts) {
+            updated[item.localKey] = { nonce: nonce++, text: item.draft }
+          }
+          return updated
+        })
+      }
       void window.desktop?.windows?.savePaneTree?.(next)?.catch(() => undefined)
       return next
     })
-  }, [validTaskIds, context.task.id])
+  }, [validTaskIds, context.task.id, draftStore])
 
   const notifyPopupActivated = useCallback(() => {
     void window.desktop?.windows?.reportState?.({
@@ -215,9 +238,57 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
     })
   })
 
+  const handleIncomingHandoff = useEffectEvent((event: SessionWindowHandoffEvent) => {
+    const ackBridge = window.desktop?.windows?.acknowledgeHandoff
+    if (!ackBridge) return
+    const ordered = orderedBindingsForTask(event.taskId)
+    const resolvedKey = event.sessionKey
+      ?? (ordered[0] ? sessionBindingKey(ordered[0]) : undefined)
+    const incomingTrimmed = event.draft.trim()
+
+    if (incomingTrimmed && resolvedKey) {
+      const existingDraft = draftStore.findLiveDraftForSession(event.taskId, resolvedKey)
+      if (existingDraft && existingDraft.trim() !== incomingTrimmed) {
+        applyTreeChange((current) => selectSessionInGroup(current, current.activeGroupId, event.taskId, resolvedKey))
+        void ackBridge({ requestId: event.requestId, status: 'conflict' }).catch(() => undefined)
+        return
+      }
+    }
+
+    let targetGroupId = focusedGroup.id
+    applyTreeChange((current) => {
+      targetGroupId = current.activeGroupId
+      if (resolvedKey) {
+        return selectSessionInGroup(current, current.activeGroupId, event.taskId, resolvedKey)
+      }
+      return openTaskPageInGroup(current, current.activeGroupId, event.taskId)
+    })
+
+    if (incomingTrimmed && resolvedKey) {
+      const localKey = `${event.taskId}:${resolvedKey}`
+      const panelKey = `${targetGroupId}:${localKey}`
+      draftStore.record(targetGroupId, event.taskId, resolvedKey, event.draft)
+      setRestoredDrafts((current) => {
+        const nextNonce = nextRestoredDraftNonce(current)
+        return {
+          ...current,
+          [panelKey]: { nonce: nextNonce, text: event.draft },
+          [localKey]: { nonce: nextNonce, text: event.draft },
+        }
+      })
+    }
+
+    void ackBridge({ requestId: event.requestId, status: 'accepted' }).catch(() => undefined)
+  })
+
   useEffect(() => {
-    const unlisten = window.desktop?.windows?.onNavigate?.((event) => handleNavigateFromMain(event))
-    return () => { unlisten?.() }
+    const windowsBridge = window.desktop?.windows
+    const unlistenNav = windowsBridge?.onNavigate?.((event) => handleNavigateFromMain(event))
+    const unlistenHandoff = windowsBridge?.onHandoff?.((event) => handleIncomingHandoff(event))
+    return () => {
+      unlistenNav?.()
+      unlistenHandoff?.()
+    }
   }, [])
 
   useEffect(() => {
@@ -260,19 +331,36 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
     if (!windowsBridge) return false
     setActionError(null)
     try {
-      const sessionKey = binding ? sessionBindingKey(binding) : undefined
-      const fallbackDraft = draft ?? (sessionKey ? draftsRef.current[`${groupId}:${taskId}:${sessionKey}`] : undefined)
-      const trimmedDraft = fallbackDraft?.trim() ? fallbackDraft : undefined
+      const resolvedBinding = binding ?? (() => {
+        const group = findPaneGroup(effectiveTree.root, groupId) ?? focusedGroup
+        return resolveGroupActiveBinding(group, taskId, orderedBindingsForTask(taskId), selection.sessions).binding
+      })()
+      const sessionKey = resolvedBinding ? sessionBindingKey(resolvedBinding) : undefined
+      const fallbackDraft = draft ?? draftStore.readForMove(groupId, taskId, sessionKey)
+      const hasDraft = Boolean(fallbackDraft && fallbackDraft.trim().length > 0)
       const result = await windowsBridge.open({
         taskId,
-        ...(binding ? { target: binding.agentHost, sessionKey } : {}),
+        ...(resolvedBinding ? { target: resolvedBinding.agentHost, sessionKey } : {}),
         mode,
-        ...(mode === 'move' && trimmedDraft ? { draft: trimmedDraft } : {}),
+        ...(mode === 'move' && hasDraft ? { draft: fallbackDraft } : {}),
       })
       if (!result.opened) return false
       if (mode === 'move') {
         const source = findPaneGroup(effectiveTree.root, groupId)
         if (source && (paneGroups.length > 1 || source.openTaskIds.length > 1)) {
+          if (sessionKey) {
+            const localKey = `${taskId}:${sessionKey}`
+            const panelKey = `${groupId}:${localKey}`
+            const { clearedSessionDraft } = draftStore.clearMovedPanel(groupId, taskId, sessionKey)
+            setRestoredDrafts((current) => {
+              const nonce = nextRestoredDraftNonce(current)
+              return {
+                ...current,
+                [panelKey]: { nonce, text: '' },
+                ...(clearedSessionDraft ? { [localKey]: { nonce, text: '' } } : {}),
+              }
+            })
+          }
           applyTreeChange((current) => closeTaskPageInGroup(current, groupId, taskId))
           return true
         }
@@ -298,8 +386,10 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
           const dedupeKey = `${taskId}:${sessionKey ?? ''}`
           if (seen.has(dedupeKey)) continue
           seen.add(dedupeKey)
-          const rawDraft = sessionKey ? draftsRef.current[`${group.id}:${taskId}:${sessionKey}`] : undefined
-          const draft = rawDraft?.trim() ? rawDraft : undefined
+          const groupDraft = draftStore.readForMove(group.id, taskId, sessionKey ?? undefined)
+          const fallbackDraft = sessionKey ? draftStore.findLiveDraftForSession(taskId, sessionKey) : undefined
+          const rawDraft = groupDraft && groupDraft.trim().length > 0 ? groupDraft : fallbackDraft
+          const draft = rawDraft && rawDraft.trim().length > 0 ? rawDraft : undefined
           pages.push({
             taskId,
             ...(sessionKey !== undefined ? { sessionKey } : {}),
@@ -308,8 +398,13 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
           })
         }
       }
-      const primaryDraftRaw = activeSessionKey ? draftsRef.current[`${focusedGroup.id}:${activeTask.id}:${activeSessionKey}`] : undefined
-      const primaryDraft = primaryDraftRaw?.trim() ? primaryDraftRaw : undefined
+      const focusedDraft = draftStore.readForMove(focusedGroup.id, activeTask.id, activeSessionKey ?? undefined)
+      const primaryDraftRaw = focusedDraft && focusedDraft.trim().length > 0
+        ? focusedDraft
+        : activeSessionKey
+          ? draftStore.findLiveDraftForSession(activeTask.id, activeSessionKey)
+          : undefined
+      const primaryDraft = primaryDraftRaw && primaryDraftRaw.trim().length > 0 ? primaryDraftRaw : undefined
       await window.desktop?.windows?.dock({
         taskId: activeTask.id,
         ...(activeBinding ? { target: activeBinding.agentHost } : {}),
@@ -437,6 +532,7 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
         popupTabsTarget={!isMultiPane ? popupTabsTarget : null}
         cachedTitles={sessionTitles.titles}
         customTitles={sessionTitles.customTitles}
+        draftStore={draftStore}
         restoredDrafts={restoredDrafts}
         onTitles={sessionTitles.remember}
         onRenameSession={sessionTitles.rename}

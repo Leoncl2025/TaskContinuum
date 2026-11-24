@@ -265,9 +265,17 @@ test('opens a sidebar-less Task-Page Popup Window, supports nested splits and Ta
     }, { timeout: 25_000 }).toBe('connected')
 
     const mainComposer = mainPage.getByRole('textbox', { name: 'Message Agent Host' })
-    await mainComposer.fill('Main window stays live alongside popup')
+    await mainComposer.fill('Draft survives tab close and reopen')
 
-    // Open Popup Window via "Copy into New Window": BOTH Main Window and Popup Window run the same session simultaneously!
+    // [P1 Regression #1]: Closing a Task Page tab and reopening it preserves the unsent draft!
+    await mainPage.getByRole('button', { name: 'Close Multi-window session workflow', exact: true }).click()
+    await expect(mainPage.getByRole('tablist', { name: 'Open tasks' }).getByRole('tab')).toHaveCount(0)
+    await mainPage.getByRole('button', { name: 'Tasks', exact: true }).click()
+    await mainPage.getByRole('complementary', { name: 'Explorer' }).getByRole('treeitem', { name: /Multi-window session workflow/ }).click()
+    await expect(mainComposer).toHaveValue('Draft survives tab close and reopen')
+    await mainComposer.fill('')
+
+    // Open Popup Window via "Copy into New Window" while composer is empty.
     const popoutPromise = app.waitForEvent('window')
     await mainPage.getByLabel('Chat header').click({ button: 'right' })
     await mainPage.getByRole('menu', { name: 'Session view actions', exact: true })
@@ -285,7 +293,34 @@ test('opens a sidebar-less Task-Page Popup Window, supports nested splits and Ta
     await expect(popoutPage.getByRole('button', { name: 'Open task page', exact: true })).toHaveCount(0)
     await expect(popoutPage.locator('.session-window-titlebar').getByRole('tablist', { name: 'Open tasks' }).getByRole('tab', { name: 'Multi-window session workflow', exact: true })).toBeVisible()
     await expect(popoutPage.getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible()
-    await expect(mainComposer).toHaveValue('Main window stays live alongside popup')
+
+    // [P1 Regression #2]: Write a draft in Main Window AFTER Copy into New Window, then choose Move into New Window:
+    // Target Popup Window receives and confirms the draft BEFORE Main Window closes its source tab!
+    await mainComposer.click()
+    await mainComposer.fill('Moved into already-open popup')
+    await mainPage.getByLabel('Chat header').click({ button: 'right' })
+    await mainPage.getByRole('menu', { name: 'Session view actions', exact: true })
+      .getByRole('menuitem', { name: /^Move into New Window/ }).click()
+    await expect(popoutPage.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Moved into already-open popup')
+    await expect(mainPage.getByRole('tablist', { name: 'Open tasks' }).getByRole('tab')).toHaveCount(0)
+
+    // Reopen T-0001 in Main Window (moved draft was cleared from Main Window, not duplicated), write a DIFFERENT draft,
+    // and attempt Move into New Window while Popup Window still holds its own draft -> MUST NOT overwrite or close source!
+    await mainPage.locator('.main-panel').click()
+    await mainPage.getByRole('complementary', { name: 'Explorer' }).getByRole('treeitem', { name: /Multi-window session workflow/ }).click()
+    await expect(mainComposer).toHaveValue('')
+    await mainComposer.fill('Main window conflicting draft')
+    await mainPage.getByLabel('Chat header').click({ button: 'right' })
+    await mainPage.getByRole('menu', { name: 'Session view actions', exact: true })
+      .getByRole('menuitem', { name: /^Move into New Window/ }).click()
+    await expect(mainPage.getByRole('alert').filter({ hasText: 'Both this pane and the open task window have unsent drafts' })).toBeVisible()
+    // Source tab stayed open and BOTH drafts are completely intact!
+    await expect(mainPage.getByRole('tablist', { name: 'Open tasks' }).getByRole('tab', { name: 'Multi-window session workflow', exact: true })).toBeVisible()
+    await expect(mainComposer).toHaveValue('Main window conflicting draft')
+    await expect(popoutPage.getByRole('textbox', { name: 'Message Agent Host' })).toHaveValue('Moved into already-open popup')
+    await mainPage.getByRole('button', { name: 'Dismiss Agent Host error', exact: true }).click()
+    await mainComposer.fill('Main window stays live alongside popup')
+    await popoutPage.getByRole('textbox', { name: 'Message Agent Host' }).fill('')
 
     // Perform recursive nested splits INSIDE the Popup Window: Split Right, then Split Down on Pane 2!
     await popoutPage.keyboard.press('Control+\\')

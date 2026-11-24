@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { DesktopBridge, DesktopInfo, SessionWindowActivatedEvent, SessionWindowFocusSyncEvent, SessionWindowNavigateEvent, SessionWindowSummary } from '../shared/desktop'
+import type { DesktopBridge, DesktopInfo, SessionWindowActivatedEvent, SessionWindowFocusSyncEvent, SessionWindowHandoffEvent, SessionWindowNavigateEvent, SessionWindowSummary } from '../shared/desktop'
 import type { WorkspaceBridge } from '../shared/workspace'
 import type { RemoteVSCodeBridge } from '../shared/remoteVSCode'
 import type { AgentHostBridge, AgentHostView } from '../shared/agentHost'
@@ -22,6 +22,7 @@ const bridge: DesktopBridge = {
     savePaneTree: (tree) => ipcRenderer.invoke('desktop:session-window-save-tree', tree),
     reportState: (state) => ipcRenderer.invoke('desktop:session-window-report-state', state),
     navigate: (request) => ipcRenderer.invoke('desktop:session-window-navigate', request),
+    acknowledgeHandoff: (ack) => ipcRenderer.invoke('desktop:session-window-handoff-ack', ack),
     list: () => ipcRenderer.invoke('desktop:session-window-list'),
     onChanged: (listener) => {
       const receive = (_event: Electron.IpcRendererEvent, windows: SessionWindowSummary[]) => listener(windows)
@@ -42,6 +43,11 @@ const bridge: DesktopBridge = {
       const receive = (_event: Electron.IpcRendererEvent, event: SessionWindowNavigateEvent) => listener(event)
       ipcRenderer.on('desktop:session-window-navigate', receive)
       return () => ipcRenderer.removeListener('desktop:session-window-navigate', receive)
+    },
+    onHandoff: (listener) => {
+      const receive = (_event: Electron.IpcRendererEvent, event: SessionWindowHandoffEvent) => listener(event)
+      ipcRenderer.on('desktop:session-window-handoff', receive)
+      return () => ipcRenderer.removeListener('desktop:session-window-handoff', receive)
     },
   },
   getInfo: async () => {
