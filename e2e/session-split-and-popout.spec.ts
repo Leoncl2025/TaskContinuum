@@ -262,11 +262,14 @@ test('opens a sidebar-less Task-Page Popup Window, supports nested splits and Ta
     popoutPage.on('pageerror', (error) => errors.push(error.message))
     await popoutPage.setViewportSize({ width: 1180, height: 780 })
 
-    // Verify Popup Window is Task-Page based and has NO left sidebar!
+    // Verify Popup Window is Task-Page based, minimal, and has NO left sidebar, NO statusbar, and NO redundant session/task dropdowns!
     await expect(popoutPage.locator('.session-window')).toBeVisible()
     await expect(popoutPage.locator('.activity-bar')).toHaveCount(0)
     await expect(popoutPage.locator('.sidebar')).toHaveCount(0)
-    await expect(popoutPage.getByRole('tablist', { name: 'Open tasks' }).getByRole('tab', { name: 'Multi-window session workflow', exact: true })).toBeVisible()
+    await expect(popoutPage.locator('.statusbar')).toHaveCount(0)
+    await expect(popoutPage.locator('.popup-session-switcher')).toHaveCount(0)
+    await expect(popoutPage.getByRole('button', { name: 'Open task page', exact: true })).toHaveCount(0)
+    await expect(popoutPage.locator('.session-window-titlebar').getByRole('tablist', { name: 'Open tasks' }).getByRole('tab', { name: 'Multi-window session workflow', exact: true })).toBeVisible()
     await expect(popoutPage.getByLabel('Chat header').getByText('Connected', { exact: true })).toBeVisible()
     await expect(mainComposer).toHaveValue('Main window stays live alongside popup')
 
@@ -288,14 +291,22 @@ test('opens a sidebar-less Task-Page Popup Window, supports nested splits and Ta
     const popPane3 = popoutPage.getByRole('region', { name: 'Screen pane 3', exact: true })
     await expect(popPane3).toBeVisible()
 
-    // Open T-0002 into Popup Pane 3 via the "+" Open task page button!
-    await popPane3.getByRole('button', { name: 'Open task page', exact: true }).click()
-    await popoutPage.getByRole('menu', { name: 'Open task page', exact: true })
-      .getByRole('menuitem', { name: /Nested popup companion task/ }).click()
+    // Focus Popup Pane 3, then select T-0002 from the MAIN WINDOW's left Tasks sidebar -> opens T-0002 in Popup Pane 3 and syncs Main Window's sidebar!
+    await popPane3.getByLabel('Chat header').click()
+    await mainPage.getByRole('button', { name: 'Tasks', exact: true }).click()
+    await mainPage.getByRole('complementary', { name: 'Explorer' }).getByRole('treeitem', { name: /Nested popup companion task/ }).click()
     await expect(popPane3.getByRole('tablist').getByRole('tab')).toHaveText([
       'Multi-window session workflow',
       'Nested popup companion task',
     ])
+    // Main Window's own docked tab bar stayed untouched on T-0001 while its left Sessions sidebar synced to Popup Pane 3's T-0002!
+    await expect(mainPage.getByRole('tablist', { name: 'Open tasks' }).getByRole('tab')).toHaveText(['Multi-window session workflow'])
+    await mainPage.getByRole('button', { name: 'Agent Host sessions', exact: true }).click()
+    await expect(picker).toContainText('T-0002')
+
+    // Clicking back inside Main Window's docked chat composer switches the left sidebar right back to Main Window's T-0001!
+    await mainComposer.click()
+    await expect(picker).toContainText('T-0001')
 
     await popoutPage.screenshot({ path: testInfo.outputPath('popup-window-nested-split.png'), animations: 'disabled' })
 

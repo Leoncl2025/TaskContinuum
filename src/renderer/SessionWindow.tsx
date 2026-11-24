@@ -14,7 +14,7 @@ import { Icon, IconButton } from './components/Primitives'
 import { UpdateNotice } from './components/UpdateSettings'
 import type { useUpdates } from './components/UpdateSettings'
 import { readLayout } from './layout'
-import { machineLabel, useMachineAliases } from './machineAliases'
+import { useMachineAliases } from './machineAliases'
 import { MachineAliasesProvider } from './MachineAliasesProvider'
 import { UserProfileContext, useUserProfileState } from './userProfile'
 import {
@@ -32,7 +32,6 @@ import {
   splitPaneGroup,
 } from './paneTree'
 import type { PaneTreeState } from './paneTree'
-import appIcon from '../../build/icon.png'
 
 type SessionContext = Extract<DesktopWindowContext, { kind: 'session' }>
 
@@ -85,12 +84,11 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
   )
 
   const [chatHeaderTarget, setChatHeaderTarget] = useState<HTMLDivElement | null>(null)
+  const [popupTabsTarget, setPopupTabsTarget] = useState<HTMLDivElement | null>(null)
   const [desktop, setDesktop] = useState<DesktopInfo>()
   const userProfile = useUserProfileState(desktop?.userProfile)
   const [fullScreen, setFullScreen] = useState(false)
-  const [desktopError, setDesktopError] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
-  const [busyPanels, setBusyPanels] = useState<Record<string, boolean>>({})
   const [docking, setDocking] = useState(false)
   const chordUntilRef = useRef(0)
   const draftsRef = useRef<Record<string, string>>(
@@ -175,25 +173,13 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
     [orderedBindingsForTask, activeTask.id],
   )
   const { sessionKey: activeSessionKey, binding: activeBinding } = useMemo(
-    () => resolveGroupActiveBinding(focusedGroup, activeTask.id, activeTaskBindings),
-    [focusedGroup, activeTask.id, activeTaskBindings],
+    () => resolveGroupActiveBinding(focusedGroup, activeTask.id, activeTaskBindings, selection.sessions),
+    [focusedGroup, activeTask.id, activeTaskBindings, selection.sessions],
   )
 
   const handleDraftSnapshot = useCallback((groupId: string, taskId: string, sessionKey: string, draft: string) => {
     draftsRef.current[`${groupId}:${taskId}:${sessionKey}`] = draft
   }, [])
-
-  const reportPanelBusy = useCallback((value: boolean, key?: string) => {
-    if (!key) return
-    setBusyPanels((current) => {
-      if (Boolean(current[key]) === value) return current
-      const next = { ...current }
-      if (value) next[key] = true
-      else delete next[key]
-      return next
-    })
-  }, [])
-  const busy = Object.keys(busyPanels).length > 0
 
   const applyTreeChange = useCallback((updater: (current: PaneTreeState) => PaneTreeState) => {
     setPaneTree((previous) => {
@@ -203,6 +189,36 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
       return next
     })
   }, [validTaskIds, context.task.id])
+
+  const notifyPopupActivated = useCallback(() => {
+    void window.desktop?.windows?.reportState?.({
+      taskId: activeTask.id,
+      sessionKey: activeSessionKey ?? null,
+      activated: true,
+    })?.catch(() => undefined)
+  }, [activeTask.id, activeSessionKey])
+
+  useEffect(() => {
+    void window.desktop?.windows?.reportState?.({
+      taskId: activeTask.id,
+      sessionKey: activeSessionKey ?? null,
+      activated: false,
+    })?.catch(() => undefined)
+  }, [activeTask.id, activeSessionKey])
+
+  const handleNavigateFromMain = useEffectEvent((event: { taskId: string; sessionKey?: string | null }) => {
+    applyTreeChange((current) => {
+      if (event.sessionKey !== undefined && event.sessionKey !== null) {
+        return selectSessionInGroup(current, current.activeGroupId, event.taskId, event.sessionKey)
+      }
+      return openTaskPageInGroup(current, current.activeGroupId, event.taskId)
+    })
+  })
+
+  useEffect(() => {
+    const unlisten = window.desktop?.windows?.onNavigate?.((event) => handleNavigateFromMain(event))
+    return () => { unlisten?.() }
+  }, [])
 
   useEffect(() => {
     const onStorage = () => {
@@ -218,13 +234,13 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
     let changed = false
     const bridge = window.desktop
     const unlisten = bridge?.onFullScreenChanged((value) => { changed = true; if (mounted) setFullScreen(value) })
-    void bridge?.getInfo().then((info) => { if (mounted) setDesktop(info) }).catch(() => { if (mounted) setDesktopError(true) })
-    void bridge?.getFullScreen().then((value) => { if (mounted && !changed) setFullScreen(value) }).catch(() => { if (mounted) setDesktopError(true) })
+    void bridge?.getInfo().then((info) => { if (mounted) setDesktop(info) }).catch(() => undefined)
+    void bridge?.getFullScreen().then((value) => { if (mounted && !changed) setFullScreen(value) }).catch(() => undefined)
     return () => { mounted = false; unlisten?.() }
   }, [])
 
   function windowAction(action: 'minimize' | 'toggleMaximize' | 'toggleFullScreen' | 'close'): void {
-    void window.desktop?.[action]().catch(() => setDesktopError(true))
+    void window.desktop?.[action]().catch(() => undefined)
   }
 
   async function popOutAnotherWindow({
@@ -375,16 +391,18 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
   }, [])
 
   const unifiedChatHeader = !isMultiPane && Boolean(activeBinding)
-  const ownerDisplay = activeBinding ? machineLabel(activeBinding.owner, aliases) : undefined
 
-  return <UserProfileContext.Provider value={userProfile}><div className="workbench session-window" data-theme={theme} data-compact={false}>
-    <header className="titlebar session-window-titlebar" aria-label="Session window toolbar" data-chat-header={unifiedChatHeader}>
-      <div className="app-brand session-window-brand">
-        <span className="brand-mark"><img src={appIcon} alt="" width={20} height={20} /></span>
-        <span className="session-window-task-pill" title={`${activeTask.id} · ${activeTask.title}`}>{activeTask.id}</span>
-      </div>
-      <div className="titlebar-chat" ref={setChatHeaderTarget} hidden={!unifiedChatHeader} />
-      {!unifiedChatHeader && <div className="session-window-title-spacer">{activeTask.title}</div>}
+  return <UserProfileContext.Provider value={userProfile}><div
+    className="workbench session-window"
+    data-theme={theme}
+    data-compact={false}
+    onPointerDownCapture={() => notifyPopupActivated()}
+    onFocusCapture={() => notifyPopupActivated()}
+  >
+    <header className="titlebar session-window-titlebar" aria-label="Session window toolbar" data-chat-header={unifiedChatHeader} data-multi-pane={isMultiPane || undefined}>
+      {!isMultiPane && <div className="session-window-tabs-slot" ref={setPopupTabsTarget} />}
+      <div className="session-window-drag-spacer">{isMultiPane ? activeTask.title : null}</div>
+      <div className="titlebar-chat session-window-chat-slot" ref={setChatHeaderTarget} hidden={!unifiedChatHeader} />
       <div className="titlebar-actions">
         <button type="button" className="session-window-dock-button" aria-label="Dock session to main window" title="Dock task pages back into the main window" disabled={docking} onClick={() => { void dockToMainWindow() }}>
           <Icon name="layout-panel-dock" />
@@ -392,7 +410,6 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
         </button>
       </div>
       {window.desktop && <div className="window-controls">
-        <IconButton icon={fullScreen ? 'screen-normal' : 'screen-full'} label={fullScreen ? 'Exit full screen' : 'Enter full screen'} title={`${fullScreen ? 'Exit' : 'Enter'} full screen (F11 / Shift+Alt+Enter)`} aria-pressed={fullScreen} onClick={() => windowAction('toggleFullScreen')} />
         <IconButton icon="chrome-minimize" label="Minimize window" onClick={() => windowAction('minimize')} />
         <IconButton icon="chrome-maximize" label="Maximize or restore window" disabled={fullScreen} onClick={() => windowAction('toggleMaximize')} />
         <IconButton icon="chrome-close" label="Close window" onClick={() => windowAction('close')} />
@@ -408,6 +425,7 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
         onTreeChange={applyTreeChange}
         tasks={tasks}
         bindings={mergedBindings}
+        rememberedSessions={selection.sessions}
         orderedBindingsForTask={orderedBindingsForTask}
         linksBusy={links.busy}
         linksReady={links.ready || Boolean(context.target)}
@@ -416,28 +434,16 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
         compact={false}
         isPopupWindow={true}
         unifiedHeaderTarget={unifiedChatHeader ? chatHeaderTarget : null}
+        popupTabsTarget={!isMultiPane ? popupTabsTarget : null}
         cachedTitles={sessionTitles.titles}
         customTitles={sessionTitles.customTitles}
         restoredDrafts={restoredDrafts}
         onTitles={sessionTitles.remember}
         onRenameSession={sessionTitles.rename}
         onDraftSnapshot={handleDraftSnapshot}
-        onBusyChange={reportPanelBusy}
         onPopOutTaskPage={window.desktop?.windows ? popOutAnotherWindow : undefined}
       />
     </main>
-
-    <footer className="statusbar" aria-label="Session window status">
-      <span className="local-status"><Icon name="multiple-windows" />{isMultiPane ? `POPUP SPLIT (${paneGroups.length})` : 'TASK WINDOW'}</span>
-      <span title={context.workspaceRoot}><Icon name="folder" />{context.workspaceName}</span>
-      <span className="session-window-status-task" title={activeTask.title}>{activeTask.id} · {activeTask.title}</span>
-      <span className="statusbar-spacer" />
-      <span className="response-status" role="status" title={activeBinding?.owner.machineName}>
-        {busy ? 'Agent Host active' : ownerDisplay ? `Agent Host @ ${ownerDisplay}` : 'Select a session'}
-      </span>
-      <button type="button" disabled={docking} onClick={() => { void dockToMainWindow() }}><Icon name="layout-panel-dock" />Dock to main window</button>
-      <span className="platform-status">{desktopError ? 'Desktop bridge error' : desktop ? `Desktop · ${desktop.version}` : 'Desktop'}</span>
-    </footer>
 
     <UpdateNotice updates={updates} />
   </div></UserProfileContext.Provider>

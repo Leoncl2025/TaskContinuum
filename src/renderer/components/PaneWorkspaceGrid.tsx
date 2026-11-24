@@ -1,5 +1,5 @@
 import { Activity, memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, DragEvent, MouseEvent as ReactMouseEvent, ReactNode } from 'react'
+import type { CSSProperties, DragEvent, MouseEvent as ReactMouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { agentHostKey } from '../../shared/agentHost'
 import type { SessionWindowMode } from '../../shared/desktop'
@@ -122,6 +122,7 @@ export interface PaneWorkspaceGridProps {
   readonly compact?: boolean
   readonly isPopupWindow?: boolean
   readonly unifiedHeaderTarget?: HTMLElement | null
+  readonly popupTabsTarget?: HTMLElement | null
   readonly connectionRevision?: number
   readonly cachedTitles: Readonly<Record<string, string>>
   readonly customTitles?: Readonly<Record<string, string>>
@@ -162,6 +163,7 @@ export function PaneWorkspaceGrid({
   compact = false,
   isPopupWindow = false,
   unifiedHeaderTarget,
+  popupTabsTarget,
   connectionRevision = 0,
   cachedTitles,
   customTitles,
@@ -184,7 +186,6 @@ export function PaneWorkspaceGrid({
   const isMultiGroup = groups.length > 1
   const taskById = useMemo(() => new Map(tasks.map((item) => [item.id, item])), [tasks])
   const [contextMenu, setContextMenu] = useState<SessionContextMenuTarget | null>(null)
-  const [openPicker, setOpenPicker] = useState<{ groupId: string; x: number; y: number } | null>(null)
 
   const getGroupHost = useCallback((groupId: string): HTMLDivElement => {
     return getOrCreateGroupDomHost(gridId, groupId)
@@ -200,16 +201,6 @@ export function PaneWorkspaceGrid({
       }
     }
   }, [gridId, groups])
-
-  useEffect(() => {
-    if (!openPicker) return
-    const dismiss = (event: PointerEvent) => {
-      if (event.target instanceof Element && (event.target.closest('.pane-task-picker-wrap') || event.target.closest('.pane-task-picker-menu'))) return
-      setOpenPicker(null)
-    }
-    document.addEventListener('pointerdown', dismiss, true)
-    return () => document.removeEventListener('pointerdown', dismiss, true)
-  }, [openPicker])
 
   const activateGroup = useCallback((groupId: string) => {
     onTreeChange((current) => focusPaneGroup(current, groupId))
@@ -273,20 +264,16 @@ export function PaneWorkspaceGrid({
           groupIndex={Math.max(0, groups.findIndex((item) => item.id === tree.activeGroupId))}
           totalGroups={groups.length}
           focused={true}
-          theme={theme}
-          tasks={tasks}
           taskById={taskById}
           bindings={bindings}
           rememberedSessions={rememberedSessions}
           orderedBindingsForTask={orderedBindingsForTask}
           isPopupWindow={isPopupWindow}
-          openPicker={openPicker}
-          setOpenPicker={setOpenPicker}
+          popupTabsTarget={null}
           getGroupHost={getGroupHost}
           onActivateGroup={activateGroup}
           onSelectTask={selectTaskInGroup}
           onCloseTask={closeTaskInGroup}
-          onSplit={handleSplit}
           onCloseGroup={(groupId) => onTreeChange((current) => removePaneGroup(current, groupId))}
           onDropTaskPage={handleDropTaskPage}
           onDropSessionBinding={handleDropSessionBinding}
@@ -297,21 +284,17 @@ export function PaneWorkspaceGrid({
           node={tree.root}
           groups={groups}
           activeGroupId={tree.activeGroupId}
-          theme={theme}
-          tasks={tasks}
           taskById={taskById}
           bindings={bindings}
           rememberedSessions={rememberedSessions}
           orderedBindingsForTask={orderedBindingsForTask}
           isPopupWindow={isPopupWindow}
-          openPicker={openPicker}
-          setOpenPicker={setOpenPicker}
+          popupTabsTarget={!isMultiGroup ? popupTabsTarget : null}
           getGroupHost={getGroupHost}
           onResizeSplit={(splitId, ratio) => onTreeChange((current) => resizePaneSplit(current, splitId, ratio))}
           onActivateGroup={activateGroup}
           onSelectTask={selectTaskInGroup}
           onCloseTask={closeTaskInGroup}
-          onSplit={handleSplit}
           onCloseGroup={(groupId) => onTreeChange((current) => removePaneGroup(current, groupId))}
           onDropTaskPage={handleDropTaskPage}
           onDropSessionBinding={handleDropSessionBinding}
@@ -405,21 +388,17 @@ function PaneTreeBranch({
   node,
   groups,
   activeGroupId,
-  theme,
-  tasks,
   taskById,
   bindings,
   rememberedSessions,
   orderedBindingsForTask,
   isPopupWindow,
-  openPicker,
-  setOpenPicker,
+  popupTabsTarget,
   getGroupHost,
   onResizeSplit,
   onActivateGroup,
   onSelectTask,
   onCloseTask,
-  onSplit,
   onCloseGroup,
   onDropTaskPage,
   onDropSessionBinding,
@@ -428,21 +407,17 @@ function PaneTreeBranch({
   readonly node: PaneTreeNode
   readonly groups: readonly PaneGroup[]
   readonly activeGroupId: string
-  readonly theme: 'dark' | 'light'
-  readonly tasks: readonly TaskRecord[]
   readonly taskById: ReadonlyMap<string, TaskRecord>
   readonly bindings: SessionBindings
   readonly rememberedSessions?: Readonly<Record<string, string | null>>
   readonly orderedBindingsForTask: (taskId: string) => readonly SessionBinding[]
   readonly isPopupWindow: boolean
-  readonly openPicker: { groupId: string; x: number; y: number } | null
-  readonly setOpenPicker: (picker: { groupId: string; x: number; y: number } | null) => void
+  readonly popupTabsTarget?: HTMLElement | null
   readonly getGroupHost: (groupId: string) => HTMLDivElement
   readonly onResizeSplit: (splitId: string, ratio: number) => void
   readonly onActivateGroup: (groupId: string) => void
   readonly onSelectTask: (groupId: string, taskId: string) => void
   readonly onCloseTask: (groupId: string, taskId: string) => void
-  readonly onSplit: (groupId: string, direction: SplitDirection, moveSource: boolean, taskId?: string, sessionKey?: string | null) => void
   readonly onCloseGroup: (groupId: string) => void
   readonly onDropTaskPage: (payload: TaskPageDragPayload, targetGroupId: string, zone: 'tab' | 'center' | SplitDirection, insertIndex?: number) => void
   readonly onDropSessionBinding: (taskId: string, sessionKey: string, targetGroupId: string, zone: 'center' | SplitDirection) => void
@@ -455,20 +430,16 @@ function PaneTreeBranch({
       groupIndex={groupIndex}
       totalGroups={groups.length}
       focused={node.id === activeGroupId}
-      theme={theme}
-      tasks={tasks}
       taskById={taskById}
       bindings={bindings}
       rememberedSessions={rememberedSessions}
       orderedBindingsForTask={orderedBindingsForTask}
       isPopupWindow={isPopupWindow}
-      openPicker={openPicker}
-      setOpenPicker={setOpenPicker}
+      popupTabsTarget={popupTabsTarget}
       getGroupHost={getGroupHost}
       onActivateGroup={onActivateGroup}
       onSelectTask={onSelectTask}
       onCloseTask={onCloseTask}
-      onSplit={onSplit}
       onCloseGroup={onCloseGroup}
       onDropTaskPage={onDropTaskPage}
       onDropSessionBinding={onDropSessionBinding}
@@ -487,21 +458,17 @@ function PaneTreeBranch({
         node={node.first}
         groups={groups}
         activeGroupId={activeGroupId}
-        theme={theme}
-        tasks={tasks}
         taskById={taskById}
         bindings={bindings}
         rememberedSessions={rememberedSessions}
         orderedBindingsForTask={orderedBindingsForTask}
         isPopupWindow={isPopupWindow}
-        openPicker={openPicker}
-        setOpenPicker={setOpenPicker}
+        popupTabsTarget={null}
         getGroupHost={getGroupHost}
         onResizeSplit={onResizeSplit}
         onActivateGroup={onActivateGroup}
         onSelectTask={onSelectTask}
         onCloseTask={onCloseTask}
-        onSplit={onSplit}
         onCloseGroup={onCloseGroup}
         onDropTaskPage={onDropTaskPage}
         onDropSessionBinding={onDropSessionBinding}
@@ -519,21 +486,17 @@ function PaneTreeBranch({
         node={node.second}
         groups={groups}
         activeGroupId={activeGroupId}
-        theme={theme}
-        tasks={tasks}
         taskById={taskById}
         bindings={bindings}
         rememberedSessions={rememberedSessions}
         orderedBindingsForTask={orderedBindingsForTask}
         isPopupWindow={isPopupWindow}
-        openPicker={openPicker}
-        setOpenPicker={setOpenPicker}
+        popupTabsTarget={null}
         getGroupHost={getGroupHost}
         onResizeSplit={onResizeSplit}
         onActivateGroup={onActivateGroup}
         onSelectTask={onSelectTask}
         onCloseTask={onCloseTask}
-        onSplit={onSplit}
         onCloseGroup={onCloseGroup}
         onDropTaskPage={onDropTaskPage}
         onDropSessionBinding={onDropSessionBinding}
@@ -548,20 +511,16 @@ function PaneGroupFrame({
   groupIndex,
   totalGroups,
   focused,
-  theme,
-  tasks,
   taskById,
   bindings,
   rememberedSessions,
   orderedBindingsForTask,
   isPopupWindow,
-  openPicker,
-  setOpenPicker,
+  popupTabsTarget,
   getGroupHost,
   onActivateGroup,
   onSelectTask,
   onCloseTask,
-  onSplit,
   onCloseGroup,
   onDropTaskPage,
   onDropSessionBinding,
@@ -571,20 +530,16 @@ function PaneGroupFrame({
   readonly groupIndex: number
   readonly totalGroups: number
   readonly focused: boolean
-  readonly theme: 'dark' | 'light'
-  readonly tasks: readonly TaskRecord[]
   readonly taskById: ReadonlyMap<string, TaskRecord>
   readonly bindings: SessionBindings
   readonly rememberedSessions?: Readonly<Record<string, string | null>>
   readonly orderedBindingsForTask: (taskId: string) => readonly SessionBinding[]
   readonly isPopupWindow: boolean
-  readonly openPicker: { groupId: string; x: number; y: number } | null
-  readonly setOpenPicker: (picker: { groupId: string; x: number; y: number } | null) => void
+  readonly popupTabsTarget?: HTMLElement | null
   readonly getGroupHost: (groupId: string) => HTMLDivElement
   readonly onActivateGroup: (groupId: string) => void
   readonly onSelectTask: (groupId: string, taskId: string) => void
   readonly onCloseTask: (groupId: string, taskId: string) => void
-  readonly onSplit: (groupId: string, direction: SplitDirection, moveSource: boolean, taskId?: string, sessionKey?: string | null) => void
   readonly onCloseGroup: (groupId: string) => void
   readonly onDropTaskPage: (payload: TaskPageDragPayload, targetGroupId: string, zone: 'tab' | 'center' | SplitDirection, insertIndex?: number) => void
   readonly onDropSessionBinding: (taskId: string, sessionKey: string, targetGroupId: string, zone: 'center' | SplitDirection) => void
@@ -608,10 +563,6 @@ function PaneGroupFrame({
     [group.openTaskIds, taskById],
   )
   const canSplitMore = totalGroups < MAX_PANE_GROUPS
-  const otherTasks = useMemo(
-    () => tasks.filter((item) => !group.openTaskIds.includes(item.id)),
-    [tasks, group.openTaskIds],
-  )
 
   function calculateTabInsertIndex(clientX: number): number {
     const container = tabsRef.current
@@ -718,15 +669,8 @@ function PaneGroupFrame({
 
   const tablistLabel = isMultiGroup ? `Pane ${groupIndex + 1} task pages` : 'Open tasks'
 
-  return <section
-    className="pane-group-unit"
-    data-group-id={group.id}
-    data-pane-index={groupIndex}
-    data-pane-focused={isMultiGroup ? focused || undefined : undefined}
-    aria-label={isMultiGroup ? `Screen pane ${groupIndex + 1}` : undefined}
-    onPointerDownCapture={isMultiGroup && !focused ? () => onActivateGroup(group.id) : undefined}
-    onFocusCapture={isMultiGroup && !focused ? () => onActivateGroup(group.id) : undefined}
-  >
+  const canCloseTab = !isPopupWindow || isMultiGroup || openItems.length > 1
+  const tabsBar = (
     <div
       ref={tabsRef}
       className="editor-tabs"
@@ -767,12 +711,12 @@ function PaneGroupFrame({
             setTabDropIndex(null)
             setDropZone(undefined)
           }}
-          onAuxClick={(event) => {
+          onAuxClick={canCloseTab ? (event) => {
             if (event.button === 1) {
               event.preventDefault()
               onCloseTask(group.id, item.id)
             }
-          }}
+          } : undefined}
           onContextMenu={(event) => openTabContextMenu(event, item.id)}
         >
           <button
@@ -795,72 +739,28 @@ function PaneGroupFrame({
             <Icon name={item.kind === 'epic' ? 'layers' : 'file-text'} />
             <span>{item.title}</span>
           </button>
-          <IconButton icon="close" label={`Close ${item.title}`} onClick={() => onCloseTask(group.id, item.id)} />
+          {canCloseTab && <IconButton icon="close" label={`Close ${item.title}`} onClick={() => onCloseTask(group.id, item.id)} />}
         </div>
       })}
 
-      {((isPopupWindow && otherTasks.length > 0) || (Boolean(group.activeTaskId) && canSplitMore && (isMultiGroup || isPopupWindow)) || (isMultiGroup && !openItems.length)) && (
+      {isMultiGroup && !openItems.length && (
         <div className="editor-tabs-actions">
-          {isPopupWindow && otherTasks.length > 0 && <div className="pane-task-picker-wrap">
-            <IconButton
-              icon="add"
-              label="Open task page"
-              title="Open another task page in this pane"
-              aria-haspopup="menu"
-              aria-expanded={openPicker?.groupId === group.id}
-              onClick={(event) => {
-                if (openPicker?.groupId === group.id) {
-                  setOpenPicker(null)
-                  return
-                }
-                const rect = event.currentTarget.getBoundingClientRect()
-                setOpenPicker({
-                  groupId: group.id,
-                  x: Math.max(8, Math.min(window.innerWidth - 264, rect.right - 248)),
-                  y: Math.min(window.innerHeight - 200, rect.bottom + 4),
-                })
-              }}
-            />
-            {openPicker?.groupId === group.id && createPortal(
-              <div className="repository-dialog-theme session-context-portal" data-theme={theme}>
-                <div
-                  className="session-context-menu pane-task-picker-menu"
-                  role="menu"
-                  aria-label="Open task page"
-                  style={{ left: `${openPicker.x}px`, top: `${openPicker.y}px` }}
-                >
-                  {otherTasks.map((candidate) => <button
-                    key={candidate.id}
-                    type="button"
-                    role="menuitem"
-                    className="session-context-item"
-                    onClick={() => {
-                      setOpenPicker(null)
-                      onSelectTask(group.id, candidate.id)
-                    }}
-                  >
-                    <span>{candidate.title}</span>
-                    <span className="session-context-shortcut">{candidate.id}</span>
-                  </button>)}
-                </div>
-              </div>,
-              document.body,
-            )}
-          </div>}
-          {group.activeTaskId && canSplitMore && (isMultiGroup || isPopupWindow) && (
-            <IconButton
-              icon="split-horizontal"
-              label="Split task page right"
-              title="Split task page right (Ctrl+\) · Alt+Click to split down"
-              onClick={(event) => onSplit(group.id, event.altKey ? 'down' : 'right', false)}
-            />
-          )}
-          {isMultiGroup && !openItems.length && (
-            <IconButton icon="close" label="Close empty split pane" onClick={() => onCloseGroup(group.id)} />
-          )}
+          <IconButton icon="close" label="Close empty split pane" onClick={() => onCloseGroup(group.id)} />
         </div>
       )}
     </div>
+  )
+
+  return <section
+    className="pane-group-unit"
+    data-group-id={group.id}
+    data-pane-index={groupIndex}
+    data-pane-focused={isMultiGroup ? focused || undefined : undefined}
+    aria-label={isMultiGroup ? `Screen pane ${groupIndex + 1}` : undefined}
+    onPointerDownCapture={isMultiGroup && !focused ? () => onActivateGroup(group.id) : undefined}
+    onFocusCapture={isMultiGroup && !focused ? () => onActivateGroup(group.id) : undefined}
+  >
+    {popupTabsTarget ? createPortal(tabsBar, popupTabsTarget) : tabsBar}
 
     <div
       ref={slotRef}
@@ -889,9 +789,9 @@ const MountedChatPanel = memo(function MountedChatPanel({
   splitOrientation,
   closeLabel,
   hideClose,
+  minimalHeader,
   restoredDraft,
   headerTarget,
-  sessionSwitcher,
   cachedTitle,
   customTitle,
   visible,
@@ -921,9 +821,9 @@ const MountedChatPanel = memo(function MountedChatPanel({
   readonly splitOrientation: 'horizontal' | 'vertical'
   readonly closeLabel: string
   readonly hideClose: boolean
+  readonly minimalHeader: boolean
   readonly restoredDraft?: { readonly nonce: number; readonly text: string }
   readonly headerTarget?: HTMLElement | null
-  readonly sessionSwitcher?: ReactNode
   readonly cachedTitle?: string
   readonly customTitle?: string
   readonly visible: boolean
@@ -994,11 +894,11 @@ const MountedChatPanel = memo(function MountedChatPanel({
     paneSlot={slot}
     splitOrientation={splitOrientation}
     showTaskBadge={false}
+    minimalHeader={minimalHeader}
     closeLabel={closeLabel}
     hideClose={hideClose}
     restoredDraft={restoredDraft}
     headerTarget={headerTarget}
-    sessionSwitcher={sessionSwitcher}
     cachedTitle={cachedTitle}
     customTitle={customTitle}
     onTitles={onTitles}
@@ -1101,7 +1001,7 @@ function PaneGroupBody({
     () => activeTask ? orderedBindingsForTask(activeTask.id) : [],
     [activeTask, orderedBindingsForTask],
   )
-  const { sessionKey: activeSessionKey, binding: activeBinding, missingSelectedSession } = useMemo(
+  const { binding: activeBinding, missingSelectedSession } = useMemo(
     () => resolveGroupActiveBinding(group, activeTask?.id ?? null, activeTaskBindings, rememberedSessions, linksReady),
     [group, activeTask, activeTaskBindings, rememberedSessions, linksReady],
   )
@@ -1133,25 +1033,6 @@ function PaneGroupBody({
 
   const awaitingSyncCount = activeTask && awaitingSyncCountForTask ? awaitingSyncCountForTask(activeTask.id) : 0
 
-  const popupSessionSwitcher = isPopupWindow && activeTask && activeTaskBindings.length > 1 ? (
-    <select
-      className="popup-session-switcher"
-      aria-label={`Switch session for ${activeTask.id}`}
-      title="Switch active session in this task page (Ctrl+Shift+PgUp/PgDown)"
-      value={activeSessionKey ?? ''}
-      onChange={(event) => onSelectSession(activeTask.id, event.target.value)}
-      onPointerDown={(event) => event.stopPropagation()}
-      onClick={(event) => event.stopPropagation()}
-    >
-      {activeTaskBindings.map((candidate) => {
-        const key = sessionBindingKey(candidate)
-        const label = sessionBindingTitle(candidate, cachedTitles)
-        const host = machineLabel(candidate.owner, aliases)
-        return <option key={key} value={key}>{label} · {host}</option>
-      })}
-    </select>
-  ) : undefined
-
   const handleCloseGroup = useCallback(() => {
     onCloseGroup()
   }, [onCloseGroup])
@@ -1172,9 +1053,9 @@ function PaneGroupBody({
           splitOrientation={parentSplit?.orientation ?? 'horizontal'}
           closeLabel={isMultiGroup ? 'Close split pane' : 'Hide chat panel'}
           hideClose={isPopupWindow && !isMultiGroup}
+          minimalHeader={isPopupWindow}
           restoredDraft={draftLookup}
           headerTarget={!isMultiGroup && unifiedHeaderTarget ? unifiedHeaderTarget : undefined}
-          sessionSwitcher={visible ? popupSessionSwitcher : undefined}
           cachedTitle={cachedTitles[agentHostKey(panel.binding.agentHost)]}
           customTitle={customTitles?.[agentHostKey(panel.binding.agentHost)]}
           visible={visible}

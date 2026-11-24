@@ -49,6 +49,25 @@ export interface SessionWindowActivatedEvent {
   readonly pages?: readonly DockedTaskPage[]
 }
 
+export interface SessionWindowFocusSyncEvent {
+  readonly windowId: string
+  readonly taskId: string | null
+  readonly sessionKey: string | null
+  readonly activated: boolean
+  readonly closed?: boolean
+}
+
+export interface SessionWindowNavigateRequest {
+  readonly windowId: string
+  readonly taskId: string
+  readonly sessionKey?: string | null
+}
+
+export interface SessionWindowNavigateEvent {
+  readonly taskId: string
+  readonly sessionKey?: string | null
+}
+
 export interface SessionWindowBounds {
   readonly x: number
   readonly y: number
@@ -78,9 +97,13 @@ export interface DesktopSessionWindowsBridge {
   focus(request: { windowId?: string; taskId?: string; target?: AgentHostTarget }): Promise<boolean>
   dock(request?: { windowId?: string; taskId?: string; target?: AgentHostTarget; sessionKey?: string | null; draft?: string; pages?: readonly DockedTaskPage[] }): Promise<void>
   savePaneTree?(tree: PersistedPaneTreeState): Promise<void>
+  reportState?(state: { taskId: string | null; sessionKey?: string | null; activated?: boolean }): Promise<void>
+  navigate?(request: SessionWindowNavigateRequest): Promise<boolean>
   list(): Promise<SessionWindowSummary[]>
   onChanged(listener: (windows: SessionWindowSummary[]) => void): () => void
   onActivateSession(listener: (event: SessionWindowActivatedEvent) => void): () => void
+  onFocusSync?(listener: (event: SessionWindowFocusSyncEvent) => void): () => void
+  onNavigate?(listener: (event: SessionWindowNavigateEvent) => void): () => void
 }
 
 export interface DesktopBridge {

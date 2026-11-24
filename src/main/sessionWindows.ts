@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { agentHostKey } from '../shared/agentHost'
 import type { AgentHostTarget } from '../shared/agentHost'
 import { MAX_CHAT_TEXT_LENGTH } from '../shared/chatAttachments'
-import type { DesktopWindowContext, SessionWindowBounds, SessionWindowMode, SessionWindowSummary } from '../shared/desktop'
+import type { DesktopWindowContext, SessionWindowBounds, SessionWindowFocusSyncEvent, SessionWindowMode, SessionWindowNavigateEvent, SessionWindowSummary } from '../shared/desktop'
 import { persistedPaneTreeSchema } from '../shared/paneTreeSchema'
 import type { PersistedPaneTreeNode, PersistedPaneTreeState } from '../shared/paneTreeSchema'
 import type { WorkspaceState } from '../shared/workspace'
@@ -78,6 +78,18 @@ const dockSessionWindowSchema = z.object({
   pages: z.array(dockedPageSchema).max(32).optional(),
 }).strict().optional()
 
+const reportPopupStateSchema = z.object({
+  taskId: taskIdSchema.nullable(),
+  sessionKey: sessionKeySchema,
+  activated: z.boolean().optional(),
+}).strict()
+
+const navigateSessionWindowSchema = z.object({
+  windowId: z.string().uuid(),
+  taskId: taskIdSchema,
+  sessionKey: sessionKeySchema,
+}).strict()
+
 type SessionContext = Extract<DesktopWindowContext, { kind: 'session' }>
 
 interface PopoutEntry {
@@ -87,6 +99,8 @@ interface PopoutEntry {
   readonly workspaceId: string
   readonly workspaceRoot: string
   mode: SessionWindowMode
+  activeTaskId: string | null
+  activeSessionKey: string | null
   paneTree?: PersistedPaneTreeState
   bounds?: SessionWindowBounds
   context: SessionContext
@@ -351,6 +365,35 @@ export class SessionWindowManager {
     this.persistEntry(registered.entry)
   }
 
+  reportState(caller: BrowserWindow, stateInput: unknown): void {
+    const registered = [...this.bySenderId.values()].find((item) => item.window === caller)
+    if (registered?.kind !== 'session') return
+    const parsed = reportPopupStateSchema.parse(stateInput)
+    registered.entry.activeTaskId = parsed.taskId
+    registered.entry.activeSessionKey = parsed.sessionKey ?? null
+    this.publishFocusSync({
+      windowId: registered.entry.windowId,
+      taskId: registered.entry.activeTaskId,
+      sessionKey: registered.entry.activeSessionKey,
+      activated: Boolean(parsed.activated),
+    })
+  }
+
+  navigate(requestInput: unknown): boolean {
+    const request = navigateSessionWindowSchema.parse(requestInput)
+    const entry = [...this.popouts.values()].find((item) => item.windowId === request.windowId && !item.window.isDestroyed())
+    if (!entry || entry.window.webContents.isDestroyed()) return false
+    entry.activeTaskId = request.taskId
+    if (request.sessionKey !== undefined) entry.activeSessionKey = request.sessionKey
+    if (entry.window.isMinimized()) entry.window.restore()
+    const payload: SessionWindowNavigateEvent = {
+      taskId: request.taskId,
+      ...(request.sessionKey !== undefined ? { sessionKey: request.sessionKey } : {}),
+    }
+    entry.window.webContents.send('desktop:session-window-navigate', payload)
+    return true
+  }
+
   list(workspaceRoot = this.activeWorkspaceRoot): SessionWindowSummary[] {
     if (!workspaceRoot) return []
     const summaries: SessionWindowSummary[] = []
@@ -413,6 +456,12 @@ export class SessionWindowManager {
     main.webContents.send('desktop:session-windows-changed', this.list())
   }
 
+  private publishFocusSync(payload: SessionWindowFocusSyncEvent): void {
+    const main = this.main
+    if (!main || main.webContents.isDestroyed()) return
+    main.webContents.send('desktop:session-window-focus-sync', payload)
+  }
+
   private focusBrowserWindow(window: BrowserWindow): void {
     if (window.isDestroyed()) return
     if (window.isMinimized()) window.restore()
@@ -467,6 +516,12 @@ export class SessionWindowManager {
         this.publishChanged()
       }
       this.focusBrowserWindow(existing.window)
+      this.publishFocusSync({
+        windowId: existing.windowId,
+        taskId: existing.activeTaskId,
+        sessionKey: existing.activeSessionKey,
+        activated: true,
+      })
       return { opened: true, reused: true }
     }
 
@@ -645,6 +700,8 @@ export class SessionWindowManager {
         workspaceId,
         workspaceRoot,
         mode,
+        activeTaskId: context.task.id,
+        activeSessionKey: context.sessionKey ?? (context.target ? `ahp:${agentHostKey(context.target)}` : null),
         ...(paneTree ? { paneTree } : {}),
         ...(bounds ? { bounds } : {}),
         context,
@@ -653,6 +710,17 @@ export class SessionWindowManager {
       this.popouts.set(entryKey, entry)
       this.bySenderId.set(senderId, { kind: 'session', entry, window })
       this.attachBoundsListeners(entry)
+      if (typeof window.on === 'function') {
+        window.on('focus', () => {
+          if (window.isDestroyed() || this.closingAll || this.preservingShutdown) return
+          this.publishFocusSync({
+            windowId: entry.windowId,
+            taskId: entry.activeTaskId,
+            sessionKey: entry.activeSessionKey,
+            activated: true,
+          })
+        })
+      }
       const cleanup = () => {
         const removed = this.popouts.get(entryKey) === entry
         if (removed) this.popouts.delete(entryKey)
@@ -662,7 +730,16 @@ export class SessionWindowManager {
         }
         this.options.onSessionWindowClosed?.(window)
         this.options.onAnyWindowClosedDuringInstall?.()
-        if (removed && !this.closingAll && !this.preservingShutdown) this.publishChanged()
+        if (removed && !this.closingAll && !this.preservingShutdown) {
+          this.publishFocusSync({
+            windowId: entry.windowId,
+            taskId: null,
+            sessionKey: null,
+            activated: false,
+            closed: true,
+          })
+          this.publishChanged()
+        }
       }
       window.webContents.once('render-process-gone', () => this.options.onSessionWindowClosed?.(window))
       window.once('closed', cleanup)
@@ -678,8 +755,17 @@ export class SessionWindowManager {
       }
       this.persistEntry(entry)
       this.publishChanged()
-      if (focusOnOpen) this.focusBrowserWindow(window)
-      else this.showRestoredBrowserWindow(window, bounds?.maximized)
+      if (focusOnOpen) {
+        this.focusBrowserWindow(window)
+        this.publishFocusSync({
+          windowId: entry.windowId,
+          taskId: entry.activeTaskId,
+          sessionKey: entry.activeSessionKey,
+          activated: true,
+        })
+      } else {
+        this.showRestoredBrowserWindow(window, bounds?.maximized)
+      }
       return { opened: true, reused: false }
     })().finally(() => {
       this.opening.delete(entryKey)
@@ -695,6 +781,12 @@ export class SessionWindowManager {
       const byId = [...this.popouts.values()].find((entry) => entry.windowId === request.windowId && !entry.window.isDestroyed())
       if (!byId) return false
       this.focusBrowserWindow(byId.window)
+      this.publishFocusSync({
+        windowId: byId.windowId,
+        taskId: byId.activeTaskId,
+        sessionKey: byId.activeSessionKey,
+        activated: true,
+      })
       return true
     }
     if (!request.taskId) return false
@@ -705,6 +797,12 @@ export class SessionWindowManager {
     const existing = this.popouts.get(entryKey)
     if (!existing || existing.window.isDestroyed()) return false
     this.focusBrowserWindow(existing.window)
+    this.publishFocusSync({
+      windowId: existing.windowId,
+      taskId: existing.activeTaskId,
+      sessionKey: existing.activeSessionKey,
+      activated: true,
+    })
     return true
   }
 

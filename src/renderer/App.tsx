@@ -162,6 +162,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const [expandSessionRequest, setExpandSessionRequest] = useState<{ taskId: string; key: string; id: number; active: boolean }>()
   const [renameSessionRequest, setRenameSessionRequest] = useState<{ taskId: string; key: string; id: number }>()
   const [popoutWindows, setPopoutWindows] = useState<SessionWindowSummary[]>([])
+  const [activePopup, setActivePopup] = useState<{ windowId: string; taskId: string | null; sessionKey: string | null } | null>(null)
   const [restoredDrafts, setRestoredDrafts] = useState<Record<string, { nonce: number; text: string }>>({})
   const [sidebarContextMenu, setSidebarContextMenu] = useState<SessionContextMenuTarget | null>(null)
   const [busyPanels, setBusyPanels] = useState<Record<string, boolean>>({})
@@ -220,11 +221,27 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   const activePanelKey = task && activeBinding ? `${task.id}:${sessionBindingKey(activeBinding)}` : undefined
 
   const popoutPanelKeys = useMemo(() => new Set(popoutWindows.map((item) => item.key)), [popoutWindows])
-  const sidebarTask = task
+  const popupInspectedTask = useMemo(
+    () => activePopup?.taskId ? tasks.find((item) => item.id === activePopup.taskId) : undefined,
+    [activePopup?.taskId, tasks],
+  )
+  const sidebarTask = activePopup ? popupInspectedTask : task
   const sidebarSortMode = selection.taskSortMode(sidebarTask?.id)
   const sidebarOrderedKeys = sidebarTask ? selection.sessionOrders[sidebarTask.id] : undefined
   const sidebarSessionLayout = sidebarTask ? selection.sessionGroups[sidebarTask.id] : undefined
-  const sidebarActiveKey = activeKey
+  const sidebarActiveKey = useMemo(() => {
+    if (!activePopup) return activeKey
+    if (!sidebarTask) return undefined
+    const ordered = orderedBindingsForTask(sidebarTask.id)
+    if (activePopup.sessionKey && ordered.some((item) => sessionBindingKey(item) === activePopup.sessionKey)) {
+      return activePopup.sessionKey
+    }
+    const remembered = selection.sessions[sidebarTask.id]
+    if (remembered && ordered.some((item) => sessionBindingKey(item) === remembered)) {
+      return remembered
+    }
+    return ordered[0] ? sessionBindingKey(ordered[0]) : undefined
+  }, [activePopup, activeKey, sidebarTask, orderedBindingsForTask, selection.sessions])
   const sidebarPopoutKeys = useMemo(() => {
     if (!sidebarTask) return undefined
     const keys = new Set<string>()
@@ -312,8 +329,8 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     creationLifetime.current = scope
     return () => { scope.active = false }
   }, [])
-  useEffect(() => { currentTaskId.current = selectedId }, [selectedId])
-  useEffect(() => { currentSessionKey.current = activeKey }, [activeKey])
+  useEffect(() => { currentTaskId.current = sidebarTask?.id ?? selectedId }, [sidebarTask?.id, selectedId])
+  useEffect(() => { currentSessionKey.current = sidebarActiveKey }, [sidebarActiveKey])
   const rememberDefaultSession = selection.rememberDefaultSession
   useEffect(() => {
     if (!task || !activeBinding || !links.ready) return
@@ -323,7 +340,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     const scope = { active: sidebarVisible && sidebarView === 'sessions' }
     sessionViewLifetime.current = scope
     return () => { scope.active = false }
-  }, [sidebarVisible, sidebarView, selectedId])
+  }, [sidebarVisible, sidebarView, sidebarTask?.id])
 
   useEffect(() => { saveLayout(layout) }, [layout])
   useEffect(() => {
@@ -396,6 +413,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
       const primary = pagesToDock.find((item) => item.taskId === event.taskId) ?? pagesToDock.at(-1)!
       return openTaskPageInGroup(next, next.activeGroupId, primary.taskId, primary.sessionKey)
     })
+    setActivePopup(null)
     showTaskChat()
   })
 
@@ -403,13 +421,34 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
     const windowsBridge = window.desktop?.windows
     if (!windowsBridge) return
     let mounted = true
-    void windowsBridge.list().then((items) => { if (mounted) setPopoutWindows(items) }).catch(() => undefined)
-    const unlistenChanged = windowsBridge.onChanged((items) => { if (mounted) setPopoutWindows(items) })
+    void windowsBridge.list().then((items) => {
+      if (!mounted) return
+      setPopoutWindows(items)
+      if (!items.length) setActivePopup(null)
+    }).catch(() => undefined)
+    const unlistenChanged = windowsBridge.onChanged((items) => {
+      if (!mounted) return
+      setPopoutWindows(items)
+      if (!items.length) setActivePopup(null)
+    })
     const unlistenActivate = windowsBridge.onActivateSession((event) => activateDockedSession(event))
+    const unlistenFocusSync = windowsBridge.onFocusSync?.((event) => {
+      if (!mounted) return
+      if (event.closed) {
+        setActivePopup((current) => current?.windowId === event.windowId ? null : current)
+      } else if (event.activated) {
+        setActivePopup({ windowId: event.windowId, taskId: event.taskId, sessionKey: event.sessionKey })
+      } else {
+        setActivePopup((current) => current?.windowId === event.windowId
+          ? { windowId: event.windowId, taskId: event.taskId, sessionKey: event.sessionKey }
+          : current)
+      }
+    })
     return () => {
       mounted = false
       unlistenChanged()
       unlistenActivate()
+      unlistenFocusSync?.()
     }
   }, [workspaceRoot])
 
@@ -525,6 +564,28 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
   }, [compact, primaryPanel, dialog, taskCreationMode, repositorySetupOpen, workspace, workspaces.available, workspaces.busy, workspaceLocked, toggleChat, toggleDetails, toggleSidebar])
 
   function selectTask(id: string): void {
+    if (activePopup && window.desktop?.windows?.navigate) {
+      const ordered = orderedBindingsForTask(id)
+      const remembered = selection.sessions[id]
+      const resolvedKey = remembered && ordered.some((item) => sessionBindingKey(item) === remembered)
+        ? remembered
+        : ordered[0]
+          ? sessionBindingKey(ordered[0])
+          : null
+      currentTaskId.current = id
+      currentSessionKey.current = resolvedKey ?? undefined
+      setActivePopup((current) => current?.windowId === activePopup.windowId
+        ? { windowId: activePopup.windowId, taskId: id, sessionKey: resolvedKey }
+        : current)
+      void window.desktop.windows.navigate({
+        windowId: activePopup.windowId,
+        taskId: id,
+        sessionKey: resolvedKey,
+      }).then((ok) => {
+        if (!ok) setActivePopup(null)
+      }).catch(() => setActivePopup(null))
+      return
+    }
     currentTaskId.current = id
     applyTreeChange((current) => openTaskPageInGroup(current, current.activeGroupId, id))
     showChat()
@@ -588,6 +649,22 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
 
   function selectSession(taskId: string, binding: SessionBinding): void {
     const key = sessionBindingKey(binding)
+    if (activePopup && window.desktop?.windows?.navigate) {
+      currentTaskId.current = taskId
+      currentSessionKey.current = key
+      setActivePopup((current) => current?.windowId === activePopup.windowId
+        ? { windowId: activePopup.windowId, taskId, sessionKey: key }
+        : current)
+      selection.rememberDefaultSession(taskId, key)
+      void window.desktop.windows.navigate({
+        windowId: activePopup.windowId,
+        taskId,
+        sessionKey: key,
+      }).then((ok) => {
+        if (!ok) setActivePopup(null)
+      }).catch(() => setActivePopup(null))
+      return
+    }
     const ordered = orderedBindingsForTask(taskId)
     const fallbackKey = Object.hasOwn(selection.sessions, taskId)
       ? selection.sessions[taskId] ?? undefined
@@ -805,10 +882,15 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
         onLayoutChange={sidebarTask ? (next, makeManual) => selection.setSessionLayout(sidebarTask.id, next, makeManual, selectedId, openTasks) : undefined}
         onSortMode={sidebarTask ? (mode) => selection.setSessionSort(sidebarTask.id, mode, selectedId, openTasks) : undefined}
         onDetach={sidebarTask ? (binding) => detachSession(sidebarTask.id, binding) : undefined} onLink={linkAgentHost} onCreated={agentHostCreated}
-        onDevices={() => setDialog('remote-devices')} onClose={toggleSidebar} /> : <TaskSidebar key={createdTaskId ?? 'initial'} tasks={tasks} selectedId={selectedId} query={query} onQuery={setQuery} onSelect={selectTask} onCreate={onCreateRepository} onCreateTask={openTaskCreation} creationDisabled={!workspaces.available || workspaceLocked || workspaces.busy} onClose={toggleSidebar} workspace={workspace ?? undefined} workspaceControls={workspaceControls} />)}
+        onDevices={() => setDialog('remote-devices')} onClose={toggleSidebar} /> : <TaskSidebar key={createdTaskId ?? 'initial'} tasks={tasks} selectedId={sidebarTask?.id ?? selectedId} query={query} onQuery={setQuery} onSelect={selectTask} onCreate={onCreateRepository} onCreateTask={openTaskCreation} creationDisabled={!workspaces.available || workspaceLocked || workspaces.busy} onClose={toggleSidebar} workspace={workspace ?? undefined} workspaceControls={workspaceControls} />)}
       {!compact && sidebarVisible && <WorkbenchSash layout={layout} panel="sidebar" onResize={(width) => changePanelWidth('sidebar', width)} onReset={() => changePanelWidth('sidebar', defaultLayout.sidebarWidth)} />}
 
-      <Activity mode={compact && sidebarVisible ? 'hidden' : 'visible'}><main className="main-panel" aria-label="Task workspace" aria-keyshortcuts="Control+Shift+PageUp Control+Shift+PageDown">
+      <Activity mode={compact && sidebarVisible ? 'hidden' : 'visible'}><main
+        className="main-panel"
+        aria-label="Task workspace"
+        aria-keyshortcuts="Control+Shift+PageUp Control+Shift+PageDown"
+        onPointerDownCapture={activePopup ? () => setActivePopup(null) : undefined}
+      >
         {(!chatVisible || taskAgentOpen) && (
           <div className="editor-tabs" role="tablist" aria-label="Open tasks" aria-keyshortcuts="Control+PageUp Control+PageDown">
             {openTasks.map((id, index) => {
@@ -872,7 +954,7 @@ function Workbench({ workspaces, updates, updateSafetyError, repositorySetupOpen
           <Activity mode={detailsVisible ? 'visible' : 'hidden'}><aside className="task-details-panel" aria-label="Task details">
             <header className="panel-header"><span>TASK DETAILS</span><IconButton icon="layout-sidebar-right-off" label="Hide task details" onClick={toggleDetails} /></header>
             <div className="task-details-content">
-              {task ? <TaskViewer task={task} workspaceName={workspace?.name} onChat={showTaskChat} /> : <div className="empty-workbench workspace-empty">
+              {(sidebarTask ?? task) ? <TaskViewer task={(sidebarTask ?? task)!} workspaceName={workspace?.name} onChat={showTaskChat} /> : <div className="empty-workbench workspace-empty">
                 <Icon name={workspace ? 'folder-opened' : 'repo'} />
                 <h1>{workspaces.busy ? 'Loading workspace...' : workspace ? !tasks.length ? 'No tasks in this workspace' : 'Make room for meaningful work.' : 'Create your task repository'}</h1>
                 <p>{workspace ? workspace.name : 'A dedicated Git repository for your task files and configuration. Start empty, then publish to GitHub when you are ready.'}</p>

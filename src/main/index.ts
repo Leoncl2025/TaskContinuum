@@ -145,6 +145,15 @@ function registerDesktopBridge(): void {
     sessionWindows?.savePaneTree(window, tree)
     return Promise.resolve()
   })
+  handleDesktopOperation(ipcMain, 'desktop:session-window-report-state', (event, state: unknown) => {
+    const window = requireTrustedWindow(event)
+    sessionWindows?.reportState(window, state)
+    return Promise.resolve()
+  })
+  handleDesktopOperation(ipcMain, 'desktop:session-window-navigate', (event, request: unknown) => {
+    requireMainWindow(event)
+    return Promise.resolve(sessionWindows?.navigate(request) ?? false)
+  })
 }
 
 function configureRendererSession(webSession: Electron.Session): void {

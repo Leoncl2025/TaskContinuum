@@ -419,6 +419,7 @@ type AgentHostPanelProps = {
   paneSlot?: 'single' | 'primary' | 'secondary'
   splitOrientation?: 'horizontal' | 'vertical'
   showTaskBadge?: boolean
+  minimalHeader?: boolean
   closeLabel?: string
   hideClose?: boolean
   restoredDraft?: { readonly nonce: number; readonly text: string }
@@ -482,7 +483,7 @@ function HeaderTitleInput({ value, onFinish }: { value: string; onFinish(next: s
   />
 }
 
-export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, visible = true, paneSlot, splitOrientation = 'horizontal', showTaskBadge = false, closeLabel = 'Hide chat panel', hideClose = false, restoredDraft, headerTarget, sessionSwitcher, cachedTitle, customTitle, onTitles, onRenameTitle, onDraftChange, onActivatePane, onSplitRight, onSplitDown, onToggleSplitOrientation, onSwapSplit, onPopOut, onHeaderContextMenu, onDetach, onClose, onDevices, onSessions, onBusy, panelKey, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
+export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, target, connectionRevision = 0, active = true, visible = true, paneSlot, splitOrientation = 'horizontal', showTaskBadge = false, minimalHeader = false, closeLabel = 'Hide chat panel', hideClose = false, restoredDraft, headerTarget, sessionSwitcher, cachedTitle, customTitle, onTitles, onRenameTitle, onDraftChange, onActivatePane, onSplitRight, onSplitDown, onToggleSplitOrientation, onSwapSplit, onPopOut, onHeaderContextMenu, onDetach, onClose, onDevices, onSessions, onBusy, panelKey, beforeReconnect, prepareFirstMessage }: AgentHostPanelProps) {
   const bridge = window.agentHost
   const { sessionId, chatId } = target
   const { clientId, machineName } = target.owner
@@ -839,7 +840,7 @@ export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, ta
     )
   } : undefined}>
     <div className="ahp-chat-title">
-      <Icon name="copilot" />
+      {!minimalHeader && <Icon name="copilot" />}
       {showTaskBadge && task && <span className="ahp-chat-task-badge" title={task.title}>{task.id}</span>}
       {editingTitle && onRenameTitle ? (
         <HeaderTitleInput
@@ -865,11 +866,13 @@ export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, ta
     </div>
     <div className="ahp-chat-meta">
       <span className="ahp-chat-status" role="status" data-state={stateLabel} title={stateLabel}><span aria-hidden="true" /><span className="ahp-chat-state-label">{stateLabel}</span></span>
-      <span className="ahp-chat-machine" title={ownerLabel}><Icon name="server" /><span>Copilot @ {ownerLabel}</span></span>
+      <span className="ahp-chat-machine" title={machineName}>{!minimalHeader && <Icon name="server" />}<span>{minimalHeader ? ownerLabel : `Copilot @ ${ownerLabel}`}</span></span>
     </div>
     <div className="ahp-chat-actions">
-      <IconButton icon={headerTarget ? 'ellipsis' : 'info'} label="Chat details" title={headerTarget ? 'Chat details and actions' : 'Chat details'} aria-haspopup="dialog" aria-expanded={detailsOpen} onClick={() => setDetailsKey(key)} />
-      <div className="ahp-chat-secondary-actions">{chatActions}</div>
+      <IconButton icon={headerTarget || minimalHeader ? 'ellipsis' : 'info'} label="Chat details" title={headerTarget || minimalHeader ? 'Chat details and actions' : 'Chat details'} aria-haspopup="dialog" aria-expanded={detailsOpen} onClick={() => setDetailsKey(key)} />
+      {minimalHeader
+        ? (!workspace && !hideClose && <IconButton icon="close" label={closeLabel} onClick={() => { setDetailsKey(undefined); onClose() }} />)
+        : <div className="ahp-chat-secondary-actions">{chatActions}</div>}
     </div>
   </HeaderTag>
   return <ChatLinkTargetContext.Provider value={stableTarget}><ChatLinkActiveContext.Provider value={active}><aside ref={panel} className="chat-panel ahp-panel" data-pane-slot={paneSlot} data-pane-focused={paneSlot && paneSlot !== 'single' ? active || undefined : undefined} aria-label={workspace ? 'Agent Host task creation chat' : paneSlot === 'secondary' ? 'Secondary split Agent Host task chat' : 'Agent Host task chat'} aria-keyshortcuts="F5" data-update-blocker={updateBlocker} onPointerDownCapture={onActivatePane ? () => onActivatePane() : undefined} onFocusCapture={onActivatePane ? () => onActivatePane() : undefined}>
@@ -885,7 +888,7 @@ export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, ta
         <dt>Chat ID</dt><dd><code>{chatId}</code></dd>
         <dt>Protocol</dt><dd>{view?.protocolVersion ? `AHP ${view.protocolVersion}` : 'Not negotiated'}</dd>
       </dl>
-      {headerTarget && <div className="dialog-actions" role="group" aria-label="Chat actions">{chatActions}</div>}
+      {(headerTarget || minimalHeader) && <div className="dialog-actions" role="group" aria-label="Chat actions">{chatActions}</div>}
     </Dialog>}
     <div className="chat-log" ref={log} role="log" aria-label={`Agent Host conversation for ${contextLabel}`} aria-live="polite" onCopy={(event) => {
       try { copyMarkdownSelection(event) }
