@@ -25,7 +25,7 @@ import { DesktopOperationUnavailableError } from './desktopOperations'
 
 export interface AgentHostAccess {
   canSend: boolean
-  actor: { clientId: string; machineName: string; username?: string }
+  actor: { clientId: string; machineName: string; username?: string; displayName?: string }
   current?(): boolean
 }
 export interface AgentHostGatewayOptions {
@@ -484,8 +484,17 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
                   const images = action.message.attachments?.map((image) => ({ id: image._meta.taskcontinuumImageId, name: image.label, mimeType: image.contentType, data: image.data })) as ChatImageAttachment[] | undefined
                   const command = chatSubmissionSchema.parse({ id: action.turnId, text: action.message.text, ...(images?.length ? { images } : {}) })
                   const model = agentHostModelSelectionSchema.optional().parse(action.message.model)
+                  const parsedSenderDisplay = z.object({
+                    taskcontinuumActor: z.object({
+                      displayName: z.string().trim().min(1).max(80).optional(),
+                    }).loose().optional(),
+                  }).loose().safeParse(action.message._meta)
+                  const senderDisplay = parsedSenderDisplay.success ? parsedSenderDisplay.data.taskcontinuumActor?.displayName : undefined
+                  const effectiveActor = senderDisplay
+                    ? { ...access.actor, displayName: senderDisplay }
+                    : access.actor
                   step = 'native'
-                  await connection.send(command.id, command.text, command.images, async () => { await requestAuthorization(true) }, access.actor, model)
+                  await connection.send(command.id, command.text, command.images, async () => { await requestAuthorization(true) }, effectiveActor, model)
                 } else if (params.action.type === 'chat/turnCancelled') {
                   const action = z.object({ type: z.literal('chat/turnCancelled'), turnId: z.string().min(1).max(200), duration: z.number().nonnegative() }).strict().parse(params.action)
                   await connection.cancel(action.turnId, async () => { await requestAuthorization(true) })

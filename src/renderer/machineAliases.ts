@@ -80,6 +80,5 @@ export function useWorkspaceGitSync(): GitSyncContext {
 }
 
 export function machineLabel(owner: { clientId?: string; machineName: string }, aliases: Readonly<Record<string, string>>): string {
-  const name = machineDisplayName(owner, aliases)
-  return name === owner.machineName ? name : `${name} (${owner.machineName})`
+  return machineDisplayName(owner, aliases)
 }

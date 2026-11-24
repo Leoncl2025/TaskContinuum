@@ -804,7 +804,7 @@ export class AgentHostConnection {
     if (errors.length) throw new Error(errors.join(' '))
   }
 
-  async send(id: string, text: string, images: ChatImageAttachment[] | undefined, authorize: () => Promise<void>, actor?: { clientId: string; machineName: string; username?: string }, model?: ModelSelection): Promise<void> {
+  async send(id: string, text: string, images: ChatImageAttachment[] | undefined, authorize: () => Promise<void>, actor?: { clientId: string; machineName: string; username?: string; displayName?: string }, model?: ModelSelection): Promise<void> {
     const command = { ...chatSubmissionSchema.parse({ id, text, ...(images?.length ? { images } : {}) }), ...(model === undefined ? {} : { model: agentHostModelSelectionSchema.parse(model) }) }
     if (this.sending || this.reviewing) {
       const error = new Error('Another delivery or review is in progress for this chat.')

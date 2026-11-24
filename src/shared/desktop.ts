@@ -3,11 +3,18 @@ import type { ChatLinkBridge } from './chatLinks'
 import type { PersistedPaneTreeState } from './paneTreeSchema'
 import type { TaskRecord } from './tasks'
 
+export interface DesktopUserProfile {
+  readonly clientId: string
+  readonly loginUsername: string
+  readonly displayName: string
+}
+
 export interface DesktopInfo {
   name: string
   version: string
   platform: string
   security: { contextIsolated: boolean; sandboxed: boolean }
+  userProfile?: DesktopUserProfile
 }
 
 export type SessionWindowMode = 'move' | 'copy'

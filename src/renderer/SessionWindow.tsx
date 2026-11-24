@@ -16,6 +16,7 @@ import type { useUpdates } from './components/UpdateSettings'
 import { readLayout } from './layout'
 import { machineLabel, useMachineAliases } from './machineAliases'
 import { MachineAliasesProvider } from './MachineAliasesProvider'
+import { UserProfileContext, useUserProfileState } from './userProfile'
 import {
   activePaneGroup,
   closeTaskPageInGroup,
@@ -85,6 +86,7 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
 
   const [chatHeaderTarget, setChatHeaderTarget] = useState<HTMLDivElement | null>(null)
   const [desktop, setDesktop] = useState<DesktopInfo>()
+  const userProfile = useUserProfileState(desktop?.userProfile)
   const [fullScreen, setFullScreen] = useState(false)
   const [desktopError, setDesktopError] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -375,7 +377,7 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
   const unifiedChatHeader = !isMultiPane && Boolean(activeBinding)
   const ownerDisplay = activeBinding ? machineLabel(activeBinding.owner, aliases) : undefined
 
-  return <div className="workbench session-window" data-theme={theme} data-compact={false}>
+  return <UserProfileContext.Provider value={userProfile}><div className="workbench session-window" data-theme={theme} data-compact={false}>
     <header className="titlebar session-window-titlebar" aria-label="Session window toolbar" data-chat-header={unifiedChatHeader}>
       <div className="app-brand session-window-brand">
         <span className="brand-mark"><img src={appIcon} alt="" width={20} height={20} /></span>
@@ -438,5 +440,5 @@ function SessionWindowShell({ context, updates, updateSafetyError }: {
     </footer>
 
     <UpdateNotice updates={updates} />
-  </div>
+  </div></UserProfileContext.Provider>
 }

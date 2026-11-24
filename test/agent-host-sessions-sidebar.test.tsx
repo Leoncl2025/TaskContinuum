@@ -141,7 +141,7 @@ describe('AgentHostSessionsSidebar', () => {
       cachedTitles={{ [agentHostKey(target)]: 'Remembered work' }} onLink={onLink} onDevices={vi.fn()} onClose={vi.fn()} /></MachineAliasesProvider>)
 
     const row = await screen.findByRole('region', { name: 'Host session Remembered work' })
-    expect(within(row).getByText(`Build desk (${target.owner.machineName}) / Read and send`)).toBeInTheDocument()
+    expect(within(row).getByText('Build desk / Read and send')).toBeInTheDocument()
     const search = screen.getByRole('textbox', { name: 'Find Agent Host session' })
     for (const query of ['Remembered work', 'Build desk', target.owner.machineName]) {
       await user.clear(search)
@@ -194,12 +194,20 @@ describe('AgentHostSessionsSidebar', () => {
       bindings={{ 'T-0002': [first, second] }} activeKey={sessionBindingKey(first)} onSelect={onSelect} onDetach={onDetach}
       onLink={vi.fn()} onDevices={vi.fn()} onClose={vi.fn()} /></MachineAliasesProvider>)
 
-    expect(await screen.findByText(`Office (${first.owner.machineName})`)).toHaveAttribute('title', first.owner.machineName)
-    expect(screen.getByText(`Laptop (${second.owner.machineName})`)).toBeInTheDocument()
+    expect(await screen.findByText('Office')).toHaveAttribute('title', first.owner.machineName)
+    expect(screen.getByText('Laptop')).toBeInTheDocument()
+    expect(screen.queryByText(first.owner.machineName)).not.toBeInTheDocument()
     expect(screen.getByRole('treeitem', { name: first.title })).toHaveAttribute('aria-selected', 'true')
     git.setStatus({ ...git.getStatus(), machineAliases: { [first.owner.clientId]: 'Build desk', [second.owner.clientId]: 'Laptop' } })
     await act(async () => git.notify())
-    expect(screen.getByText(`Build desk (${first.owner.machineName})`)).toBeInTheDocument()
+    expect(screen.getByText('Build desk')).toBeInTheDocument()
+    await user.pointer({ target: screen.getByRole('button', { name: `Open ${first.title}` }), keys: '[MouseRight]' })
+    await user.click(screen.getByRole('menuitem', { name: 'Session Details' }))
+    const details = screen.getByRole('group', { name: `Details for ${first.title}` })
+    expect(within(details).getByText('Build desk')).toBeInTheDocument()
+    expect(within(details).getByText(first.owner.machineName)).toBeInTheDocument()
+    await user.click(within(details).getByRole('button', { name: `Hide details for ${first.title}` }))
+    expect(screen.queryByText(first.owner.machineName)).not.toBeInTheDocument()
     expect(screen.getByRole('treeitem', { name: first.title })).toHaveAttribute('aria-selected', 'true')
     expect(onSelect).not.toHaveBeenCalled()
     expect(onDetach).not.toHaveBeenCalled()

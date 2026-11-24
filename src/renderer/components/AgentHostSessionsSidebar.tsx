@@ -242,7 +242,7 @@ export function AgentHostSessionsSidebar({ taskId, taskTitle, taskReady = false,
     const needle = query.trim().toLowerCase()
     const decorated = sessions
       .filter((session) => (location === 'all' || !localOwnerId || session.owner.clientId === localOwnerId)
-        && (!needle || `${cachedTitles?.[agentHostKey(session)] ?? session.title} ${session.sessionId} ${machineLabel(session.owner, aliases)}`.toLowerCase().includes(needle)))
+        && (!needle || `${cachedTitles?.[agentHostKey(session)] ?? session.title} ${session.sessionId} ${machineLabel(session.owner, aliases)} ${session.owner.machineName}`.toLowerCase().includes(needle)))
       .map((session, index) => {
         const key = agentHostKey(session)
         const label = cachedTitles?.[key] ?? session.title

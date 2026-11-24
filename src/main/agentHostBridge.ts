@@ -12,6 +12,7 @@ import type { AgentHostConnection } from './agentHostConnection'
 import { isAgentHostTurnBoundary } from './agentHostConnection'
 import type { AgentHostEvent } from './agentHostConnection'
 import { readClientIdentity } from './clientIdentity'
+import { resolveLocalUserProfile } from './userProfile'
 import { agentHostCreateRequestSchema, creationLocationSchema, creationTaskIdSchema } from './agentHostCreationProtocol'
 import { localAgentHostCreateRequestSchema } from './localAgentHostCreationService'
 import { handleDesktopOperation } from './desktopOperations'
@@ -316,7 +317,14 @@ export function registerAgentHostBridge(requireWindow: (event: IpcMainInvokeEven
     const selection = agentHostModelSelectionSchema.optional().parse(model)
     const { connection, release } = await acquire(event, window, root, target)
     try {
-      return await connection.send(command.id, command.text, command.images, () => current(event, window, root, target), await readClientIdentity(app.getPath('userData')), selection)
+      const [identity, profile] = await Promise.all([
+        readClientIdentity(app.getPath('userData')),
+        resolveLocalUserProfile(app.getPath('userData'), root).catch(() => undefined),
+      ])
+      const actor = profile?.displayName && profile.displayName !== identity.username
+        ? { ...identity, displayName: profile.displayName }
+        : identity
+      return await connection.send(command.id, command.text, command.images, () => current(event, window, root, target), actor, selection)
     } finally { release() }
   })
   handleDesktopOperation(ipcMain, 'agent-host:resolve-delivery', async (event, value: unknown, turnValue: unknown, actionValue: unknown, acknowledged: unknown) => {

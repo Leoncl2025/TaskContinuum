@@ -119,7 +119,7 @@ test('links and streams original AHP chats with current receipts and explicit li
       retiredBridges: ['copilot', 'vscodeChat', 'sharedSessions'].filter((name) => Reflect.has(window, name)),
     }))
     expect(security.info.security).toEqual({ contextIsolated: true, sandboxed: true })
-    expect(security.keys).toEqual(['bindCreation', 'cancel', 'create', 'createLocal', 'creationStatus', 'creationWorkers', 'creations', 'list', 'localCreationHosts', 'localCreationStatus', 'localCreations', 'models', 'onView', 'releaseTerminal', 'resolveDelivery', 'send', 'terminal', 'unwatch', 'watch'])
+    expect(security.keys).toEqual(['abandonCreation', 'bindCreation', 'cancel', 'create', 'createLocal', 'creationStatus', 'creationWorkers', 'creations', 'list', 'loadHistory', 'localCreationHosts', 'localCreationStatus', 'localCreations', 'models', 'onHistoryTransfer', 'onView', 'releaseTerminal', 'rename', 'resolveDelivery', 'send', 'terminal', 'unwatch', 'watch'])
     expect(security.require).toBe('undefined')
     expect(security.retiredBridges).toEqual([])
     expect(await page!.evaluate(async (value) => { try { await window.agentHost!.watch({ ...value, chatId: 'ahp-chat:/not-linked' }); return false } catch { return true } }, target)).toBe(true)
@@ -163,8 +163,9 @@ test('links and streams original AHP chats with current receipts and explicit li
     await panel.getByRole('button', { name: 'Send to Agent Host' }).click()
     await expect.poll(() => fixture.dispatches.length).toBe(1)
     expect(fixture.dispatches[0]).toMatchObject({ message: { model: { id: 'gpt-6', config: { thinkingLevel: 'max', contextSize: 872000 } } } })
-    await expect(panel.getByText('Requested model: gpt-6')).toBeVisible()
-    await expect(panel.getByText('Requested config: {"thinkingLevel":"max","contextSize":872000}', { exact: true })).toBeVisible()
+    const modelPill = panel.locator('.turn-model-pill')
+    await expect(modelPill).toContainText('gpt-6')
+    await expect(modelPill).toContainText('Max · 872K')
     const turnId = (fixture.dispatches[0] as { turnId: string }).turnId
     fixture.action({ type: 'chat/responsePart', turnId, part: { id: 'answer', kind: 'markdown', content: '' } })
     fixture.action({ type: 'chat/delta', turnId, partId: 'answer', content: '## Live reply\n\n**Streaming before completion**\n\n```ts\nconst exactSession = true;\n```' })

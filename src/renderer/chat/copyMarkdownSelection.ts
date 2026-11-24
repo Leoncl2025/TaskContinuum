@@ -55,7 +55,7 @@ export function copyMarkdownSelection(event: ClipboardEvent<HTMLElement>): void 
     if (href && parseChatLink(href)) link.setAttribute('href', href)
     else link.removeAttribute('href')
   }
-  fragment.querySelectorAll('button, input, textarea, select, script, style, iframe, img, .message-code-header').forEach((node) => node.remove())
+  fragment.querySelectorAll('button, input, textarea, select, script, style, iframe, img, .message-code-header, .message-turn-meta').forEach((node) => node.remove())
   for (const math of fragment.querySelectorAll('.katex-display, .katex:not(.katex-display .katex)')) {
     const tex = math.querySelector('annotation[encoding="application/x-tex"]')?.textContent
     if (tex !== undefined && tex !== null) math.replaceWith(document.createTextNode(math.classList.contains('katex-display') ? `\\[\n${tex}\n\\]` : `\\(${tex}\\)`))

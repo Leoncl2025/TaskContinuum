@@ -16,6 +16,7 @@ import { desktopOperations, handleDesktopOperation } from './desktopOperations'
 import { createDesktopUpdateService } from './updates'
 import { registerUpdateBridge } from './updateBridge'
 import { MultiWindowInstallCoordinator, SessionWindowManager } from './sessionWindows'
+import { resolveLocalUserProfile } from './userProfile'
 import type { SessionWindowBounds } from '../shared/desktop'
 
 app.setName('Task Continuum')
@@ -92,9 +93,15 @@ function requireMainWindow(event: IpcMainInvokeEvent): BrowserWindow {
 }
 
 function registerDesktopBridge(): void {
-  ipcMain.handle('desktop:info', (event) => {
+  ipcMain.handle('desktop:info', async (event) => {
     requireTrustedWindow(event)
-    return { name: app.name, version: app.getVersion(), platform: process.platform }
+    const userProfile = await resolveLocalUserProfile(app.getPath('userData')).catch(() => undefined)
+    return {
+      name: app.name,
+      version: app.getVersion(),
+      platform: process.platform,
+      ...(userProfile ? { userProfile } : {}),
+    }
   })
   ipcMain.handle('desktop:minimize', (event) => requireTrustedWindow(event).minimize())
   ipcMain.handle('desktop:toggle-maximize', (event) => {

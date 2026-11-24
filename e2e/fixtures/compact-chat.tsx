@@ -20,6 +20,22 @@ const target = {
   sessionId: `copilotcli:/${'s'.repeat(120)}`,
   chatId: `ahp-chat:/${'c'.repeat(120)}`,
 }
+const turnTimestamps = parameters.has('timestamps')
+const headerDemo = parameters.has('header-demo')
+const demoSender = {
+  clientId: '44444444-4444-4444-8444-444444444444',
+  username: 'lianc',
+  machineName: 'lianc-surface',
+}
+const demoTurnStarts = [
+  '2026-11-22T10:14:05.000Z',
+  '2026-11-22T10:28:40.000Z',
+  '2026-11-23T01:42:10.000Z',
+  '2026-11-23T06:15:22.000Z',
+  '2026-11-23T12:48:03.000Z',
+  '2026-11-23T13:02:18.000Z',
+]
+const demoTurnDurations = [8_400, 14_200, 6_300, 22_000, 11_800, 72_000]
 const view: AgentHostView = {
   target, state: 'connected', canSend: true, readOnly: false, terminals: {},
   chat: {
@@ -27,8 +43,22 @@ const view: AgentHostView = {
     modifiedAt: '', status: 1,
     turns: Array.from({ length: parameters.has('markdown') ? 1 : 6 }, (_, index) => ({
       id: `turn-${index}`, state: 'complete' as Turn['state'],
-      message: { text: 'Keep the conversation in focus and make room for the next idea.', origin: { kind: MessageKind.User } },
-      responseParts: [{ kind: 'markdown' as ResponsePartKind.Markdown, id: `response-${index}`, content: parameters.get('markdown') ?? '## A simpler workspace\n\nKeep essential context close to the conversation. Connection details remain available without taking space away from your work.\n\n[**Release notes**](https://example.com/release-notes) / [`plan.md`](file:///C:/layout-fixture/plan.md)\n\n- Clear hierarchy\n- Predictable actions\n- More room to read' }],
+      ...(turnTimestamps ? {
+        startedAt: demoTurnStarts[index % demoTurnStarts.length],
+        duration: demoTurnDurations[index % demoTurnDurations.length],
+      } : {}),
+      message: {
+        text: 'Keep the conversation in focus and make room for the next idea.',
+        origin: { kind: MessageKind.User },
+        ...(headerDemo ? {
+          model: { id: 'gemini-4-carbon', config: { reasoningEffort: 'high', contextSize: 936000 } },
+          _meta: { taskcontinuumActor: demoSender },
+        } : {}),
+      },
+      responseParts: [
+        ...(headerDemo ? [{ kind: 'reasoning' as ResponsePartKind.Reasoning, id: `reasoning-${index}`, content: 'Analyzing layout density and visual hierarchy for turn headers.' }] : []),
+        { kind: 'markdown' as ResponsePartKind.Markdown, id: `response-${index}`, content: parameters.get('markdown') ?? '## A simpler workspace\n\nKeep essential context close to the conversation. Connection details remain available without taking space away from your work.\n\n[**Release notes**](https://example.com/release-notes) / [`plan.md`](file:///C:/layout-fixture/plan.md)\n\n- Clear hierarchy\n- Predictable actions\n- More room to read' },
+      ],
       usage: undefined,
     })),
   },
@@ -136,7 +166,11 @@ window.agentHost = {
 const status: WorkspaceGitSyncStatus = {
   enabled: true, workspaceId: 'fixture', intervalMs: 15000, state: 'idle', pending: 0,
   provisionalTasks: [], conflicts: [], peers: [], revision: 'a'.repeat(64),
-  machineAliases: { [target.owner.clientId]: long ? 'Studio build workstation '.repeat(3) : 'Studio', ...(groupDemo ? { [demoRunner.clientId]: 'Runner' } : {}) },
+  machineAliases: {
+    [target.owner.clientId]: headerDemo ? 'Runner3' : long ? 'Studio build workstation '.repeat(3) : 'Studio',
+    ...(headerDemo ? { [demoSender.clientId]: 'Surface' } : {}),
+    ...(groupDemo ? { [demoRunner.clientId]: 'Runner' } : {}),
+  },
 }
 declare global {
   interface Window {
@@ -201,7 +235,13 @@ if (parameters.has('workbench')) {
     },
   }
   window.desktop = {
-    getInfo: async () => ({ name: 'Task Continuum', version: 'layout-fixture', platform: 'win32', security: { contextIsolated: true, sandboxed: true } }),
+    getInfo: async () => ({
+      name: 'Task Continuum',
+      version: 'layout-fixture',
+      platform: 'win32',
+      security: { contextIsolated: true, sandboxed: true },
+      ...(headerDemo ? { userProfile: { clientId: demoSender.clientId, loginUsername: 'lianc', displayName: 'Leon' } } : {}),
+    }),
     minimize: unsupported, toggleMaximize: unsupported, close: unsupported, copyText: unsupported,
     getFullScreen: async () => false, toggleFullScreen: unsupported, onFullScreenChanged: () => () => {},
   }

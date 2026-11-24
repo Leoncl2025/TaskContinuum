@@ -399,6 +399,7 @@ export function LinkedSessionTree({ taskId, entries, manualLayout, activeKey, po
           <dt>Title</dt><dd>{label}</dd>
           <dt>Session</dt><dd>{binding.id}</dd>
           <dt>Chat</dt><dd>{binding.agentHost.chatId}</dd>
+          {machineLabel(binding.owner, aliases) !== binding.owner.machineName && <><dt>Alias</dt><dd>{machineLabel(binding.owner, aliases)}</dd></>}
           <dt>Machine</dt><dd>{binding.owner.machineName}</dd>
           <dt>Location</dt><dd>{binding.ownerIsRemote ? 'Remote' : 'Local'}</dd>
           <dt>Access</dt><dd>{discovered ? discovered.canSend ? 'Read and send' : 'Read only' : 'Not in discovery list'}</dd>

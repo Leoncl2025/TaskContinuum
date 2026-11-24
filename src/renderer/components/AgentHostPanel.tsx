@@ -14,6 +14,8 @@ import { ChatLinkActiveContext, ChatLinkTargetContext } from '../chat/chatLinkCo
 import { copyMarkdownSelection } from '../chat/copyMarkdownSelection'
 import { ChatImages, ChatImageStatus } from './ChatImages'
 import { messageImages as imagesFor } from '../chat/messageImages'
+import { formatRequestedModelSummary } from '../chat/turnModelSummary'
+import { formatTurnTimestamps } from '../chat/turnTime'
 import { useChatImageInput } from '../chat/useChatImageInput'
 import { readModelPreference, saveModelPreference } from '../chat/modelPreferences'
 import { Dialog, Icon, IconButton } from './Primitives'
@@ -22,7 +24,10 @@ import { modelConfigErrors } from '../../shared/agentHostModelConfig'
 import type { ModelConfig } from '../../shared/agentHostModelConfig'
 import { sessionTitle } from '../chat/useSessionTitles'
 import type { SessionTitleUpdate } from '../chat/useSessionTitles'
+import { machineDisplayName } from '../../shared/machineAliases'
 import { machineLabel, useMachineAliases } from '../machineAliases'
+import { resolveTurnActorName, useUserProfile } from '../userProfile'
+import type { TurnActorMetadata, UserProfileValue } from '../userProfile'
 
 function terminalText(state: TerminalState | undefined): string {
   return state ? stripAnsi(state.content.map((part) => part.type === 'command' ? part.output : part.value).join('')) : ''
@@ -34,7 +39,7 @@ const EMPTY_TERMINAL_STATUS: NonNullable<AgentHostView['terminalStatus']> = Obje
 function turnPartsEquivalent(left: Turn, right: Turn): boolean {
   if (left === right) return true
   if (left.id !== right.id || left.state !== 'complete' || right.state !== 'complete') return false
-  if (left.duration !== right.duration || left.message.text !== right.message.text) return false
+  if (left.startedAt !== right.startedAt || left.duration !== right.duration || left.message.text !== right.message.text) return false
   if (left.responseParts.length !== right.responseParts.length) return false
   for (let index = 0; index < left.responseParts.length; index++) {
     const lp = left.responseParts[index]
@@ -280,7 +285,10 @@ const ChatTurnItem = memo(function ChatTurnItem({
   turn,
   isResponding,
   machineName,
+  ownerDisplay,
   aliases,
+  models,
+  userProfile,
   terminals,
   terminalStatus,
   owner,
@@ -290,29 +298,78 @@ const ChatTurnItem = memo(function ChatTurnItem({
   turn: DisplayedTurn
   isResponding: boolean
   machineName: string
+  ownerDisplay: string
   aliases: Readonly<Record<string, string>>
+  models: readonly Awaited<ReturnType<AgentHostBridge['models']>>[number][]
+  userProfile: UserProfileValue
 }) {
-  const actor = turn.message._meta?.taskcontinuumActor as { username?: string; machineName?: string; clientId?: string } | undefined
+  const actor = turn.message._meta?.taskcontinuumActor as TurnActorMetadata | undefined
+  const resolvedActor = useMemo(() => resolveTurnActorName(actor, userProfile), [actor, userProfile])
+  const actorMachineDisplay = typeof actor?.machineName === 'string' && actor.machineName
+    ? machineDisplayName({ machineName: actor.machineName, clientId: typeof actor.clientId === 'string' ? actor.clientId : undefined }, aliases)
+    : undefined
+  const modelSummary = useMemo(() => formatRequestedModelSummary(turn.message.model, models), [turn.message.model, models])
   const images = useMemo(() => imagesFor(turn), [turn])
+  const times = useMemo(() => formatTurnTimestamps(turn, isResponding), [turn, isResponding])
   return <div data-turn-id={turn.id}>
     <article className="message message-user">
-      <header><Icon name="account" /><strong>{typeof actor?.username === 'string' ? actor.username : 'User'}</strong>{typeof actor?.machineName === 'string' && <span className="message-model" title={actor.machineName}>{machineLabel({ machineName: actor.machineName, clientId: typeof actor.clientId === 'string' ? actor.clientId : undefined }, aliases)}</span>}</header>
-      {turn.message.model && <><p className="message-notice">Requested model: {turn.message.model.id}</p>{Object.keys(turn.message.model.config ?? {}).length > 0 && <p className="message-notice">Requested config: {JSON.stringify(turn.message.model.config)}</p>}</>}
+      <header className="turn-header turn-header-user">
+        <div className="turn-header-identity">
+          <span className="turn-actor-avatar is-user" aria-hidden="true">
+            {resolvedActor.initial ?? <Icon name="account" />}
+          </span>
+          <strong className="turn-actor-name" title={resolvedActor.rawUsername}>{resolvedActor.name}</strong>
+          {actorMachineDisplay && (
+            <span className="turn-machine-badge" title={actor?.machineName}>{actorMachineDisplay}</span>
+          )}
+        </div>
+        {modelSummary && (
+          <span className="turn-model-pill" title={modelSummary.tooltip}>
+            <span className="turn-model-name">{modelSummary.modelLabel}</span>
+            {modelSummary.optionsLabel && (
+              <>
+                <span className="turn-model-sep" aria-hidden="true">·</span>
+                <span className="turn-model-opts">{modelSummary.optionsLabel}</span>
+              </>
+            )}
+          </span>
+        )}
+      </header>
       <div className="message-text">{turn.message.text}</div>
       <ChatImages images={images} />
     </article>
+    {times.user && (
+      <div className="message-turn-meta message-turn-meta-user">
+        <time dateTime={times.user.iso} title={times.user.tooltip}>{times.user.short}</time>
+      </div>
+    )}
     <article className="message message-assistant">
-      <header><Icon name="copilot" /><strong title={machineName}>Copilot @ {owner}</strong></header>
+      <header className="turn-header turn-header-assistant">
+        <span className="turn-actor-avatar is-assistant" aria-hidden="true">
+          <Icon name="copilot" />
+        </span>
+        <strong className="turn-actor-name">Copilot</strong>
+        <span className="turn-machine-badge is-assistant" title={machineName}>{ownerDisplay}</span>
+      </header>
       <Responses parts={turn.responseParts} terminals={terminals} terminalStatus={terminalStatus} owner={owner} bridge={bridge} watchId={watchId} />
       {isResponding && <p className="message-notice" role="status">Responding...</p>}
     </article>
+    {times.assistant && (
+      <div className="message-turn-meta message-turn-meta-assistant">
+        <time dateTime={times.assistant.iso} title={times.assistant.tooltip}>{times.assistant.short}</time>
+        {times.assistant.duration && <span className="message-turn-duration" title={times.assistant.tooltip}>· {times.assistant.duration}</span>}
+      </div>
+    )}
   </div>
 }, (prev, next) => {
   if (prev.turn !== next.turn
     || prev.isResponding !== next.isResponding
     || prev.owner !== next.owner
+    || prev.ownerDisplay !== next.ownerDisplay
     || prev.machineName !== next.machineName
     || prev.aliases !== next.aliases
+    || prev.models !== next.models
+    || prev.userProfile !== next.userProfile
     || prev.bridge !== next.bridge) {
     return false
   }
@@ -322,10 +379,13 @@ const ChatTurnItem = memo(function ChatTurnItem({
     && prev.terminalStatus === next.terminalStatus
 })
 
-const ChatTranscript = memo(function ChatTranscript({ view, machineName, aliases, ...context }: Pick<ResponseContext, 'owner' | 'bridge' | 'watchId'> & {
+const ChatTranscript = memo(function ChatTranscript({ view, machineName, ownerDisplay, aliases, models, userProfile, ...context }: Pick<ResponseContext, 'owner' | 'bridge' | 'watchId'> & {
   view: AgentHostView | undefined
   machineName: string
+  ownerDisplay: string
   aliases: Readonly<Record<string, string>>
+  models: readonly Awaited<ReturnType<AgentHostBridge['models']>>[number][]
+  userProfile: UserProfileValue
 }) {
   const activeTurn = view?.chat?.activeTurn
   const turns = [...view?.chat?.turns ?? [], ...activeTurn ? [activeTurn] : []]
@@ -339,7 +399,10 @@ const ChatTranscript = memo(function ChatTranscript({ view, machineName, aliases
         turn={turn}
         isResponding={activeTurn?.id === turn.id}
         machineName={machineName}
+        ownerDisplay={ownerDisplay}
         aliases={aliases}
+        models={models}
+        userProfile={userProfile}
         terminals={terminals}
         terminalStatus={terminalStatus}
         {...context}
@@ -424,7 +487,9 @@ export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, ta
   const { sessionId, chatId } = target
   const { clientId, machineName } = target.owner
   const aliases = useMachineAliases()
+  const userProfile = useUserProfile()
   const ownerLabel = machineLabel(target.owner, aliases)
+  const ownerDisplay = machineDisplayName(target.owner, aliases)
   const key = agentHostKey(target)
   const stableTarget = useMemo(
     () => ({ sessionId, chatId, owner: { clientId, machineName } }),
@@ -842,7 +907,7 @@ export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, ta
         {view?.state === 'offline' && <p className="muted">Only previously loaded history is available offline.</p>}
         {historyFailure && <p className="copilot-error" role="alert">{historyFailure}</p>}
       </div>}
-      <ChatTranscript view={view} machineName={machineName} aliases={aliases} owner={ownerLabel} bridge={bridge} watchId={watchId} />
+      <ChatTranscript view={view} machineName={machineName} ownerDisplay={ownerDisplay} aliases={aliases} models={models} userProfile={userProfile} owner={ownerLabel} bridge={bridge} watchId={watchId} />
     </div>
     <form className="composer-area" onSubmit={(event) => { event.preventDefault(); void send() }}>
       <ChatImageStatus input={imageInput} />

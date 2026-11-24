@@ -6,10 +6,12 @@ import type { ChatState, McpAuthRequiredReason, MessageResourceAttachment, Respo
 import { MessageKind } from '@microsoft/agent-host-protocol'
 import type { AgentHostBridge, AgentHostView } from '../src/shared/agentHost'
 import { AgentHostPanel } from '../src/renderer/components/AgentHostPanel'
+import { formatTurnTimestamps } from '../src/renderer/chat/turnTime'
 import { readModelPreference, saveModelPreference } from '../src/renderer/chat/modelPreferences'
 import { fixtureTasks as demoTasks } from './task-fixture'
 import { modelConfigFixture } from './agent-host-model-fixture'
 import { MachineAliasesProvider } from '../src/renderer/MachineAliasesProvider'
+import { UserProfileContext } from '../src/renderer/userProfile'
 import { gitSyncUiFixture } from './remote-config-ui-fixture'
 import { updateBlockers } from '../src/renderer/installSafety'
 import * as messageImages from '../src/renderer/chat/messageImages'
@@ -310,7 +312,7 @@ describe('Compact chat activity', () => {
     await screen.findByText('Final recommendation.')
     const body = rendered.container.querySelector('.message-assistant')!
     expect([...body.children].map((element) => element.textContent)).toEqual([
-      'Copilot @ Owner-B', '2 tool callsRead (2)', 'Found the relevant implementation.',
+      'CopilotOwner-B', '2 tool callsRead (2)', 'Found the relevant implementation.',
       '2 tool callsSearch (2)', 'Owner notification',
       'Input required on Owner-BChoose the deployment target.', 'ReasoningFurther reasoning',
       'The turn could not continue.', 'Final recommendation.',
@@ -871,7 +873,7 @@ describe('Agent Host chat UI', () => {
     git.setStatus({ ...git.getStatus(), machineAliases: { [setup.target.owner.clientId]: 'Office' } })
     const user = userEvent.setup()
     render(<MachineAliasesProvider workspaceId="workspace"><AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} /></MachineAliasesProvider>)
-    await screen.findByText('Copilot @ Office (Owner-B)')
+    await screen.findByText('Copilot @ Office')
     await user.selectOptions(screen.getByRole('combobox', { name: 'Agent Host model' }), await screen.findByRole('option', { name: 'GPT-6' }))
     await user.type(screen.getByRole('textbox', { name: 'Message Agent Host' }), 'Keep my next question')
     const terminal = 'ahp-terminal:/streaming'
@@ -883,14 +885,16 @@ describe('Agent Host chat UI', () => {
       ], usage: undefined,
     } as ChatState['activeTurn']
     act(() => setup.emit())
-    expect(await screen.findByLabelText('Checks on Office (Owner-B)')).toHaveTextContent('Still running')
+    expect(await screen.findByLabelText('Checks on Office')).toHaveTextContent('Still running')
     await waitFor(() => expect(setup.bridge.terminal).toHaveBeenCalledOnce())
     const terminalRequest = vi.mocked(setup.bridge.terminal).mock.calls[0]
     git.setStatus({ ...git.getStatus(), machineAliases: { [setup.target.owner.clientId]: 'Build station', [senderId]: 'Portable' } })
     await act(async () => git.notify())
-    expect(screen.getAllByText('Copilot @ Build station (Owner-B)')).toHaveLength(2)
-    expect(screen.getByLabelText('Checks on Build station (Owner-B)')).toHaveTextContent('Still running')
-    expect(within(screen.getByRole('log')).getByText('Portable (Sender-A)')).toBeInTheDocument()
+    expect(screen.getByText('Copilot @ Build station')).toBeInTheDocument()
+    expect(screen.getByLabelText('Checks on Build station')).toHaveTextContent('Still running')
+    expect(within(screen.getByRole('log')).getByText('Build station')).toHaveAttribute('title', 'Owner-B')
+    expect(within(screen.getByRole('log')).getByText('Portable')).toHaveAttribute('title', 'Sender-A')
+    expect(within(screen.getByRole('log')).queryByText(/\(Owner-B\)|\(Sender-A\)/)).not.toBeInTheDocument()
     expect(screen.getByText('Streaming answer')).toBeInTheDocument()
     expect(screen.getByRole('textbox')).toHaveValue('Keep my next question')
     expect(screen.getByRole('combobox', { name: 'Agent Host model' })).toHaveValue('gpt-6')
@@ -905,7 +909,9 @@ describe('Agent Host chat UI', () => {
     expect(setup.bridge.cancel).toHaveBeenCalledExactlyOnceWith(setup.target, 'streaming-turn')
     git.setStatus({ ...git.getStatus(), machineAliases: {} })
     await act(async () => git.notify())
-    expect(screen.getAllByText('Copilot @ Owner-B')).toHaveLength(2)
+    expect(screen.getByText('Copilot @ Owner-B')).toBeInTheDocument()
+    expect(within(screen.getByRole('log')).getByText('Owner-B')).toBeInTheDocument()
+    expect(within(screen.getByRole('log')).getByText('Sender-A')).toBeInTheDocument()
     expect(screen.getByLabelText('Checks on Owner-B')).toBeInTheDocument()
     expect(screen.getByRole('textbox')).toHaveValue('Keep my next question')
     expect(setup.bridge.watch).toHaveBeenCalledOnce()
@@ -1470,5 +1476,108 @@ describe('Agent Host chat UI', () => {
     expect(mounted.container.querySelector('[data-turn-id="activity-turn"]')).toBe(turnNode)
     expect(screen.getByRole('link', { name: 'Report' })).toBe(link)
     imageSpy.mockRestore()
+  })
+
+  it('renders subtle timestamps underneath User and completed Assistant messages', async () => {
+    const now = new Date(2026, 10, 23, 21, 10, 0).getTime()
+    const todayStart = new Date(2026, 10, 23, 21, 2, 18).toISOString()
+    const prevDayStart = new Date(2026, 10, 22, 18, 28, 40).toISOString()
+
+    const completedToday = formatTurnTimestamps({ startedAt: todayStart, duration: 14_200 }, false, now)
+    expect(completedToday.user?.short).toBe('21:02')
+    expect(completedToday.assistant?.short).toBe('21:02')
+    expect(completedToday.assistant?.duration).toBe('14s')
+    expect(completedToday.assistant?.tooltip).toContain('Completed')
+
+    const prevDay = formatTurnTimestamps({ startedAt: prevDayStart, duration: 72_000 }, false, now)
+    expect(prevDay.user?.short).toBe('Nov 22, 18:28')
+    expect(prevDay.assistant?.short).toBe('Nov 22, 18:29')
+    expect(prevDay.assistant?.duration).toBe('1m 12s')
+
+    const setup = fixture()
+    setup.view.chat!.turns = [{
+      id: 'turn-done',
+      startedAt: prevDayStart,
+      duration: 72_000,
+      state: 'complete' as TurnState.Complete,
+      message: { text: 'Summarize the architecture', origin: { kind: MessageKind.User } },
+      responseParts: [{ kind: 'markdown' as ResponsePartKind.Markdown, id: 'done-md', content: 'All modules are isolated.' }],
+      usage: undefined,
+    }]
+    setup.view.chat!.activeTurn = {
+      id: 'turn-live',
+      startedAt: todayStart,
+      message: { text: 'Run verification now', origin: { kind: MessageKind.User } },
+      responseParts: [{ kind: 'markdown' as ResponsePartKind.Markdown, id: 'live-md', content: 'Checking...' }],
+      usage: undefined,
+    }
+
+    const rendered = render(<AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByText('All modules are isolated.')
+
+    const doneTurn = rendered.container.querySelector('[data-turn-id="turn-done"]')!
+    expect(doneTurn.querySelector('.message-turn-meta-user time')).not.toBeNull()
+    expect(doneTurn.querySelector('.message-turn-meta-assistant time')).not.toBeNull()
+    expect(doneTurn.querySelector('.message-turn-duration')?.textContent).toContain('1m 12s')
+
+    const liveTurn = rendered.container.querySelector('[data-turn-id="turn-live"]')!
+    expect(liveTurn.querySelector('.message-turn-meta-user time')).not.toBeNull()
+    expect(liveTurn.querySelector('.message-turn-meta-assistant')).toBeNull()
+  })
+
+  it('renders clean turn headers with friendly user display name, alias-only machine badges, and compact model/config pill', async () => {
+    const setup = fixture()
+    const git = gitSyncUiFixture()
+    window.remoteVSCode = git.remote
+    const senderClientId = crypto.randomUUID()
+    setup.target.owner.machineName = 'CPC-lianc-L5CN7'
+    setup.view.target = setup.target
+    git.setStatus({
+      ...git.getStatus(),
+      machineAliases: {
+        [setup.target.owner.clientId]: 'Runner3',
+        [senderClientId]: 'Surface',
+      },
+    })
+    setup.view.chat!.turns = [{
+      id: 'turn-clean-header',
+      startedAt: '2026-11-24T02:04:00.000Z',
+      duration: 9_400,
+      state: 'complete' as TurnState.Complete,
+      message: {
+        text: 'Redesign the turn headers cleanly.',
+        origin: { kind: MessageKind.User },
+        model: { id: 'gemini-4-carbon', config: { reasoningEffort: 'high', contextSize: 936000 } },
+        _meta: { taskcontinuumActor: { clientId: senderClientId, username: 'lianc', machineName: 'lianc-surface' } },
+      },
+      responseParts: [{ kind: 'markdown' as ResponsePartKind.Markdown, id: 'clean-md', content: 'Updated the turn headers.' }],
+      usage: undefined,
+    }]
+
+    render(
+      <UserProfileContext.Provider value={{
+        clientId: senderClientId,
+        loginUsername: 'lianc',
+        displayName: 'Leon',
+        customDisplayName: '',
+        effectiveDisplayName: 'Leon',
+        setCustomDisplayName: vi.fn(),
+      }}>
+        <MachineAliasesProvider workspaceId="workspace">
+          <AgentHostPanel task={demoTasks[1]} target={setup.target} onDetach={vi.fn()} onClose={vi.fn()} />
+        </MachineAliasesProvider>
+      </UserProfileContext.Provider>,
+    )
+
+    const log = await screen.findByRole('log')
+    await within(log).findByText('Updated the turn headers.')
+    expect(within(log).getByText('Leon')).toHaveAttribute('title', 'lianc')
+    expect(within(log).queryByText('lianc')).not.toBeInTheDocument()
+    expect(within(log).getByText('Surface')).toHaveAttribute('title', 'lianc-surface')
+    expect(within(log).getByText('Runner3')).toHaveAttribute('title', 'CPC-lianc-L5CN7')
+    expect(within(log).queryByText(/CPC-lianc-L5CN7|lianc-surface/)).not.toBeInTheDocument()
+    expect(within(log).getByText('gemini-4-carbon')).toBeInTheDocument()
+    expect(within(log).getByText('High · 936K')).toBeInTheDocument()
+    expect(within(log).queryByText(/Requested model:|Requested config:/)).not.toBeInTheDocument()
   })
 })
