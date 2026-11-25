@@ -9,10 +9,14 @@ import { MessageKind } from '@microsoft/agent-host-protocol'
 import type { ChatToolCallCompleteAction, SessionActiveClientSetAction } from '@microsoft/agent-host-protocol'
 import { AgentHostConnection } from '../src/main/agentHostConnection'
 import { attachAgentHostGateway } from '../src/main/agentHostGateway'
+import { AgentHostManager } from '../src/main/agentHostManager'
+import { AgentHostRegistry } from '../src/main/agentHostRegistry'
 import { connectAgentHostWebSocket, connectLocalAgentHost } from '../src/main/agentHostTransport'
 import { canonicalPolicyRoot } from '../src/main/linkedSessionPolicy'
+import { registerRepositorySessionLinksBackend } from '../src/main/repositorySessionLinks'
 import { SessionCollaborationService } from '../src/main/sessionCollaborationService'
 import { TaskContinuumAgentHostTools } from '../src/main/taskContinuumAgentHostTools'
+import { VSCodeDeviceClient } from '../src/main/vscodeDeviceClient'
 import type { WorkspaceTaskMetadata } from '../src/main/workspaceReader'
 import { COLLABORATION_LIMITS, formatCollaborationTargetRef } from '../src/shared/sessionCollaboration'
 import type { AgentHostTarget } from '../src/shared/agentHost'
@@ -109,16 +113,16 @@ async function setupCollaborationFixture(protocolVersion = '0.9.0') {
   }
   let localConnection = newLocalConnection()
 
-  const encodedRemoteTarget = Buffer.from(JSON.stringify(remoteTarget)).toString('base64url')
+  const connectRemote = (target: AgentHostTarget, signal: AbortSignal) => connectAgentHostWebSocket(
+    `ws://127.0.0.1:${gatewayPort}/device/agent-host?target=${Buffer.from(JSON.stringify(target)).toString('base64url')}`,
+    { headers: { Authorization: ['Bearer', gatewayToken].join(' ') } },
+    signal,
+  )
   const newRemoteConnection = () => {
     const conn = new AgentHostConnection(
       remoteTarget,
       join(dataDir, 'remote-conn'),
-      (signal) => connectAgentHostWebSocket(
-        `ws://127.0.0.1:${gatewayPort}/device/agent-host?target=${encodedRemoteTarget}`,
-        { headers: { Authorization: ['Bearer', gatewayToken].join(' ') } },
-        signal,
-      ),
+      (signal) => connectRemote(remoteTarget, signal),
     )
     cleanups.push(() => conn.close())
     return conn
@@ -221,11 +225,57 @@ async function setupCollaborationFixture(protocolVersion = '0.9.0') {
     authorizeNativeTools,
     readWorkspace,
     readLinks,
+    connectRemote,
     createService,
   }
 }
 
 describe('SessionCollaborationService and gateway provenance', () => {
+  it('lists, reads, and sends to a repository binding through the real AgentHostManager', async () => {
+    const f = await setupCollaborationFixture()
+    const taskId = 'T-0072'
+    const canonical = await canonicalPolicyRoot(f.workspaceRoot)
+    const unregister = await registerRepositorySessionLinksBackend(canonical, {
+      read: () => f.readLinks(canonical),
+      update: async () => { throw new Error('Collaboration must not write workspace bindings.') },
+    })
+    cleanups.push(unregister)
+    const identity = async () => f.localOwner
+    const registry = new AgentHostRegistry(f.dataDir, [], identity)
+    const devices = new VSCodeDeviceClient(f.dataDir, {
+      available: () => true, encrypt: (text) => Buffer.from(text), decrypt: (bytes) => bytes.toString(),
+    }, async () => { throw new Error('Fixture uses a loopback gateway.') }, async () => {})
+    const transport = vi.spyOn(devices, 'agentHostTransport')
+      .mockImplementation((_root, target, signal) => f.connectRemote(target, signal))
+    const manager = new AgentHostManager(f.dataDir, registry, devices, identity)
+    cleanups.push(async () => { await manager.close(); devices.close() })
+    const service = new SessionCollaborationService({
+      directory: f.dataDir, agentHosts: manager, devices, identity, readWorkspace: f.readWorkspace,
+    })
+    cleanups.push(() => service.close())
+    const api = service.forWorkspace(f.workspaceRoot)
+
+    f.remoteHost.historyText(1, 'Remote fixture response')
+    const targetRef = formatCollaborationTargetRef(taskId, f.remoteTarget)
+    // The local binding has no owner receipt, even though it is in the repository.
+    const expected = { sessions: [{ targetRef, location: 'remote' }] }
+    await expect(api.listSessions({ taskId })).resolves.toMatchObject(expected)
+    await expect(api.listSessions({})).resolves.toMatchObject(expected)
+    expect(transport).not.toHaveBeenCalled()
+    await expect(api.readContext({ targetRef, limit: 1, detail: 'summary' })).resolves.toMatchObject({
+      targetRef, turns: [{ responseText: 'Remote fixture response' }],
+    })
+
+    const unconfirmedRef = formatCollaborationTargetRef(taskId, f.localTarget)
+    await expect(api.readContext({ targetRef: unconfirmedRef, limit: 1, detail: 'summary' })).rejects.toMatchObject({ code: 'ACCESS_DENIED' })
+
+    const messageId = randomUUID()
+    await expect(api.sendMessage({ targetRef, messageId, text: 'Hi' })).resolves.toMatchObject({
+      targetRef, messageId, state: 'delivered',
+    })
+    expect(f.remoteHost.dispatches).toMatchObject([{ turnId: messageId, message: { text: 'Hi' } }])
+  })
+
   it('sends from a native client tool through the remote gateway and revalidates the sender of queued messages', async () => {
     const f = await setupCollaborationFixture('1.0.0')
     f.setBindings({

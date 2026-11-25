@@ -111,7 +111,10 @@ For example, `taskcontinuum_collaboration_list_sessions({ "taskId": "T-0072", "q
 can return sessions linked under tasks other than T-0072. Follow `nextOffset`
 with the same task and query until it is absent. Use the returned `targetRef`
 unchanged in read and send calls; any optional caller `taskId` on those calls
-does not select or restrict the destination.
+does not select or restrict the destination. Do not construct a reference
+from Git bindings: sending still requires authorization for the exact chat.
+Once you have the target, call `send_message` directly; loading its history
+is not required.
 
 ### Delivery vs. work completion
 

@@ -58,6 +58,10 @@ interface NativeCollaborationSource {
   beforeAccept(): Promise<void>
 }
 
+function targetFromLink({ sessionId, chatId, owner }: SessionLink): AgentHostTarget {
+  return { sessionId, chatId, owner }
+}
+
 function clipText(value: string, maxChars: number): { text: string; truncated: boolean } {
   if (value.length <= maxChars) return { text: value, truncated: false }
   return { text: `${value.slice(0, Math.max(0, maxChars - 1))}…`, truncated: true }
@@ -243,15 +247,16 @@ export class SessionCollaborationService {
     finally { this.activeOperations-- }
   }
 
-  private async resolveTargetLink(canonicalRoot: string, targetRef: string, expectedTaskId?: string): Promise<{ taskId: string; link: SessionLink }> {
+  private async resolveTargetLink(canonicalRoot: string, targetRef: string, expectedTaskId?: string): Promise<{ taskId: string; link: AgentHostTarget }> {
     const parsed = parseCollaborationTargetRef(targetRef)
     if (expectedTaskId !== undefined && expectedTaskId !== parsed.taskId) {
       throw new CollaborationError('INVALID_REQUEST', 'The targetRef belongs to a different task.')
     }
     const links = await this.readTaskLinks(canonicalRoot, parsed.taskId)
-    const link = links.find((candidate) => candidate.owner.clientId === parsed.ownerClientId
+    const binding = links.find((candidate) => candidate.owner.clientId === parsed.ownerClientId
       && candidate.sessionId === parsed.sessionId && candidate.chatId === parsed.chatId)
-    if (!link) throw new CollaborationError('NOT_FOUND', 'The target session is not currently linked to this task.')
+    if (!binding) throw new CollaborationError('NOT_FOUND', 'The target session is not currently linked to this task.')
+    const link = targetFromLink(binding)
     try { await this.deps.agentHosts.authorize(canonicalRoot, link) }
     catch { throw new CollaborationError('ACCESS_DENIED', 'The target session is not authorized on this device.') }
     return { taskId: parsed.taskId, link }
@@ -302,7 +307,7 @@ export class SessionCollaborationService {
           const text = `${title} ${task.id} ${task.title} ${link.owner.machineName} ${link.sessionId} ${link.chatId}`.toLowerCase()
           if (!terms.every((term) => text.includes(term))) continue
         }
-        try { await this.deps.agentHosts.authorize(canonical, link) }
+        try { await this.deps.agentHosts.authorize(canonical, targetFromLink(link)) }
         catch { continue }
         const peer = isLocal ? undefined : peers.get(link.owner.clientId)
         sessions.push({
@@ -336,7 +341,7 @@ export class SessionCollaborationService {
     return cached
   }
 
-  private async acquireAuthorizedConnection(canonicalRoot: string, link: SessionLink): Promise<{ connection: AgentHostConnection; release: () => void }> {
+  private async acquireAuthorizedConnection(canonicalRoot: string, link: AgentHostTarget): Promise<{ connection: AgentHostConnection; release: () => void }> {
     const key = `${canonicalRoot}:${agentHostKey(link)}`
     for (let attempt = 0; attempt < 2; attempt++) {
       let release: (() => void) | undefined
@@ -623,7 +628,7 @@ export class SessionCollaborationService {
     }
   }
 
-  private async dispatchNow(canonicalRoot: string, record: SavedMessage, messageText: string, link: SessionLink, connection: AgentHostConnection,
+  private async dispatchNow(canonicalRoot: string, record: SavedMessage, messageText: string, link: AgentHostTarget, connection: AgentHostConnection,
     beforeDispatch?: () => Promise<void>): Promise<void> {
     const lockKey = this.targetLockKey(canonicalRoot, link)
     this.dispatchingTargets.add(lockKey)
@@ -695,7 +700,7 @@ export class SessionCollaborationService {
     }
   }
 
-  private watchTargetForQueue(canonicalRoot: string, link: SessionLink, connection: AgentHostConnection): void {
+  private watchTargetForQueue(canonicalRoot: string, link: AgentHostTarget, connection: AgentHostConnection): void {
     const key = this.targetLockKey(canonicalRoot, link)
     const existing = this.watchers.get(key)
     if (existing?.connection === connection) return
@@ -706,12 +711,12 @@ export class SessionCollaborationService {
     this.watchers.set(key, { connection, unlisten })
   }
 
-  private scheduleDrainTarget(canonicalRoot: string, link: SessionLink, connection: AgentHostConnection): void {
+  private scheduleDrainTarget(canonicalRoot: string, link: AgentHostTarget, connection: AgentHostConnection): void {
     if (this.closed) return
     void this.drainTargetQueue(canonicalRoot, link, connection).catch(() => {})
   }
 
-  private async drainTargetQueue(canonicalRoot: string, link: SessionLink, connection: AgentHostConnection): Promise<void> {
+  private async drainTargetQueue(canonicalRoot: string, link: AgentHostTarget, connection: AgentHostConnection): Promise<void> {
     if (this.closed) return
     const lockKey = this.targetLockKey(canonicalRoot, link)
     if (this.dispatchingTargets.has(lockKey)) return
