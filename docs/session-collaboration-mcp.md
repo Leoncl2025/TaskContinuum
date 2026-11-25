@@ -1,10 +1,33 @@
-# Session collaboration MCP
+# TaskContinuum agent tools
 
-Task Continuum provides a dedicated **MCP stdio server** (`taskcontinuum-collab-mcp.cjs`)
-for coordinating Agent Host sessions across tasks in one workspace, including on
-paired remote machines. It uses the running desktop's task repository bindings and
-authenticated Dev Tunnel + SSH Agent Host gateway — keeping read-only file
-transfer (`taskcontinuum-files-mcp.cjs`) separate from session execution authority.
+**TaskContinuum** is the tool namespace. **Collaboration** is its first capability
+group, for coordinating Agent Host sessions across tasks in one workspace,
+including on paired remote machines. The native Agent Host and MCP transports use
+the same tool definitions and workspace authorization. The standalone, read-only
+file transfer server (`taskcontinuum-files-mcp.cjs`) is unchanged.
+
+## Use in a native Copilot Agent Host session: no MCP setup
+
+1. On the machine running the initiating Agent Host, open the task workspace in
+   Task Continuum, link the local Copilot Agent Host chat, and open the linked
+   chat in Task Continuum. Keep that view open.
+2. In that same chat in Task Continuum or VS Code, ask: **“List the sessions I
+   can collaborate with in this TaskContinuum workspace.”** TC automatically
+   contributes its tools to the Agent Host. No MCP config, external Node
+   process, or additional enrollment step is needed.
+
+The native route uses AHP 1.0 client tools. TC publishes one contribution per
+session with `session/activeClientSet` and consumes only running calls assigned
+to its own client. The originating chat must be attached and currently confirmed
+in a single workspace; a call cannot supply its own workspace or sender.
+Native tool approvals remain in the Host. Closing the last view removes the
+contribution; reconnect registers it again without replaying calls.
+
+A local initiating agent can still collaborate with **remote targets** via the
+authenticated Dev Tunnel + SSH gateway. Opening a remote mirror alone does not
+register tools on the owner machine, and a turn sent from a paired device cannot
+borrow the owner's local workspace authority through those tools. Use the MCP
+route below for agent clients outside this native attachment flow.
 
 ## Collaboration UI and native session provenance
 
@@ -29,27 +52,29 @@ messages and Task Continuum cross-machine collaboration:
 Collaboration is **available by default** across tasks in the configured workspace.
 There is no separate collaboration panel, opt-in, or cumulative send quota. The app ignores old
 per-task collaboration settings. The workspace still needs **Automatic workspace
-links**, and the sending Agent needs a configured collaboration MCP client.
+links**, and the sending Agent needs either the native attachment above or a
+configured TaskContinuum MCP client.
 Only sessions currently linked and authorized in that workspace are available.
 Their tasks do not have to match. Reading or sending still requires the
 corresponding permission. Making tools available does not send any messages.
 
-## Install in the actual MCP Host/client
+## TaskContinuum MCP: optional fallback
 
 Configure the execution Host/client running beside your Task Continuum desktop to launch
-`resources\cli\taskcontinuum-collab-mcp.cjs` (or `out\cli\taskcontinuum-collab-mcp.cjs`
+`resources\cli\taskcontinuum-mcp.cjs` (or `out\cli\taskcontinuum-mcp.cjs`
 after `npm run build:cli`) with Node.js 24. Use the MCP executable from the same
 build as the local desktop, and restart the MCP client after updating.
 
-Example configuration (for VS Code, use `servers` instead of `mcpServers`):
+Example for Copilot Global (the editor-only legacy config uses `servers` instead
+of `mcpServers`):
 
 ```json
 {
   "mcpServers": {
-    "taskcontinuum-collaboration": {
+    "taskcontinuum": {
       "command": "C:\\Program Files\\nodejs\\node.exe",
       "args": [
-        "C:\\Tools\\TaskContinuum\\resources\\cli\\taskcontinuum-collab-mcp.cjs"
+        "C:\\Tools\\TaskContinuum\\resources\\cli\\taskcontinuum-mcp.cjs"
       ],
       "env": {
         "TASKCONTINUUM_WORKSPACE": "C:\\Work\\Tasks",
@@ -62,16 +87,17 @@ Example configuration (for VS Code, use `servers` instead of `mcpServers`):
 
 Do not pass credentials or command-line arguments. The stdio process authenticates to
 the local desktop through the owner-private `session-collaboration-mcp.json` loopback
-descriptor.
+descriptor. Existing `taskcontinuum-collab-mcp.cjs` configurations and `tc_*`
+tool names continue to work; new setups should use the product-wide entry.
 
 ## Tools and delivery semantics
 
 | Tool | Arguments |
 | --- | --- |
-| `tc_sessions_list` | Optional `taskId`, `query`, `limit` (1–20, default 20), and `offset`. Searches authorized linked sessions in the workspace. Each row has its own `taskId`, `targetRef`, device, connection state, and send capability. |
-| `tc_sessions_context` | `targetRef`, optional `cursor`, optional `limit` (1–20, default 5), optional `detail` (`summary` or `full`). Reads bounded recent turns and marks output `untrustedContent: true`. |
-| `tc_messages_send` | `targetRef`, `messageId` (UUID), and `text` (up to 12,000 characters). Submits an idempotent collaboration message. |
-| `tc_messages_status` | `messageId` (UUID). Inspects delivery state and target `turnStatus` without re-sending. |
+| `taskcontinuum_collaboration_list_sessions` | Optional `taskId`, `query`, `limit` (1–20, default 20), and `offset`. Searches authorized linked sessions in the workspace. Each row has its own `taskId`, `targetRef`, device, connection state, and send capability. |
+| `taskcontinuum_collaboration_read_context` | `targetRef`, optional `cursor`, optional `limit` (1–20, default 5), optional `detail` (`summary` or `full`). Reads bounded recent turns and marks output `untrustedContent: true`. |
+| `taskcontinuum_collaboration_send_message` | `targetRef`, `messageId` (UUID), and `text` (up to 12,000 characters). Submits an idempotent collaboration message. |
+| `taskcontinuum_collaboration_message_status` | `messageId` (UUID). Inspects delivery state and target `turnStatus` without re-sending. |
 
 ### Find a session
 
@@ -81,7 +107,7 @@ workspace tasks. The task only changes the order. Omit it to browse the workspac
 `query` matches task IDs and titles, machine names, session and chat IDs, and
 session titles when available. Search does not open remote chats to fetch titles.
 
-For example, `tc_sessions_list({ "taskId": "T-0072", "query": "Runner3", "limit": 5 })`
+For example, `taskcontinuum_collaboration_list_sessions({ "taskId": "T-0072", "query": "Runner3", "limit": 5 })`
 can return sessions linked under tasks other than T-0072. Follow `nextOffset`
 with the same task and query until it is absent. Use the returned `targetRef`
 unchanged in read and send calls; any optional caller `taskId` on those calls
@@ -90,8 +116,9 @@ does not select or restrict the destination.
 ### Delivery vs. work completion
 
 - `delivered` means the target Agent Host accepted and started turn `turnId` — **not**
-  that the receiving Agent has finished its task. Poll `tc_messages_status` until
-  `turnStatus` reaches `completed`, then call `tc_sessions_context` to inspect results.
+  that the receiving Agent has finished its task. Poll
+  `taskcontinuum_collaboration_message_status` until `turnStatus` reaches
+  `completed`, then call `taskcontinuum_collaboration_read_context` to inspect results.
 - Busy targets enter `queued` (up to 16 queued messages per task, 30-minute TTL) and
   drain automatically once the active turn completes and authorization still holds.
   A full queue returns `BUSY`; it frees capacity as pending messages finish or expire.

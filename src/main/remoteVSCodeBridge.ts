@@ -19,6 +19,7 @@ import { startFileTransferMcpBridge } from './fileTransferMcpBridge'
 import { FileTransferBudget } from './fileTransferBudget'
 import { ChatLinkService } from './chatLinkService'
 import { SessionCollaborationService } from './sessionCollaborationService'
+import { TaskContinuumAgentHostTools } from './taskContinuumAgentHostTools'
 import { startSessionCollaborationMcpBridge } from './sessionCollaborationMcpBridge'
 import { desktopOperations, handleDesktopOperation } from './desktopOperations'
 
@@ -61,6 +62,9 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     devices,
     identity: clientIdentity,
   })
+  const nativeTools = new TaskContinuumAgentHostTools((root, target, beforeAccept) => ({
+    collaboration: collaboration.forWorkspace(root, { target, beforeAccept }),
+  }))
   const collaborationReady = startSessionCollaborationMcpBridge(
     app.getPath('userData'),
     (root) => collaboration.forWorkspace(root),
@@ -143,7 +147,7 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     if (confirmation.response === 1) { await unchanged(root); await tunnels.stop() }
   })
   let closing: Promise<void> | undefined
-  return { agentHosts, gitSync, filesReady, collaborationReady, chatLinks,
+  return { agentHosts, gitSync, filesReady, collaborationReady, chatLinks, nativeTools,
     hasActiveWork: () => agentHosts.hasActiveWork || host.hasActiveWork || files.hasActiveWork || fileSource.hasActiveWork || collaboration.hasActiveWork,
     close: () => closing ??= (async () => {
     try { await (await collaborationReady).close() } catch { console.error('Closing after session collaboration MCP bridge failure.') }

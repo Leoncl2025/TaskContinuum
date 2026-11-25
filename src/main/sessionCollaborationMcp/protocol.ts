@@ -1,14 +1,14 @@
 import { isAbsolute } from 'node:path'
 import { z } from 'zod'
 import {
-  CollaborationError, collaborationContextRequestSchema, collaborationContextResultSchema,
-  collaborationErrorCodeSchema, collaborationFailure, collaborationMessageLookupSchema,
+  COLLABORATION_LIMITS, CollaborationError, collaborationContextRequestSchema, collaborationContextResultSchema,
+  collaborationErrorCodeSchema, collaborationMessageLookupSchema,
   collaborationMessageStatusSchema, collaborationSendRequestSchema,
   collaborationSessionsListRequestSchema, collaborationSessionsListResultSchema,
 } from '../../shared/sessionCollaboration'
-import type { CollaborationErrorCode, SessionCollaborationApi } from '../../shared/sessionCollaboration'
+import type { SessionCollaborationApi } from '../../shared/sessionCollaboration'
 
-export const MAX_COLLAB_BRIDGE_REQUEST_BYTES = 64 * 1024
+export const MAX_COLLAB_BRIDGE_REQUEST_BYTES = COLLABORATION_LIMITS.maxToolRequestBytes
 export const MAX_COLLAB_BRIDGE_RESPONSE_BYTES = 256 * 1024
 export const MAX_COLLAB_BRIDGE_REQUESTS = 8
 
@@ -27,24 +27,6 @@ export type CollaborationBridgeRequest = z.infer<typeof collaborationBridgeReque
 export const collaborationBridgeErrorSchema = z.object({
   error: z.object({ code: collaborationErrorCodeSchema, message: z.string().max(512) }).strict(),
 }).strict()
-
-const defaultMessages: Record<CollaborationErrorCode, string> = {
-  INVALID_REQUEST: 'Invalid session collaboration request. Check taskId, targetRef, messageId, and limits.',
-  ACCESS_DENIED: 'Session collaboration is not authorized. Check workspace and linked session access.',
-  NOT_FOUND: 'The requested task, linked target session, or collaboration message was not found.',
-  CONFLICT: 'This messageId already belongs to a different collaboration request.',
-  BUSY: 'Session collaboration capacity is busy. Retry after pending operations finish.',
-  EXPIRED: 'This queued collaboration message expired before the target session became idle.',
-  UNAVAILABLE: 'Task Continuum or the target Agent Host session is unavailable.',
-}
-
-export function safeCollaborationFailure(error: unknown): { code: CollaborationErrorCode; message: string } {
-  const { code, message } = collaborationFailure(error)
-  if (error instanceof CollaborationError && message && message.length <= 320 && !/[\\/]/.test(message)) {
-    return { code, message }
-  }
-  return { code, message: defaultMessages[code] }
-}
 
 export function validateCollaborationResult(request: CollaborationBridgeRequest, value: unknown) {
   try {

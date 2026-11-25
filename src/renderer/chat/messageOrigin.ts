@@ -2,6 +2,7 @@ import type { Message, ResponsePart } from '@microsoft/agent-host-protocol'
 import { agentHostKey } from '../../shared/agentHost'
 import type { AgentHostTarget } from '../../shared/agentHost'
 import { readNativeDelegationMeta, readTaskContinuumCollaborationMeta } from '../../shared/sessionCollaboration'
+import { collaborationToolIds, collaborationToolMatches } from '../../shared/taskContinuumTools'
 import { machineLabel } from '../machineAliases'
 import type { SessionBinding } from './sessionBindings'
 
@@ -146,14 +147,12 @@ const COLLABORATION_TOOL_NAMES = new Set([
   'get_session_context',
   'list_sessions',
   'create_session',
-  'tc_sessions_list',
-  'tc_sessions_context',
-  'tc_messages_send',
-  'tc_messages_status',
 ])
 
 export function summarizeCollaborationTool(tool: ToolCall): string | undefined {
-  if (!COLLABORATION_TOOL_NAMES.has(tool.toolName)) return undefined
+  const tcTool = (Object.keys(collaborationToolIds) as (keyof typeof collaborationToolIds)[])
+    .find((id) => collaborationToolMatches(tool.toolName, id))
+  if (!tcTool && !COLLABORATION_TOOL_NAMES.has(tool.toolName)) return undefined
   if (!('content' in tool) || !tool.content?.length) return undefined
   const firstText = tool.content.find((item): item is Extract<typeof item, { type: 'text' }> => item.type === 'text')?.text
   if (!firstText || firstText.length > 65_536) return undefined
@@ -176,7 +175,7 @@ export function summarizeCollaborationTool(tool: ToolCall): string | undefined {
     return `Read ${payload.transcript.length} turn${payload.transcript.length === 1 ? '' : 's'}`
   }
 
-  // Task Continuum Collaboration MCP tools (`{ result }` or `{ error }`)
+  // Both TaskContinuum tool transports return `{ result }` or `{ error }`.
   if (payload.error && typeof payload.error === 'object' && !Array.isArray(payload.error)) {
     const code = (payload.error as Record<string, unknown>).code
     if (typeof code === 'string') return `Error: ${code}`
@@ -186,13 +185,13 @@ export function summarizeCollaborationTool(tool: ToolCall): string | undefined {
     : undefined
   if (!result) return undefined
 
-  if (tool.toolName === 'tc_sessions_list' && Array.isArray(result.sessions)) {
+  if (tcTool === 'listSessions' && Array.isArray(result.sessions)) {
     return `${result.sessions.length} linked session${result.sessions.length === 1 ? '' : 's'} in workspace search`
   }
-  if (tool.toolName === 'tc_sessions_context' && Array.isArray(result.turns)) {
+  if (tcTool === 'readContext' && Array.isArray(result.turns)) {
     return `Read ${result.turns.length} recent turn${result.turns.length === 1 ? '' : 's'}`
   }
-  if ((tool.toolName === 'tc_messages_send' || tool.toolName === 'tc_messages_status') && typeof result.state === 'string') {
+  if ((tcTool === 'sendMessage' || tcTool === 'messageStatus') && typeof result.state === 'string') {
     const taskSuffix = typeof result.taskId === 'string' ? ` (${result.taskId})` : ''
     if (result.state === 'queued') return `Queued for idle target${taskSuffix}`
     if (result.state === 'dispatching') return `Dispatching${taskSuffix}`

@@ -1,14 +1,14 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { CollaborationError } from '../shared/sessionCollaboration'
+import { CollaborationError, safeCollaborationFailure } from '../shared/sessionCollaboration'
 import type { SessionCollaborationApi } from '../shared/sessionCollaboration'
 import type { DesktopOperations } from './desktopOperations'
 import { DesktopOperationUnavailableError } from './desktopOperations'
 import { removeCollaborationEndpoint, writeCollaborationEndpoint } from './sessionCollaborationMcp/descriptor'
 import {
   MAX_COLLAB_BRIDGE_REQUEST_BYTES, MAX_COLLAB_BRIDGE_REQUESTS, MAX_COLLAB_BRIDGE_RESPONSE_BYTES,
-  collaborationBridgeRequestSchema, invokeCollaborationApi, safeCollaborationFailure, validateCollaborationResult,
+  collaborationBridgeRequestSchema, invokeCollaborationApi, validateCollaborationResult,
 } from './sessionCollaborationMcp/protocol'
 
 function respond(response: ServerResponse, status: number, body: unknown): void {

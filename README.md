@@ -246,7 +246,7 @@ Use `npm run check` for validation, `npm run test:e2e` for desktop tests, and
 
 - [Task documents and CLI](docs/task-documents.md)
 - [File transfer MCP](docs/file-transfer-mcp.md)
-- [Session collaboration MCP](docs/session-collaboration-mcp.md)
+- [TaskContinuum agent tools: native collaboration and MCP fallback](docs/session-collaboration-mcp.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 An independent project, not affiliated with VS Code or GitHub Copilot.

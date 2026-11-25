@@ -419,7 +419,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
                 ready.push({ resource: item, pending, snapshot })
               }
               result = request.method === 'initialize'
-                ? { ...connection.handshake, snapshots: ready.map((item) => item.snapshot), _meta: { taskcontinuumCanSend: initialAccess.canSend, taskcontinuumModelSelection: true, taskcontinuumModelConfig: true, taskcontinuumStreamedSendValidation: true, taskcontinuumChunkedChatSnapshot: snapshotStore.capability, taskcontinuumPagedChatHistory: { version: 1 }, taskcontinuumChatSnapshotCache: { version: 1 }, taskcontinuumCollaboration: { version: 1 } } }
+                ? { ...connection.handshake, snapshots: ready.map((item) => item.snapshot), _meta: { taskcontinuumCanSend: initialAccess.canSend, taskcontinuumModelSelection: true, taskcontinuumModelConfig: true, taskcontinuumStreamedSendValidation: true, taskcontinuumChunkedChatSnapshot: snapshotStore.capability, taskcontinuumPagedChatHistory: { version: 1 }, taskcontinuumChatSnapshotCache: { version: 1 }, taskcontinuumCollaboration: { version: 1, nativeSource: true } } }
                 : { type: 'snapshot', snapshots: ready.map((item) => item.snapshot) }
             } else if (request.method === 'ping') {
               z.object({ channel: z.literal('ahp-root://') }).strict().parse(request.params)

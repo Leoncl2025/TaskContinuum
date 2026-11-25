@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import type { Socket } from 'node:net'
 import { WebSocket, WebSocketServer } from 'ws'
-import { chatReducer, terminalReducer, MessageKind } from '@microsoft/agent-host-protocol'
+import { chatReducer, sessionReducer, terminalReducer, MessageKind } from '@microsoft/agent-host-protocol'
 import type { ActionEnvelope, ChatState, Message, RootState, SessionState, Snapshot, TerminalState } from '@microsoft/agent-host-protocol'
 import type { AgentHostEndpoint } from '../src/main/agentHostProtocol'
 import { modelConfigFixture } from './agent-host-model-fixture'
@@ -38,9 +38,11 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
   let chat: ChatState = { resource: chatId, title: 'Original Host chat', status: 1, modifiedAt: new Date().toISOString(), turns: [] }
   let olderTurns: ChatState['turns'] = []
   let historyPageSize = 5
-  const session: SessionState = { provider: 'copilotcli', title: chat.title, status: 1, lifecycle: 'ready' as SessionState['lifecycle'], activeClients: [], chats: [{ resource: chatId, title: chat.title, status: 1, modifiedAt: chat.modifiedAt }, { resource: 'ahp-chat:/private-other', title: 'Unshared sibling title', status: 1, modifiedAt: chat.modifiedAt }], defaultChat: chatId }
+  let session: SessionState = { provider: 'copilotcli', title: chat.title, status: 1, lifecycle: 'ready' as SessionState['lifecycle'], activeClients: [], chats: [{ resource: chatId, title: chat.title, status: 1, modifiedAt: chat.modifiedAt }, { resource: 'ahp-chat:/private-other', title: 'Unshared sibling title', status: 1, modifiedAt: chat.modifiedAt }], defaultChat: chatId }
   const subscriptions = new Map<import('ws').WebSocket, Set<string>>()
+  const identities = new Map<WebSocket, string>()
   const dispatches: unknown[] = []
+  const dispatchChannels: { channel: string; type: string }[] = []
   const methods: string[] = []
   const initializations: string[][] = []
   let loseNextSend = false
@@ -87,14 +89,28 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
     chat = chatReducer(chat, envelope.action as Parameters<typeof chatReducer>[1])
     for (const [socket, subscribed] of subscriptions) if (subscribed.has(chatId) && socket.readyState === socket.OPEN) socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'action', params: envelope }))
   }
+  function sessionAction(value: Record<string, unknown>, origin?: ActionEnvelope['origin']) {
+    const action = value as unknown as Parameters<typeof sessionReducer>[1]
+    session = sessionReducer(session, action)
+    const envelope: ActionEnvelope = { channel: sessionId, serverSeq: ++sequence, origin, action }
+    for (const [socket, subscribed] of subscriptions) if (subscribed.has(sessionId) && socket.readyState === socket.OPEN) {
+      socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'action', params: envelope }))
+    }
+  }
   sockets.on('connection', (socket) => {
     subscriptions.set(socket, new Set())
-    socket.on('close', () => subscriptions.delete(socket))
+    socket.on('close', () => {
+      subscriptions.delete(socket)
+      const clientId = identities.get(socket)
+      identities.delete(socket)
+      if (clientId && session.activeClients.some((client) => client.clientId === clientId)) sessionAction({ type: 'session/activeClientRemoved', clientId })
+    })
     socket.on('message', (data) => {
       const message = JSON.parse(data.toString())
       methods.push(message.method)
       let result: unknown = {}
       if (message.method === 'initialize') {
+        identities.set(socket, message.params.clientId)
         initializations.push([...message.params.protocolVersions])
         result = { protocolVersion, serverSeq: sequence, snapshots: [], ...(initializeMeta ? { _meta: initializeMeta } : {}) }
       }
@@ -131,8 +147,17 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
       }
       else if (message.method === 'dispatchAction') {
         dispatches.push(message.params.action)
+        const { channel, clientSeq, action: dispatched } = message.params
+        dispatchChannels.push({ channel, type: dispatched.type })
         if (loseNextSend) { loseNextSend = false; socket.terminate(); return }
-        action(message.params.action)
+        if (channel === sessionId && (dispatched.type === 'session/activeClientSet' || dispatched.type === 'session/activeClientRemoved')) {
+          sessionAction(dispatched, { clientId: identities.get(socket)!, clientSeq })
+        } else if (dispatched.type === 'chat/toolCallComplete') {
+          if (channel === chatId) action(dispatched)
+          const pending = session.inputNeeded?.find((request) => request.kind === 'toolClientExecution'
+            && request.chat === channel && request.toolCall.toolCallId === dispatched.toolCallId)
+          if (pending) sessionAction({ type: 'session/inputNeededRemoved', id: pending.id })
+        } else action(dispatched)
       }
       const delayed = message.method === 'subscribe' ? terminalDelays.get(message.params.channel) : undefined
       if (delayed) {
@@ -150,7 +175,7 @@ export async function startAgentHostFixture(initializeMeta?: Record<string, unkn
     terminalDelays.set(resource, new Promise<void>((resolve) => { release = resolve }))
     return () => { terminalDelays.delete(resource); release() }
   }
-  return { endpoint, hostId, sessionId, chatId, dispatches, methods, initializations, action, snapshot, addTerminal, historyTerminals, terminalAction,
+  return { endpoint, hostId, sessionId, chatId, dispatches, dispatchChannels, methods, initializations, action, sessionAction, snapshot, addTerminal, historyTerminals, terminalAction,
     setWorkingDirectories: (directories: string[]) => { session.workingDirectories = [...directories] },
     historyBytes: (bytes: number, responseId = 3, metadataPadding = false) => {
       const metadata = { largeHistory: '' }

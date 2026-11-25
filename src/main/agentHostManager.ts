@@ -93,6 +93,14 @@ export class AgentHostManager {
     throw new Error('The task no longer links this exact Agent Host chat.')
   }
 
+  async authorizeNativeTools(root: string, target: AgentHostTarget): Promise<void> {
+    const lease = await this.access.acquire(root)
+    if (!lease.current() || lease.owner.clientId !== target.owner.clientId
+      || !lease.localTargets.some((entry) => agentHostKey(entry) === agentHostKey(target))) {
+      throw new Error('TaskContinuum tools require a currently confirmed local chat link.')
+    }
+  }
+
   async connection(root: string, value: AgentHostTarget): Promise<AgentHostConnection> {
     const target = agentHostTargetSchema.parse(value)
     await this.authorize(root, target)

@@ -20,7 +20,7 @@ import { DesktopOperations } from '../src/main/desktopOperations'
 import { startSessionCollaborationMcpBridge } from '../src/main/sessionCollaborationMcpBridge'
 import { createCollaborationBridgeApi } from '../src/main/sessionCollaborationMcp/client'
 import { readCollaborationEndpoint } from '../src/main/sessionCollaborationMcp/descriptor'
-import { createSessionCollaborationMcpServer } from '../src/main/sessionCollaborationMcp/server'
+import { createTaskContinuumMcpServer } from '../src/main/sessionCollaborationMcp/server'
 
 const execute = promisify(execFile)
 const cleanups: (() => Promise<void>)[] = []
@@ -191,7 +191,7 @@ describe('session collaboration MCP bridge and server', () => {
 
   it('exposes the 4 collaboration MCP tools, marks peer context untrusted, and sanitizes tool errors', async () => {
     const { api, targetRef, messageId } = fakeCollaborationApi()
-    const server = createSessionCollaborationMcpServer(api)
+    const server = createTaskContinuumMcpServer({ collaboration: api }, true)
     const client = new Client({ name: 'collab-mcp-test', version: '1.0.0' })
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
     await server.connect(serverTransport)
@@ -246,7 +246,7 @@ describe('session collaboration MCP bridge and server', () => {
     })
   })
 
-  it('bundles taskcontinuum-collab-mcp.cjs, serves all 4 tools over stdio, and fails closed without TASKCONTINUUM_WORKSPACE', async () => {
+  it('serves the TaskContinuum namespace over stdio, retains the legacy launcher, and requires a workspace', async () => {
     const { data, workspace, targetRef, messageId } = await createTempFixture()
     await execute(process.execPath, [resolve('node_modules', 'vite', 'bin', 'vite.js'), 'build', '--config', 'vite.cli.config.ts'], { maxBuffer: 1024 * 1024 })
     const entry = resolve('out/cli/taskcontinuum-collab-mcp.cjs')
@@ -272,6 +272,23 @@ describe('session collaboration MCP bridge and server', () => {
       structuredContent: { result: { messageId, state: 'delivered' } },
     })
     expect(stderr).toBe('')
+
+    const unifiedClient = new Client({ name: 'taskcontinuum-stdio-test', version: '1.0.0' })
+    cleanups.push(() => unifiedClient.close())
+    await unifiedClient.connect(new StdioClientTransport({
+      command: process.execPath, args: [resolve('out/cli/taskcontinuum-mcp.cjs')],
+      env: { ELECTRON_RUN_AS_NODE: '1', TASKCONTINUUM_DATA_DIR: data, TASKCONTINUUM_WORKSPACE: workspace },
+    }))
+    expect(unifiedClient.getServerVersion()).toMatchObject({ name: 'taskcontinuum', title: 'TaskContinuum' })
+    expect((await unifiedClient.listTools()).tools.map((tool) => tool.name)).toEqual([
+      'taskcontinuum_collaboration_list_sessions',
+      'taskcontinuum_collaboration_read_context',
+      'taskcontinuum_collaboration_send_message',
+      'taskcontinuum_collaboration_message_status',
+    ])
+    expect(await unifiedClient.callTool({ name: 'taskcontinuum_collaboration_list_sessions', arguments: { taskId: 'T-0072' } })).toMatchObject({
+      isError: false, structuredContent: { result: { sessions: [{ targetRef }] } },
+    })
 
     const badEnv: NodeJS.ProcessEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
     delete badEnv.TASKCONTINUUM_WORKSPACE

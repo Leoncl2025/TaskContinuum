@@ -1,12 +1,13 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { basename } from 'node:path'
 import { createCollaborationBridgeApi } from './client'
 import { defaultDataDirectory } from './descriptor'
-import { createSessionCollaborationMcpServer } from './server'
+import { createTaskContinuumMcpServer } from './server'
 
 async function main(): Promise<void> {
   if (!process.env.TASKCONTINUUM_WORKSPACE || process.argv.length !== 2) throw new Error('Invalid MCP configuration')
-  const api = createCollaborationBridgeApi(defaultDataDirectory(), process.env.TASKCONTINUUM_WORKSPACE)
-  const server = createSessionCollaborationMcpServer(api)
+  const collaboration = createCollaborationBridgeApi(defaultDataDirectory(), process.env.TASKCONTINUUM_WORKSPACE)
+  const server = createTaskContinuumMcpServer({ collaboration }, basename(process.argv[1]) === 'taskcontinuum-collab-mcp.cjs')
   const transport = new StdioServerTransport(process.stdin, process.stdout, { maxBufferSize: 128 * 1024 })
   server.onerror = () => {}
   process.stdin.once('end', () => { void server.close() })
@@ -14,6 +15,6 @@ async function main(): Promise<void> {
 }
 
 void main().catch(() => {
-  process.stderr.write('Task Continuum collaboration MCP could not start. Configure TASKCONTINUUM_WORKSPACE as an absolute path and start without command arguments.\n')
+  process.stderr.write('TaskContinuum MCP could not start. Configure TASKCONTINUUM_WORKSPACE as an absolute path and start without command arguments.\n')
   process.exitCode = 1
 })

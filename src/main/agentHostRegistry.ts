@@ -485,7 +485,7 @@ export class AgentHostRegistry {
       const endpoints = await discoverAgentHosts(this.discovery)
       const endpoint = await this.resolveEndpoint(target, endpoints, signal)
       return connectLocalAgentHost(endpoint, signal)
-    })
+    }, true)
     this.connections.set(key, connection)
     return connection
   }

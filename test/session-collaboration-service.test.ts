@@ -6,18 +6,20 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MessageKind } from '@microsoft/agent-host-protocol'
+import type { ChatToolCallCompleteAction, SessionActiveClientSetAction } from '@microsoft/agent-host-protocol'
 import { AgentHostConnection } from '../src/main/agentHostConnection'
 import { attachAgentHostGateway } from '../src/main/agentHostGateway'
 import { connectAgentHostWebSocket, connectLocalAgentHost } from '../src/main/agentHostTransport'
 import { canonicalPolicyRoot } from '../src/main/linkedSessionPolicy'
 import { SessionCollaborationService } from '../src/main/sessionCollaborationService'
+import { TaskContinuumAgentHostTools } from '../src/main/taskContinuumAgentHostTools'
 import type { WorkspaceTaskMetadata } from '../src/main/workspaceReader'
 import { COLLABORATION_LIMITS, formatCollaborationTargetRef } from '../src/shared/sessionCollaboration'
 import type { AgentHostTarget } from '../src/shared/agentHost'
 import type { SessionLinksSnapshot } from '../src/shared/sessionBindings'
 import { startAgentHostFixture } from './agent-host-fixture'
 
-const cleanups: (() => Promise<void>)[] = []
+const cleanups: (() => void | Promise<void>)[] = []
 
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
@@ -30,7 +32,7 @@ async function tempRoot(prefix: string): Promise<string> {
   return dir
 }
 
-async function setupCollaborationFixture() {
+async function setupCollaborationFixture(protocolVersion = '0.9.0') {
   const root = await tempRoot('collab-service')
   const dataDir = join(root, 'profile')
   const workspaceRoot = join(root, 'workspace')
@@ -40,7 +42,7 @@ async function setupCollaborationFixture() {
   await mkdir(otherWorkspaceRoot, { recursive: true })
   const canonicalWorkspace = await canonicalPolicyRoot(workspaceRoot)
 
-  const localHost = await startAgentHostFixture()
+  const localHost = await startAgentHostFixture(undefined, protocolVersion)
   cleanups.push(() => localHost.close())
   const remoteHost = await startAgentHostFixture()
   cleanups.push(() => remoteHost.close())
@@ -100,6 +102,7 @@ async function setupCollaborationFixture() {
       localTarget,
       join(dataDir, 'local-conn'),
       (signal) => connectLocalAgentHost(localHost.endpoint, signal),
+      true,
     )
     cleanups.push(() => conn.close())
     return conn
@@ -135,6 +138,10 @@ async function setupCollaborationFixture() {
   const authorize = vi.fn(async (_root: string, target: AgentHostTarget) => {
     const ok = authorizedTargets.some((item) => item.chatId === target.chatId && item.owner.clientId === target.owner.clientId)
     if (!ok) throw new Error('Unauthorized target.')
+  })
+  const authorizeNativeTools = vi.fn(async (root: string, target: AgentHostTarget) => {
+    if (root !== canonicalWorkspace || target.owner.clientId !== localOwner.clientId) throw new Error('Unauthorized source.')
+    await authorize(root, target)
   })
   const readWorkspace = vi.fn(async () => ({ tasks }))
   const readLinks = vi.fn(async (root: string): Promise<SessionLinksSnapshot> => ({
@@ -173,6 +180,7 @@ async function setupCollaborationFixture() {
           }),
         },
         authorize,
+        authorizeNativeTools,
         connection: async (_root, target) => {
           if (target.owner.clientId === localOwner.clientId) {
             if (localConnection.isClosed) localConnection = newLocalConnection()
@@ -210,6 +218,7 @@ async function setupCollaborationFixture() {
     setGatewayCanSend: (value: boolean) => { gatewayCanSend = value },
     setGatewayAllowedTasks: (tasks: string[]) => { gatewayAllowedTasks = tasks },
     authorize,
+    authorizeNativeTools,
     readWorkspace,
     readLinks,
     createService,
@@ -217,6 +226,67 @@ async function setupCollaborationFixture() {
 }
 
 describe('SessionCollaborationService and gateway provenance', () => {
+  it('sends from a native client tool through the remote gateway and revalidates the sender of queued messages', async () => {
+    const f = await setupCollaborationFixture('1.0.0')
+    f.setBindings({
+      'T-0072': [{ ...f.localTarget, provider: 'agent-host' }],
+      'T-0073': [{ ...f.remoteTarget, provider: 'agent-host' }],
+    })
+    f.setGatewayAllowedTasks(['T-0073'])
+    const service = f.createService()
+    const native = new TaskContinuumAgentHostTools((root, target, beforeAccept) => ({
+      collaboration: service.forWorkspace(root, { target, beforeAccept }),
+    }))
+    cleanups.push(native.attach(f.workspaceRoot, f.localConnection, (root) => f.authorizeNativeTools(root, f.localTarget)))
+    await f.localConnection.open()
+    const registration = () => (f.localHost.dispatches as SessionActiveClientSetAction[]).find(({ type }) => type === 'session/activeClientSet')
+    await vi.waitFor(() => expect(registration()).toBeDefined())
+    const clientId = registration()!.activeClient.clientId
+    const turnId = randomUUID()
+    f.localHost.action({
+      type: 'chat/turnStarted', turnId, startedAt: new Date().toISOString(),
+      message: { text: 'Send the verification instructions', origin: { kind: MessageKind.User } },
+    })
+    const targetRef = formatCollaborationTargetRef('T-0073', f.remoteTarget)
+    const send = async (messageId: string, state: 'delivered' | 'queued') => {
+      const toolCallId = randomUUID()
+      f.localHost.sessionAction({
+        type: 'session/inputNeededSet',
+        request: {
+          kind: 'toolClientExecution', id: toolCallId, clientId, turnId, chat: f.localTarget.chatId,
+          toolCall: {
+            status: 'running', toolCallId, toolName: 'taskcontinuum_collaboration_send_message',
+            contributor: { kind: 'client', clientId },
+            toolInput: JSON.stringify({ targetRef, messageId, text: 'Verify the build.' }),
+          },
+        },
+      })
+      await vi.waitFor(() => {
+        const complete = (f.localHost.dispatches as ChatToolCallCompleteAction[]).find((action) =>
+          action.type === 'chat/toolCallComplete' && action.toolCallId === toolCallId)
+        expect(complete?.result).toMatchObject({ success: true, structuredContent: { result: { messageId, state } } })
+      })
+    }
+
+    const messageId = randomUUID()
+    await send(messageId, 'delivered')
+    await send(messageId, 'delivered')
+    expect(f.remoteHost.dispatches).toHaveLength(1)
+    expect(f.remoteHost.dispatches[0]).toMatchObject({
+      turnId: messageId,
+      message: { _meta: { taskcontinuumCollaboration: { sourceKind: 'agent-host-client', sourceTarget: f.localTarget } } },
+    })
+
+    const queuedId = randomUUID()
+    await send(queuedId, 'queued')
+    f.setAuthorizedTargets([f.remoteTarget])
+    f.remoteHost.action({ type: 'chat/turnComplete', turnId: messageId, duration: 1 })
+    await vi.waitFor(async () => expect(await service.forWorkspace(f.workspaceRoot).messageStatus(queuedId)).toMatchObject({
+      state: 'failed', reason: 'The originating chat is no longer authorized for this workspace.',
+    }))
+    expect(f.remoteHost.dispatches).toHaveLength(1)
+  })
+
   it('lists workspace sessions but still rejects unlinked and unauthorized targets', async () => {
     const setup = await setupCollaborationFixture()
     const service = setup.createService()

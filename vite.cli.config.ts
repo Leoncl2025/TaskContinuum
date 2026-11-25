@@ -1,4 +1,5 @@
 import { builtinModules } from 'node:module'
+import { copyFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { build, defineConfig } from 'vite'
 
@@ -11,7 +12,7 @@ export default defineConfig({
     async closeBundle() {
       for (const [entry, output] of [
         ['./src/main/fileTransferMcp/entry.ts', 'taskcontinuum-files-mcp.cjs'],
-        ['./src/main/sessionCollaborationMcp/entry.ts', 'taskcontinuum-collab-mcp.cjs'],
+        ['./src/main/sessionCollaborationMcp/entry.ts', 'taskcontinuum-mcp.cjs'],
       ] as const) {
         await build({
           configFile: false,
@@ -25,6 +26,10 @@ export default defineConfig({
           },
         })
       }
+      await copyFile(
+        new URL('./out/cli/taskcontinuum-mcp.cjs', import.meta.url),
+        new URL('./out/cli/taskcontinuum-collab-mcp.cjs', import.meta.url),
+      )
     },
   }],
   build: {

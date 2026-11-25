@@ -37,7 +37,7 @@ const captureRecordSchema = z.object({
     'connection.stream', 'connection.send', 'connection.send.phase', 'connection.offline', 'connection.retry', 'connection.close',
     'gateway.upgrade', 'gateway.request', 'gateway.models', 'gateway.socket', 'creation.prepare', 'creation.execute',
     'authorization.acquire', 'authorization.store', 'configuration.transaction', 'configuration.snapshot', 'device.disconnect',
-    'connection.cache',
+    'connection.cache', 'connection.tools',
   ]),
   targetHash: z.string().regex(/^[a-f0-9]{16}$/).optional(),
   ownerHash: z.string().regex(/^[a-f0-9]{16}$/).optional(),
@@ -83,7 +83,7 @@ export type AgentHostDiagnosticEvent =
   | 'gateway.upgrade' | 'gateway.request' | 'gateway.models' | 'gateway.socket'
   | 'creation.prepare' | 'creation.execute'
   | 'authorization.acquire' | 'authorization.store' | 'configuration.transaction' | 'configuration.snapshot' | 'device.disconnect'
-  | 'connection.cache'
+  | 'connection.cache' | 'connection.tools'
 type Status = 'begin' | 'ok' | 'error' | 'closed' | 'scheduled'
 type Step = 'load' | 'transport' | 'initialize' | 'identity' | 'session' | 'chat' | 'terminal' | 'root'
   | 'reconcile' | 'authorization' | 'workspace-recovery' | 'tunnel' | 'websocket'

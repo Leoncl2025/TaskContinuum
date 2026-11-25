@@ -15,6 +15,7 @@ export const COLLABORATION_LIMITS = {
   maxContextTurns: 20,
   maxContextBytes: 64 * 1024,
   maxConcurrentOperations: 4,
+  maxToolRequestBytes: 64 * 1024,
 } as const
 
 export const collaborationTaskIdSchema = z.string().max(64).regex(/^T-\d{4,}$/)
@@ -42,7 +43,7 @@ export const taskContinuumCollaborationMetaSchema = z.object({
   taskId: collaborationTaskIdSchema,
   messageId: z.uuid(),
   senderDevice: collaborationSenderDeviceSchema,
-  sourceKind: z.literal('mcp-client'),
+  sourceKind: z.enum(['mcp-client', 'agent-host-client']),
   sourceTarget: collaborationTargetSchema.optional(),
 }).strict()
 export type TaskContinuumCollaborationMeta = z.infer<typeof taskContinuumCollaborationMetaSchema>
@@ -150,6 +151,25 @@ export function collaborationFailure(error: unknown): { code: CollaborationError
     return { code: 'UNAVAILABLE', message: 'Session collaboration timed out or was interrupted.' }
   }
   return { code: 'UNAVAILABLE', message: 'Task Continuum or the target Agent Host is currently unavailable.' }
+}
+
+const defaultCollaborationErrors: Record<CollaborationErrorCode, string> = {
+  INVALID_REQUEST: 'Invalid session collaboration request. Check taskId, targetRef, messageId, and limits.',
+  ACCESS_DENIED: 'Session collaboration is not authorized. Check workspace and linked session access.',
+  NOT_FOUND: 'The requested task, linked target session, or collaboration message was not found.',
+  CONFLICT: 'This messageId already belongs to a different collaboration request.',
+  BUSY: 'Session collaboration capacity is busy. Retry after pending operations finish.',
+  EXPIRED: 'This queued collaboration message expired before the target session became idle.',
+  UNAVAILABLE: 'Task Continuum or the target Agent Host session is unavailable.',
+}
+
+export function safeCollaborationFailure(error: unknown): { code: CollaborationErrorCode; message: string } {
+  const { code, message } = collaborationFailure(error)
+  return {
+    code,
+    message: error instanceof CollaborationError && message && message.length <= 320 && !/[\\/]/.test(message)
+      ? message : defaultCollaborationErrors[code],
+  }
 }
 
 export const collaborationSessionsListRequestSchema = z.object({

@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { AhpClient } from '@microsoft/agent-host-protocol/client'
 import type { AhpTransport, Subscription } from '@microsoft/agent-host-protocol/client'
 import { MessageKind, sessionReducer, terminalReducer } from '@microsoft/agent-host-protocol'
-import type { ActionEnvelope, ChatTurnStartedAction, ChatTurnCancelledAction, InitializeResult, MessageEmbeddedResourceAttachment, ModelSelection, SessionModelInfo, SessionState, SessionTitleChangedAction, Snapshot, TerminalState } from '@microsoft/agent-host-protocol'
+import type { ActionEnvelope, ChatToolCallCompleteAction, ChatTurnStartedAction, ChatTurnCancelledAction, InitializeResult, MessageEmbeddedResourceAttachment, ModelSelection, SessionActiveClientRemovedAction, SessionActiveClientSetAction, SessionModelInfo, SessionState, SessionTitleChangedAction, Snapshot, TerminalState } from '@microsoft/agent-host-protocol'
 import type { AgentHostHistoryTransfer, AgentHostProtocolVersion, AgentHostTarget, AgentHostView } from '../shared/agentHost'
 import { agentHostProtocolVersions, MAX_SESSION_TITLE_LENGTH } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
@@ -24,6 +24,7 @@ import {
   receiveChunkedChatSnapshot, removePartialSnapshotFiles, snapshotHistoryPageSchema,
 } from './agentHostSnapshotTransfer'
 import type { ChunkedSnapshotCapability, SnapshotHistoryPage } from './agentHostSnapshotTransfer'
+import type { NativeToolChannel } from './taskContinuumAgentHostTools'
 
 export type AgentHostEvent = { type: 'action'; envelope: ActionEnvelope } | { type: 'snapshot'; snapshot: Snapshot } | { type: 'state' | 'history-progress' }
 export function isAgentHostTurnBoundary(event: AgentHostEvent): boolean {
@@ -37,7 +38,7 @@ const cacheSchema = z.discriminatedUnion('schemaVersion', [
 ])
 type Command = z.infer<typeof commandSchema>
 type ModelCatalog = Pick<SessionModelInfo, 'id' | 'name' | 'provider' | 'configSchema'>[]
-type ActiveConnection = { client: AhpClient; abort: AbortController; traceId: string }
+type ActiveConnection = { client: AhpClient; clientId: string; toolCalls?: Set<string>; abort: AbortController; traceId: string }
 
 export class AgentHostConnection {
   private current?: ActiveConnection
@@ -82,7 +83,8 @@ export class AgentHostConnection {
     failed?: boolean
   }
 
-  constructor(readonly target: AgentHostTarget, directory: string, private readonly transport: (signal: AbortSignal, traceId: string) => Promise<AhpTransport>) {
+  constructor(readonly target: AgentHostTarget, directory: string, private readonly transport: (signal: AbortSignal, traceId: string) => Promise<AhpTransport>,
+    readonly isNative = false) {
     agentHostTargetSchema.parse(target)
     this.chat = new AgentHostChatState(target.chatId)
     this.file = join(directory, 'agent-host', createHash('sha256').update(agentHostKey(target)).digest('hex'))
@@ -105,6 +107,54 @@ export class AgentHostConnection {
   get historyProgress(): AgentHostHistoryTransfer | undefined { return this.historyTransfer ? { ...this.historyTransfer } : undefined }
   get readOnly(): boolean { return this.initialized?._meta?.taskcontinuumCanSend === false || this.chat.sendState.readOnly }
   get title(): string | undefined { return this.chat.title || (this.snapshots.get(this.target.sessionId)?.state as SessionState | undefined)?.title }
+  get supportsNativeCollaborationSource(): boolean {
+    const capability = this.initialized?._meta?.taskcontinuumCollaboration
+    return typeof capability === 'object' && capability !== null && 'nativeSource' in capability && capability.nativeSource === true
+  }
+
+  nativeToolChannel(): NativeToolChannel | undefined {
+    const active = this.current
+    const state = this.snapshots.get(this.target.sessionId)?.state as SessionState | undefined
+    if (!this.isNative || !active || !state || !this.connected || this.initialized?.protocolVersion !== '1.0.0') return undefined
+    const dispatch = (channel: string, action: Parameters<AhpClient['dispatch']>[1]) => {
+      if (this.current !== active || !this.connected || active.abort.signal.aborted) throw new Error('The native tool connection changed.')
+      return active.client.dispatch(channel, action).clientSeq
+    }
+    return {
+      clientId: active.clientId, state,
+      claimCall: (key) => {
+        if (this.current !== active || !this.connected) return false
+        const calls = active.toolCalls ??= new Set()
+        if (calls.has(key)) return false
+        if (calls.size >= 2048) calls.delete(calls.values().next().value!)
+        calls.add(key)
+        return true
+      },
+      publish: (tools) => dispatch(this.target.sessionId, {
+        type: 'session/activeClientSet' as SessionActiveClientSetAction['type'],
+        activeClient: { clientId: active.clientId, displayName: 'TaskContinuum', tools },
+      }),
+      remove: () => {
+        dispatch(this.target.sessionId, { type: 'session/activeClientRemoved' as SessionActiveClientRemovedAction['type'], clientId: active.clientId })
+      },
+      complete: (request, result) => {
+        dispatch(request.chat, {
+          type: 'chat/toolCallComplete' as ChatToolCallCompleteAction['type'],
+          toolCallId: request.toolCall.toolCallId, turnId: request.turnId, result,
+        })
+      },
+    }
+  }
+
+  mayUseNativeTools(turnId: string): boolean {
+    const turn = this.chat.activeMessage
+    const chat = this.nativeToolChannel()?.state.chats.find(({ resource }) => resource === this.target.chatId)
+    if (!chat || chat.interactivity === 'read-only' || chat.interactivity === 'hidden'
+      || this.readOnly || turn?.id !== turnId || turn.message.origin.kind !== MessageKind.User) return false
+    // A remote gateway sender must not borrow this owner's workspace credentials.
+    const actor = turn.message._meta?.taskcontinuumActor
+    return actor === undefined || (typeof actor === 'object' && actor !== null && 'clientId' in actor && actor.clientId === this.target.owner.clientId)
+  }
 
   get hasActiveWork(): boolean {
     const send = this.chat.sendState
@@ -448,13 +498,13 @@ export class AgentHostConnection {
       }
       try {
         const client = new AhpClient(await this.transport(abort.signal, traceId), { requestTimeoutMs: 60000, subscriptionBuffer: 4096 })
-        active = { client, abort, traceId }
+        active = { client, clientId: randomUUID(), abort, traceId }
         if (this.closed) { abort.abort(); await client.shutdown(); throw new Error('Agent Host view is closed.') }
         advance('initialize')
         this.current = active
         this.modelCatalog = undefined
         client.connect()
-        const initialized = await client.initialize({ clientId: randomUUID(), protocolVersions: [...agentHostProtocolVersions] })
+        const initialized = await client.initialize({ clientId: active.clientId, protocolVersions: [...agentHostProtocolVersions] })
         this.initialized = { ...initialized, protocolVersion: requireAgentHostProtocolVersion(initialized.protocolVersion) }
         advance('session')
         this.snapshots.clear()
@@ -674,7 +724,9 @@ export class AgentHostConnection {
           if (!prior) throw new Error('Agent Host channel needs a snapshot.')
           if (envelope.serverSeq <= prior.fromSeq) continue
           let state: Snapshot['state']
-          if (envelope.channel === this.target.sessionId && envelope.action.type.startsWith('session/')) state = sessionReducer(prior.state as SessionState, envelope.action as Parameters<typeof sessionReducer>[1])
+          if (envelope.channel === this.target.sessionId && envelope.action.type.startsWith('session/')) state = envelope.rejectionReason === undefined
+            ? sessionReducer(prior.state as SessionState, envelope.action as Parameters<typeof sessionReducer>[1])
+            : prior.state
           else if (agentHostTerminalIdSchema.safeParse(envelope.channel).success && envelope.action.type.startsWith('terminal/')) state = terminalReducer(prior.state as TerminalState, envelope.action as Parameters<typeof terminalReducer>[1])
           else throw new Error('Unexpected Agent Host action.')
           if (envelope.channel === this.target.sessionId && !(state as SessionState).chats.some((chat) => chat.resource === this.target.chatId && chat.interactivity !== 'hidden')) throw new Error('The selected chat is no longer available in this session.')

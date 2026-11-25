@@ -341,7 +341,7 @@ void app.whenReady().then(async () => {
   await Promise.all([remoteVSCode.filesReady, remoteVSCode.collaborationReady])
   if (quitting || cleanupComplete) return
   registerChatLinkBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.chatLinks)
-  agentHost = registerAgentHostBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.agentHosts)
+  agentHost = registerAgentHostBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.agentHosts, remoteVSCode.nativeTools)
   const installCoordinator = new MultiWindowInstallCoordinator(
     () => sessionWindows?.liveWindows() ?? [],
     (parentId, blockers) => updateRestart?.respond(parentId, blockers),

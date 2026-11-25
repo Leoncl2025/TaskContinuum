@@ -23,6 +23,10 @@ export class AgentHostChatState {
   get completedTurns(): number { return this.state?.turns.length ?? 0 }
   get oldestTurnId(): string | undefined { return this.state?.turns[0]?.id }
   get nativeHistoryCursor(): string | undefined { return this.state?.turnsNextCursor }
+  get activeMessage(): { id: string; message: Message } | undefined {
+    const turn = this.state?.activeTurn
+    return turn && { id: turn.id, message: turn.message }
+  }
   get sendState() {
     return {
       activeTurnId: this.state?.activeTurn?.id,

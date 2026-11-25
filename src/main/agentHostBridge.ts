@@ -16,11 +16,13 @@ import { resolveLocalUserProfile } from './userProfile'
 import { agentHostCreateRequestSchema, creationLocationSchema, creationTaskIdSchema } from './agentHostCreationProtocol'
 import { localAgentHostCreateRequestSchema } from './localAgentHostCreationService'
 import { handleDesktopOperation } from './desktopOperations'
+import type { TaskContinuumAgentHostTools } from './taskContinuumAgentHostTools'
 
 export function registerAgentHostBridge(
   requireWindow: (event: IpcMainInvokeEvent) => BrowserWindow,
   currentRoot: () => Promise<string>,
   manager: AgentHostManager,
+  tools?: TaskContinuumAgentHostTools,
 ) {
   const watches = new Map<string, { window: BrowserWindow; root: string; target: AgentHostTarget; connection: AgentHostConnection; leases: Map<string, Set<string>>; close(): void }>()
   const progressWatches = new Map<string, { window: BrowserWindow; connection: AgentHostConnection; schedule(): void; close(): void }>()
@@ -214,11 +216,16 @@ export function registerAgentHostBridge(
       else if (!timer) timer = setTimeout(() => { void publish() }, 25)
     }
     const unlisten = connection.listen(schedule)
+    const detachTools = tools?.attach(root, connection, async (scope) => {
+      await current(event, window, root)
+      await manager.authorizeNativeTools(scope, target)
+    })
     const close = () => {
       if (stopped) return
       stopped = true
       clearTimeout(timer)
       unlisten()
+      detachTools?.()
       release()
       watches.delete(id)
       progressWatches.get(progressKey(window, root, target))?.schedule()

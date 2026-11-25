@@ -11,7 +11,7 @@ import {
   COLLABORATION_LIMITS, CollaborationError, collaborationContextRequestSchema, collaborationContextResultSchema,
   collaborationMessageLookupSchema, collaborationMessageStatusSchema, collaborationSendRequestSchema,
   collaborationSessionsListRequestSchema, collaborationSessionsListResultSchema,
-  formatCollaborationTargetRef, parseCollaborationTargetRef, readTaskContinuumCollaborationMeta,
+  collaborationTargetSchema, formatCollaborationTargetRef, parseCollaborationTargetRef, readTaskContinuumCollaborationMeta,
 } from '../shared/sessionCollaboration'
 import type {
   CollaborationContextRequest, CollaborationContextResult, CollaborationContextTurn, CollaborationMessageStatus,
@@ -30,6 +30,7 @@ import type { WorkspaceTaskMetadata } from './workspaceReader'
 const savedMessageSchema = z.object({
   root: z.string().min(1).max(4096),
   requestHash: z.string().regex(/^[a-f0-9]{64}$/),
+  sourceTarget: collaborationTargetSchema.optional(),
   text: z.string().max(COLLABORATION_LIMITS.maxMessageLength).optional(),
   status: collaborationMessageStatusSchema,
 }).strict()
@@ -42,7 +43,7 @@ const messagesDocumentSchema = z.object({
 
 export interface SessionCollaborationDependencies {
   directory: string
-  agentHosts: Pick<AgentHostManager, 'authorize' | 'connection' | 'hasConsent'> & {
+  agentHosts: Pick<AgentHostManager, 'authorize' | 'connection' | 'hasConsent'> & Partial<Pick<AgentHostManager, 'authorizeNativeTools'>> & {
     local: Pick<AgentHostManager['local'], 'list'>
   }
   devices: Pick<VSCodeDeviceClient, 'list'>
@@ -50,6 +51,11 @@ export interface SessionCollaborationDependencies {
   readLinks?: (root: string) => Promise<SessionLinksSnapshot>
   readWorkspace?: (root: string) => Promise<{ tasks: readonly WorkspaceTaskMetadata[] }>
   now?: () => number
+}
+
+interface NativeCollaborationSource {
+  target: AgentHostTarget
+  beforeAccept(): Promise<void>
 }
 
 function clipText(value: string, maxChars: number): { text: string; truncated: boolean } {
@@ -218,11 +224,11 @@ export class SessionCollaborationService {
     return taskSessionLinks(await this.readWorkspaceLinks(canonicalRoot), taskId)
   }
 
-  forWorkspace(root: string): SessionCollaborationApi {
+  forWorkspace(root: string, source?: NativeCollaborationSource): SessionCollaborationApi {
     return {
       listSessions: (request) => this.withCapacity(() => this.listSessions(root, collaborationSessionsListRequestSchema.parse(request))),
       readContext: (request) => this.withCapacity(() => this.readContext(root, collaborationContextRequestSchema.parse(request))),
-      sendMessage: (request) => this.withCapacity(() => this.sendMessage(root, collaborationSendRequestSchema.parse(request))),
+      sendMessage: (request) => this.withCapacity(() => this.sendMessage(root, collaborationSendRequestSchema.parse(request), source)),
       messageStatus: (messageId) => this.withCapacity(() => this.messageStatus(root, collaborationMessageLookupSchema.parse({ messageId }).messageId)),
     }
   }
@@ -486,7 +492,7 @@ export class SessionCollaborationService {
     return collaborationMessageStatusSchema.parse(record.status)
   }
 
-  private async sendMessage(root: string, request: CollaborationSendRequest): Promise<CollaborationMessageStatus> {
+  private async sendMessage(root: string, request: CollaborationSendRequest, source?: NativeCollaborationSource): Promise<CollaborationMessageStatus> {
     await this.initialize()
     const canonical = await this.canonicalRoot(root)
     await this.expireQueuedMessages()
@@ -513,15 +519,18 @@ export class SessionCollaborationService {
     try {
       await this.resolveTargetLink(canonical, request.targetRef, taskId)
 
+      await source?.beforeAccept()
       const view = connection.view
       if (view.readOnly) {
         throw new CollaborationError('ACCESS_DENIED', 'The target session is read-only or does not allow sending.')
       }
+      const sourceTarget = source && collaborationTargetSchema.parse(source.target)
       const createdAt = this.isoNow()
       if (view.chat?.draft?.text || view.chat?.draft?.attachments?.length) {
         const blocked: SavedMessage = {
           root: canonical,
           requestHash,
+          sourceTarget,
           status: {
             messageId: request.messageId,
             taskId,
@@ -540,6 +549,7 @@ export class SessionCollaborationService {
         const blocked: SavedMessage = {
           root: canonical,
           requestHash,
+          sourceTarget,
           status: {
             messageId: request.messageId,
             taskId,
@@ -565,6 +575,7 @@ export class SessionCollaborationService {
         const queued: SavedMessage = {
           root: canonical,
           requestHash,
+          sourceTarget,
           text: request.text,
           status: {
             messageId: request.messageId,
@@ -586,6 +597,7 @@ export class SessionCollaborationService {
       const record: SavedMessage = {
         root: canonical,
         requestHash,
+        sourceTarget,
         status: {
           messageId: request.messageId,
           taskId,
@@ -597,12 +609,22 @@ export class SessionCollaborationService {
       }
       this.messages.push(record)
       await this.persistMessages()
-      await this.dispatchNow(canonical, record, request.text, link, connection)
+      await this.dispatchNow(canonical, record, request.text, link, connection, source?.beforeAccept)
       return await this.enrichStatus(canonical, record)
     } finally { release() }
   }
 
-  private async dispatchNow(canonicalRoot: string, record: SavedMessage, messageText: string, link: SessionLink, connection: AgentHostConnection): Promise<void> {
+  private async authorizeSource(root: string, source: AgentHostTarget): Promise<void> {
+    try {
+      if (!this.deps.agentHosts.authorizeNativeTools) throw new Error('Native link verification is unavailable.')
+      await this.deps.agentHosts.authorizeNativeTools(root, source)
+    } catch {
+      throw new CollaborationError('ACCESS_DENIED', 'The originating chat is no longer authorized for this workspace.')
+    }
+  }
+
+  private async dispatchNow(canonicalRoot: string, record: SavedMessage, messageText: string, link: SessionLink, connection: AgentHostConnection,
+    beforeDispatch?: () => Promise<void>): Promise<void> {
     const lockKey = this.targetLockKey(canonicalRoot, link)
     this.dispatchingTargets.add(lockKey)
     try {
@@ -616,13 +638,19 @@ export class SessionCollaborationService {
           machineName: actor.machineName,
           ...(actor.username ? { username: actor.username } : {}),
         },
-        sourceKind: 'mcp-client',
+        sourceKind: record.sourceTarget && (link.owner.clientId === actor.clientId || connection.supportsNativeCollaborationSource)
+          ? 'agent-host-client' : 'mcp-client',
+        ...(record.sourceTarget ? { sourceTarget: record.sourceTarget } : {}),
       }
       await connection.send(
         record.status.messageId,
         messageText,
         undefined,
-        async () => { await this.resolveTargetLink(canonicalRoot, record.status.targetRef, record.status.taskId) },
+        async () => {
+          await this.resolveTargetLink(canonicalRoot, record.status.targetRef, record.status.taskId)
+          if (record.sourceTarget) await this.authorizeSource(canonicalRoot, record.sourceTarget)
+          await beforeDispatch?.()
+        },
         actor,
         undefined,
         collaborationMeta,
