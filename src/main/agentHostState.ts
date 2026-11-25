@@ -18,6 +18,7 @@ export class AgentHostChatState {
 
   get lastSequence(): number { return this.sequence }
   get value(): ChatState | undefined { return this.state ? structuredClone(this.state) : undefined }
+  get title(): string | undefined { return this.state?.title }
   get loaded(): boolean { return this.state !== undefined }
   get completedTurns(): number { return this.state?.turns.length ?? 0 }
   get oldestTurnId(): string | undefined { return this.state?.turns[0]?.id }

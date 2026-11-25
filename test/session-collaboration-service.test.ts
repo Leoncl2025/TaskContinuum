@@ -2,14 +2,16 @@
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MessageKind } from '@microsoft/agent-host-protocol'
 import { AgentHostConnection } from '../src/main/agentHostConnection'
 import { attachAgentHostGateway } from '../src/main/agentHostGateway'
 import { connectAgentHostWebSocket, connectLocalAgentHost } from '../src/main/agentHostTransport'
+import { canonicalPolicyRoot } from '../src/main/linkedSessionPolicy'
 import { SessionCollaborationService } from '../src/main/sessionCollaborationService'
+import type { WorkspaceTaskMetadata } from '../src/main/workspaceReader'
 import { COLLABORATION_LIMITS, formatCollaborationTargetRef } from '../src/shared/sessionCollaboration'
 import type { AgentHostTarget } from '../src/shared/agentHost'
 import type { SessionLinksSnapshot } from '../src/shared/sessionBindings'
@@ -32,8 +34,11 @@ async function setupCollaborationFixture() {
   const root = await tempRoot('collab-service')
   const dataDir = join(root, 'profile')
   const workspaceRoot = join(root, 'workspace')
+  const otherWorkspaceRoot = join(root, 'other-workspace')
   await mkdir(dataDir, { recursive: true })
   await mkdir(workspaceRoot, { recursive: true })
+  await mkdir(otherWorkspaceRoot, { recursive: true })
+  const canonicalWorkspace = await canonicalPolicyRoot(workspaceRoot)
 
   const localHost = await startAgentHostFixture()
   cleanups.push(() => localHost.close())
@@ -119,12 +124,24 @@ async function setupCollaborationFixture() {
 
   let currentTime = Date.parse('2026-11-16T03:00:00.000Z')
   let authorizedTargets = [localTarget, remoteTarget]
+  let tasks: WorkspaceTaskMetadata[] = [{ id: 'T-0072', title: 'Release' }, { id: 'T-0073', title: 'Verification' }]
   let bindings: SessionLinksSnapshot['document']['bindings'] = {
     'T-0072': [
       { ...localTarget, provider: 'agent-host' },
       { ...remoteTarget, provider: 'agent-host' },
     ],
   }
+
+  const authorize = vi.fn(async (_root: string, target: AgentHostTarget) => {
+    const ok = authorizedTargets.some((item) => item.chatId === target.chatId && item.owner.clientId === target.owner.clientId)
+    if (!ok) throw new Error('Unauthorized target.')
+  })
+  const readWorkspace = vi.fn(async () => ({ tasks }))
+  const readLinks = vi.fn(async (root: string): Promise<SessionLinksSnapshot> => ({
+    document: { schemaVersion: '2.1', bindings: root === canonicalWorkspace ? bindings : {} },
+    revision: 'rev-1',
+    localOwner: { clientId: localOwner.clientId, machineName: localOwner.machineName },
+  }))
 
   const createService = () => {
     const service = new SessionCollaborationService({
@@ -155,10 +172,7 @@ async function setupCollaborationFixture() {
             warnings: [],
           }),
         },
-        authorize: async (_root, target) => {
-          const ok = authorizedTargets.some((item) => item.chatId === target.chatId && item.owner.clientId === target.owner.clientId)
-          if (!ok) throw new Error('Unauthorized target.')
-        },
+        authorize,
         connection: async (_root, target) => {
           if (target.owner.clientId === localOwner.clientId) {
             if (localConnection.isClosed) localConnection = newLocalConnection()
@@ -168,12 +182,8 @@ async function setupCollaborationFixture() {
           return remoteConnection
         },
       },
-      readLinks: async () => ({
-        document: { schemaVersion: '2.1', bindings },
-        revision: 'rev-1',
-        localOwner: { clientId: localOwner.clientId, machineName: localOwner.machineName },
-      }),
-      readWorkspace: async () => ({ tasks: [{ id: 'T-0072' }, { id: 'T-0073' }] }),
+      readLinks,
+      readWorkspace,
       now: () => currentTime,
     })
     cleanups.push(() => service.close())
@@ -183,6 +193,7 @@ async function setupCollaborationFixture() {
   return {
     dataDir,
     workspaceRoot,
+    otherWorkspaceRoot,
     localHost,
     remoteHost,
     localOwner,
@@ -195,30 +206,41 @@ async function setupCollaborationFixture() {
     advanceTime: (deltaMs: number) => { currentTime += deltaMs },
     setAuthorizedTargets: (targets: AgentHostTarget[]) => { authorizedTargets = targets },
     setBindings: (next: SessionLinksSnapshot['document']['bindings']) => { bindings = next },
+    setTasks: (next: WorkspaceTaskMetadata[]) => { tasks = next },
     setGatewayCanSend: (value: boolean) => { gatewayCanSend = value },
     setGatewayAllowedTasks: (tasks: string[]) => { gatewayAllowedTasks = tasks },
+    authorize,
+    readWorkspace,
+    readLinks,
     createService,
   }
 }
 
 describe('SessionCollaborationService and gateway provenance', () => {
-  it('lists only authorized links for each task without prior collaboration setup', async () => {
+  it('lists workspace sessions but still rejects unlinked and unauthorized targets', async () => {
     const setup = await setupCollaborationFixture()
-    const api = setup.createService().forWorkspace(setup.workspaceRoot)
+    const service = setup.createService()
+    const api = service.forWorkspace(setup.workspaceRoot)
     const remoteRef = formatCollaborationTargetRef('T-0072', setup.remoteTarget)
 
     const listed = await api.listSessions({ taskId: 'T-0072' })
-    expect(listed.collaboration).toMatchObject({ enabled: true, paused: false })
+    expect(listed.collaboration).toEqual({ queuedCount: 0 })
     expect(listed.sessions.map((item) => item.location).sort()).toEqual(['local', 'remote'])
     await expect(api.listSessions({ taskId: 'T-0073' })).resolves.toMatchObject({
-      collaboration: { enabled: true, paused: false },
-      sessions: [],
+      collaboration: { queuedCount: 0 },
+      sessions: [{ taskId: 'T-0072', location: 'local' }, { taskId: 'T-0072', location: 'remote' }],
     })
     await expect(api.readContext({
       targetRef: formatCollaborationTargetRef('T-0073', setup.remoteTarget),
       limit: 5,
       detail: 'summary',
     })).rejects.toMatchObject({ code: 'NOT_FOUND' })
+
+    const other = service.forWorkspace(setup.otherWorkspaceRoot)
+    await expect(other.listSessions({ taskId: 'T-0072' })).resolves.toMatchObject({ sessions: [] })
+    await expect(other.readContext({ targetRef: remoteRef, limit: 5, detail: 'summary' })).rejects.toMatchObject({ code: 'NOT_FOUND' })
+    await expect(other.sendMessage({ targetRef: remoteRef, messageId: randomUUID(), text: 'Wrong workspace' }))
+      .rejects.toMatchObject({ code: 'NOT_FOUND' })
 
     setup.setAuthorizedTargets([setup.localTarget])
     await expect(api.listSessions({ taskId: 'T-0072' })).resolves.toMatchObject({ sessions: [{ location: 'local' }] })
@@ -230,42 +252,108 @@ describe('SessionCollaborationService and gateway provenance', () => {
     expect(setup.remoteHost.dispatches).toHaveLength(0)
   })
 
-  it('preserves explicit disable and pause overrides across a restart', async () => {
+  it('searches current task, children, ancestors, then other tasks and stops authorizing at the page size', async () => {
     const setup = await setupCollaborationFixture()
-    const service = setup.createService()
-    await service.setTaskPolicy(setup.workspaceRoot, 'T-0072', { enabled: false })
-    await service.setTaskPolicy(setup.workspaceRoot, 'T-0073', { paused: true })
-    await service.close()
+    const tree = [
+      { id: 'T-0080', title: 'Unrelated' },
+      { id: 'T-0075', title: 'Grandchild', parentId: 'T-0073' },
+      { id: 'T-0060', title: 'Root review' },
+      { id: 'T-0061', title: 'Parent', parentId: 'T-0060' },
+      { id: 'T-0072', title: 'Current', parentId: 'T-0061' },
+      { id: 'T-0073', title: 'First child', parentId: 'T-0072' },
+      { id: 'T-0074', title: 'Second child', parentId: 'T-0072' },
+    ]
+    const links = tree.map(({ id }) => ({
+      sessionId: `copilotcli:/session-${id}`,
+      chatId: `ahp-chat:/chat-${id}`,
+      owner: setup.remoteTarget.owner,
+      provider: 'agent-host' as const,
+    }))
+    setup.setTasks(tree)
+    setup.setBindings(Object.fromEntries(tree.map(({ id }, index) => [id, [links[index]]])))
+    setup.setAuthorizedTargets(links)
+    const api = setup.createService().forWorkspace(setup.workspaceRoot)
+
+    const first = await api.listSessions({ taskId: 'T-0072', limit: 2 })
+    expect(first.sessions.map((session) => session.taskId)).toEqual(['T-0072', 'T-0073'])
+    expect(first.nextOffset).toBe(2)
+    expect(setup.readWorkspace).toHaveBeenCalledOnce()
+    expect(setup.readLinks).toHaveBeenCalledOnce()
+    expect(setup.authorize.mock.calls.map(([, target]) => target.sessionId))
+      .toEqual(['copilotcli:/session-T-0072', 'copilotcli:/session-T-0073'])
+
+    const rest = await api.listSessions({ taskId: 'T-0072', offset: first.nextOffset })
+    expect(rest.sessions.map((session) => session.taskId)).toEqual(['T-0074', 'T-0075', 'T-0061', 'T-0060', 'T-0080'])
+    expect(rest.nextOffset).toBeUndefined()
+    await expect(api.listSessions({ query: 'root worker-b' }))
+      .resolves.toMatchObject({ sessions: [{ taskId: 'T-0060' }] })
+  })
+
+  it('does not block collaboration based on previous task settings or rewrite them', async () => {
+    const setup = await setupCollaborationFixture()
+    const oldPolicyPath = join(setup.dataDir, 'session-collaboration-policy.json')
+    const oldPolicy = JSON.stringify({
+      schemaVersion: 1,
+      workspaces: {
+        [await canonicalPolicyRoot(setup.workspaceRoot)]: {
+          'T-0072': { enabled: false, paused: false, sentCount: 32 },
+          'T-0073': { enabled: true, paused: true, sentCount: 0 },
+        },
+      },
+    })
+    await writeFile(oldPolicyPath, oldPolicy)
 
     const api = setup.createService().forWorkspace(setup.workspaceRoot)
     const remoteRef = formatCollaborationTargetRef('T-0072', setup.remoteTarget)
-
-    await expect(api.listSessions({ taskId: 'T-0072' })).rejects.toMatchObject({ code: 'ACCESS_DENIED' })
-    await expect(api.readContext({ targetRef: remoteRef, limit: 5, detail: 'summary' })).rejects.toMatchObject({ code: 'ACCESS_DENIED' })
+    await expect(api.listSessions({ taskId: 'T-0073' })).resolves.toMatchObject({ sessions: [{ taskId: 'T-0072' }, { taskId: 'T-0072' }] })
     await expect(api.sendMessage({
       targetRef: remoteRef,
       messageId: randomUUID(),
-      text: 'Should not send while collaboration is off',
-    })).rejects.toMatchObject({ code: 'ACCESS_DENIED' })
-    await expect(api.listSessions({ taskId: 'T-0073' })).rejects.toMatchObject({ code: 'COLLABORATION_PAUSED' })
-    expect(setup.remoteHost.dispatches).toHaveLength(0)
+      text: 'Collaborate without per-task setup',
+    })).resolves.toMatchObject({ state: 'delivered' })
+    expect(setup.remoteHost.dispatches).toHaveLength(1)
+    expect(await readFile(oldPolicyPath, 'utf8')).toBe(oldPolicy)
   })
 
-  it('delivers cross-device messages by default with gateway-verified provenance and tracks turn completion', async () => {
+  it('delivers the 33rd message in the same task without a quota reset', async () => {
     const setup = await setupCollaborationFixture()
+    const api = setup.createService().forWorkspace(setup.workspaceRoot)
+    const targetRef = formatCollaborationTargetRef('T-0072', setup.localTarget)
+
+    for (let index = 1; index <= 33; index++) {
+      const messageId = randomUUID()
+      await expect(api.sendMessage({ targetRef, messageId, text: `Collaboration message ${index}` }))
+        .resolves.toMatchObject({ state: 'delivered', turnId: messageId })
+      setup.localHost.action({ type: 'chat/turnComplete', turnId: messageId, duration: 10 })
+      await vi.waitFor(() => expect(setup.localConnection.view.chat?.activeTurn).toBeUndefined(), { interval: 5 })
+    }
+
+    expect(setup.localHost.dispatches).toHaveLength(33)
+  })
+
+  it('delivers and reads across tasks through the original device gateway', async () => {
+    const setup = await setupCollaborationFixture()
+    setup.setBindings({
+      'T-0072': [{ ...setup.localTarget, provider: 'agent-host' }],
+      'T-0073': [{ ...setup.remoteTarget, provider: 'agent-host' }],
+    })
+    setup.setGatewayAllowedTasks(['T-0073'])
     const service = setup.createService()
     const api = service.forWorkspace(setup.workspaceRoot)
-    const remoteRef = formatCollaborationTargetRef('T-0072', setup.remoteTarget)
+    const { sessions } = await api.listSessions({ taskId: 'T-0072', query: 'Worker-B' })
+    expect(sessions).toMatchObject([{ taskId: 'T-0073', location: 'remote' }])
+    const remoteRef = sessions[0].targetRef
     const messageId = randomUUID()
 
     const status = await api.sendMessage({
       targetRef: remoteRef,
+      taskId: 'T-0072',
       messageId,
       text: 'Hold v0.2.5 release until regression tests pass.',
     })
     expect(status).toMatchObject({
       messageId,
-      taskId: 'T-0072',
+      taskId: 'T-0073',
       targetRef: remoteRef,
       state: 'delivered',
       turnId: messageId,
@@ -282,7 +370,7 @@ describe('SessionCollaborationService and gateway provenance', () => {
     expect(dispatched.message.text).toBe('Hold v0.2.5 release until regression tests pass.')
     expect(dispatched.message._meta.taskcontinuumCollaboration).toEqual({
       version: 1,
-      taskId: 'T-0072',
+      taskId: 'T-0073',
       messageId,
       senderDevice: {
         clientId: setup.localOwner.clientId,
@@ -325,7 +413,8 @@ describe('SessionCollaborationService and gateway provenance', () => {
       expect(latest.turnStatus).toBe('completed')
     })
 
-    const context = await api.readContext({ targetRef: remoteRef, limit: 5, detail: 'summary' })
+    const context = await api.readContext({ targetRef: remoteRef, taskId: 'T-0072', limit: 5, detail: 'summary' })
+    expect(context.taskId).toBe('T-0073')
     expect(context.turns).toHaveLength(1)
     expect(context.turns[0]).toMatchObject({
       turnId: messageId,
@@ -383,7 +472,6 @@ describe('SessionCollaborationService and gateway provenance', () => {
   it('queues behind a busy turn, drains on completion, blocks on human drafts, and pauses safely across restart', async () => {
     const setup = await setupCollaborationFixture()
     const service = setup.createService()
-    await service.setTaskPolicy(setup.workspaceRoot, 'T-0072', { enabled: true })
     const api = service.forWorkspace(setup.workspaceRoot)
     const localRef = formatCollaborationTargetRef('T-0072', setup.localTarget)
 
@@ -451,14 +539,12 @@ describe('SessionCollaborationService and gateway provenance', () => {
     expect(afterRestart.reason).toMatch(/restart/i)
   })
 
-  it('supports context cursor pagination, pause/resume, TTL expiry, and per-task quota reset', async () => {
+  it('pages context and reports a full message queue as temporarily busy until entries expire', async () => {
     const setup = await setupCollaborationFixture()
     setup.localHost.historyText(8, 'Historical output', ['t-1', 't-2', 't-3', 't-4', 't-5', 't-6', 't-7', 't-8'])
     setup.localHost.historyWindow(4, 4)
 
-    const service = setup.createService()
-    await service.setTaskPolicy(setup.workspaceRoot, 'T-0072', { enabled: true })
-    const api = service.forWorkspace(setup.workspaceRoot)
+    const api = setup.createService().forWorkspace(setup.workspaceRoot)
     const localRef = formatCollaborationTargetRef('T-0072', setup.localTarget)
 
     const recentPage = await api.readContext({ targetRef: localRef, limit: 3, detail: 'summary' })
@@ -469,34 +555,29 @@ describe('SessionCollaborationService and gateway provenance', () => {
     const olderPage = await api.readContext({ targetRef: localRef, cursor: recentPage.nextCursor, limit: 3, detail: 'summary' })
     expect(olderPage.turns.map((turn) => turn.turnId)).toEqual(['t-3', 't-4', 't-5'])
 
-    // Pause blocks new operations with COLLABORATION_PAUSED.
-    await service.setTaskPolicy(setup.workspaceRoot, 'T-0072', { paused: true })
-    await expect(api.listSessions({ taskId: 'T-0072' })).rejects.toMatchObject({ code: 'COLLABORATION_PAUSED' })
-    await service.setTaskPolicy(setup.workspaceRoot, 'T-0072', { paused: false })
-
-    // Queue expiry after TTL.
     setup.localHost.action({
       type: 'chat/turnStarted',
       turnId: 'long-running',
       startedAt: '2026-11-16T03:10:00.000Z',
       message: { text: 'Busy', origin: { kind: MessageKind.User } },
     })
-    const expiringId = randomUUID()
-    const expiring = await api.sendMessage({
-      targetRef: localRef,
-      messageId: expiringId,
-      text: 'Will expire if busy too long',
-    })
-    expect(expiring.state).toBe('queued')
+    const pending = Array.from({ length: COLLABORATION_LIMITS.maxQueuedPerTask }, (_, index) => ({
+      targetRef: localRef, messageId: randomUUID(), text: `Waiting message ${index}`,
+    }))
+    for (const request of pending) {
+      await expect(api.sendMessage(request)).resolves.toMatchObject({ state: 'queued' })
+    }
+    const overflow = { targetRef: localRef, messageId: randomUUID(), text: 'Retry when the queue has space' }
+    await expect(api.sendMessage(overflow)).rejects.toMatchObject({ code: 'BUSY' })
     setup.advanceTime(COLLABORATION_LIMITS.messageTtlMs + 1_000)
-    const expiredStatus = await api.messageStatus(expiringId)
+    const expiredStatus = await api.messageStatus(pending[0].messageId)
     expect(expiredStatus.state).toBe('expired')
+    await expect(api.sendMessage(overflow)).resolves.toMatchObject({ state: 'queued' })
   })
 
   it('self-heals after cached connection eviction or disconnect without losing context reads or sends', async () => {
     const setup = await setupCollaborationFixture()
     const service = setup.createService()
-    await service.setTaskPolicy(setup.workspaceRoot, 'T-0072', { enabled: true })
     const api = service.forWorkspace(setup.workspaceRoot)
     const remoteRef = formatCollaborationTargetRef('T-0072', setup.remoteTarget)
 

@@ -114,11 +114,11 @@ export class VSCodeDeviceClient {
       this.peers = this.peers.filter((peer) => peer !== prior).concat({ ...prior, id: prior?.id ?? randomUUID(), root: canonical, invitation, enabled: autoConnect })
     })
   }
-  async list(root: string) {
+  async list(root: string, refresh = true) {
     await this.load()
     const canonical = await this.root(root)
     return this.peers.filter((peer) => peer.root === canonical).map((peer) => {
-      if (peer.enabled && !this.closed && (!this.active.has(peer.id) || Date.now() - this.active.get(peer.id)!.refreshed > 10000)) void this.ensure(peer).catch(() => undefined)
+      if (refresh && peer.enabled && !this.closed && (!this.active.has(peer.id) || Date.now() - this.active.get(peer.id)!.refreshed > 10000)) void this.ensure(peer).catch(() => undefined)
       return { id: peer.id, ownerClientId: peer.invitation.ownerClientId, machineName: peer.invitation.machineName, state: this.active.get(peer.id)?.refreshed ? 'connected' as const : this.connecting.has(peer.id) ? 'connecting' as const : 'offline' as const,
         enabled: peer.enabled, expiresAt: peer.invitation.expiresAt, error: this.errors.get(peer.id) }
     })

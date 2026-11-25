@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MessageKind } from '@microsoft/agent-host-protocol'
 import type { ChatState, ResponsePartKind, Turn } from '@microsoft/agent-host-protocol'
 import type { AgentHostBridge, AgentHostView } from '../src/shared/agentHost'
-import type { TaskCollaborationState } from '../src/shared/sessionCollaboration'
 import { AgentHostPanel } from '../src/renderer/components/AgentHostPanel'
 import { AgentHostSessionsSidebar } from '../src/renderer/components/AgentHostSessionsSidebar'
 import { sessionBindingKey } from '../src/renderer/chat/sessionBindings'
@@ -281,28 +280,18 @@ describe('AgentHostPanel collaboration UI adaptation', () => {
   })
 })
 
-describe('AgentHostSessionsSidebar per-task collaboration controls', () => {
-  it('shows enabled collaboration without writing a policy and still allows manual overrides', async () => {
+describe('AgentHostSessionsSidebar with session collaboration', () => {
+  it('keeps linked sessions visible without displaying the old collaboration panel', async () => {
     const setup = createPanelFixture()
-    const user = userEvent.setup()
-    let state: TaskCollaborationState = {
+    const legacyPolicy = vi.fn(async () => ({
       taskId: 'T-0002',
       enabled: true,
       paused: false,
       queuedCount: 0,
-      sentCount: 0,
+      sentCount: 32,
       maxSentMessages: 32,
-    }
-    setup.bridge.collaborationPolicy = vi.fn(async () => ({ ...state }))
-    setup.bridge.setCollaborationPolicy = vi.fn(async (_taskId, update) => {
-      state = {
-        ...state,
-        enabled: update.enabled ?? state.enabled,
-        paused: update.enabled === false ? false : (update.paused ?? state.paused),
-        sentCount: update.resetBudget ? 0 : state.sentCount,
-      }
-      return { ...state }
-    })
+    }))
+    Object.assign(setup.bridge, { collaborationPolicy: legacyPolicy, setCollaborationPolicy: vi.fn() })
 
     const linked = {
       id: setup.target.sessionId,
@@ -323,25 +312,8 @@ describe('AgentHostSessionsSidebar per-task collaboration controls', () => {
       />,
     )
 
-    const section = await screen.findByRole('region', { name: 'Task session collaboration' })
-    expect(await within(section).findByText('Enabled · 0/32 sent')).toBeInTheDocument()
-    expect(setup.bridge.setCollaborationPolicy).not.toHaveBeenCalled()
-    expect(within(section).queryByRole('button', { name: 'Enable collaboration' })).not.toBeInTheDocument()
-
-    await user.click(within(section).getByRole('button', { name: 'Disable collaboration' }))
-    expect(within(section).getByText('Off')).toBeInTheDocument()
-
-    await user.click(within(section).getByRole('button', { name: 'Enable collaboration' }))
-    expect(within(section).getByText('Enabled · 0/32 sent')).toBeInTheDocument()
-
-    await user.click(within(section).getByRole('button', { name: 'Pause collaboration' }))
-    expect(within(section).getByText('Paused')).toBeInTheDocument()
-
-    state.sentCount = 5
-    await user.click(within(section).getByRole('button', { name: 'Resume collaboration' }))
-    expect(within(section).getByText('Enabled · 5/32 sent')).toBeInTheDocument()
-
-    await user.click(within(section).getByRole('button', { name: 'Reset quota' }))
-    expect(within(section).getByText('Enabled · 0/32 sent')).toBeInTheDocument()
+    expect(await screen.findByRole('treeitem', { name: linked.title })).toBeVisible()
+    expect(screen.queryByRole('region', { name: 'Task session collaboration' })).not.toBeInTheDocument()
+    expect(legacyPolicy).not.toHaveBeenCalled()
   })
 })

@@ -79,7 +79,7 @@ function documentData(text: string | null) {
   return { body, checklist, requirements, goals, plan }
 }
 
-export async function readTaskWorkspace(folder: string): Promise<WorkspaceSnapshot> {
+async function openTaskWorkspace(folder: string) {
   if (!isAbsolute(folder)) throw new Error('Choose an absolute workspace folder.')
   const root = await realpath(folder)
   if (!(await stat(root)).isDirectory()) throw new Error('The workspace must be a folder.')
@@ -110,10 +110,12 @@ export async function readTaskWorkspace(folder: string): Promise<WorkspaceSnapsh
   const tasksRoot = await containedPath(root, resolve(root, config.paths.tasks))
   const entries = (await readdir(tasksRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
   if (entries.length > 1000) throw new Error('The workspace exceeds the 1,000 task limit.')
-  const tasks: TaskRecord[] = []
+  return { root, config, read, warnings, entries: entries.sort((left, right) => left.name.localeCompare(right.name)) }
+}
+
+async function* taskEntries({ root, config, read, entries, warnings }: Awaited<ReturnType<typeof openTaskWorkspace>>) {
   const ids = new Set<string>()
-  const fixedIds = new Set<string>()
-  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+  for (const entry of entries) {
     const directory = join(config.paths.tasks, entry.name)
     try {
       const canonical = await containedPath(root, join(root, directory))
@@ -125,10 +127,34 @@ export async function readTaskWorkspace(folder: string): Promise<WorkspaceSnapsh
       const task = parsed.data
       if (ids.has(task.id)) throw new Error(`Duplicate task ID ${task.id}.`)
       ids.add(task.id)
-      if (fixedTask.success) fixedIds.add(task.id)
+      yield { task, directory, name: entry.name, fixed: fixedTask.success }
+    } catch (error) {
+      warnings.push(`${entry.name}: ${error instanceof Error ? error.message : 'Cannot read task.'}`)
+    }
+  }
+}
+
+export type WorkspaceTaskMetadata = Pick<TaskRecord, 'id' | 'title' | 'parentId'>
+
+export async function readTaskWorkspaceMetadata(folder: string): Promise<{ tasks: WorkspaceTaskMetadata[] }> {
+  const tasks: WorkspaceTaskMetadata[] = []
+  for await (const { task } of taskEntries(await openTaskWorkspace(folder))) {
+    tasks.push({ id: task.id, title: task.title, parentId: task.relations.parent ?? undefined })
+  }
+  return { tasks }
+}
+
+export async function readTaskWorkspace(folder: string): Promise<WorkspaceSnapshot> {
+  const workspace = await openTaskWorkspace(folder)
+  const { root, config, read, warnings } = workspace
+  const tasks: TaskRecord[] = []
+  const fixedIds = new Set<string>()
+  for await (const { task, directory, name, fixed } of taskEntries(workspace)) {
+    try {
+      if (fixed) fixedIds.add(task.id)
       async function document(file: string): Promise<string | null> {
         try { return await read(join(directory, file)) } catch (error) {
-          warnings.push(`${entry.name}/${file}: ${error instanceof Error ? error.message : 'Cannot read document.'}`)
+          warnings.push(`${name}/${file}: ${error instanceof Error ? error.message : 'Cannot read document.'}`)
           return null
         }
       }
@@ -137,7 +163,7 @@ export async function readTaskWorkspace(folder: string): Promise<WorkspaceSnapsh
       const checklist = documentData(await document('Checklist.md'))
       const seen = new Set<string>()
       const items = checklist.checklist.filter((item) => {
-        if (seen.has(item.id)) { warnings.push(`${entry.name}: Duplicate acceptance ID ${item.id}.`); return false }
+        if (seen.has(item.id)) { warnings.push(`${name}: Duplicate acceptance ID ${item.id}.`); return false }
         seen.add(item.id)
         return true
       })
@@ -153,7 +179,7 @@ export async function readTaskWorkspace(folder: string): Promise<WorkspaceSnapsh
         documents: { requirements: requirements.body, plan: plan.body, checklist: checklist.body },
       })
     } catch (error) {
-      warnings.push(`${entry.name}: ${error instanceof Error ? error.message : 'Cannot read task.'}`)
+      warnings.push(`${name}: ${error instanceof Error ? error.message : 'Cannot read task.'}`)
     }
   }
   let diagnostics: DocumentDiagnostic[]

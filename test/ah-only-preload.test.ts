@@ -194,15 +194,11 @@ describe('native-only preload boundary', () => {
     expect(ipc.invoke.mock.calls.some(([channel]) => channel === 'agent-host:send')).toBe(false)
   })
 
-  it('forwards per-task session collaboration policy queries and updates under agentHost without adding new preload globals', async () => {
+  it('does not expose per-task collaboration switches in preload', () => {
     const bridge = window.agentHost
-    if (!bridge?.collaborationPolicy || !bridge.setCollaborationPolicy) throw new Error('Collaboration policy preload API missing.')
-    await bridge.collaborationPolicy('T-0072')
-    await bridge.setCollaborationPolicy('T-0072', { enabled: true, paused: false })
-    expect(ipc.invoke.mock.calls).toEqual([
-      ['agent-host:collaboration-policy', 'T-0072'],
-      ['agent-host:set-collaboration-policy', 'T-0072', { enabled: true, paused: false }],
-    ])
+    if (!bridge) throw new Error('Agent Host preload API missing.')
+    expect(bridge).not.toHaveProperty('collaborationPolicy')
+    expect(bridge).not.toHaveProperty('setCollaborationPolicy')
   })
 
   it('exposes root-scoped local creation without caller-selected paths, tasks, or remote workers', async () => {

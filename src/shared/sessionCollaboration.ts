@@ -8,8 +8,9 @@ export const COLLABORATION_LIMITS = {
   maxMessageLength: MAX_CHAT_TEXT_LENGTH,
   maxQueuedPerTask: 16,
   maxRetainedMessages: 200,
-  maxMessagesPerTaskWindow: 32,
   messageTtlMs: 30 * 60 * 1000,
+  maxSessionPageSize: 20,
+  maxSessionListTitleLength: 512,
   defaultContextTurns: 5,
   maxContextTurns: 20,
   maxContextBytes: 64 * 1024,
@@ -127,11 +128,9 @@ export const collaborationTargetRefSchema = z.string().min(24).max(2048).refine(
 export const collaborationErrorCodeSchema = z.enum([
   'INVALID_REQUEST',
   'ACCESS_DENIED',
-  'COLLABORATION_PAUSED',
   'NOT_FOUND',
   'CONFLICT',
   'BUSY',
-  'QUOTA_EXCEEDED',
   'EXPIRED',
   'UNAVAILABLE',
 ])
@@ -153,26 +152,11 @@ export function collaborationFailure(error: unknown): { code: CollaborationError
   return { code: 'UNAVAILABLE', message: 'Task Continuum or the target Agent Host is currently unavailable.' }
 }
 
-export const taskCollaborationPolicyUpdateSchema = z.object({
-  enabled: z.boolean().optional(),
-  paused: z.boolean().optional(),
-  resetBudget: z.boolean().optional(),
-}).strict().refine((value) => value.enabled !== undefined || value.paused !== undefined || value.resetBudget !== undefined,
-  'At least one collaboration policy field must be specified.')
-export type TaskCollaborationPolicyUpdate = z.infer<typeof taskCollaborationPolicyUpdateSchema>
-
-export const taskCollaborationStateSchema = z.object({
-  taskId: collaborationTaskIdSchema,
-  enabled: z.boolean(),
-  paused: z.boolean(),
-  queuedCount: z.number().int().nonnegative(),
-  sentCount: z.number().int().nonnegative(),
-  maxSentMessages: z.number().int().positive(),
-}).strict()
-export type TaskCollaborationState = z.infer<typeof taskCollaborationStateSchema>
-
 export const collaborationSessionsListRequestSchema = z.object({
-  taskId: collaborationTaskIdSchema,
+  taskId: collaborationTaskIdSchema.optional().describe('Starting task for search priority, not a filter. Omit to browse the workspace.'),
+  query: z.string().trim().max(200).optional(),
+  limit: z.number().int().min(1).max(COLLABORATION_LIMITS.maxSessionPageSize).optional(),
+  offset: z.number().int().nonnegative().max(1000).optional().describe('Use nextOffset from the previous page with the same task and query.'),
 }).strict()
 export type CollaborationSessionsListRequest = z.infer<typeof collaborationSessionsListRequestSchema>
 
@@ -181,7 +165,7 @@ export const collaborationSessionEntrySchema = z.object({
   taskId: collaborationTaskIdSchema,
   sessionId: collaborationSessionIdSchema,
   chatId: collaborationChatIdSchema,
-  title: z.string().max(2000),
+  title: z.string().max(COLLABORATION_LIMITS.maxSessionListTitleLength),
   owner: collaborationOwnerSchema,
   location: z.enum(['local', 'remote']),
   state: z.enum(['connected', 'connecting', 'offline', 'available']),
@@ -190,20 +174,18 @@ export const collaborationSessionEntrySchema = z.object({
 export type CollaborationSessionEntry = z.infer<typeof collaborationSessionEntrySchema>
 
 export const collaborationSessionsListResultSchema = z.object({
-  taskId: collaborationTaskIdSchema,
+  taskId: collaborationTaskIdSchema.optional(),
   collaboration: z.object({
-    enabled: z.boolean(),
-    paused: z.boolean(),
     queuedCount: z.number().int().nonnegative(),
-    remainingMessages: z.number().int().nonnegative(),
   }).strict(),
-  sessions: z.array(collaborationSessionEntrySchema).max(1000),
+  sessions: z.array(collaborationSessionEntrySchema).max(COLLABORATION_LIMITS.maxSessionPageSize),
+  nextOffset: z.number().int().positive().max(1000).optional(),
 }).strict()
 export type CollaborationSessionsListResult = z.infer<typeof collaborationSessionsListResultSchema>
 
 export const collaborationContextRequestSchema = z.object({
   targetRef: collaborationTargetRefSchema,
-  taskId: collaborationTaskIdSchema.optional(),
+  taskId: collaborationTaskIdSchema.optional().describe('Optional caller task hint. The targetRef selects the destination.'),
   cursor: z.string().min(1).max(256).optional(),
   limit: z.number().int().min(1).max(COLLABORATION_LIMITS.maxContextTurns).default(COLLABORATION_LIMITS.defaultContextTurns),
   detail: z.enum(['summary', 'full']).default('summary'),
@@ -245,7 +227,7 @@ export type CollaborationContextResult = z.infer<typeof collaborationContextResu
 
 export const collaborationSendRequestSchema = z.object({
   targetRef: collaborationTargetRefSchema,
-  taskId: collaborationTaskIdSchema.optional(),
+  taskId: collaborationTaskIdSchema.optional().describe('Optional caller task hint. The targetRef selects the destination.'),
   messageId: z.uuid(),
   text: z.string().max(COLLABORATION_LIMITS.maxMessageLength).refine((value) => value.trim().length > 0, 'Collaboration message text cannot be empty.'),
 }).strict()

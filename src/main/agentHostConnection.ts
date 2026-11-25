@@ -103,7 +103,8 @@ export class AgentHostConnection {
   get sizeLimitError(): AgentHostSizeLimitError | undefined { return this.lastSizeFailure }
   get historyEpoch(): string { return this.historyGeneration }
   get historyProgress(): AgentHostHistoryTransfer | undefined { return this.historyTransfer ? { ...this.historyTransfer } : undefined }
-  private get readOnly(): boolean { return this.initialized?._meta?.taskcontinuumCanSend === false || this.chat.sendState.readOnly }
+  get readOnly(): boolean { return this.initialized?._meta?.taskcontinuumCanSend === false || this.chat.sendState.readOnly }
+  get title(): string | undefined { return this.chat.title || (this.snapshots.get(this.target.sessionId)?.state as SessionState | undefined)?.title }
 
   get hasActiveWork(): boolean {
     const send = this.chat.sendState

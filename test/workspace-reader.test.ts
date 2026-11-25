@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { readTaskWorkspace } from '../src/main/workspaceReader'
+import { readTaskWorkspace, readTaskWorkspaceMetadata } from '../src/main/workspaceReader'
 import { filterTasks, taskProgress } from '../src/shared/tasks'
 
 const roots: string[] = []
@@ -75,6 +75,9 @@ describe('read-only task workspaces', () => {
     const outside = await mkdtemp(join(await fixtureRoot(), 'taskcontinuum-outside-'))
     roots.push(outside)
     await symlink(outside, join(root, 'tasks', 'T-0003-linked'), process.platform === 'win32' ? 'junction' : 'dir')
+    await expect(readTaskWorkspaceMetadata(root)).resolves.toEqual({
+      tasks: [{ id: 'T-0002', title: 'Real task', parentId: 'T-0001' }],
+    })
     const workspace = await readTaskWorkspace(root)
     expect(workspace.tasks).toHaveLength(1)
     expect(workspace.warnings.some((warning) => warning.includes('escapes the selected folder'))).toBe(true)

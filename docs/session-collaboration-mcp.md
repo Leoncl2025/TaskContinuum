@@ -1,9 +1,9 @@
 # Session collaboration MCP
 
 Task Continuum provides a dedicated **MCP stdio server** (`taskcontinuum-collab-mcp.cjs`)
-for coordinating Agent Host sessions linked to the same task across local and paired
-remote machines. It uses the running desktop's task repository bindings, collaboration
-policy, and authenticated Dev Tunnel + SSH Agent Host gateway — keeping read-only file
+for coordinating Agent Host sessions across tasks in one workspace, including on
+paired remote machines. It uses the running desktop's task repository bindings and
+authenticated Dev Tunnel + SSH Agent Host gateway — keeping read-only file
 transfer (`taskcontinuum-files-mcp.cjs`) separate from session execution authority.
 
 ## Collaboration UI and native session provenance
@@ -24,25 +24,24 @@ messages and Task Continuum cross-machine collaboration:
   background activity while reading older history shows a non-intrusive **New activity
   below** pill instead of stealing focus or scroll position.
 
-## Task collaboration settings
+## Availability
 
-Collaboration is **on by default** for every task, without a separate confirmation
-or enable step. The workspace still needs **Automatic workspace links**, and the
-Agent must use a configured collaboration MCP client. Only currently linked and
-authorized sessions are available, and reading or sending still requires the
-corresponding permission. Pairing alone does not grant access to unlinked chats,
-and enabling collaboration does not itself send any messages.
-
-In **Agent Host sessions > Current**, you can pause, resume, or disable collaboration
-for an individual task, or reset its quota after reviewing message activity.
-Previously saved disabled and paused settings stay in effect. Disabling collaboration
-blocks queued messages without replaying them.
+Collaboration is **available by default** across tasks in the configured workspace.
+There is no separate collaboration panel, opt-in, or cumulative send quota. The app ignores old
+per-task collaboration settings. The workspace still needs **Automatic workspace
+links**, and the sending Agent needs a configured collaboration MCP client.
+Only sessions currently linked and authorized in that workspace are available.
+Their tasks do not have to match. Reading or sending still requires the
+corresponding permission. Making tools available does not send any messages.
 
 ## Install in the actual MCP Host/client
 
 Configure the execution Host/client running beside your Task Continuum desktop to launch
 `resources\cli\taskcontinuum-collab-mcp.cjs` (or `out\cli\taskcontinuum-collab-mcp.cjs`
-after `npm run build:cli`) with Node.js 24:
+after `npm run build:cli`) with Node.js 24. Use the MCP executable from the same
+build as the local desktop, and restart the MCP client after updating.
+
+Example configuration (for VS Code, use `servers` instead of `mcpServers`):
 
 ```json
 {
@@ -69,10 +68,24 @@ descriptor.
 
 | Tool | Arguments |
 | --- | --- |
-| `tc_sessions_list` | `taskId` (`T-XXXX`). Lists authorized linked sessions for the task and returns validated `targetRef` handles, location, connection state, and send capability. |
-| `tc_sessions_context` | `targetRef`, optional `taskId`, optional `cursor`, optional `limit` (1–20, default 5), optional `detail` (`summary` or `full`). Reads bounded recent turns and marks output `untrustedContent: true`. |
-| `tc_messages_send` | `targetRef`, `messageId` (UUID), `text` (up to 12,000 characters), optional `taskId`. Submits an idempotent collaboration message. |
+| `tc_sessions_list` | Optional `taskId`, `query`, `limit` (1–20, default 20), and `offset`. Searches authorized linked sessions in the workspace. Each row has its own `taskId`, `targetRef`, device, connection state, and send capability. |
+| `tc_sessions_context` | `targetRef`, optional `cursor`, optional `limit` (1–20, default 5), optional `detail` (`summary` or `full`). Reads bounded recent turns and marks output `untrustedContent: true`. |
+| `tc_messages_send` | `targetRef`, `messageId` (UUID), and `text` (up to 12,000 characters). Submits an idempotent collaboration message. |
 | `tc_messages_status` | `messageId` (UUID). Inspects delivery state and target `turnStatus` without re-sending. |
+
+### Find a session
+
+Pass the caller's `taskId` to start with that task, then search its descendants
+(direct children first), its ancestors (nearest parent first), and all other
+workspace tasks. The task only changes the order. Omit it to browse the workspace.
+`query` matches task IDs and titles, machine names, session and chat IDs, and
+session titles when available. Search does not open remote chats to fetch titles.
+
+For example, `tc_sessions_list({ "taskId": "T-0072", "query": "Runner3", "limit": 5 })`
+can return sessions linked under tasks other than T-0072. Follow `nextOffset`
+with the same task and query until it is absent. Use the returned `targetRef`
+unchanged in read and send calls; any optional caller `taskId` on those calls
+does not select or restrict the destination.
 
 ### Delivery vs. work completion
 
@@ -81,6 +94,7 @@ descriptor.
   `turnStatus` reaches `completed`, then call `tc_sessions_context` to inspect results.
 - Busy targets enter `queued` (up to 16 queued messages per task, 30-minute TTL) and
   drain automatically once the active turn completes and authorization still holds.
+  A full queue returns `BUSY`; it frees capacity as pending messages finish or expire.
 - Unsent human drafts or uncertain deliveries on the target chat return `blocked` rather
   than overwriting drafts or bypassing manual delivery review.
 - Application restarts transition persisted `queued` entries to `blocked` and

@@ -143,7 +143,7 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     if (confirmation.response === 1) { await unchanged(root); await tunnels.stop() }
   })
   let closing: Promise<void> | undefined
-  return { agentHosts, gitSync, filesReady, collaboration, collaborationReady, chatLinks,
+  return { agentHosts, gitSync, filesReady, collaborationReady, chatLinks,
     hasActiveWork: () => agentHosts.hasActiveWork || host.hasActiveWork || files.hasActiveWork || fileSource.hasActiveWork || collaboration.hasActiveWork,
     close: () => closing ??= (async () => {
     try { await (await collaborationReady).close() } catch { console.error('Closing after session collaboration MCP bridge failure.') }

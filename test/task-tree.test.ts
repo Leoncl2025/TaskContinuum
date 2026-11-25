@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildTaskTree } from '../src/shared/taskTree'
+import { buildTaskTree, tasksInSearchOrder } from '../src/shared/taskTree'
 import type { TaskTreeNode } from '../src/shared/taskTree'
 import type { TaskRecord } from '../src/shared/tasks'
 
@@ -36,5 +36,11 @@ describe('task hierarchy', () => {
     const tree = buildTaskTree([task('first', 'second'), task('second', 'first'), task('self', 'self'), task('child', 'first')])
     expect(ids(tree).sort()).toEqual(['child', 'first', 'second', 'self'])
     expect(ids(buildTaskTree([task('first', 'second'), task('second', 'first')], new Set(['second'])))).toEqual(['first', 'second'])
+  })
+
+  it('does not repeat tasks or loop while searching a malformed hierarchy', () => {
+    const start = task('first', 'second')
+    const tasks = [task('other-root'), task('second', 'first'), task('child', 'second'), start]
+    expect([...tasksInSearchOrder(tasks, start)].map(({ id }) => id)).toEqual(['first', 'second', 'child', 'other-root'])
   })
 })

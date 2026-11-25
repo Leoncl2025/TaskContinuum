@@ -6,10 +6,10 @@ export interface TaskTreeNode {
   matches: boolean
 }
 
-export function buildTaskTree(tasks: TaskRecord[], matches?: ReadonlySet<string>): TaskTreeNode[] {
+function indexTasks<T extends Pick<TaskRecord, 'id' | 'parentId'>>(tasks: readonly T[]) {
   const byId = new Map(tasks.map((task) => [task.id, task]))
-  const children = new Map<string, TaskRecord[]>()
-  const roots: TaskRecord[] = []
+  const children = new Map<string, T[]>()
+  const roots: T[] = []
   for (const task of byId.values()) {
     if (!task.parentId || task.parentId === task.id || !byId.has(task.parentId)) roots.push(task)
     else {
@@ -18,6 +18,41 @@ export function buildTaskTree(tasks: TaskRecord[], matches?: ReadonlySet<string>
       children.set(task.parentId, siblings)
     }
   }
+  return { byId, children, roots }
+}
+
+export function* tasksInSearchOrder<T extends Pick<TaskRecord, 'id' | 'parentId'>>(tasks: readonly T[], start?: T): IterableIterator<T> {
+  if (!start) {
+    yield* tasks
+    return
+  }
+  yield start
+  const { byId, children } = indexTasks(tasks)
+  const visited = new Set([start.id])
+  const branch = [start]
+  for (let i = 0; i < branch.length; i++) {
+    for (const child of children.get(branch[i].id) ?? []) {
+      if (visited.has(child.id)) continue
+      visited.add(child.id)
+      branch.push(child)
+      yield child
+    }
+  }
+  let parentId = start.parentId
+  while (parentId && !visited.has(parentId)) {
+    const parent = byId.get(parentId)
+    if (!parent) break
+    visited.add(parentId)
+    yield parent
+    parentId = parent.parentId
+  }
+  for (const task of byId.values()) {
+    if (!visited.has(task.id)) yield task
+  }
+}
+
+export function buildTaskTree(tasks: TaskRecord[], matches?: ReadonlySet<string>): TaskTreeNode[] {
+  const { byId, children, roots } = indexTasks(tasks)
   const visited = new Set<string>()
   function visit(task: TaskRecord): TaskTreeNode | null {
     if (visited.has(task.id)) return null

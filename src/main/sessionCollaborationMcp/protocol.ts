@@ -30,12 +30,10 @@ export const collaborationBridgeErrorSchema = z.object({
 
 const defaultMessages: Record<CollaborationErrorCode, string> = {
   INVALID_REQUEST: 'Invalid session collaboration request. Check taskId, targetRef, messageId, and limits.',
-  ACCESS_DENIED: 'Session collaboration is not authorized. Check workspace and session access and the task collaboration settings.',
-  COLLABORATION_PAUSED: 'Session collaboration is currently paused for this task in Task Continuum.',
+  ACCESS_DENIED: 'Session collaboration is not authorized. Check workspace and linked session access.',
   NOT_FOUND: 'The requested task, linked target session, or collaboration message was not found.',
   CONFLICT: 'This messageId already belongs to a different collaboration request.',
-  BUSY: 'Session collaboration capacity is busy. Retry when active requests complete.',
-  QUOTA_EXCEEDED: 'The task collaboration message or queue limit was exceeded.',
+  BUSY: 'Session collaboration capacity is busy. Retry after pending operations finish.',
   EXPIRED: 'This queued collaboration message expired before the target session became idle.',
   UNAVAILABLE: 'Task Continuum or the target Agent Host session is unavailable.',
 }

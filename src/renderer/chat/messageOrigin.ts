@@ -186,8 +186,8 @@ export function summarizeCollaborationTool(tool: ToolCall): string | undefined {
     : undefined
   if (!result) return undefined
 
-  if (tool.toolName === 'tc_sessions_list' && Array.isArray(result.sessions) && typeof result.taskId === 'string') {
-    return `${result.sessions.length} linked session${result.sessions.length === 1 ? '' : 's'} in ${result.taskId}`
+  if (tool.toolName === 'tc_sessions_list' && Array.isArray(result.sessions)) {
+    return `${result.sessions.length} linked session${result.sessions.length === 1 ? '' : 's'} in workspace search`
   }
   if (tool.toolName === 'tc_sessions_context' && Array.isArray(result.turns)) {
     return `Read ${result.turns.length} recent turn${result.turns.length === 1 ? '' : 's'}`

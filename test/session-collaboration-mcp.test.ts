@@ -51,10 +51,10 @@ function fakeCollaborationApi() {
   const api = {
     listSessions: vi.fn<SessionCollaborationApi['listSessions']>(async ({ taskId }) => ({
       taskId,
-      collaboration: { enabled: true, paused: false, queuedCount: 0, remainingMessages: 31 },
+      collaboration: { queuedCount: 0 },
       sessions: [{
         targetRef,
-        taskId,
+        taskId: 'T-0072',
         sessionId: 'copilotcli:/worker-session',
         chatId: 'ahp-chat://default/worker',
         title: 'Verification Session',
@@ -167,7 +167,7 @@ describe('session collaboration MCP bridge and server', () => {
       await hold
       return {
         taskId: 'T-0072',
-        collaboration: { enabled: true, paused: false, queuedCount: 0, remainingMessages: 32 },
+        collaboration: { queuedCount: 0 },
         sessions: [],
       }
     })
@@ -206,11 +206,13 @@ describe('session collaboration MCP bridge and server', () => {
       ['tc_messages_status', true],
     ])
 
-    const listResult = await client.callTool({ name: 'tc_sessions_list', arguments: { taskId: 'T-0072' } })
+    const search = { taskId: 'T-0073', query: 'Worker-B', limit: 2, offset: 1 }
+    const listResult = await client.callTool({ name: 'tc_sessions_list', arguments: search })
     expect(listResult.isError).toBe(false)
     expect(listResult.structuredContent).toMatchObject({
-      result: { taskId: 'T-0072', sessions: [{ targetRef }] },
+      result: { taskId: 'T-0073', collaboration: { queuedCount: 0 }, sessions: [{ taskId: 'T-0072', targetRef }] },
     })
+    expect(api.listSessions).toHaveBeenCalledExactlyOnceWith(search)
 
     const contextResult = await client.callTool({ name: 'tc_sessions_context', arguments: { targetRef, limit: 3 } })
     expect(contextResult.isError).toBe(false)

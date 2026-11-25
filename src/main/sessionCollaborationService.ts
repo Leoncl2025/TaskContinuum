@@ -3,21 +3,20 @@ import { join } from 'node:path'
 import { z } from 'zod'
 import type { ChatState, ResponsePart, Turn, TurnState } from '@microsoft/agent-host-protocol'
 import { agentHostKey } from '../shared/agentHost'
-import type { AgentHostTarget } from '../shared/agentHost'
+import type { AgentHostSession, AgentHostTarget } from '../shared/agentHost'
 import { taskSessionLinks } from '../shared/sessionBindings'
 import type { SessionLink, SessionLinksSnapshot } from '../shared/sessionBindings'
+import { tasksInSearchOrder } from '../shared/taskTree'
 import {
   COLLABORATION_LIMITS, CollaborationError, collaborationContextRequestSchema, collaborationContextResultSchema,
   collaborationMessageLookupSchema, collaborationMessageStatusSchema, collaborationSendRequestSchema,
-  collaborationSessionsListRequestSchema, collaborationSessionsListResultSchema, collaborationTaskIdSchema,
+  collaborationSessionsListRequestSchema, collaborationSessionsListResultSchema,
   formatCollaborationTargetRef, parseCollaborationTargetRef, readTaskContinuumCollaborationMeta,
-  taskCollaborationPolicyUpdateSchema, taskCollaborationStateSchema,
 } from '../shared/sessionCollaboration'
 import type {
   CollaborationContextRequest, CollaborationContextResult, CollaborationContextTurn, CollaborationMessageStatus,
   CollaborationSendRequest, CollaborationSessionEntry, CollaborationSessionsListRequest, CollaborationSessionsListResult,
-  CollaborationTurnStatus, SessionCollaborationApi, TaskCollaborationPolicyUpdate, TaskCollaborationState,
-  TaskContinuumCollaborationMeta,
+  CollaborationTurnStatus, SessionCollaborationApi, TaskContinuumCollaborationMeta,
 } from '../shared/sessionCollaboration'
 import type { AgentHostConnection } from './agentHostConnection'
 import type { AgentHostManager } from './agentHostManager'
@@ -25,19 +24,8 @@ import { canonicalPolicyRoot } from './linkedSessionPolicy'
 import { readRepositorySessionLinksForAuthorization } from './repositorySessionLinks'
 import { readJsonBounded, writeJsonAtomic } from './shared/storage'
 import type { VSCodeDeviceClient } from './vscodeDeviceClient'
-import { readTaskWorkspace } from './workspaceReader'
-
-const taskPolicyEntrySchema = z.object({
-  enabled: z.boolean(),
-  paused: z.boolean(),
-  sentCount: z.number().int().nonnegative().default(0),
-}).strict()
-type TaskPolicyEntry = z.infer<typeof taskPolicyEntrySchema>
-
-const policyDocumentSchema = z.object({
-  schemaVersion: z.literal(1),
-  workspaces: z.record(z.string().min(1).max(4096), z.record(collaborationTaskIdSchema, taskPolicyEntrySchema)),
-}).strict()
+import { readTaskWorkspaceMetadata } from './workspaceReader'
+import type { WorkspaceTaskMetadata } from './workspaceReader'
 
 const savedMessageSchema = z.object({
   root: z.string().min(1).max(4096),
@@ -60,7 +48,7 @@ export interface SessionCollaborationDependencies {
   devices: Pick<VSCodeDeviceClient, 'list'>
   identity: () => Promise<{ clientId: string; machineName: string; username?: string }>
   readLinks?: (root: string) => Promise<SessionLinksSnapshot>
-  readWorkspace?: (root: string) => Promise<{ tasks: ReadonlyArray<{ id: string }> }>
+  readWorkspace?: (root: string) => Promise<{ tasks: readonly WorkspaceTaskMetadata[] }>
   now?: () => number
 }
 
@@ -109,12 +97,10 @@ function resolveTurnStatus(chat: ChatState | undefined, turnId: string | undefin
 }
 
 export class SessionCollaborationService {
-  private readonly policyFile: string
   private readonly messagesFile: string
   private readonly readLinks: (root: string) => Promise<SessionLinksSnapshot>
-  private readonly readWorkspace: (root: string) => Promise<{ tasks: ReadonlyArray<{ id: string }> }>
+  private readonly readWorkspace: (root: string) => Promise<{ tasks: readonly WorkspaceTaskMetadata[] }>
   private readonly now: () => number
-  private policies = new Map<string, Map<string, TaskPolicyEntry>>()
   private messages: SavedMessage[] = []
   private loading?: Promise<void>
   private writing: Promise<void> = Promise.resolve()
@@ -126,10 +112,9 @@ export class SessionCollaborationService {
   private closed = false
 
   constructor(private readonly deps: SessionCollaborationDependencies) {
-    this.policyFile = join(deps.directory, 'session-collaboration-policy.json')
     this.messagesFile = join(deps.directory, 'session-collaboration-messages.json')
     this.readLinks = deps.readLinks ?? readRepositorySessionLinksForAuthorization
-    this.readWorkspace = deps.readWorkspace ?? readTaskWorkspace
+    this.readWorkspace = deps.readWorkspace ?? readTaskWorkspaceMetadata
     this.now = deps.now ?? Date.now
     this.expiryTimer = setInterval(() => {
       void this.expireQueuedMessages().catch(() => {})
@@ -147,16 +132,6 @@ export class SessionCollaborationService {
 
   private async initialize(): Promise<void> {
     this.loading ??= (async () => {
-      try {
-        const parsed = policyDocumentSchema.parse(await readJsonBounded(this.policyFile, 1024 * 1024))
-        for (const [root, entries] of Object.entries(parsed.workspaces)) {
-          this.policies.set(root, new Map(Object.entries(entries)))
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          throw new CollaborationError('UNAVAILABLE', 'Session collaboration policy storage is unreadable.')
-        }
-      }
       let recovered = false
       try {
         const parsed = messagesDocumentSchema.parse(await readJsonBounded(this.messagesFile, 4 * 1024 * 1024))
@@ -200,17 +175,6 @@ export class SessionCollaborationService {
     return this.loading
   }
 
-  private async persistPolicies(): Promise<void> {
-    const workspaces: Record<string, Record<string, TaskPolicyEntry>> = {}
-    for (const [root, tasks] of this.policies) {
-      if (tasks.size > 0) workspaces[root] = Object.fromEntries(tasks)
-    }
-    const payload = policyDocumentSchema.parse({ schemaVersion: 1, workspaces })
-    const operation = this.writing.then(() => writeJsonAtomic(this.policyFile, payload))
-    this.writing = operation.catch(() => undefined)
-    await operation
-  }
-
   private async persistMessages(): Promise<void> {
     if (this.messages.length > COLLABORATION_LIMITS.maxRetainedMessages) {
       const removable = this.messages.filter((item) => item.status.state !== 'queued' && item.status.state !== 'dispatching')
@@ -231,91 +195,27 @@ export class SessionCollaborationService {
     catch { throw new CollaborationError('ACCESS_DENIED', 'The configured workspace is unavailable.') }
   }
 
-  private policyEntry(canonicalRoot: string, taskId: string): TaskPolicyEntry {
-    return this.policies.get(canonicalRoot)?.get(taskId) ?? { enabled: true, paused: false, sentCount: 0 }
-  }
-
-  private queuedCountForTask(canonicalRoot: string, taskId: string): number {
-    return this.messages.filter((item) => item.root === canonicalRoot && item.status.taskId === taskId
+  private queuedCount(canonicalRoot: string, taskId?: string): number {
+    return this.messages.filter((item) => item.root === canonicalRoot && (taskId === undefined || item.status.taskId === taskId)
       && (item.status.state === 'queued' || item.status.state === 'dispatching')).length
   }
 
-  private async requireTaskExists(canonicalRoot: string, taskId: string): Promise<void> {
-    let workspace: { tasks: ReadonlyArray<{ id: string }> }
-    try { workspace = await this.readWorkspace(canonicalRoot) }
+  private async readWorkspaceTasks(canonicalRoot: string): Promise<readonly WorkspaceTaskMetadata[]> {
+    try { return (await this.readWorkspace(canonicalRoot)).tasks }
     catch { throw new CollaborationError('ACCESS_DENIED', 'The task workspace could not be read.') }
-    if (!workspace.tasks.some((task) => task.id === taskId)) {
+  }
+
+  private async readWorkspaceLinks(canonicalRoot: string): Promise<SessionLinksSnapshot['document']['bindings']> {
+    try { return (await this.readLinks(canonicalRoot)).document.bindings }
+    catch { throw new CollaborationError('ACCESS_DENIED', 'Workspace session bindings are unavailable or Automatic workspace links is disabled.') }
+  }
+
+  private async readTaskLinks(canonicalRoot: string, taskId: string): Promise<SessionLink[]> {
+    const tasks = await this.readWorkspaceTasks(canonicalRoot)
+    if (!tasks.some((task) => task.id === taskId)) {
       throw new CollaborationError('NOT_FOUND', `Task ${taskId} does not exist in this workspace.`)
     }
-  }
-
-  async getTaskPolicy(root: string, rawTaskId: string): Promise<TaskCollaborationState> {
-    if (this.closed) throw new CollaborationError('UNAVAILABLE', 'Session collaboration service is closed.')
-    const taskId = collaborationTaskIdSchema.parse(rawTaskId)
-    await this.initialize()
-    const canonical = await this.canonicalRoot(root)
-    await this.requireTaskExists(canonical, taskId)
-    const entry = this.policyEntry(canonical, taskId)
-    return taskCollaborationStateSchema.parse({
-      taskId,
-      enabled: entry.enabled,
-      paused: entry.paused,
-      queuedCount: this.queuedCountForTask(canonical, taskId),
-      sentCount: entry.sentCount,
-      maxSentMessages: COLLABORATION_LIMITS.maxMessagesPerTaskWindow,
-    })
-  }
-
-  async setTaskPolicy(root: string, rawTaskId: string, rawUpdate: TaskCollaborationPolicyUpdate): Promise<TaskCollaborationState> {
-    if (this.closed) throw new CollaborationError('UNAVAILABLE', 'Session collaboration service is closed.')
-    const taskId = collaborationTaskIdSchema.parse(rawTaskId)
-    const update = taskCollaborationPolicyUpdateSchema.parse(rawUpdate)
-    await this.initialize()
-    const canonical = await this.canonicalRoot(root)
-    await this.requireTaskExists(canonical, taskId)
-    const current = this.policyEntry(canonical, taskId)
-    const next: TaskPolicyEntry = {
-      enabled: update.enabled ?? current.enabled,
-      paused: (update.enabled === false) ? false : (update.paused ?? current.paused),
-      sentCount: update.resetBudget ? 0 : current.sentCount,
-    }
-    let workspacePolicies = this.policies.get(canonical)
-    if (!workspacePolicies) {
-      workspacePolicies = new Map()
-      this.policies.set(canonical, workspacePolicies)
-    }
-    workspacePolicies.set(taskId, next)
-    await this.persistPolicies()
-
-    if (!next.enabled) {
-      let blockedAny = false
-      const timestamp = this.isoNow()
-      for (const message of this.messages) {
-        if (message.root === canonical && message.status.taskId === taskId && message.status.state === 'queued') {
-          message.text = undefined
-          message.status = {
-            ...message.status,
-            state: 'blocked',
-            updatedAt: timestamp,
-            reason: 'Task collaboration was disabled before queued delivery.',
-          }
-          blockedAny = true
-        }
-      }
-      if (blockedAny) await this.persistMessages()
-      this.cleanupIdleWatchers()
-    } else if (!next.paused && current.paused) {
-      this.scheduleDrainForTask(canonical, taskId)
-    }
-
-    return taskCollaborationStateSchema.parse({
-      taskId,
-      enabled: next.enabled,
-      paused: next.paused,
-      queuedCount: this.queuedCountForTask(canonical, taskId),
-      sentCount: next.sentCount,
-      maxSentMessages: COLLABORATION_LIMITS.maxMessagesPerTaskWindow,
-    })
+    return taskSessionLinks(await this.readWorkspaceLinks(canonicalRoot), taskId)
   }
 
   forWorkspace(root: string): SessionCollaborationApi {
@@ -337,96 +237,87 @@ export class SessionCollaborationService {
     finally { this.activeOperations-- }
   }
 
-  private async requireAuthorizedTask(canonicalRoot: string, taskId: string, allowPaused = false): Promise<{ links: SessionLink[]; policy: TaskPolicyEntry }> {
-    await this.requireTaskExists(canonicalRoot, taskId)
-    const policy = this.policyEntry(canonicalRoot, taskId)
-    if (!policy.enabled) {
-      throw new CollaborationError('ACCESS_DENIED', `Session collaboration is disabled for ${taskId}. Re-enable it in Task Continuum.`)
-    }
-    if (!allowPaused && policy.paused) {
-      throw new CollaborationError('COLLABORATION_PAUSED', `Session collaboration is currently paused for ${taskId}.`)
-    }
-    let snapshot: SessionLinksSnapshot
-    try { snapshot = await this.readLinks(canonicalRoot) }
-    catch { throw new CollaborationError('ACCESS_DENIED', 'Workspace session bindings are unavailable or Automatic workspace links is disabled.') }
-    return { links: taskSessionLinks(snapshot.document.bindings, taskId), policy }
-  }
-
-  private async resolveTargetLink(canonicalRoot: string, targetRef: string, expectedTaskId?: string): Promise<{ taskId: string; link: SessionLink; policy: TaskPolicyEntry }> {
+  private async resolveTargetLink(canonicalRoot: string, targetRef: string, expectedTaskId?: string): Promise<{ taskId: string; link: SessionLink }> {
     const parsed = parseCollaborationTargetRef(targetRef)
     if (expectedTaskId !== undefined && expectedTaskId !== parsed.taskId) {
       throw new CollaborationError('INVALID_REQUEST', 'The targetRef belongs to a different task.')
     }
-    const { links, policy } = await this.requireAuthorizedTask(canonicalRoot, parsed.taskId)
+    const links = await this.readTaskLinks(canonicalRoot, parsed.taskId)
     const link = links.find((candidate) => candidate.owner.clientId === parsed.ownerClientId
       && candidate.sessionId === parsed.sessionId && candidate.chatId === parsed.chatId)
     if (!link) throw new CollaborationError('NOT_FOUND', 'The target session is not currently linked to this task.')
     try { await this.deps.agentHosts.authorize(canonicalRoot, link) }
     catch { throw new CollaborationError('ACCESS_DENIED', 'The target session is not authorized on this device.') }
-    return { taskId: parsed.taskId, link, policy }
+    return { taskId: parsed.taskId, link }
   }
 
   private async listSessions(root: string, request: CollaborationSessionsListRequest): Promise<CollaborationSessionsListResult> {
     await this.initialize()
     const canonical = await this.canonicalRoot(root)
     await this.expireQueuedMessages()
-    const { links, policy } = await this.requireAuthorizedTask(canonical, request.taskId)
-    const [me, remoteDevices, localConsented] = await Promise.all([
-      this.deps.identity(),
-      this.deps.devices.list(canonical).catch(() => []),
-      this.deps.agentHosts.hasConsent(canonical).catch(() => false),
-    ])
-    const localSessions = localConsented
-      ? (await this.deps.agentHosts.local.list().catch(() => ({ sessions: [] }))).sessions
-      : []
+    const [tasks, bindings] = await Promise.all([this.readWorkspaceTasks(canonical), this.readWorkspaceLinks(canonical)])
+    const start = request.taskId ? tasks.find((task) => task.id === request.taskId) : undefined
+    if (request.taskId && !start) throw new CollaborationError('NOT_FOUND', `Task ${request.taskId} does not exist in this workspace.`)
 
+    const [me, remoteDevices] = await Promise.all([
+      this.deps.identity(),
+      this.deps.devices.list(canonical, false).catch(() => []),
+    ])
+    const peers = new Map(remoteDevices.map((device) => [device.ownerClientId, device]))
+    let localCatalog: Map<string, AgentHostSession> | undefined
+    let localConsented = false
+    const terms = request.query?.toLowerCase().split(/\s+/).filter(Boolean) ?? []
+    const limit = request.limit ?? COLLABORATION_LIMITS.maxSessionPageSize
+    const offset = request.offset ?? 0
+    let position = 0
+    let nextOffset: number | undefined
     const sessions: CollaborationSessionEntry[] = []
-    for (const link of links) {
-      try { await this.deps.agentHosts.authorize(canonical, link) }
-      catch { continue }
-      const targetRef = formatCollaborationTargetRef(request.taskId, link)
-      const isLocal = link.owner.clientId === me.clientId
-      if (isLocal) {
-        const discovered = localSessions.find((session) => agentHostKey(session) === agentHostKey(link))
-        const cached = this.getLoadedConnection(`${canonical}:${agentHostKey(link)}`)
-        const title = cached?.view.chat?.title || discovered?.title || link.sessionId
+    search: for (const task of tasksInSearchOrder(tasks, start)) {
+      for (const link of taskSessionLinks(bindings, task.id)) {
+        const index = position++
+        if (index < offset) continue
+        if (sessions.length >= limit) {
+          nextOffset = index
+          break search
+        }
+        const key = agentHostKey(link)
+        const cached = this.getLoadedConnection(`${canonical}:${key}`)
+        const isLocal = link.owner.clientId === me.clientId
+        if (isLocal && !cached?.title && !localCatalog) {
+          localConsented = await this.deps.agentHosts.hasConsent(canonical).catch(() => false)
+          const localSessions = localConsented
+            ? (await this.deps.agentHosts.local.list().catch(() => ({ sessions: [] }))).sessions
+            : []
+          localCatalog = new Map(localSessions.map((session) => [agentHostKey(session), session]))
+        }
+        const discovered = isLocal ? localCatalog?.get(key) : undefined
+        const title = cached?.title || discovered?.title || link.sessionId
+        if (terms.length) {
+          const text = `${title} ${task.id} ${task.title} ${link.owner.machineName} ${link.sessionId} ${link.chatId}`.toLowerCase()
+          if (!terms.every((term) => text.includes(term))) continue
+        }
+        try { await this.deps.agentHosts.authorize(canonical, link) }
+        catch { continue }
+        const peer = isLocal ? undefined : peers.get(link.owner.clientId)
         sessions.push({
-          targetRef,
-          taskId: request.taskId,
+          targetRef: formatCollaborationTargetRef(task.id, link),
+          taskId: task.id,
           sessionId: link.sessionId,
           chatId: link.chatId,
-          title,
+          title: title.slice(0, COLLABORATION_LIMITS.maxSessionListTitleLength),
           owner: link.owner,
-          location: 'local',
-          state: cached?.state === 'connected' || discovered ? 'connected' : 'available',
-          canSend: cached?.view ? !cached.view.readOnly : (discovered ? discovered.canSend : localConsented),
-        })
-      } else {
-        const peer = remoteDevices.find((device) => device.ownerClientId === link.owner.clientId)
-        const cached = this.getLoadedConnection(`${canonical}:${agentHostKey(link)}`)
-        sessions.push({
-          targetRef,
-          taskId: request.taskId,
-          sessionId: link.sessionId,
-          chatId: link.chatId,
-          title: cached?.view.chat?.title || link.sessionId,
-          owner: link.owner,
-          location: 'remote',
-          state: cached?.state === 'connected' ? 'connected' : (peer?.state ?? 'offline'),
-          canSend: cached?.view ? !cached.view.readOnly : Boolean(peer?.enabled),
+          location: isLocal ? 'local' : 'remote',
+          state: cached?.state === 'connected' || discovered ? 'connected' : (peer?.state ?? (isLocal ? 'available' : 'offline')),
+          canSend: cached ? !cached.readOnly : (discovered?.canSend ?? (isLocal ? localConsented : Boolean(peer?.enabled))),
         })
       }
     }
 
     return collaborationSessionsListResultSchema.parse({
-      taskId: request.taskId,
-      collaboration: {
-        enabled: policy.enabled,
-        paused: policy.paused,
-        queuedCount: this.queuedCountForTask(canonical, request.taskId),
-        remainingMessages: Math.max(0, COLLABORATION_LIMITS.maxMessagesPerTaskWindow - policy.sentCount),
-      },
+      ...(request.taskId ? { taskId: request.taskId } : {}),
+      collaboration: { queuedCount: this.queuedCount(canonical) },
       sessions,
+      ...(nextOffset === undefined ? {} : { nextOffset }),
     })
   }
 
@@ -469,7 +360,7 @@ export class SessionCollaborationService {
   private async readContext(root: string, request: CollaborationContextRequest): Promise<CollaborationContextResult> {
     await this.initialize()
     const canonical = await this.canonicalRoot(root)
-    const { taskId, link } = await this.resolveTargetLink(canonical, request.targetRef, request.taskId)
+    const { taskId, link } = await this.resolveTargetLink(canonical, request.targetRef)
     const { connection, release } = await this.acquireAuthorizedConnection(canonical, link)
     try {
       await this.resolveTargetLink(canonical, request.targetRef, taskId)
@@ -600,28 +491,22 @@ export class SessionCollaborationService {
     const canonical = await this.canonicalRoot(root)
     await this.expireQueuedMessages()
     const parsedTarget = parseCollaborationTargetRef(request.targetRef)
-    if (request.taskId !== undefined && request.taskId !== parsedTarget.taskId) {
-      throw new CollaborationError('INVALID_REQUEST', 'The targetRef belongs to a different task.')
-    }
     const requestHash = createHash('sha256')
       .update(JSON.stringify({ taskId: parsedTarget.taskId, targetRef: request.targetRef, text: request.text }))
       .digest('hex')
 
     const existing = this.messages.find((item) => item.root === canonical && item.status.messageId === request.messageId)
     if (existing) {
-      await this.requireAuthorizedTask(canonical, existing.status.taskId, true)
+      await this.readTaskLinks(canonical, existing.status.taskId)
       if (existing.requestHash !== requestHash) {
         throw new CollaborationError('CONFLICT', 'This messageId already belongs to different collaboration content or target.')
       }
       return this.enrichStatus(canonical, existing)
     }
 
-    const { taskId, link, policy } = await this.resolveTargetLink(canonical, request.targetRef, parsedTarget.taskId)
-    if (policy.sentCount >= COLLABORATION_LIMITS.maxMessagesPerTaskWindow) {
-      throw new CollaborationError('QUOTA_EXCEEDED', `Collaboration message limit (${COLLABORATION_LIMITS.maxMessagesPerTaskWindow}) reached for ${taskId}.`)
-    }
-    if (this.queuedCountForTask(canonical, taskId) >= COLLABORATION_LIMITS.maxQueuedPerTask) {
-      throw new CollaborationError('QUOTA_EXCEEDED', `Too many queued collaboration messages for ${taskId}.`)
+    const { taskId, link } = await this.resolveTargetLink(canonical, request.targetRef)
+    if (this.queuedCount(canonical, taskId) >= COLLABORATION_LIMITS.maxQueuedPerTask) {
+      throw new CollaborationError('BUSY', `Too many pending collaboration messages for ${taskId}. Retry when some finish.`)
     }
 
     const { connection, release } = await this.acquireAuthorizedConnection(canonical, link)
@@ -675,8 +560,6 @@ export class SessionCollaborationService {
       const targetBusy = this.dispatchingTargets.has(lockKey) || hasQueuedAhead
         || Boolean(view.chat?.activeTurn) || Boolean(view.pendingTurn) || Boolean(view.chat?.queuedMessages?.length)
 
-      await this.incrementSentCount(canonical, taskId)
-
       if (targetBusy) {
         const expiresAt = new Date(this.now() + COLLABORATION_LIMITS.messageTtlMs).toISOString()
         const queued: SavedMessage = {
@@ -717,17 +600,6 @@ export class SessionCollaborationService {
       await this.dispatchNow(canonical, record, request.text, link, connection)
       return await this.enrichStatus(canonical, record)
     } finally { release() }
-  }
-
-  private async incrementSentCount(canonicalRoot: string, taskId: string): Promise<void> {
-    const current = this.policyEntry(canonicalRoot, taskId)
-    let workspacePolicies = this.policies.get(canonicalRoot)
-    if (!workspacePolicies) {
-      workspacePolicies = new Map()
-      this.policies.set(canonicalRoot, workspacePolicies)
-    }
-    workspacePolicies.set(taskId, { ...current, sentCount: current.sentCount + 1 })
-    await this.persistPolicies()
   }
 
   private async dispatchNow(canonicalRoot: string, record: SavedMessage, messageText: string, link: SessionLink, connection: AgentHostConnection): Promise<void> {
@@ -806,25 +678,6 @@ export class SessionCollaborationService {
     this.watchers.set(key, { connection, unlisten })
   }
 
-  private scheduleDrainForTask(canonicalRoot: string, taskId: string): void {
-    const queued = this.messages.filter((item) => item.root === canonicalRoot && item.status.taskId === taskId && item.status.state === 'queued')
-    const seen = new Set<string>()
-    for (const item of queued) {
-      if (seen.has(item.status.targetRef)) continue
-      seen.add(item.status.targetRef)
-      void (async () => {
-        try {
-          const { link } = await this.resolveTargetLink(canonicalRoot, item.status.targetRef, taskId)
-          const { connection, release } = await this.acquireAuthorizedConnection(canonicalRoot, link)
-          try {
-            this.watchTargetForQueue(canonicalRoot, link, connection)
-            await this.drainTargetQueue(canonicalRoot, link, connection)
-          } finally { release() }
-        } catch { /* Remains queued until reachable or expired. */ }
-      })()
-    }
-  }
-
   private scheduleDrainTarget(canonicalRoot: string, link: SessionLink, connection: AgentHostConnection): void {
     if (this.closed) return
     void this.drainTargetQueue(canonicalRoot, link, connection).catch(() => {})
@@ -854,21 +707,6 @@ export class SessionCollaborationService {
       await this.drainTargetQueue(canonicalRoot, link, connection)
       return
     }
-
-    const policy = this.policyEntry(canonicalRoot, next.status.taskId)
-    if (!policy.enabled) {
-      next.text = undefined
-      next.status = {
-        ...next.status,
-        state: 'blocked',
-        updatedAt: this.isoNow(),
-        reason: 'Task collaboration was disabled before queued delivery.',
-      }
-      await this.persistMessages()
-      await this.drainTargetQueue(canonicalRoot, link, connection)
-      return
-    }
-    if (policy.paused) return
 
     try { await this.resolveTargetLink(canonicalRoot, next.status.targetRef, next.status.taskId) }
     catch {
@@ -954,7 +792,7 @@ export class SessionCollaborationService {
     const canonical = await this.canonicalRoot(root)
     const record = this.messages.find((item) => item.root === canonical && item.status.messageId === messageId)
     if (!record) throw new CollaborationError('NOT_FOUND', 'Collaboration message was not found.')
-    await this.requireAuthorizedTask(canonical, record.status.taskId, true)
+    await this.readTaskLinks(canonical, record.status.taskId)
     return this.enrichStatus(canonical, record)
   }
 
