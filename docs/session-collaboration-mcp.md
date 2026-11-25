@@ -24,19 +24,19 @@ messages and Task Continuum cross-machine collaboration:
   background activity while reading older history shows a non-intrusive **New activity
   below** pill instead of stealing focus or scroll position.
 
-## Enable per-task collaboration
+## Task collaboration settings
 
-Linking a session or pairing a device for file transfer does **not** automatically allow
-an Agent to send prompts to other sessions. Collaboration is opt-in per task on the
-operator's desktop:
+Collaboration is **on by default** for every task, without a separate confirmation
+or enable step. The workspace still needs **Automatic workspace links**, and the
+Agent must use a configured collaboration MCP client. Only currently linked and
+authorized sessions are available, and reading or sending still requires the
+corresponding permission. Pairing alone does not grant access to unlinked chats,
+and enabling collaboration does not itself send any messages.
 
-1. Start Task Continuum, open the task workspace with **Automatic workspace links**
-   enabled, and select the target task.
-2. Open **Agent Host sessions > Current** and click **Enable collaboration** under
-   **Agent collaboration**.
-3. Use **Pause collaboration** / **Resume collaboration** at any time to suspend or
-   resume MCP coordination for that task, or **Reset quota** after reviewing message
-   activity. Disabling collaboration blocks any queued messages without replaying them.
+In **Agent Host sessions > Current**, you can pause, resume, or disable collaboration
+for an individual task, or reset its quota after reviewing message activity.
+Previously saved disabled and paused settings stay in effect. Disabling collaboration
+blocks queued messages without replaying them.
 
 ## Install in the actual MCP Host/client
 

@@ -202,10 +202,42 @@ async function setupCollaborationFixture() {
 }
 
 describe('SessionCollaborationService and gateway provenance', () => {
-  it('enforces explicit per-task opt-in and isolates tasks from one another', async () => {
+  it('lists only authorized links for each task without prior collaboration setup', async () => {
+    const setup = await setupCollaborationFixture()
+    const api = setup.createService().forWorkspace(setup.workspaceRoot)
+    const remoteRef = formatCollaborationTargetRef('T-0072', setup.remoteTarget)
+
+    const listed = await api.listSessions({ taskId: 'T-0072' })
+    expect(listed.collaboration).toMatchObject({ enabled: true, paused: false })
+    expect(listed.sessions.map((item) => item.location).sort()).toEqual(['local', 'remote'])
+    await expect(api.listSessions({ taskId: 'T-0073' })).resolves.toMatchObject({
+      collaboration: { enabled: true, paused: false },
+      sessions: [],
+    })
+    await expect(api.readContext({
+      targetRef: formatCollaborationTargetRef('T-0073', setup.remoteTarget),
+      limit: 5,
+      detail: 'summary',
+    })).rejects.toMatchObject({ code: 'NOT_FOUND' })
+
+    setup.setAuthorizedTargets([setup.localTarget])
+    await expect(api.listSessions({ taskId: 'T-0072' })).resolves.toMatchObject({ sessions: [{ location: 'local' }] })
+    await expect(api.sendMessage({
+      targetRef: remoteRef,
+      messageId: randomUUID(),
+      text: 'Do not send to an unauthorized session',
+    })).rejects.toMatchObject({ code: 'ACCESS_DENIED' })
+    expect(setup.remoteHost.dispatches).toHaveLength(0)
+  })
+
+  it('preserves explicit disable and pause overrides across a restart', async () => {
     const setup = await setupCollaborationFixture()
     const service = setup.createService()
-    const api = service.forWorkspace(setup.workspaceRoot)
+    await service.setTaskPolicy(setup.workspaceRoot, 'T-0072', { enabled: false })
+    await service.setTaskPolicy(setup.workspaceRoot, 'T-0073', { paused: true })
+    await service.close()
+
+    const api = setup.createService().forWorkspace(setup.workspaceRoot)
     const remoteRef = formatCollaborationTargetRef('T-0072', setup.remoteTarget)
 
     await expect(api.listSessions({ taskId: 'T-0072' })).rejects.toMatchObject({ code: 'ACCESS_DENIED' })
@@ -215,22 +247,13 @@ describe('SessionCollaborationService and gateway provenance', () => {
       messageId: randomUUID(),
       text: 'Should not send while collaboration is off',
     })).rejects.toMatchObject({ code: 'ACCESS_DENIED' })
-
-    const policy = await service.setTaskPolicy(setup.workspaceRoot, 'T-0072', { enabled: true })
-    expect(policy).toMatchObject({ taskId: 'T-0072', enabled: true, paused: false, sentCount: 0 })
-
-    // Enabling T-0072 never grants collaboration on T-0073.
-    await expect(api.listSessions({ taskId: 'T-0073' })).rejects.toMatchObject({ code: 'ACCESS_DENIED' })
-
-    const listed = await api.listSessions({ taskId: 'T-0072' })
-    expect(listed.sessions).toHaveLength(2)
-    expect(listed.sessions.map((item) => item.location).sort()).toEqual(['local', 'remote'])
+    await expect(api.listSessions({ taskId: 'T-0073' })).rejects.toMatchObject({ code: 'COLLABORATION_PAUSED' })
+    expect(setup.remoteHost.dispatches).toHaveLength(0)
   })
 
-  it('delivers cross-device messages through the gateway with gateway-verified provenance and tracks turn completion', async () => {
+  it('delivers cross-device messages by default with gateway-verified provenance and tracks turn completion', async () => {
     const setup = await setupCollaborationFixture()
     const service = setup.createService()
-    await service.setTaskPolicy(setup.workspaceRoot, 'T-0072', { enabled: true })
     const api = service.forWorkspace(setup.workspaceRoot)
     const remoteRef = formatCollaborationTargetRef('T-0072', setup.remoteTarget)
     const messageId = randomUUID()

@@ -30,7 +30,7 @@ export const collaborationBridgeErrorSchema = z.object({
 
 const defaultMessages: Record<CollaborationErrorCode, string> = {
   INVALID_REQUEST: 'Invalid session collaboration request. Check taskId, targetRef, messageId, and limits.',
-  ACCESS_DENIED: 'Session collaboration is not authorized. Enable collaboration for the task and verify workspace/session access.',
+  ACCESS_DENIED: 'Session collaboration is not authorized. Check workspace and session access and the task collaboration settings.',
   COLLABORATION_PAUSED: 'Session collaboration is currently paused for this task in Task Continuum.',
   NOT_FOUND: 'The requested task, linked target session, or collaboration message was not found.',
   CONFLICT: 'This messageId already belongs to a different collaboration request.',

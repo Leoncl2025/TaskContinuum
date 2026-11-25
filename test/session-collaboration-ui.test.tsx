@@ -282,12 +282,12 @@ describe('AgentHostPanel collaboration UI adaptation', () => {
 })
 
 describe('AgentHostSessionsSidebar per-task collaboration controls', () => {
-  it('exposes enable, pause, resume, and quota reset controls when supported by the desktop bridge', async () => {
+  it('shows enabled collaboration without writing a policy and still allows manual overrides', async () => {
     const setup = createPanelFixture()
     const user = userEvent.setup()
     let state: TaskCollaborationState = {
       taskId: 'T-0002',
-      enabled: false,
+      enabled: true,
       paused: false,
       queuedCount: 0,
       sentCount: 0,
@@ -324,6 +324,11 @@ describe('AgentHostSessionsSidebar per-task collaboration controls', () => {
     )
 
     const section = await screen.findByRole('region', { name: 'Task session collaboration' })
+    expect(await within(section).findByText('Enabled · 0/32 sent')).toBeInTheDocument()
+    expect(setup.bridge.setCollaborationPolicy).not.toHaveBeenCalled()
+    expect(within(section).queryByRole('button', { name: 'Enable collaboration' })).not.toBeInTheDocument()
+
+    await user.click(within(section).getByRole('button', { name: 'Disable collaboration' }))
     expect(within(section).getByText('Off')).toBeInTheDocument()
 
     await user.click(within(section).getByRole('button', { name: 'Enable collaboration' }))

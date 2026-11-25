@@ -232,7 +232,7 @@ export class SessionCollaborationService {
   }
 
   private policyEntry(canonicalRoot: string, taskId: string): TaskPolicyEntry {
-    return this.policies.get(canonicalRoot)?.get(taskId) ?? { enabled: false, paused: false, sentCount: 0 }
+    return this.policies.get(canonicalRoot)?.get(taskId) ?? { enabled: true, paused: false, sentCount: 0 }
   }
 
   private queuedCountForTask(canonicalRoot: string, taskId: string): number {
@@ -341,7 +341,7 @@ export class SessionCollaborationService {
     await this.requireTaskExists(canonicalRoot, taskId)
     const policy = this.policyEntry(canonicalRoot, taskId)
     if (!policy.enabled) {
-      throw new CollaborationError('ACCESS_DENIED', `Session collaboration is not enabled for ${taskId}. Enable it in Task Continuum first.`)
+      throw new CollaborationError('ACCESS_DENIED', `Session collaboration is disabled for ${taskId}. Re-enable it in Task Continuum.`)
     }
     if (!allowPaused && policy.paused) {
       throw new CollaborationError('COLLABORATION_PAUSED', `Session collaboration is currently paused for ${taskId}.`)

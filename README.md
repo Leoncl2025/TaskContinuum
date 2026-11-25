@@ -17,7 +17,7 @@ A focused desktop workbench for tasks and native Copilot Agent Host conversation
   **Dock** popped-out windows back with unsent drafts preserved.
 - Multiple conversations per task, with distinct provenance for native and
   cross-device agent collaboration messages, pending queue indicators, and
-  opt-in per-task session collaboration MCP tools.
+  session collaboration MCP tools enabled by default with per-task controls.
 - Compact session rows show the conversation title and machine without repeating
   the task heading. Select the title or machine to open its chat; the separate
   arrow expands identities, access details and the **Unlink** action.
