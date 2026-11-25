@@ -7,7 +7,7 @@ import { AhpErrorCodes } from '@microsoft/agent-host-protocol'
 import type { AgentHostTarget } from '../shared/agentHost'
 import { chatSubmissionSchema, MAX_CHAT_TEXT_LENGTH } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
-import { taskContinuumCollaborationMetaSchema } from '../shared/sessionCollaboration'
+import { COLLABORATION_LIMITS, CollaborationError, taskContinuumCollaborationMetaSchema } from '../shared/sessionCollaboration'
 import type { TaskContinuumCollaborationMeta } from '../shared/sessionCollaboration'
 import { AgentHostProtocolError, agentHostAdvertisedVersionSchema, agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminalIdSchema, requireAgentHostProtocolVersion } from './agentHostProtocol'
 import { AGENT_HOST_TRACE_HEADER, agentHostDiagnosticChannel, agentHostDiagnosticMethod, logAgentHostDiagnostic, withAgentHostDiagnosticTrace } from './agentHostDiagnostics'
@@ -24,6 +24,11 @@ import {
 import type { SnapshotChunkRequest, SnapshotPrepareRequest, SnapshotTransferLimits, SnapshotTransferLookup } from './agentHostSnapshotTransfer'
 import type { DesktopOperations } from './desktopOperations'
 import { DesktopOperationUnavailableError } from './desktopOperations'
+import {
+  TOOL_RELAY_CAPABILITY, TOOL_RELAY_LIMITS, TOOL_RELAY_METHOD, toolRelayCapabilitySchema, toolRelayResponseSchema,
+} from './taskContinuumToolRelay'
+import type { RelayToolToCaller, ToolRelayResult } from './taskContinuumToolRelay'
+import type { TaskContinuumAgentHostTools } from './taskContinuumAgentHostTools'
 
 export interface AgentHostAccess {
   canSend: boolean
@@ -36,6 +41,7 @@ export interface AgentHostGatewayOptions {
   authorize(token: string, target: AgentHostTarget, send: boolean): Promise<AgentHostAccess>
   connection(target: AgentHostTarget): Promise<AgentHostConnection>
   operations?: DesktopOperations
+  nativeTools?: TaskContinuumAgentHostTools
   snapshotLimits?: Partial<SnapshotTransferLimits>
 }
 const rpcSchema = z.object({ jsonrpc: z.literal('2.0'), id: z.union([z.number().int().nonnegative(), z.string().max(128)]).optional(), method: z.string().max(100), params: z.record(z.string(), z.unknown()) }).strict()
@@ -56,6 +62,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
   let terminalLeases = 0
   let pendingUpgrades = 0
   let activeRequests = 0
+  let relayedCalls = 0
   const upgrades = new Set<AbortController>()
   const runOperation = <T>(action: () => Promise<T>): Promise<T> => options.operations ? options.operations.runAsync(action) : action()
   server.on('upgrade', (request, socket, head) => {
@@ -161,6 +168,9 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
     let pendingRequests = 0
     let responseBytes = 0
     let closeReason: AgentHostDiagnosticDetails['reason']
+    let detachTools: (() => void) | undefined
+    let nextToolRequestId = 0
+    const toolReplies = new Map<number, (result: ToolRelayResult | Error) => void>()
     let access = initialAccess
     const authorize = async (send: boolean) => {
       if (closed || socket.readyState !== WebSocket.OPEN) throw new Error('Access changed.')
@@ -203,6 +213,41 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
       try { socket.send(text, complete) }
       catch (error) { complete(error instanceof Error ? error : new Error('Agent Host response failed.')); return false }
       return true
+    }
+    const relayTool: RelayToolToCaller = async (request, verify) => {
+      const authorizeCaller = async () => {
+        try { await authorize(true) }
+        catch { throw new CollaborationError('ACCESS_DENIED', 'The original device no longer has send access to this chat.') }
+        verify()
+      }
+      await authorizeCaller()
+      if (request.channel !== target.chatId || !detachTools || Buffer.byteLength(JSON.stringify(request)) > COLLABORATION_LIMITS.maxToolRequestBytes) {
+        throw new CollaborationError('INVALID_REQUEST', '')
+      }
+      if (toolReplies.size >= TOOL_RELAY_LIMITS.perSocket || relayedCalls >= TOOL_RELAY_LIMITS.global) throw new CollaborationError('BUSY', '')
+      const id = --nextToolRequestId
+      relayedCalls++
+      const reply = await new Promise<ToolRelayResult>((resolve, reject) => {
+        const finish = (result: ToolRelayResult | Error) => {
+          if (!toolReplies.delete(id)) return
+          clearTimeout(timer)
+          relayedCalls--
+          if (result instanceof Error) reject(result)
+          else resolve(result)
+        }
+        const timer = setTimeout(() => finish(new CollaborationError('UNAVAILABLE', 'The caller did not confirm the tool result. No tool call was replayed.')), TOOL_RELAY_LIMITS.timeoutMs)
+        timer.unref()
+        toolReplies.set(id, finish)
+        try {
+          if (!send({ jsonrpc: '2.0', id, method: TOOL_RELAY_METHOD, params: request })) {
+            finish(new CollaborationError('UNAVAILABLE', 'The original TaskContinuum connection closed.'))
+          }
+        } catch (error) {
+          finish(error instanceof Error ? error : new Error('The caller tool request could not be sent.'))
+        }
+      })
+      await authorizeCaller()
+      return reply
     }
     const discard = (events: ActionEnvelope[]): void => {
       for (const envelope of events) {
@@ -301,6 +346,10 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
       pendingSubscriptions.clear()
       for (const resource of [...retained]) releaseTerminal(resource)
       rejectInitialization?.(new Error('Agent Host connection closed.'))
+      for (const finish of toolReplies.values()) finish(new CollaborationError('UNAVAILABLE', 'The original TaskContinuum connection closed.'))
+      if (detachTools) connection.closeToolRelay(relayTool)
+      detachTools?.()
+      detachTools = undefined
       unlisten()
       releaseConnection()
     })
@@ -312,6 +361,17 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
       try { parsed = JSON.parse(raw) }
       catch { fail('invalid-frame'); return }
       const hint = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+      // Reverse RPC IDs are negative and only resolve calls pending on this socket.
+      if (typeof hint.id === 'number' && hint.id < 0 && !Object.hasOwn(hint, 'method')) {
+        const finish = toolReplies.get(hint.id)
+        if (finish) {
+          const response = Buffer.byteLength(raw) <= TOOL_RELAY_LIMITS.responseBytes && toolRelayResponseSchema.safeParse(parsed)
+          finish(response && response.success && 'result' in response.data
+            ? response.data.result
+            : new CollaborationError('UNAVAILABLE', 'The caller could not return a valid TaskContinuum tool result.'))
+        }
+        return
+      }
       const params = hint.params !== null && typeof hint.params === 'object' && !Array.isArray(hint.params) ? hint.params as Record<string, unknown> : {}
       const hintedMethod = typeof hint.method === 'string' ? hint.method : ''
       const resource = typeof params.channel === 'string' ? params.channel : undefined
@@ -405,9 +465,11 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
             if (isInitialization) {
               if (!initializer || initialized) throw new Error('Already initialized.')
               let resources: string[]
+              let relaySupported = false
               if (request.method === 'initialize') {
                 const params = initializeSchema.parse(request.params)
                 requireAgentHostProtocolVersion(connection.handshake.protocolVersion, params.protocolVersions)
+                relaySupported = toolRelayCapabilitySchema.safeParse(params.clientInfo).success
                 resources = params.initialSubscriptions ?? []
               } else resources = reconnectSchema.parse(request.params).subscriptions
               if (resources.length > 2 || new Set(resources).size !== resources.length || resources.some((item) => item !== target.sessionId && item !== target.chatId)) throw new Error('Channel not authorized.')
@@ -418,8 +480,17 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
                 staged = { resource: item, pending }
                 ready.push({ resource: item, pending, snapshot })
               }
+              if (relaySupported && initialAccess.canSend && options.nativeTools && connection.nativeToolChannel()) {
+                const attachment = options.nativeTools.attachRemote(connection, async () => { await authorize(true) })
+                detachTools = attachment.close
+                // Publish before the first turn if possible; a slow Host must still allow ordinary chat.
+                if (attachment.published) {
+                  try { await abortable(attachment.published, AbortSignal.timeout(1000)) }
+                  catch (error) { logAgentHostDiagnostic('connection.tools', { target, traceId, status: 'scheduled', step: 'dispatch', error }) }
+                }
+              }
               result = request.method === 'initialize'
-                ? { ...connection.handshake, snapshots: ready.map((item) => item.snapshot), _meta: { taskcontinuumCanSend: initialAccess.canSend, taskcontinuumModelSelection: true, taskcontinuumModelConfig: true, taskcontinuumStreamedSendValidation: true, taskcontinuumChunkedChatSnapshot: snapshotStore.capability, taskcontinuumPagedChatHistory: { version: 1 }, taskcontinuumChatSnapshotCache: { version: 1 }, taskcontinuumCollaboration: { version: 1, nativeSource: true } } }
+                ? { ...connection.handshake, snapshots: ready.map((item) => item.snapshot), _meta: { taskcontinuumCanSend: initialAccess.canSend, taskcontinuumModelSelection: true, taskcontinuumModelConfig: true, taskcontinuumStreamedSendValidation: true, taskcontinuumChunkedChatSnapshot: snapshotStore.capability, taskcontinuumPagedChatHistory: { version: 1 }, taskcontinuumChatSnapshotCache: { version: 1 }, taskcontinuumCollaboration: { version: 1, nativeSource: true, ...(detachTools ? TOOL_RELAY_CAPABILITY : {}) } } }
                 : { type: 'snapshot', snapshots: ready.map((item) => item.snapshot) }
             } else if (request.method === 'ping') {
               z.object({ channel: z.literal('ahp-root://') }).strict().parse(request.params)
@@ -519,7 +590,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
                     if (collaboration && rechecked.taskIds && !rechecked.taskIds.includes(collaboration.taskId)) {
                       throw new Error('The target chat is no longer linked to that task on its owner.')
                     }
-                  }, effectiveActor, model, collaboration)
+                  }, effectiveActor, model, collaboration, { relay: detachTools ? relayTool : undefined })
                 } else if (params.action.type === 'chat/turnCancelled') {
                   const action = z.object({ type: z.literal('chat/turnCancelled'), turnId: z.string().min(1).max(200), duration: z.number().nonnegative() }).strict().parse(params.action)
                   await connection.cancel(action.turnId, async () => { await requestAuthorization(true) })
@@ -623,7 +694,11 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
             for (const item of ready) if (pendingSubscriptions.get(item.resource) === item.pending) cancelSubscription(item.resource)
             if (staged && pendingSubscriptions.get(staged.resource) === staged.pending) cancelSubscription(staged.resource)
             if (newlyRetained) releaseTerminal(newlyRetained)
-            if (initializer) rejectInitialization?.(error instanceof Error ? error : new Error('Agent Host initialization failed.'))
+            if (initializer) {
+              detachTools?.()
+              detachTools = undefined
+              rejectInitialization?.(error instanceof Error ? error : new Error('Agent Host initialization failed.'))
+            }
             logAgentHostDiagnostic('gateway.request', { target, traceId, status: 'error', step, method, channel, queueMs, authMs, elapsedMs: performance.now() - received, pending: pendingRequests, error })
             if (!closed && authorized) {
               try { await requestAuthorization(false) }
@@ -655,7 +730,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
   }
 
   return {
-    hasActiveWork: () => pendingUpgrades > 0 || activeRequests > 0,
+    hasActiveWork: () => pendingUpgrades > 0 || activeRequests > 0 || relayedCalls > 0,
     revalidate: () => { for (const check of checks) check() },
     close: () => {
       snapshotStore.close()

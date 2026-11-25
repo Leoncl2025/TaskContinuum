@@ -218,7 +218,7 @@ export function registerAgentHostBridge(
     const unlisten = connection.listen(schedule)
     const detachTools = tools?.attach(root, connection, async (scope) => {
       await current(event, window, root)
-      await manager.authorizeNativeTools(scope, target)
+      await manager.authorize(scope, target)
     })
     const close = () => {
       if (stopped) return

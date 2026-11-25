@@ -8,6 +8,7 @@ import { remoteClientSchema } from './vscodeRemoteProtocol'
 import { sshPublicKeySchema } from './devTunnel/protocol'
 import { DeviceRequestError } from './vscodeDeviceHttp'
 import { attachAgentHostGateway } from './agentHostGateway'
+import type { TaskContinuumAgentHostTools } from './taskContinuumAgentHostTools'
 import type { AgentHostAccess } from './agentHostGateway'
 import type { AgentHostSession, AgentHostTarget } from '../shared/agentHost'
 import type { AgentHostRegistry } from './agentHostRegistry'
@@ -48,6 +49,7 @@ export class VSCodeDeviceHost {
     registry: AgentHostRegistry
     linked(root: string): Promise<AgentHostTarget[]>
     access?(root: string): Promise<AgentHostAuthorizationLease>
+    nativeTools?: TaskContinuumAgentHostTools
   }
   private agentHostGateway?: ReturnType<typeof attachAgentHostGateway>
   private agentHostCreations?: AgentHostCreationService
@@ -65,9 +67,10 @@ export class VSCodeDeviceHost {
   }
 
   setAgentHostAccess(registry: AgentHostRegistry, linked: (root: string) => Promise<AgentHostTarget[]>,
-    authorizeLocal?: (ownerId: string, workspaceId: string) => Promise<string>, access?: (root: string) => Promise<AgentHostAuthorizationLease>): void {
+    authorizeLocal?: (ownerId: string, workspaceId: string) => Promise<string>, access?: (root: string) => Promise<AgentHostAuthorizationLease>,
+    nativeTools?: TaskContinuumAgentHostTools): void {
     if (this.server) throw new Error('Agent Host access must be configured before device publication.')
-    this.agentHosts = { registry, linked, access }
+    this.agentHosts = { registry, linked, access, nativeTools }
     this.agentHostCreations = new AgentHostCreationService(this.directory, registry, (pairId, workspaceId) => this.authorizedCreationWorkspace(pairId, workspaceId), authorizeLocal)
   }
 
@@ -360,7 +363,8 @@ export class VSCodeDeviceHost {
       server.maxConnections = 256
       this.server = server
       if (this.agentHosts) this.agentHostGateway = attachAgentHostGateway(server, { port: () => this.state?.port, operations: this.operations,
-        authorize: (token, target, send) => this.authorizedAgentHost(token, target, send), connection: (target) => this.agentHosts!.registry.connection(target) })
+        authorize: (token, target, send) => this.authorizedAgentHost(token, target, send), connection: (target) => this.agentHosts!.registry.connection(target),
+        nativeTools: this.agentHosts.nativeTools })
       await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(this.state!.port ?? 0, '127.0.0.1', resolve) })
       const address = server.address()
       if (!address || typeof address === 'string') throw new Error('Device gateway could not listen.')

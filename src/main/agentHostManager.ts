@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { z } from 'zod'
 import type { AgentHostTarget } from '../shared/agentHost'
 import type { SessionOwner } from '../shared/sessionBindings'
+import { CollaborationError } from '../shared/sessionCollaboration'
 import { AgentHostConnection } from './agentHostConnection'
 import { logAgentHostDiagnostic } from './agentHostDiagnostics'
 import type { AgentHostRegistry } from './agentHostRegistry'
@@ -15,6 +16,7 @@ import { LocalAgentHostCreationService } from './localAgentHostCreationService'
 import { routeAgentHostCreations } from './localTaskAgentHostWorker'
 import type { LocalTaskAgentHostWorker } from './localTaskAgentHostWorker'
 import { AgentHostAuthorization } from './agentHostAuthorization'
+import type { ExecuteRelayedTool } from './taskContinuumToolRelay'
 
 export const REMOTE_AGENT_HOST_LIMITS = {
   maxConnections: 128,
@@ -25,6 +27,7 @@ export class AgentHostManager {
   private readonly remote = new Map<string, AgentHostConnection>()
   private readonly closing = new Map<string, Promise<void>>()
   private closed = false
+  private executeRelayedTool?: (root: string, target: AgentHostTarget, ...parameters: Parameters<ExecuteRelayedTool>) => ReturnType<ExecuteRelayedTool>
   private consentWrite: Promise<void> = Promise.resolve()
   readonly creations: AgentHostCreationClient
   readonly localCreations: LocalAgentHostCreationService
@@ -93,19 +96,16 @@ export class AgentHostManager {
     throw new Error('The task no longer links this exact Agent Host chat.')
   }
 
-  async authorizeNativeTools(root: string, target: AgentHostTarget): Promise<void> {
-    const lease = await this.access.acquire(root)
-    if (!lease.current() || lease.owner.clientId !== target.owner.clientId
-      || !lease.localTargets.some((entry) => agentHostKey(entry) === agentHostKey(target))) {
-      throw new Error('TaskContinuum tools require a currently confirmed local chat link.')
-    }
+  setToolRelay(execute: NonNullable<AgentHostManager['executeRelayedTool']>): void {
+    this.executeRelayedTool = execute
   }
 
   async connection(root: string, value: AgentHostTarget): Promise<AgentHostConnection> {
     const target = agentHostTargetSchema.parse(value)
     await this.authorize(root, target)
     if (target.owner.clientId === (await this.owner()).clientId) return this.local.connection(target)
-    const scope = createHash('sha256').update(await canonicalPolicyRoot(root)).digest('hex')
+    const workspace = await canonicalPolicyRoot(root)
+    const scope = createHash('sha256').update(workspace).digest('hex')
     if (this.closed) throw new Error('Agent Host manager is closed.')
     const key = `${scope}:${agentHostKey(target)}`
     const pendingClose = this.closing.get(key)
@@ -122,6 +122,7 @@ export class AgentHostManager {
     if (this.remote.size >= REMOTE_AGENT_HOST_LIMITS.maxConnections && !this.evictRemote(false) && !this.evictRemote(true)) {
       throw new Error('Remote Agent Host connection limit reached.')
     }
+    const execute = this.executeRelayedTool
     connection = new AgentHostConnection(target, join(this.directory, 'agent-host-remotes', scope), async (signal, traceId) => {
       const started = performance.now()
       try {
@@ -132,7 +133,16 @@ export class AgentHostManager {
         throw error
       }
       return this.devices.agentHostTransport(root, target, signal, traceId)
-    })
+    }, false, execute ? (request, checkTurn) => {
+      return execute(workspace, target, request, async () => {
+        await checkTurn()
+        try {
+          if (await canonicalPolicyRoot(root) !== workspace) throw new Error('The task workspace changed.')
+          await this.authorize(workspace, target)
+        } catch { throw new CollaborationError('ACCESS_DENIED', 'The originating chat is no longer authorized in the caller workspace.') }
+        await checkTurn()
+      })
+    } : undefined)
     this.remote.set(key, connection)
     return connection
   }

@@ -8,13 +8,13 @@ file transfer server (`taskcontinuum-files-mcp.cjs`) is unchanged.
 
 ## Use in a native Copilot Agent Host session: no MCP setup
 
-1. On the machine running the initiating Agent Host, open the task workspace in
-   Task Continuum, link the local Copilot Agent Host chat, and open the linked
-   chat in Task Continuum. Keep that view open.
-2. In that same chat in Task Continuum or VS Code, ask: **“List the sessions I
-   can collaborate with in this TaskContinuum workspace.”** TC automatically
-   contributes its tools to the Agent Host. No MCP config, external Node
-   process, or additional enrollment step is needed.
+1. In Task Continuum, open a linked Copilot Agent Host chat in your task
+   workspace. It can be a local chat or a remote chat that already grants
+   your device send access. No owner-side view is needed for a remote chat.
+2. Ask that chat to **list the sessions it can collaborate with**, or to
+   send a message to another linked chat. If you also use VS Code to send a
+   prompt locally, keep the same chat open in Task Continuum. No MCP config,
+   external Node process, or additional enrollment step is needed.
 
 The native route uses AHP 1.0 client tools. TC publishes one contribution per
 session with `session/activeClientSet` and consumes only running calls assigned
@@ -23,11 +23,15 @@ in a single workspace; a call cannot supply its own workspace or sender.
 Native tool approvals remain in the Host. Closing the last view removes the
 contribution; reconnect registers it again without replaying calls.
 
-A local initiating agent can still collaborate with **remote targets** via the
-authenticated Dev Tunnel + SSH gateway. Opening a remote mirror alone does not
-register tools on the owner machine, and a turn sent from a paired device cannot
-borrow the owner's local workspace authority through those tools. Use the MCP
-route below for agent clients outside this native attachment flow.
+For a remote-origin turn, the owner Host runs the agent but sends the tool
+call back on the exact authenticated gateway connection that started the turn.
+The caller's TC locates targets and runs tools in the caller's workspace using
+its existing read/send permissions. The owner does not grant access to chats
+the caller could not already reach. No arbitrary tool definition, filesystem
+operation, or workspace path is forwarded. Keep both TC desktops updated.
+If the connection drops, pending tool calls fail rather than replaying on
+another connection; start a new turn if needed. The MCP route remains
+available for agent clients outside this native attachment flow.
 
 ## Collaboration UI and native session provenance
 

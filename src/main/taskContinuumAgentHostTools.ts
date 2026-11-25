@@ -8,6 +8,8 @@ import { COLLABORATION_LIMITS, CollaborationError } from '../shared/sessionColla
 import type { AgentHostTarget } from '../shared/agentHost'
 import { invokeTaskContinuumTool, taskContinuumToolFailure, taskContinuumTools } from './taskContinuumTools'
 import type { TaskContinuumToolServices } from './taskContinuumTools'
+import { toolRelayRequestSchema } from './taskContinuumToolRelay'
+import type { ToolRelayRequest, ToolRelayResult } from './taskContinuumToolRelay'
 
 const executionRequest = z.object({
   kind: z.literal('toolClientExecution'),
@@ -36,6 +38,7 @@ export interface NativeToolChannel {
 
 type WorkspaceTools = (root: string, source: AgentHostTarget, beforeAccept: () => Promise<void>) => TaskContinuumToolServices
 type View = { root: string; connection: AgentHostConnection; authorize: (root: string) => Promise<void> }
+type RemoteView = { root?: never; connection: AgentHostConnection; authorize: () => Promise<void> }
 type Registration = {
   connection: AgentHostConnection
   channel: NativeToolChannel
@@ -73,23 +76,39 @@ export class TaskContinuumAgentHostTools {
   }
 
   attach(root: string, connection: AgentHostConnection, authorize: (root: string) => Promise<void>): () => void {
-    if (!connection.isNative) return () => {}
-    const id = connection.target.sessionId
+    return this.attachView({ root, connection, authorize }).close
+  }
+
+  attachRemote(connection: AgentHostConnection, authorize: () => Promise<void>) {
+    return this.attachView({ connection, authorize })
+  }
+
+  private attachView(view: View | RemoteView) {
+    if (!view.connection.isNative) return { close: () => {}, published: undefined }
+    const id = view.connection.target.sessionId
     let session = this.sessions.get(id)
     if (!session) {
       session = new NativeSessionTools(this.tools, this.acquireExecution)
       this.sessions.set(id, session)
     }
-    const detach = session.attach({ root, connection, authorize })
-    return () => {
+    const detach = session.attach(view)
+    const close = () => {
       detach()
       if (session.empty && this.sessions.get(id) === session) this.sessions.delete(id)
     }
+    return { close, published: session.publishing }
+  }
+
+  async executeForCaller(root: string, source: AgentHostTarget, request: ToolRelayRequest, verify: () => Promise<void>): Promise<ToolRelayResult> {
+    await verify()
+    const result = await invokeTaskContinuumTool(this.tools(root, source, verify), request.toolName, request.arguments)
+    await verify()
+    return result
   }
 }
 
 class NativeSessionTools {
-  private readonly views = new Set<View>()
+  private readonly views = new Set<View | RemoteView>()
   private registration?: Registration
   private refreshing?: Promise<void>
   private dirty = false
@@ -99,8 +118,9 @@ class NativeSessionTools {
   constructor(private readonly tools: WorkspaceTools, private readonly acquireExecution: () => (() => void) | undefined) {}
 
   get empty(): boolean { return this.views.size === 0 }
+  get publishing(): Promise<void> | undefined { return this.refreshing }
 
-  attach(view: View): () => void {
+  attach(view: View | RemoteView): () => void {
     this.views.add(view)
     const unlisten = view.connection.listen((event) => this.onEvent(view.connection, event))
     this.timer ??= setInterval(() => this.refresh(), 5000)
@@ -159,7 +179,10 @@ class NativeSessionTools {
       const { connection } = view
       const channel = connection.nativeToolChannel()
       if (!channel || connection.readOnly || this.rejectedClients.get(connection) === channel.clientId) continue
-      try { await view.authorize(await canonicalPolicyRoot(view.root)) } catch { continue }
+      try {
+        if (view.root === undefined) await view.authorize()
+        else await view.authorize(await canonicalPolicyRoot(view.root))
+      } catch { continue }
       if (!this.views.has(view) || connection.readOnly || connection.nativeToolChannel()?.clientId !== channel.clientId) continue
       selected = { connection, channel }
       break
@@ -175,7 +198,8 @@ class NativeSessionTools {
   private unregister(): void {
     const prior = this.registration
     if (prior) {
-      for (const [key, request] of prior.pending) this.finish(prior, key, request, undefined, new CollaborationError('UNAVAILABLE', 'The TaskContinuum tool session closed or changed.'))
+      for (const [key, request] of prior.pending) this.finish(prior, key, request,
+        taskContinuumToolFailure(new CollaborationError('UNAVAILABLE', 'The TaskContinuum tool session closed or changed.')))
     }
     this.registration = undefined
     if (!prior || prior.connection.nativeToolChannel()?.clientId !== prior.channel.clientId) return
@@ -205,34 +229,54 @@ class NativeSessionTools {
     registration.pending.set(key, value)
     const release = this.acquireExecution()
     if (!release) {
-      this.finish(registration, key, value, undefined, new CollaborationError('BUSY', ''))
+      this.finish(registration, key, value, taskContinuumToolFailure(new CollaborationError('BUSY', '')))
       return
     }
     void (async () => {
+      const current = () => {
+        if (!this.activeRequest(registration, value)) throw accessDenied()
+      }
       const views = [...this.views].filter(({ connection }) => connection.target.chatId === value.chat)
-      const roots = new Set(views.map(({ root }) => process.platform === 'win32' ? root.toLowerCase() : root))
+      const connection = views[0]?.connection
+      if (!connection) throw accessDenied()
+      const route = connection.nativeToolRoute(value.turnId)
+      const args = decodeArguments(value.toolCall.toolInput)
+      if (route !== 'local') {
+        const request = toolRelayRequestSchema.parse({
+          channel: value.chat, turnId: value.turnId, toolCallId: value.toolCall.toolCallId,
+          toolName: value.toolCall.toolName, arguments: args,
+        })
+        const reply = await route(request, () => {
+          current()
+          if (connection.nativeToolRoute(value.turnId) !== route) throw accessDenied()
+        })
+        this.finish(registration, key, value, reply)
+        return
+      }
+      const localViews = views.filter((view): view is View => view.root !== undefined)
+      const rootKey = (root: string) => process.platform === 'win32' ? root.toLowerCase() : root
+      const roots = new Set(localViews.map(({ root }) => rootKey(root)))
       if (roots.size !== 1) throw accessDenied()
-      const view = views[0]
+      const view = localViews[0]
       const root = await canonicalPolicyRoot(view.root)
       const verify = async () => {
         if (!this.activeRequest(registration, value) || !this.views.has(view)) throw accessDenied()
         try { await view.authorize(root) } catch { throw accessDenied() }
-        if (!view.connection.mayUseNativeTools(value.turnId)
+        if (view.connection.nativeToolRoute(value.turnId) !== 'local'
           || !this.activeRequest(registration, value) || !this.views.has(view)
-          || [...this.views].some((entry) => entry.connection.target.chatId === value.chat
-            && !roots.has(process.platform === 'win32' ? entry.root.toLowerCase() : entry.root))) throw accessDenied()
+          || [...this.views].some((entry) => entry.root !== undefined && entry.connection.target.chatId === value.chat
+            && !roots.has(rootKey(entry.root)))) throw accessDenied()
       }
       await verify()
-      const result = await invokeTaskContinuumTool(this.tools(root, view.connection.target, verify), value.toolCall.toolName, decodeArguments(value.toolCall.toolInput))
+      const result = await invokeTaskContinuumTool(this.tools(root, view.connection.target, verify), value.toolCall.toolName, args)
       await verify()
       this.finish(registration, key, value, result)
-    })().catch((error: unknown) => this.finish(registration, key, value, undefined, error)).finally(release)
+    })().catch((error: unknown) => this.finish(registration, key, value, taskContinuumToolFailure(error))).finally(release)
   }
 
-  private finish(registration: Registration, key: string, value: ToolExecution, result?: Record<string, unknown>, failure?: unknown): void {
+  private finish(registration: Registration, key: string, value: ToolExecution, payload: ToolRelayResult): void {
     if (!registration.pending.delete(key) || !this.activeRequest(registration, value)) return
-    const error = result === undefined ? taskContinuumToolFailure(failure).error : undefined
-    const payload = error ? { error } : result!
+    const error = 'error' in payload ? payload.error : undefined
     try {
       registration.channel.complete(value, {
         success: error === undefined,

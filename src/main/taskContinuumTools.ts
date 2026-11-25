@@ -31,7 +31,7 @@ function collaborationTool<Schema extends z.ZodType, Result>(
     legacyName,
     invoke: async (services: TaskContinuumToolServices, args: unknown) => ({
       result: await invoke(services.collaboration, schema.parse(args)),
-      ...(options.untrustedContent ? { untrustedContent: true } : {}),
+      ...(options.untrustedContent ? { untrustedContent: true as const } : {}),
     }),
   }
 }

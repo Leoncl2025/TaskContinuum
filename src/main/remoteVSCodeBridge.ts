@@ -65,6 +65,8 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
   const nativeTools = new TaskContinuumAgentHostTools((root, target, beforeAccept) => ({
     collaboration: collaboration.forWorkspace(root, { target, beforeAccept }),
   }))
+  agentHosts.setToolRelay((root, target, request, verify) =>
+    desktopOperations.runAsync(() => nativeTools.executeForCaller(root, target, request, verify)))
   const collaborationReady = startSessionCollaborationMcpBridge(
     app.getPath('userData'),
     (root) => collaboration.forWorkspace(root),
@@ -93,7 +95,7 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
       const access = await agentHosts.access.acquire(root)
       if (!gitSync.sessionAccessReady(root)) throw new Error('Workspace access changed while connecting.')
       return { ...access, current: () => gitSync.sessionAccessReady(root) && access.current() }
-    })
+    }, nativeTools)
   const gitSync = new WorkspaceSyncService({
     directory: app.getPath('userData'), keys, tunnels, host, devices,
     identity: clientIdentity, onChange: onStatusChanged, onBindingsChanged,

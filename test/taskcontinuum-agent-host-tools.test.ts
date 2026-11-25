@@ -127,7 +127,7 @@ describe('TaskContinuum native Agent Host tools', () => {
     const remoteTurn = f.start({ clientId: randomUUID() })
     f.host.sessionAction(f.request(remoteTurn))
     await vi.waitFor(() => expect(f.completions()).toHaveLength(4))
-    expect(f.completions()[3].result).toMatchObject({ success: false, error: { code: 'ACCESS_DENIED' } })
+    expect(f.completions()[3].result).toMatchObject({ success: false, error: { code: 'UNAVAILABLE', message: expect.stringContaining('No live TaskContinuum connection') } })
     expect(f.listSessions).not.toHaveBeenCalled()
   })
 

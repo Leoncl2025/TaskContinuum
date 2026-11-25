@@ -43,7 +43,7 @@ const messagesDocumentSchema = z.object({
 
 export interface SessionCollaborationDependencies {
   directory: string
-  agentHosts: Pick<AgentHostManager, 'authorize' | 'connection' | 'hasConsent'> & Partial<Pick<AgentHostManager, 'authorizeNativeTools'>> & {
+  agentHosts: Pick<AgentHostManager, 'authorize' | 'connection' | 'hasConsent'> & {
     local: Pick<AgentHostManager['local'], 'list'>
   }
   devices: Pick<VSCodeDeviceClient, 'list'>
@@ -621,8 +621,7 @@ export class SessionCollaborationService {
 
   private async authorizeSource(root: string, source: AgentHostTarget): Promise<void> {
     try {
-      if (!this.deps.agentHosts.authorizeNativeTools) throw new Error('Native link verification is unavailable.')
-      await this.deps.agentHosts.authorizeNativeTools(root, source)
+      await this.deps.agentHosts.authorize(root, source)
     } catch {
       throw new CollaborationError('ACCESS_DENIED', 'The originating chat is no longer authorized for this workspace.')
     }
@@ -645,7 +644,8 @@ export class SessionCollaborationService {
         },
         sourceKind: record.sourceTarget && (link.owner.clientId === actor.clientId || connection.supportsNativeCollaborationSource)
           ? 'agent-host-client' : 'mcp-client',
-        ...(record.sourceTarget ? { sourceTarget: record.sourceTarget } : {}),
+        // A caller can attribute a chat to its own device, not claim the remote agent's owner identity.
+        ...(record.sourceTarget?.owner.clientId === actor.clientId ? { sourceTarget: record.sourceTarget } : {}),
       }
       await connection.send(
         record.status.messageId,

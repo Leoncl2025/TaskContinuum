@@ -12,7 +12,7 @@ import { attachAgentHostGateway } from '../src/main/agentHostGateway'
 import { AgentHostManager } from '../src/main/agentHostManager'
 import { AgentHostRegistry } from '../src/main/agentHostRegistry'
 import { connectAgentHostWebSocket, connectLocalAgentHost } from '../src/main/agentHostTransport'
-import { canonicalPolicyRoot } from '../src/main/linkedSessionPolicy'
+import { canonicalPolicyRoot, recordLocalLink } from '../src/main/linkedSessionPolicy'
 import { registerRepositorySessionLinksBackend } from '../src/main/repositorySessionLinks'
 import { SessionCollaborationService } from '../src/main/sessionCollaborationService'
 import { TaskContinuumAgentHostTools } from '../src/main/taskContinuumAgentHostTools'
@@ -36,7 +36,7 @@ async function tempRoot(prefix: string): Promise<string> {
   return dir
 }
 
-async function setupCollaborationFixture(protocolVersion = '0.9.0') {
+async function setupCollaborationFixture(protocolVersion = '0.9.0', ownerTools?: TaskContinuumAgentHostTools) {
   const root = await tempRoot('collab-service')
   const dataDir = join(root, 'profile')
   const workspaceRoot = join(root, 'workspace')
@@ -48,7 +48,7 @@ async function setupCollaborationFixture(protocolVersion = '0.9.0') {
 
   const localHost = await startAgentHostFixture(undefined, protocolVersion)
   cleanups.push(() => localHost.close())
-  const remoteHost = await startAgentHostFixture()
+  const remoteHost = await startAgentHostFixture(undefined, ownerTools ? protocolVersion : '0.9.0')
   cleanups.push(() => remoteHost.close())
 
   const localOwner = { clientId: randomUUID(), machineName: 'Studio-A', username: 'alice' }
@@ -70,6 +70,7 @@ async function setupCollaborationFixture(protocolVersion = '0.9.0') {
     remoteTarget,
     join(root, 'owner-b-data'),
     (signal) => connectLocalAgentHost(remoteHost.endpoint, signal),
+    Boolean(ownerTools),
   )
   cleanups.push(() => ownerSideConnection.close())
 
@@ -79,6 +80,7 @@ async function setupCollaborationFixture(protocolVersion = '0.9.0') {
   const gatewayServer = createServer()
   const gateway = attachAgentHostGateway(gatewayServer, {
     port: () => (gatewayServer.address() as { port: number } | null)?.port,
+    nativeTools: ownerTools,
     authorize: async (token, target, send) => {
       if (token !== gatewayToken || target.chatId !== remoteTarget.chatId) throw new Error('Unauthorized.')
       if (send && !gatewayCanSend) throw new Error('Send denied.')
@@ -143,10 +145,6 @@ async function setupCollaborationFixture(protocolVersion = '0.9.0') {
     const ok = authorizedTargets.some((item) => item.chatId === target.chatId && item.owner.clientId === target.owner.clientId)
     if (!ok) throw new Error('Unauthorized target.')
   })
-  const authorizeNativeTools = vi.fn(async (root: string, target: AgentHostTarget) => {
-    if (root !== canonicalWorkspace || target.owner.clientId !== localOwner.clientId) throw new Error('Unauthorized source.')
-    await authorize(root, target)
-  })
   const readWorkspace = vi.fn(async () => ({ tasks }))
   const readLinks = vi.fn(async (root: string): Promise<SessionLinksSnapshot> => ({
     document: { schemaVersion: '2.1', bindings: root === canonicalWorkspace ? bindings : {} },
@@ -184,7 +182,6 @@ async function setupCollaborationFixture(protocolVersion = '0.9.0') {
           }),
         },
         authorize,
-        authorizeNativeTools,
         connection: async (_root, target) => {
           if (target.owner.clientId === localOwner.clientId) {
             if (localConnection.isClosed) localConnection = newLocalConnection()
@@ -222,7 +219,6 @@ async function setupCollaborationFixture(protocolVersion = '0.9.0') {
     setGatewayCanSend: (value: boolean) => { gatewayCanSend = value },
     setGatewayAllowedTasks: (tasks: string[]) => { gatewayAllowedTasks = tasks },
     authorize,
-    authorizeNativeTools,
     readWorkspace,
     readLinks,
     connectRemote,
@@ -231,6 +227,96 @@ async function setupCollaborationFixture(protocolVersion = '0.9.0') {
 }
 
 describe('SessionCollaborationService and gateway provenance', () => {
+  it('lets a remotely started Run5 turn list and send through the Studio workspace without an owner-side view', async () => {
+    const ownerApi = vi.fn(() => { throw new Error('Run5 must never execute tools with its owner’s permissions.') })
+    const f = await setupCollaborationFixture('1.0.0', new TaskContinuumAgentHostTools(ownerApi))
+    const taskId = 'T-0072'
+    const canonical = await canonicalPolicyRoot(f.workspaceRoot)
+    cleanups.push(await registerRepositorySessionLinksBackend(canonical, {
+      read: () => f.readLinks(canonical),
+      update: async () => { throw new Error('Collaboration must not write workspace bindings.') },
+    }))
+    await recordLocalLink(f.dataDir, canonical, taskId, { ...f.localTarget, provider: 'agent-host' }, f.localTarget.owner)
+    const discovery = join(f.dataDir, 'discovery')
+    await mkdir(discovery)
+    await writeFile(join(discovery, 'fixture.json'), JSON.stringify(f.localHost.endpoint))
+    const identity = async () => f.localTarget.owner
+    const devices = new VSCodeDeviceClient(f.dataDir, {
+      available: () => true, encrypt: (text) => Buffer.from(text), decrypt: (bytes) => bytes.toString(),
+    }, async () => { throw new Error('Fixture uses a loopback gateway.') }, async () => {})
+    vi.spyOn(devices, 'agentHostTransport').mockImplementation((_root, target, signal) => f.connectRemote(target, signal))
+    const manager = new AgentHostManager(f.dataDir, new AgentHostRegistry(f.dataDir, [discovery], identity), devices, identity)
+    cleanups.push(async () => { await manager.close(); devices.close() })
+    const service = new SessionCollaborationService({
+      directory: f.dataDir, agentHosts: manager, devices, identity, readWorkspace: f.readWorkspace,
+    })
+    cleanups.push(() => service.close())
+    const studioTools = new TaskContinuumAgentHostTools((root, target, beforeAccept) => ({
+      collaboration: service.forWorkspace(root, { target, beforeAccept }),
+    }))
+    const execute = vi.spyOn(studioTools, 'executeForCaller')
+    manager.setToolRelay((root, target, request, verify) => studioTools.executeForCaller(root, target, request, verify))
+    const run5 = await manager.connection(f.workspaceRoot, f.remoteTarget)
+    await run5.open()
+    const registration = () => (f.remoteHost.dispatches as SessionActiveClientSetAction[]).find(({ type }) => type === 'session/activeClientSet')
+    await vi.waitFor(() => expect(registration()).toBeDefined())
+    const clientId = registration()!.activeClient.clientId
+    const turnId = randomUUID()
+    await run5.send(turnId, 'Send Hi to the linked Studio session', undefined, () => manager.authorize(f.workspaceRoot, f.remoteTarget), f.localOwner)
+
+    const request = (toolName: string, args: Record<string, unknown>, id = randomUUID(), activeTurn = turnId) => ({
+      type: 'session/inputNeededSet',
+      request: {
+        kind: 'toolClientExecution', id, turnId: activeTurn, clientId, chat: f.remoteTarget.chatId,
+        toolCall: { status: 'running', toolCallId: id, toolName, contributor: { kind: 'client', clientId }, toolInput: JSON.stringify(args) },
+      },
+    })
+    const completed = (id: string) => (f.remoteHost.dispatches as ChatToolCallCompleteAction[]).find(
+      (action) => action.type === 'chat/toolCallComplete' && action.toolCallId === id,
+    )?.result
+    const invoke = async (call: ReturnType<typeof request>, expected: object) => {
+      f.remoteHost.sessionAction(call)
+      await vi.waitFor(() => expect(completed(call.request.id)).toMatchObject(expected))
+    }
+
+    const targetRef = formatCollaborationTargetRef(taskId, f.localTarget)
+    const list = request('taskcontinuum_collaboration_list_sessions', { taskId, query: 'Studio-A' })
+    await invoke(list, { success: true, structuredContent: { result: { sessions: [{ targetRef, location: 'local' }] } } })
+    expect(execute).toHaveBeenLastCalledWith(canonical, f.remoteTarget, expect.objectContaining({ turnId }), expect.any(Function))
+    const send = 'taskcontinuum_collaboration_send_message'
+    const messageId = randomUUID()
+    const denied = request(send, { targetRef: formatCollaborationTargetRef(taskId, { ...f.localTarget, chatId: 'ahp-chat:/private-other' }), messageId, text: 'Hi' })
+    await invoke(denied, { success: false, error: { code: 'NOT_FOUND' } })
+    const call = request(send, { targetRef, messageId, text: 'Hi' })
+    await invoke(call, { success: true, structuredContent: { result: { state: 'delivered', messageId } } })
+    f.remoteHost.sessionAction(call)
+    const wrongTurn = request('taskcontinuum_collaboration_list_sessions', {}, randomUUID(), randomUUID())
+    await invoke(wrongTurn, { success: false, error: { code: 'ACCESS_DENIED' } })
+    expect(f.localHost.dispatches).toMatchObject([{ turnId: messageId, message: { text: 'Hi', _meta: { taskcontinuumCollaboration: {
+      senderDevice: { clientId: f.localOwner.clientId }, sourceKind: 'agent-host-client',
+    } } } }])
+    expect(execute).toHaveBeenCalledTimes(3)
+
+    // The owner rechecks its existing send grant for every relay.
+    f.setGatewayCanSend(false)
+    await invoke(request('taskcontinuum_collaboration_list_sessions', {}), { success: false, error: { code: 'ACCESS_DENIED' } })
+    expect(execute).toHaveBeenCalledTimes(3)
+
+    // A reconnected client cannot inherit an old turn or replay its tool calls.
+    await run5.close()
+    await vi.waitFor(() => expect(f.remoteHost.dispatchChannels).toContainEqual({ channel: f.remoteTarget.sessionId, type: 'session/activeClientRemoved' }))
+    f.setGatewayCanSend(true)
+    const reconnected = await manager.connection(f.workspaceRoot, f.remoteTarget)
+    await reconnected.open()
+    const registrations = () => (f.remoteHost.dispatches as SessionActiveClientSetAction[]).filter(({ type }) => type === 'session/activeClientSet')
+    await vi.waitFor(() => expect(registrations()).toHaveLength(2))
+    const oldTurn = request('taskcontinuum_collaboration_list_sessions', {})
+    oldTurn.request.clientId = oldTurn.request.toolCall.contributor.clientId = registrations()[1].activeClient.clientId
+    await invoke(oldTurn, { success: false, error: { code: 'UNAVAILABLE', message: expect.stringContaining('No live TaskContinuum connection') } })
+    expect(execute).toHaveBeenCalledTimes(3)
+    expect(ownerApi).not.toHaveBeenCalled()
+  })
+
   it('lists, reads, and sends to a repository binding through the real AgentHostManager', async () => {
     const f = await setupCollaborationFixture()
     const taskId = 'T-0072'
@@ -287,7 +373,7 @@ describe('SessionCollaborationService and gateway provenance', () => {
     const native = new TaskContinuumAgentHostTools((root, target, beforeAccept) => ({
       collaboration: service.forWorkspace(root, { target, beforeAccept }),
     }))
-    cleanups.push(native.attach(f.workspaceRoot, f.localConnection, (root) => f.authorizeNativeTools(root, f.localTarget)))
+    cleanups.push(native.attach(f.workspaceRoot, f.localConnection, (root) => f.authorize(root, f.localTarget)))
     await f.localConnection.open()
     const registration = () => (f.localHost.dispatches as SessionActiveClientSetAction[]).find(({ type }) => type === 'session/activeClientSet')
     await vi.waitFor(() => expect(registration()).toBeDefined())

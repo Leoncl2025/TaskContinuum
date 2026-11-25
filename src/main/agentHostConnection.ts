@@ -1,15 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { z } from 'zod'
-import { AhpClient } from '@microsoft/agent-host-protocol/client'
-import type { AhpTransport, Subscription } from '@microsoft/agent-host-protocol/client'
+import { AhpClient, RpcError } from '@microsoft/agent-host-protocol/client'
+import type { AhpTransport, ServerRequestHandler, Subscription } from '@microsoft/agent-host-protocol/client'
 import { MessageKind, sessionReducer, terminalReducer } from '@microsoft/agent-host-protocol'
 import type { ActionEnvelope, ChatToolCallCompleteAction, ChatTurnStartedAction, ChatTurnCancelledAction, InitializeResult, MessageEmbeddedResourceAttachment, ModelSelection, SessionActiveClientRemovedAction, SessionActiveClientSetAction, SessionModelInfo, SessionState, SessionTitleChangedAction, Snapshot, TerminalState } from '@microsoft/agent-host-protocol'
 import type { AgentHostHistoryTransfer, AgentHostProtocolVersion, AgentHostTarget, AgentHostView } from '../shared/agentHost'
 import { agentHostProtocolVersions, MAX_SESSION_TITLE_LENGTH } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
-import { taskContinuumCollaborationMetaSchema } from '../shared/sessionCollaboration'
+import { COLLABORATION_LIMITS, CollaborationError, taskContinuumCollaborationMetaSchema } from '../shared/sessionCollaboration'
 import type { TaskContinuumCollaborationMeta } from '../shared/sessionCollaboration'
 import { modelConfigErrors } from '../shared/agentHostModelConfig'
 import { AgentHostChatState, AgentHostHistoryCursorError } from './agentHostState'
@@ -25,6 +25,11 @@ import {
 } from './agentHostSnapshotTransfer'
 import type { ChunkedSnapshotCapability, SnapshotHistoryPage } from './agentHostSnapshotTransfer'
 import type { NativeToolChannel } from './taskContinuumAgentHostTools'
+import {
+  TOOL_RELAY_CAPABILITY, TOOL_RELAY_LIMITS, TOOL_RELAY_METHOD, toolRelayCapabilitySchema, toolRelayRequestSchema,
+} from './taskContinuumToolRelay'
+import type { ExecuteRelayedTool, RelayToolToCaller, ToolRelayResult } from './taskContinuumToolRelay'
+import { taskContinuumToolFailure } from './taskContinuumTools'
 
 export type AgentHostEvent = { type: 'action'; envelope: ActionEnvelope } | { type: 'snapshot'; snapshot: Snapshot } | { type: 'state' | 'history-progress' }
 export function isAgentHostTurnBoundary(event: AgentHostEvent): boolean {
@@ -38,7 +43,11 @@ const cacheSchema = z.discriminatedUnion('schemaVersion', [
 ])
 type Command = z.infer<typeof commandSchema>
 type ModelCatalog = Pick<SessionModelInfo, 'id' | 'name' | 'provider' | 'configSchema'>[]
-type ActiveConnection = { client: AhpClient; clientId: string; toolCalls?: Set<string>; abort: AbortController; traceId: string }
+type ActiveConnection = {
+  client: AhpClient; clientId: string; abort: AbortController; traceId: string; toolCalls?: Set<string>
+  remoteTurn?: { id: string; relay?: RelayToolToCaller }
+  sentTurn?: { id: string; calls: Set<string>; running: number }
+}
 
 export class AgentHostConnection {
   private current?: ActiveConnection
@@ -84,7 +93,7 @@ export class AgentHostConnection {
   }
 
   constructor(readonly target: AgentHostTarget, directory: string, private readonly transport: (signal: AbortSignal, traceId: string) => Promise<AhpTransport>,
-    readonly isNative = false) {
+    readonly isNative = false, private readonly executeRelayedTool?: ExecuteRelayedTool) {
     agentHostTargetSchema.parse(target)
     this.chat = new AgentHostChatState(target.chatId)
     this.file = join(directory, 'agent-host', createHash('sha256').update(agentHostKey(target)).digest('hex'))
@@ -146,14 +155,63 @@ export class AgentHostConnection {
     }
   }
 
-  mayUseNativeTools(turnId: string): boolean {
+  nativeToolRoute(turnId: string): 'local' | RelayToolToCaller {
     const turn = this.chat.activeMessage
     const chat = this.nativeToolChannel()?.state.chats.find(({ resource }) => resource === this.target.chatId)
     if (!chat || chat.interactivity === 'read-only' || chat.interactivity === 'hidden'
-      || this.readOnly || turn?.id !== turnId || turn.message.origin.kind !== MessageKind.User) return false
-    // A remote gateway sender must not borrow this owner's workspace credentials.
+      || this.readOnly || turn?.id !== turnId || turn.message.origin.kind !== MessageKind.User) {
+      throw new CollaborationError('ACCESS_DENIED', 'This tool call is not from a live, writable chat turn.')
+    }
+    const remote = this.current?.remoteTurn
+    if (remote?.id === turnId && remote.relay) return remote.relay
     const actor = turn.message._meta?.taskcontinuumActor
-    return actor === undefined || (typeof actor === 'object' && actor !== null && 'clientId' in actor && actor.clientId === this.target.owner.clientId)
+    if (remote?.id === turnId || actor !== undefined
+      && !(typeof actor === 'object' && actor !== null && 'clientId' in actor && actor.clientId === this.target.owner.clientId)) {
+      throw new CollaborationError('UNAVAILABLE', 'No live TaskContinuum connection can run tools for this remote turn. Update both devices if needed and start a new turn.')
+    }
+    return 'local'
+  }
+
+  closeToolRelay(relay: RelayToolToCaller): void {
+    const turn = this.current?.remoteTurn
+    if (turn?.relay === relay) turn.relay = undefined
+  }
+
+  private async receiveRelayedTool(active: ActiveConnection, value: unknown): Promise<ToolRelayResult> {
+    const accepted = toolRelayRequestSchema.safeParse(value)
+    if (!accepted.success || Buffer.byteLength(JSON.stringify(value)) > COLLABORATION_LIMITS.maxToolRequestBytes) {
+      return taskContinuumToolFailure(new CollaborationError('INVALID_REQUEST', ''))
+    }
+    const request = accepted.data
+    const turn = active.sentTurn
+    const execute = this.executeRelayedTool
+    const check = () => {
+      if (!execute || !turn || this.current !== active || !this.connected || active.abort.signal.aborted || this.readOnly
+        || active.sentTurn !== turn || turn.id !== request.turnId || request.channel !== this.target.chatId) {
+        throw new CollaborationError('ACCESS_DENIED', 'The tool call does not belong to a turn sent on this connection.')
+      }
+    }
+    try { check() } catch (error) { return taskContinuumToolFailure(error) }
+    if (!turn || !execute) return taskContinuumToolFailure(new CollaborationError('ACCESS_DENIED', ''))
+    if (turn.calls.has(request.toolCallId)) return taskContinuumToolFailure(new CollaborationError('CONFLICT', 'This tool call was already received. It was not replayed.'))
+    if (turn.running >= TOOL_RELAY_LIMITS.perSocket) return taskContinuumToolFailure(new CollaborationError('BUSY', ''))
+    if (turn.calls.size >= 2048) turn.calls.delete(turn.calls.values().next().value!)
+    turn.calls.add(request.toolCallId)
+    turn.running++
+    const deadline = AbortSignal.timeout(TOOL_RELAY_LIMITS.executionMs)
+    const verify = async () => {
+      deadline.throwIfAborted()
+      check()
+      if (this.chat.activeMessage?.id !== turn.id) throw new CollaborationError('ACCESS_DENIED', 'The originating chat turn is no longer active.')
+    }
+    try {
+      if (this.chat.activeMessage?.id !== turn.id) await this.waitForTurn(turn.id, active)
+      await verify()
+      const result = await execute(request, verify)
+      await verify()
+      return result
+    } catch (error) { return taskContinuumToolFailure(error) }
+    finally { turn.running-- }
   }
 
   get hasActiveWork(): boolean {
@@ -498,13 +556,24 @@ export class AgentHostConnection {
       }
       try {
         const client = new AhpClient(await this.transport(abort.signal, traceId), { requestTimeoutMs: 60000, subscriptionBuffer: 4096 })
-        active = { client, clientId: randomUUID(), abort, traceId }
+        const opened: ActiveConnection = { client, clientId: randomUUID(), abort, traceId }
+        active = opened
         if (this.closed) { abort.abort(); await client.shutdown(); throw new Error('Agent Host view is closed.') }
         advance('initialize')
         this.current = active
         this.modelCatalog = undefined
+        if (this.executeRelayedTool) {
+          // The SDK handles extension methods at runtime; its type map only includes standard AHP methods.
+          const handleTool = async (method: string, value: unknown) => {
+            if (method !== TOOL_RELAY_METHOD) throw new RpcError(-32601, 'Unsupported TaskContinuum reverse request.')
+            return this.receiveRelayedTool(opened, value)
+          }
+          client.setServerRequestHandler(handleTool as ServerRequestHandler)
+        }
         client.connect()
-        const initialized = await client.initialize({ clientId: active.clientId, protocolVersions: [...agentHostProtocolVersions] })
+        const clientInfo = { name: 'TaskContinuum', version: '1', ...TOOL_RELAY_CAPABILITY }
+        const initialized = await client.request('initialize', { channel: 'ahp-root://', clientId: active.clientId, protocolVersions: [...agentHostProtocolVersions],
+          ...(this.executeRelayedTool ? { clientInfo } : {}) })
         this.initialized = { ...initialized, protocolVersion: requireAgentHostProtocolVersion(initialized.protocolVersion) }
         advance('session')
         this.snapshots.clear()
@@ -712,6 +781,11 @@ export class AgentHostConnection {
           const loading = this.historyLoading
           const previousCount = this.chat.completedTurns
           if (!this.chat.apply(envelope)) continue
+          if (isAgentHostTurnBoundary({ type: 'action', envelope })) {
+            const activeTurn = this.chat.activeMessage?.id
+            if (active.sentTurn && active.sentTurn.id !== activeTurn && this.chat.hasTurn(active.sentTurn.id)) active.sentTurn = undefined
+            if (active.remoteTurn && active.remoteTurn.id !== activeTurn && this.chat.hasTurn(active.remoteTurn.id)) active.remoteTurn = undefined
+          }
           if (loading?.active === active && this.chat.completedTurns !== previousCount) {
             if (loading.counts.length >= SNAPSHOT_TRANSFER_LIMITS.maxTailEvents) throw new AgentHostSnapshotSupersededError('History changed too quickly while loading a page.')
             loading.counts.push({ sequence: envelope.serverSeq, delta: this.chat.completedTurns - previousCount })
@@ -860,7 +934,8 @@ export class AgentHostConnection {
     if (errors.length) throw new Error(errors.join(' '))
   }
 
-  async send(id: string, text: string, images: ChatImageAttachment[] | undefined, authorize: () => Promise<void>, actor?: { clientId: string; machineName: string; username?: string; displayName?: string }, model?: ModelSelection, collaboration?: TaskContinuumCollaborationMeta): Promise<void> {
+  async send(id: string, text: string, images: ChatImageAttachment[] | undefined, authorize: () => Promise<void>, actor?: { clientId: string; machineName: string; username?: string; displayName?: string }, model?: ModelSelection, collaboration?: TaskContinuumCollaborationMeta,
+    remoteOrigin?: { relay?: RelayToolToCaller }): Promise<void> {
     const validatedCollaboration = collaboration === undefined ? undefined : taskContinuumCollaborationMetaSchema.parse(collaboration)
     if (validatedCollaboration && validatedCollaboration.messageId !== id) throw new Error('Collaboration messageId must match the turn ID.')
     const command = {
@@ -937,6 +1012,10 @@ export class AgentHostConnection {
       } : undefined
       const action: ChatTurnStartedAction = { type: 'chat/turnStarted' as ChatTurnStartedAction['type'], turnId: id, startedAt: new Date().toISOString(), message: { text: command.text, origin: { kind: MessageKind.User }, ...(attachments?.length ? { attachments } : {}), ...(selection?.agent ? { agent: selection.agent } : {}), ...(selectedModel ? { model: selectedModel } : {}), ...(messageMeta ? { _meta: messageMeta } : {}) } }
       phase('dispatch')
+      active.remoteTurn = remoteOrigin && { id, ...remoteOrigin }
+      if (this.executeRelayedTool && toolRelayCapabilitySchema.safeParse(this.initialized?._meta?.taskcontinuumCollaboration).success) {
+        active.sentTurn = { id, calls: new Set(), running: 0 }
+      }
       dispatched = true
       active.client.dispatch(this.target.chatId, action)
       this.emit({ type: 'state' })
