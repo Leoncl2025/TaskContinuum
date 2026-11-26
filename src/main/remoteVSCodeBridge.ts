@@ -71,8 +71,10 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     app.getPath('userData'),
     (root) => collaboration.forWorkspace(root),
     desktopOperations,
-  )
-  void collaborationReady.catch(() => console.error('The local session collaboration MCP bridge could not start.'))
+  ).catch(() => {
+    console.error('The local session collaboration MCP bridge could not start. Native Agent Host tools remain available.')
+    return undefined
+  })
   const chatLinks = new ChatLinkService({
     files, owner: clientIdentity,
     device: (root, owner) => devices.fileDeviceForOwner(root, owner),
@@ -149,10 +151,10 @@ export function registerRemoteVSCodeBridge(requireWindow: (event: IpcMainInvokeE
     if (confirmation.response === 1) { await unchanged(root); await tunnels.stop() }
   })
   let closing: Promise<void> | undefined
-  return { agentHosts, gitSync, filesReady, collaborationReady, chatLinks, nativeTools,
+  return { agentHosts, gitSync, filesReady, chatLinks, nativeTools,
     hasActiveWork: () => agentHosts.hasActiveWork || host.hasActiveWork || files.hasActiveWork || fileSource.hasActiveWork || collaboration.hasActiveWork,
     close: () => closing ??= (async () => {
-    try { await (await collaborationReady).close() } catch { console.error('Closing after session collaboration MCP bridge failure.') }
+    try { await (await collaborationReady)?.close() } catch { console.error('The local session collaboration MCP bridge could not close.') }
     await collaboration.close()
     try { await (await filesReady).close() } catch { console.error('Closing after file transfer MCP bridge failure.') }
     await files.close()

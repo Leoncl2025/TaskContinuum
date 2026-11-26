@@ -23,10 +23,16 @@ import { AgentHostTurnNotDispatchedError } from './agentHostDelivery'
 import type { AgentHostManager } from './agentHostManager'
 import { canonicalPolicyRoot } from './linkedSessionPolicy'
 import { readRepositorySessionLinksForAuthorization } from './repositorySessionLinks'
-import { readJsonBounded, writeJsonAtomic } from './shared/storage'
+import { JsonFileSizeError, readJsonBounded, writeTextAtomic } from './shared/storage'
 import type { VSCodeDeviceClient } from './vscodeDeviceClient'
 import { readTaskWorkspaceMetadata } from './workspaceReader'
 import type { WorkspaceTaskMetadata } from './workspaceReader'
+
+const MAX_LEDGER_BYTES = 4 * 1024 * 1024
+// The old writer capped record count but not bytes. Bound recovery of those v1 files too.
+const MAX_LEGACY_LEDGER_BYTES = 24 * 1024 * 1024
+// Enough for the worst-case JSON escaping of a 512-character reason and the final receipt fields.
+const PENDING_STATUS_RESERVE_BYTES = 4096
 
 const savedMessageSchema = z.object({
   root: z.string().min(1).max(4096),
@@ -57,6 +63,29 @@ export interface SessionCollaborationDependencies {
 interface NativeCollaborationSource {
   target: AgentHostTarget
   beforeAccept(): Promise<void>
+}
+
+function pendingMessage({ status }: SavedMessage): boolean {
+  return status.state === 'queued' || status.state === 'dispatching'
+}
+
+function expiredMessage(record: SavedMessage, now: number): SavedMessage {
+  if (record.status.state !== 'queued' || !record.status.expiresAt || now < Date.parse(record.status.expiresAt)) return record
+  return {
+    ...record, text: undefined,
+    status: {
+      ...record.status, state: 'expired', updatedAt: new Date(now).toISOString(),
+      reason: 'Queued collaboration message expired before the target session became idle.',
+    },
+  }
+}
+
+function messageTargetKey({ root, status }: SavedMessage): string {
+  return collaborationTargetKey(root, parseCollaborationTargetRef(status.targetRef))
+}
+
+function collaborationTargetKey(root: string, { sessionId, chatId, ownerClientId }: ReturnType<typeof parseCollaborationTargetRef>): string {
+  return `${root}:${agentHostKey({ sessionId, chatId, owner: { clientId: ownerClientId } })}`
 }
 
 function targetFromLink({ sessionId, chatId, owner }: SessionLink): AgentHostTarget {
@@ -116,8 +145,10 @@ export class SessionCollaborationService {
   private loading?: Promise<void>
   private writing: Promise<void> = Promise.resolve()
   private activeOperations = 0
-  private readonly dispatchingTargets = new Set<string>()
-  private readonly watchers = new Map<string, { connection: AgentHostConnection; unlisten: () => void }>()
+  private readonly inFlightMessages = new Map<string, { taskId: string; requestHash: string; completion: Promise<CollaborationMessageStatus> }>()
+  private readonly targetOperations = new Map<string, Promise<void>>()
+  private readonly scheduledDrains = new Set<string>()
+  private readonly watchers = new Map<string, { root: string; target: AgentHostTarget; connection: AgentHostConnection; unlisten: () => void }>()
   private readonly loadedConnections = new Map<string, AgentHostConnection>()
   private readonly expiryTimer: ReturnType<typeof setInterval>
   private closed = false
@@ -134,7 +165,7 @@ export class SessionCollaborationService {
   }
 
   get hasActiveWork(): boolean {
-    return this.activeOperations > 0 || this.dispatchingTargets.size > 0
+    return this.activeOperations > 0 || this.targetOperations.size > 0
   }
 
   private isoNow(): string {
@@ -145,7 +176,11 @@ export class SessionCollaborationService {
     this.loading ??= (async () => {
       let recovered = false
       try {
-        const parsed = messagesDocumentSchema.parse(await readJsonBounded(this.messagesFile, 4 * 1024 * 1024))
+        const document = await readJsonBounded(this.messagesFile, MAX_LEDGER_BYTES).catch((error: unknown) => {
+          if (!(error instanceof JsonFileSizeError)) throw error
+          return readJsonBounded(this.messagesFile, MAX_LEGACY_LEDGER_BYTES)
+        })
+        const parsed = messagesDocumentSchema.parse(document)
         const timestamp = this.isoNow()
         this.messages = parsed.messages.map((entry) => {
           if (entry.status.state === 'queued') {
@@ -181,24 +216,70 @@ export class SessionCollaborationService {
           throw new CollaborationError('UNAVAILABLE', 'Session collaboration message ledger is unreadable.')
         }
       }
-      if (recovered) await this.persistMessages()
+      if (recovered) await this.writeMessages(this.messages)
     })()
     return this.loading
   }
 
-  private async persistMessages(): Promise<void> {
-    if (this.messages.length > COLLABORATION_LIMITS.maxRetainedMessages) {
-      const removable = this.messages.filter((item) => item.status.state !== 'queued' && item.status.state !== 'dispatching')
-      while (this.messages.length > COLLABORATION_LIMITS.maxRetainedMessages && removable.length > 0) {
-        const victim = removable.shift()!
-        const index = this.messages.indexOf(victim)
-        if (index >= 0) this.messages.splice(index, 1)
-      }
+  private async writeMessages(messages: SavedMessage[], reservePending = false): Promise<void> {
+    const payload = messagesDocumentSchema.parse({ schemaVersion: 1, messages })
+    const text = JSON.stringify(payload, null, 2) + '\n'
+    const reserve = reservePending ? messages.filter(pendingMessage).length * PENDING_STATUS_RESERVE_BYTES : 0
+    if (Buffer.byteLength(text) + reserve > MAX_LEDGER_BYTES) {
+      throw new CollaborationError('BUSY', 'The collaboration ledger is full. Existing pending messages were kept.')
     }
-    const payload = messagesDocumentSchema.parse({ schemaVersion: 1, messages: this.messages })
-    const operation = this.writing.then(() => writeJsonAtomic(this.messagesFile, payload))
-    this.writing = operation.catch(() => undefined)
-    await operation
+    try { await writeTextAtomic(this.messagesFile, text) }
+    catch {
+      throw new CollaborationError('UNAVAILABLE', 'Could not save the collaboration ledger. Check the original message before retrying.')
+    }
+  }
+
+  private updateMessages<T>(update: (messages: SavedMessage[]) => T, reservePending = false): Promise<T> {
+    const operation = this.writing.then(async () => {
+      const next = [...this.messages]
+      const result = update(next)
+      if (next.length !== this.messages.length || next.some((entry, index) => entry !== this.messages[index])) {
+        await this.writeMessages(next, reservePending)
+        this.messages = next
+      }
+      return result
+    })
+    this.writing = operation.then(() => undefined, () => undefined)
+    return operation
+  }
+
+  private admitMessage(record: SavedMessage): Promise<void> {
+    return this.updateMessages((messages) => {
+      if (this.closed) throw new CollaborationError('UNAVAILABLE', 'Session collaboration service is closed.')
+      if (this.queuedCount(record.root, record.status.taskId) >= COLLABORATION_LIMITS.maxQueuedPerTask) {
+        throw new CollaborationError('BUSY', `Too many pending collaboration messages for ${record.status.taskId}. Retry when some finish.`)
+      }
+      if (messages.length >= COLLABORATION_LIMITS.maxRetainedMessages) {
+        const removable = messages.findIndex((entry) => !pendingMessage(entry))
+        if (removable < 0) throw new CollaborationError('BUSY', 'The collaboration ledger has too many pending messages.')
+        messages.splice(removable, 1)
+      }
+      messages.push(record)
+    }, true)
+  }
+
+  private replaceMessage(previous: SavedMessage, next: SavedMessage): Promise<boolean> {
+    return this.updateMessages((messages) => {
+      const index = messages.indexOf(previous)
+      if (index < 0) return false
+      messages[index] = next
+      return true
+    })
+  }
+
+  private onTarget<T>(key: string, action: () => Promise<T>): Promise<T> {
+    const operation = (this.targetOperations.get(key) ?? Promise.resolve()).then(action)
+    const complete = operation.then(() => undefined, () => undefined)
+    this.targetOperations.set(key, complete)
+    void complete.then(() => {
+      if (this.targetOperations.get(key) === complete) this.targetOperations.delete(key)
+    })
+    return operation
   }
 
   private async canonicalRoot(root: string): Promise<string> {
@@ -208,7 +289,7 @@ export class SessionCollaborationService {
 
   private queuedCount(canonicalRoot: string, taskId?: string): number {
     return this.messages.filter((item) => item.root === canonicalRoot && (taskId === undefined || item.status.taskId === taskId)
-      && (item.status.state === 'queued' || item.status.state === 'dispatching')).length
+      && pendingMessage(item)).length
   }
 
   private async readWorkspaceTasks(canonicalRoot: string): Promise<readonly WorkspaceTaskMetadata[]> {
@@ -471,25 +552,9 @@ export class SessionCollaborationService {
     } finally { release() }
   }
 
-  private targetLockKey(canonicalRoot: string, link: Pick<AgentHostTarget, 'sessionId' | 'chatId' | 'owner'>): string {
-    return `${canonicalRoot}:${agentHostKey(link)}`
-  }
-
-  private async enrichStatus(canonicalRoot: string, record: SavedMessage): Promise<CollaborationMessageStatus> {
-    if (record.status.state === 'queued' && record.status.expiresAt && this.now() >= Date.parse(record.status.expiresAt)) {
-      record.text = undefined
-      record.status = {
-        ...record.status,
-        state: 'expired',
-        updatedAt: this.isoNow(),
-        reason: 'Queued collaboration message expired before the target session became idle.',
-      }
-      await this.persistMessages()
-      this.cleanupIdleWatchers()
-    }
+  private enrichStatus(record: SavedMessage): CollaborationMessageStatus {
     if ((record.status.state === 'delivered' || record.status.state === 'uncertain') && record.status.turnId) {
-      const parsed = parseCollaborationTargetRef(record.status.targetRef)
-      const connection = this.getLoadedConnection(`${canonicalRoot}:${JSON.stringify([parsed.ownerClientId, parsed.sessionId, parsed.chatId])}`)
+      const connection = this.getLoadedConnection(messageTargetKey(record))
       const liveTurnStatus = resolveTurnStatus(connection?.view.chat, record.status.turnId)
       if (liveTurnStatus && liveTurnStatus !== record.status.turnStatus) {
         return collaborationMessageStatusSchema.parse({ ...record.status, turnStatus: liveTurnStatus })
@@ -501,21 +566,40 @@ export class SessionCollaborationService {
   private async sendMessage(root: string, request: CollaborationSendRequest, source?: NativeCollaborationSource): Promise<CollaborationMessageStatus> {
     await this.initialize()
     const canonical = await this.canonicalRoot(root)
-    await this.expireQueuedMessages()
     const parsedTarget = parseCollaborationTargetRef(request.targetRef)
     const requestHash = createHash('sha256')
       .update(JSON.stringify({ taskId: parsedTarget.taskId, targetRef: request.targetRef, text: request.text }))
       .digest('hex')
-
+    const key = `${canonical}:${request.messageId}`
+    const inFlight = this.inFlightMessages.get(key)
     const existing = this.messages.find((item) => item.root === canonical && item.status.messageId === request.messageId)
+    if (inFlight) {
+      await this.readTaskLinks(canonical, inFlight.taskId)
+      await source?.beforeAccept()
+      if (inFlight.requestHash !== requestHash) throw new CollaborationError('CONFLICT', 'This messageId already belongs to different collaboration content or target.')
+      return inFlight.completion
+    }
     if (existing) {
       await this.readTaskLinks(canonical, existing.status.taskId)
+      await source?.beforeAccept()
       if (existing.requestHash !== requestHash) {
         throw new CollaborationError('CONFLICT', 'This messageId already belongs to different collaboration content or target.')
       }
-      return this.enrichStatus(canonical, existing)
+      await this.expireQueuedMessages()
+      return this.enrichStatus(this.messages.find((item) => item.root === canonical && item.status.messageId === request.messageId) ?? existing)
     }
 
+    const targetKey = collaborationTargetKey(canonical, parsedTarget)
+    const completion = this.onTarget(targetKey, () => this.sendToTarget(canonical, targetKey, request, requestHash, source))
+    this.inFlightMessages.set(key, { taskId: parsedTarget.taskId, requestHash, completion })
+    try { return await completion }
+    finally { this.inFlightMessages.delete(key) }
+  }
+
+  private async sendToTarget(canonical: string, targetKey: string, request: CollaborationSendRequest, requestHash: string,
+    source?: NativeCollaborationSource): Promise<CollaborationMessageStatus> {
+    if (this.closed) throw new CollaborationError('UNAVAILABLE', 'Session collaboration service is closed.')
+    await this.expireQueuedMessages()
     const { taskId, link } = await this.resolveTargetLink(canonical, request.targetRef)
     if (this.queuedCount(canonical, taskId) >= COLLABORATION_LIMITS.maxQueuedPerTask) {
       throw new CollaborationError('BUSY', `Too many pending collaboration messages for ${taskId}. Retry when some finish.`)
@@ -532,91 +616,38 @@ export class SessionCollaborationService {
       }
       const sourceTarget = source && collaborationTargetSchema.parse(source.target)
       const createdAt = this.isoNow()
-      if (view.chat?.draft?.text || view.chat?.draft?.attachments?.length) {
-        const blocked: SavedMessage = {
-          root: canonical,
-          requestHash,
-          sourceTarget,
-          status: {
-            messageId: request.messageId,
-            taskId,
-            targetRef: request.targetRef,
-            state: 'blocked',
-            createdAt,
-            updatedAt: createdAt,
-            reason: 'Target session has an unsent human draft; collaboration message was not sent.',
-          },
-        }
-        this.messages.push(blocked)
-        await this.persistMessages()
-        return collaborationMessageStatusSchema.parse(blocked.status)
-      }
-      if (view.pendingTurn?.state === 'uncertain') {
-        const blocked: SavedMessage = {
-          root: canonical,
-          requestHash,
-          sourceTarget,
-          status: {
-            messageId: request.messageId,
-            taskId,
-            targetRef: request.targetRef,
-            state: 'blocked',
-            createdAt,
-            updatedAt: createdAt,
-            reason: 'Target session has an uncertain delivery awaiting manual review.',
-          },
-        }
-        this.messages.push(blocked)
-        await this.persistMessages()
-        return collaborationMessageStatusSchema.parse(blocked.status)
-      }
-
-      const lockKey = this.targetLockKey(canonical, link)
-      const hasQueuedAhead = this.messages.some((item) => item.root === canonical && item.status.targetRef === request.targetRef && item.status.state === 'queued')
-      const targetBusy = this.dispatchingTargets.has(lockKey) || hasQueuedAhead
+      const blockedReason = view.chat?.draft?.text || view.chat?.draft?.attachments?.length
+        ? 'Target session has an unsent human draft; collaboration message was not sent.'
+        : view.pendingTurn?.state === 'uncertain' ? 'Target session has an uncertain delivery awaiting manual review.' : undefined
+      const hasQueuedAhead = this.messages.some((item) => item.status.state === 'queued' && messageTargetKey(item) === targetKey)
+      const targetBusy = hasQueuedAhead
         || Boolean(view.chat?.activeTurn) || Boolean(view.pendingTurn) || Boolean(view.chat?.queuedMessages?.length)
-
-      if (targetBusy) {
-        const expiresAt = new Date(this.now() + COLLABORATION_LIMITS.messageTtlMs).toISOString()
-        const queued: SavedMessage = {
-          root: canonical,
-          requestHash,
-          sourceTarget,
-          text: request.text,
-          status: {
-            messageId: request.messageId,
-            taskId,
-            targetRef: request.targetRef,
-            state: 'queued',
-            createdAt,
-            updatedAt: createdAt,
-            expiresAt,
-            reason: 'Target session is currently busy; message is queued until the current turn finishes.',
-          },
-        }
-        this.messages.push(queued)
-        await this.persistMessages()
-        this.watchTargetForQueue(canonical, link, connection)
-        return collaborationMessageStatusSchema.parse(queued.status)
-      }
-
+      const queued = !blockedReason && targetBusy
       const record: SavedMessage = {
         root: canonical,
         requestHash,
         sourceTarget,
+        ...(queued ? { text: request.text } : {}),
         status: {
           messageId: request.messageId,
           taskId,
           targetRef: request.targetRef,
-          state: 'dispatching',
+          state: blockedReason ? 'blocked' : queued ? 'queued' : 'dispatching',
           createdAt,
           updatedAt: createdAt,
+          ...(queued ? {
+            expiresAt: new Date(this.now() + COLLABORATION_LIMITS.messageTtlMs).toISOString(),
+            reason: 'Target session is currently busy; message is queued until the current turn finishes.',
+          } : { reason: blockedReason }),
         },
       }
-      this.messages.push(record)
-      await this.persistMessages()
-      await this.dispatchNow(canonical, record, request.text, link, connection, source?.beforeAccept)
-      return await this.enrichStatus(canonical, record)
+      await this.admitMessage(record)
+      if (queued) {
+        this.watchTargetForQueue(targetKey, canonical, link, connection)
+        this.scheduleDrainTarget(targetKey)
+      }
+      if (record.status.state !== 'dispatching') return this.enrichStatus(record)
+      return this.enrichStatus(await this.dispatchNow(canonical, record, request.text, link, connection, source?.beforeAccept))
     } finally { release() }
   }
 
@@ -629,9 +660,8 @@ export class SessionCollaborationService {
   }
 
   private async dispatchNow(canonicalRoot: string, record: SavedMessage, messageText: string, link: AgentHostTarget, connection: AgentHostConnection,
-    beforeDispatch?: () => Promise<void>): Promise<void> {
-    const lockKey = this.targetLockKey(canonicalRoot, link)
-    this.dispatchingTargets.add(lockKey)
+    beforeDispatch?: () => Promise<void>): Promise<SavedMessage> {
+    let status: CollaborationMessageStatus
     try {
       const actor = await this.deps.identity()
       const source = record.sourceTarget
@@ -659,14 +689,14 @@ export class SessionCollaborationService {
           await this.resolveTargetLink(canonicalRoot, record.status.targetRef, record.status.taskId)
           if (record.sourceTarget) await this.authorizeSource(canonicalRoot, record.sourceTarget)
           await beforeDispatch?.()
+          if (this.closed) throw new CollaborationError('UNAVAILABLE', 'Session collaboration service is closed.')
         },
         actor,
         undefined,
         collaborationMeta,
       )
       const deliveredAt = this.isoNow()
-      record.text = undefined
-      record.status = {
+      status = {
         ...record.status,
         state: 'delivered',
         updatedAt: deliveredAt,
@@ -675,13 +705,11 @@ export class SessionCollaborationService {
         turnStatus: resolveTurnStatus(connection.view.chat, record.status.messageId) ?? 'in-progress',
         reason: undefined,
       }
-      await this.persistMessages()
     } catch (error) {
       const timestamp = this.isoNow()
-      record.text = undefined
       const pendingTurn = connection.view.pendingTurn
       if (pendingTurn?.id === record.status.messageId && pendingTurn.state === 'uncertain') {
-        record.status = {
+        status = {
           ...record.status,
           state: 'uncertain',
           updatedAt: timestamp,
@@ -690,180 +718,143 @@ export class SessionCollaborationService {
           reason: 'Delivery confirmation was interrupted; inspect the target session before retrying.',
         }
       } else {
-        record.status = {
+        status = {
           ...record.status,
           state: 'failed',
           updatedAt: timestamp,
           reason: error instanceof CollaborationError || error instanceof AgentHostTurnNotDispatchedError
-            ? error.message : 'Target session rejected or could not start the collaboration message.',
+            ? error.message.slice(0, 512) : 'Target session rejected or could not start the collaboration message.',
         }
       }
-      await this.persistMessages()
-    } finally {
-      this.dispatchingTargets.delete(lockKey)
-      this.scheduleDrainTarget(canonicalRoot, link, connection)
     }
+    const finished = { ...record, text: undefined, status }
+    if (!await this.replaceMessage(record, finished)) {
+      throw new CollaborationError('UNAVAILABLE', 'The original collaboration delivery record is no longer available.')
+    }
+    return finished
   }
 
-  private watchTargetForQueue(canonicalRoot: string, link: AgentHostTarget, connection: AgentHostConnection): void {
-    const key = this.targetLockKey(canonicalRoot, link)
+  private watchTargetForQueue(key: string, root: string, target: AgentHostTarget, connection: AgentHostConnection): void {
     const existing = this.watchers.get(key)
     if (existing?.connection === connection) return
     existing?.unlisten()
     const unlisten = connection.listen(() => {
-      this.scheduleDrainTarget(canonicalRoot, link, connection)
+      this.scheduleDrainTarget(key)
     })
-    this.watchers.set(key, { connection, unlisten })
+    this.watchers.set(key, { root, target, connection, unlisten })
   }
 
-  private scheduleDrainTarget(canonicalRoot: string, link: AgentHostTarget, connection: AgentHostConnection): void {
-    if (this.closed) return
-    void this.drainTargetQueue(canonicalRoot, link, connection).catch(() => {})
+  private scheduleDrainTarget(key: string): void {
+    if (this.closed || this.scheduledDrains.has(key) || !this.watchers.has(key)) return
+    this.scheduledDrains.add(key)
+    void this.onTarget(key, async () => {
+      this.scheduledDrains.delete(key)
+      await this.drainTargetQueue(key)
+    }).catch(() => console.error('Could not update the queued collaboration delivery. Check its message status before retrying.'))
   }
 
-  private async drainTargetQueue(canonicalRoot: string, link: AgentHostTarget, connection: AgentHostConnection): Promise<void> {
-    if (this.closed) return
-    const lockKey = this.targetLockKey(canonicalRoot, link)
-    if (this.dispatchingTargets.has(lockKey)) return
-    const next = this.messages.find((item) => item.root === canonicalRoot && item.status.state === 'queued' && (() => {
-      const parsed = parseCollaborationTargetRef(item.status.targetRef)
-      return parsed.ownerClientId === link.owner.clientId && parsed.sessionId === link.sessionId && parsed.chatId === link.chatId
-    })())
-    if (!next) {
-      this.cleanupIdleWatchers()
-      return
-    }
-    if (next.status.expiresAt && this.now() >= Date.parse(next.status.expiresAt)) {
-      next.text = undefined
-      next.status = {
-        ...next.status,
-        state: 'expired',
-        updatedAt: this.isoNow(),
-        reason: 'Queued collaboration message expired before the target session became idle.',
-      }
-      await this.persistMessages()
-      await this.drainTargetQueue(canonicalRoot, link, connection)
-      return
-    }
+  private finishQueuedMessage(record: SavedMessage, state: 'blocked' | 'failed', reason: string): Promise<boolean> {
+    return this.replaceMessage(record, {
+      ...record, text: undefined,
+      status: { ...record.status, state, reason, updatedAt: this.isoNow() },
+    })
+  }
 
-    try { await this.resolveTargetLink(canonicalRoot, next.status.targetRef, next.status.taskId) }
-    catch {
-      next.text = undefined
-      next.status = {
-        ...next.status,
-        state: 'failed',
-        updatedAt: this.isoNow(),
-        reason: 'Target session is no longer linked or authorized for this task.',
-      }
-      await this.persistMessages()
-      await this.drainTargetQueue(canonicalRoot, link, connection)
-      return
-    }
-
-    if (connection.isClosed || connection.state === 'offline') {
-      try {
-        const { connection: fresh, release } = await this.acquireAuthorizedConnection(canonicalRoot, link)
-        this.watchTargetForQueue(canonicalRoot, link, fresh)
-        release()
-        connection = fresh
-      } catch {
+  private async drainTargetQueue(key: string): Promise<void> {
+    while (!this.closed) {
+      const watcher = this.watchers.get(key)
+      if (!watcher) return
+      const next = this.messages.find((item) => item.status.state === 'queued' && messageTargetKey(item) === key)
+      if (!next) {
+        this.cleanupIdleWatchers()
         return
       }
-    }
+      const expired = expiredMessage(next, this.now())
+      if (expired !== next) {
+        await this.replaceMessage(next, expired)
+        continue
+      }
 
-    const view = connection.view
-    if (view.state !== 'connected' || !view.chat) return
-    if (view.readOnly) {
-      next.text = undefined
-      next.status = {
-        ...next.status,
-        state: 'blocked',
-        updatedAt: this.isoNow(),
-        reason: 'Target session became read-only before queued delivery.',
+      const { root, target } = watcher
+      try { await this.resolveTargetLink(root, next.status.targetRef, next.status.taskId) }
+      catch {
+        await this.finishQueuedMessage(next, 'failed', 'Target session is no longer linked or authorized for this task.')
+        continue
       }
-      await this.persistMessages()
-      await this.drainTargetQueue(canonicalRoot, link, connection)
-      return
-    }
-    if (view.chat.draft?.text || view.chat.draft?.attachments?.length) {
-      next.text = undefined
-      next.status = {
-        ...next.status,
-        state: 'blocked',
-        updatedAt: this.isoNow(),
-        reason: 'Target session acquired an unsent human draft before queued delivery.',
+      if (this.closed) return
+      let { connection } = watcher
+      let release: (() => void) | undefined
+      if (connection.isClosed || connection.state === 'offline') {
+        let fresh
+        try { fresh = await this.acquireAuthorizedConnection(root, target) }
+        catch { return } // Keep the accepted message queued until reconnect or expiry.
+        connection = fresh.connection
+        release = fresh.release
+        this.watchTargetForQueue(key, root, target, connection)
       }
-      await this.persistMessages()
-      await this.drainTargetQueue(canonicalRoot, link, connection)
-      return
-    }
-    if (view.pendingTurn?.state === 'uncertain') {
-      next.text = undefined
-      next.status = {
-        ...next.status,
-        state: 'blocked',
-        updatedAt: this.isoNow(),
-        reason: 'Target session has an uncertain delivery awaiting manual review.',
+      try {
+        const view = connection.view
+        if (view.state !== 'connected' || !view.chat) return
+        const blockedReason = view.readOnly ? 'Target session became read-only before queued delivery.'
+          : view.chat.draft?.text || view.chat.draft?.attachments?.length ? 'Target session acquired an unsent human draft before queued delivery.'
+          : view.pendingTurn?.state === 'uncertain' ? 'Target session has an uncertain delivery awaiting manual review.' : undefined
+        if (blockedReason) {
+          await this.finishQueuedMessage(next, 'blocked', blockedReason)
+          continue
+        }
+        if (view.chat.activeTurn || view.pendingTurn || view.chat.queuedMessages?.length) return
+        if (!next.text) {
+          await this.finishQueuedMessage(next, 'failed', 'Queued message text was unavailable.')
+          continue
+        }
+        release ??= connection.retain()
+        const dispatching: SavedMessage = {
+          ...next, text: undefined,
+          status: { ...next.status, state: 'dispatching', updatedAt: this.isoNow(), reason: undefined },
+        }
+        const claimed = await this.updateMessages((messages) => {
+          const index = messages.indexOf(next)
+          if (index < 0 || this.closed) return false
+          const expired = expiredMessage(next, this.now())
+          messages[index] = expired === next ? dispatching : expired
+          return expired === next
+        })
+        if (claimed) await this.dispatchNow(root, dispatching, next.text, target, connection)
+      } finally {
+        release?.()
       }
-      await this.persistMessages()
-      await this.drainTargetQueue(canonicalRoot, link, connection)
-      return
     }
-    if (view.chat.activeTurn || view.pendingTurn || view.chat.queuedMessages?.length) return
-
-    const messageText = next.text
-    if (!messageText) {
-      next.status = { ...next.status, state: 'failed', updatedAt: this.isoNow(), reason: 'Queued message text was unavailable.' }
-      await this.persistMessages()
-      return
-    }
-    next.text = undefined
-    next.status = { ...next.status, state: 'dispatching', updatedAt: this.isoNow(), reason: undefined }
-    await this.persistMessages()
-    const release = connection.retain()
-    try { await this.dispatchNow(canonicalRoot, next, messageText, link, connection) }
-    finally { release() }
   }
 
   private async messageStatus(root: string, messageId: string): Promise<CollaborationMessageStatus> {
     await this.initialize()
     const canonical = await this.canonicalRoot(root)
+    await this.expireQueuedMessages()
     const record = this.messages.find((item) => item.root === canonical && item.status.messageId === messageId)
     if (!record) throw new CollaborationError('NOT_FOUND', 'Collaboration message was not found.')
     await this.readTaskLinks(canonical, record.status.taskId)
-    return this.enrichStatus(canonical, record)
+    return this.enrichStatus(record)
   }
 
   async expireQueuedMessages(): Promise<void> {
     if (this.closed) return
     await this.initialize()
-    const now = this.now()
-    const timestamp = new Date(now).toISOString()
-    let expiredAny = false
-    for (const item of this.messages) {
-      if (item.status.state === 'queued' && item.status.expiresAt && now >= Date.parse(item.status.expiresAt)) {
-        item.text = undefined
-        item.status = {
-          ...item.status,
-          state: 'expired',
-          updatedAt: timestamp,
-          reason: 'Queued collaboration message expired before the target session became idle.',
-        }
-        expiredAny = true
+    const changed = await this.updateMessages((messages) => {
+      const now = this.now()
+      let expired = false
+      for (let index = 0; index < messages.length; index++) {
+        const previous = messages[index]
+        messages[index] = expiredMessage(previous, now)
+        expired ||= messages[index] !== previous
       }
-    }
-    if (expiredAny) {
-      await this.persistMessages()
-      this.cleanupIdleWatchers()
-    }
+      return expired
+    })
+    if (changed) this.cleanupIdleWatchers()
   }
 
   private cleanupIdleWatchers(): void {
     for (const [key, watcher] of this.watchers) {
-      const hasQueued = this.messages.some((item) => item.status.state === 'queued' && (() => {
-        const parsed = parseCollaborationTargetRef(item.status.targetRef)
-        return `${item.root}:${JSON.stringify([parsed.ownerClientId, parsed.sessionId, parsed.chatId])}` === key
-      })())
+      const hasQueued = this.messages.some((item) => item.status.state === 'queued' && messageTargetKey(item) === key)
       if (!hasQueued) {
         watcher.unlisten()
         this.watchers.delete(key)
@@ -876,6 +867,7 @@ export class SessionCollaborationService {
     clearInterval(this.expiryTimer)
     for (const watcher of this.watchers.values()) watcher.unlisten()
     this.watchers.clear()
+    await Promise.all(this.targetOperations.values())
     await this.writing
   }
 }

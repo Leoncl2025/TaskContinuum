@@ -1003,6 +1003,131 @@ describe('SessionCollaborationService and gateway provenance', () => {
     await expect(api.sendMessage(overflow)).resolves.toMatchObject({ state: 'queued' })
   })
 
+  it.each([
+    { limit: 'UTF-8 bytes', attempts: 120, text: '\u6c49'.repeat(12_000) },
+    { limit: 'record count', attempts: 201, text: 'Short queued message' },
+  ])('enforces the ledger $limit before admission and preserves accepted messages across restart', async ({ limit, attempts, text }) => {
+    const setup = await setupCollaborationFixture()
+    const service = setup.createService()
+    const api = service.forWorkspace(setup.workspaceRoot)
+    const batchSize = 15
+    const tasks = Array.from({ length: Math.ceil(attempts / batchSize) }, (_, index) => ({
+      id: `T-${String(index + 1).padStart(4, '0')}`, title: `Busy task ${index + 1}`,
+    }))
+    setup.setTasks(tasks)
+    setup.setBindings(Object.fromEntries(tasks.map(({ id }) => [id, [{ ...setup.localTarget, provider: 'agent-host' }]])))
+    setup.localHost.action({
+      type: 'chat/turnStarted', turnId: 'ledger-capacity-turn', startedAt: new Date().toISOString(),
+      message: { text: 'Keep this target busy', origin: { kind: MessageKind.User } },
+    })
+
+    const accepted: string[] = []
+    let rejected: string | undefined
+    for (let index = 0; index < attempts; index++) {
+      const request = { targetRef: formatCollaborationTargetRef(tasks[Math.floor(index / batchSize)].id, setup.localTarget), messageId: randomUUID(), text }
+      const outcome = await api.sendMessage(request).catch((error: unknown) => error)
+      if (outcome instanceof Error) {
+        expect(outcome).toMatchObject({ code: 'BUSY' })
+        rejected = request.messageId
+        break
+      }
+      expect(outcome).toMatchObject({ messageId: request.messageId, state: 'queued' })
+      accepted.push(request.messageId)
+    }
+    expect(rejected).toBeDefined()
+    expect(accepted.length).toBeGreaterThan(batchSize)
+    if (limit === 'record count') expect(accepted).toHaveLength(attempts - 1)
+    await expect(api.messageStatus(rejected!)).rejects.toMatchObject({ code: 'NOT_FOUND' })
+    await expect(api.messageStatus(accepted[0])).resolves.toMatchObject({ state: 'queued' })
+    const ledgerFile = join(setup.dataDir, 'session-collaboration-messages.json')
+    const before = await readFile(ledgerFile)
+    expect(before.length).toBeLessThanOrEqual(4 * 1024 * 1024)
+    expect(JSON.parse(before.toString()).messages.map((entry: { status: { messageId: string } }) => entry.status.messageId)).toEqual(accepted)
+    await service.close()
+
+    const restarted = setup.createService().forWorkspace(setup.workspaceRoot)
+    await expect(restarted.listSessions({})).resolves.toMatchObject({ collaboration: { queuedCount: 0 } })
+    await expect(restarted.messageStatus(accepted[0])).resolves.toMatchObject({ state: 'blocked' })
+    await expect(restarted.messageStatus(accepted.at(-1)!)).resolves.toMatchObject({ state: 'blocked' })
+    expect(setup.localHost.dispatches).toHaveLength(0)
+  }, 30_000)
+
+  it('recovers the old oversized ledger without replaying or discarding message receipts', async () => {
+    const setup = await setupCollaborationFixture()
+    const targetRef = formatCollaborationTargetRef('T-0072', setup.localTarget)
+    const createdAt = '2026-11-16T03:00:00.000Z'
+    const root = await canonicalPolicyRoot(setup.workspaceRoot)
+    const ledgerFile = join(setup.dataDir, 'session-collaboration-messages.json')
+    const messages = Array.from({ length: 120 }, () => ({
+      root, requestHash: 'a'.repeat(64), text: '\u6c49'.repeat(12_000),
+      status: { messageId: randomUUID(), taskId: 'T-0072', targetRef, state: 'queued', createdAt, updatedAt: createdAt },
+    }))
+    await writeFile(ledgerFile, JSON.stringify({ schemaVersion: 1, messages }, null, 2) + '\n')
+    const restarted = setup.createService().forWorkspace(setup.workspaceRoot)
+    await expect(restarted.listSessions({})).resolves.toMatchObject({ collaboration: { queuedCount: 0 } })
+    const recovered = await readFile(ledgerFile)
+    expect(recovered.length).toBeLessThanOrEqual(4 * 1024 * 1024)
+    const saved = JSON.parse(recovered.toString()).messages as typeof messages
+    expect(saved.map(({ status }) => status)).toEqual(messages.map(({ status }) => expect.objectContaining({ ...status, state: 'blocked' })))
+    expect(saved.every(({ text }) => text === undefined)).toBe(true)
+    expect(setup.localHost.dispatches).toHaveLength(0)
+  })
+
+  it('coalesces overlapping retries by workspace and messageId before authorization or dispatch can finish', async () => {
+    const setup = await setupCollaborationFixture()
+    const service = setup.createService()
+    const api = service.forWorkspace(setup.workspaceRoot)
+    const request = { targetRef: formatCollaborationTargetRef('T-0072', setup.localTarget), messageId: randomUUID(), text: 'Deliver exactly once' }
+    const entered = Promise.withResolvers<void>()
+    const proceed = Promise.withResolvers<void>()
+    setup.authorize.mockImplementationOnce(async () => { entered.resolve(); await proceed.promise })
+
+    const original = api.sendMessage(request)
+    await entered.promise
+    const retry = api.sendMessage(request)
+    try {
+      await expect(api.sendMessage({ ...request, text: 'Different content' })).rejects.toMatchObject({ code: 'CONFLICT' })
+      const otherChat = formatCollaborationTargetRef('T-0072', setup.remoteTarget)
+      await expect(api.sendMessage({ ...request, targetRef: otherChat })).rejects.toMatchObject({ code: 'CONFLICT' })
+    } finally { proceed.resolve() }
+    const [first, repeated] = await Promise.all([original, retry])
+    expect(first).toMatchObject({ state: 'delivered', turnId: request.messageId })
+    expect(repeated).toEqual(first)
+    expect(setup.localHost.dispatches).toHaveLength(1)
+    expect(setup.remoteHost.dispatches).toHaveLength(0)
+    const ledger = JSON.parse(await readFile(join(setup.dataDir, 'session-collaboration-messages.json'), 'utf8'))
+    expect(ledger.messages).toEqual([expect.objectContaining({ status: expect.objectContaining({ state: 'delivered', messageId: request.messageId }) })])
+  })
+
+  it('drains queued messages in order without letting another task reference overtake the same chat', async () => {
+    const setup = await setupCollaborationFixture()
+    setup.setBindings(Object.fromEntries(['T-0072', 'T-0073'].map((task) => [task, [{ ...setup.localTarget, provider: 'agent-host' }]])))
+    const api = setup.createService().forWorkspace(setup.workspaceRoot)
+    const earlier = { targetRef: formatCollaborationTargetRef('T-0072', setup.localTarget), messageId: randomUUID(), text: 'Earlier queued message' }
+    const later = { targetRef: formatCollaborationTargetRef('T-0073', setup.localTarget), messageId: randomUUID(), text: 'Send after the queued message' }
+    setup.localHost.action({
+      type: 'chat/turnStarted', turnId: 'fifo-busy', startedAt: new Date().toISOString(),
+      message: { text: 'Wait until idle', origin: { kind: MessageKind.User } },
+    })
+    await expect(api.sendMessage(earlier)).resolves.toMatchObject({ state: 'queued' })
+    const entered = Promise.withResolvers<void>()
+    const proceed = Promise.withResolvers<void>()
+    setup.authorize.mockImplementationOnce(async () => { entered.resolve(); await proceed.promise })
+    setup.localHost.action({ type: 'chat/turnComplete', turnId: 'fifo-busy', duration: 1 })
+    await entered.promise
+    const competing = api.sendMessage(later)
+    try {
+      await vi.waitFor(() => expect(setup.localConnection.view.chat?.activeTurn).toBeUndefined())
+      expect(setup.localHost.dispatches).toHaveLength(0)
+    } finally { proceed.resolve() }
+    await expect(competing).resolves.toMatchObject({ state: 'queued' })
+    await vi.waitFor(async () => expect(await api.messageStatus(earlier.messageId)).toMatchObject({ state: 'delivered' }))
+    expect(setup.localHost.dispatches).toMatchObject([{ turnId: earlier.messageId }])
+    setup.localHost.action({ type: 'chat/turnComplete', turnId: earlier.messageId, duration: 1 })
+    await vi.waitFor(async () => expect(await api.messageStatus(later.messageId)).toMatchObject({ state: 'delivered' }))
+    expect(setup.localHost.dispatches).toMatchObject([{ turnId: earlier.messageId }, { turnId: later.messageId }])
+  })
+
   it('self-heals after cached connection eviction or disconnect without losing context reads or sends', async () => {
     const setup = await setupCollaborationFixture()
     const service = setup.createService()

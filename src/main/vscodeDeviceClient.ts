@@ -10,7 +10,7 @@ import type { DeviceProtector } from './vscodeDeviceHost'
 import type { AgentHostSession, AgentHostTarget } from '../shared/agentHost'
 import { agentHostCatalogSchema, agentHostTargetSchema } from './agentHostProtocol'
 import { AgentHostSizeLimitError } from './agentHostLimits'
-import { connectAgentHostWebSocket } from './agentHostTransport'
+import { AgentHostUpgradeError, connectAgentHostWebSocket } from './agentHostTransport'
 import { AGENT_HOST_TRACE_HEADER, logAgentHostDiagnostic } from './agentHostDiagnostics'
 import type { AgentHostDiagnosticDetails } from './agentHostDiagnostics'
 import type { AgentHostCreateRequest, AgentHostCreation, AgentHostWorker } from '../shared/agentHostCreation'
@@ -209,7 +209,7 @@ export class VSCodeDeviceClient {
         }
         step = 'identity'
         const signal = AbortSignal.any([abort.signal, active.abort.signal])
-        const identity = deviceIdentitySchema.parse(await abortable(deviceRequest(active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/identity', {}, signal), signal))
+        const identity = await this.readDeviceIdentity(peer, active, signal)
         if (identity.ownerId !== peer.invitation.ownerId || identity.deviceId !== peer.invitation.id) throw new Error('Device identity changed.')
         active.refreshed = Date.now()
         this.currentPeer(peer, active)
@@ -375,6 +375,25 @@ export class VSCodeDeviceClient {
     active.tunnel.close()
   }
 
+  private async readDeviceIdentity(peer: Peer, active: Active, signal: AbortSignal) {
+    return deviceIdentitySchema.parse(await abortable(deviceRequest(
+      active.tunnel.port, peer.invitation.port, peer.invitation.token, '/device/identity', {}, signal,
+    ), signal))
+  }
+
+  private async deviceTunnelFailed(peer: Peer, active: Active, readiness: AbortSignal): Promise<boolean> {
+    // A chat upgrade can fail even with a healthy tunnel and pairing. Check the same device without opening another chat.
+    const signal = AbortSignal.any([readiness, active.abort.signal, AbortSignal.timeout(REMOTE_SESSION_DISCOVERY_TIMEOUT_MS)])
+    try {
+      const identity = await this.readDeviceIdentity(peer, active, signal)
+      return identity.ownerId !== peer.invitation.ownerId || identity.deviceId !== peer.invitation.id
+    } catch (error) {
+      if (signal.aborted) return false
+      if (error instanceof DeviceRequestError) return error.status === 401 || error.status === 403
+      return error instanceof Error && 'code' in error && error.code === 'ECONNREFUSED'
+    }
+  }
+
   /** Reuse an enabled private invitation without enabling, replacing, or discovering any other device. */
   async reconnectOwner(root: string, value: AgentHostTarget['owner'], signal: AbortSignal): Promise<boolean> {
     const owner = agentHostTargetSchema.shape.owner.parse(value)
@@ -457,7 +476,10 @@ export class VSCodeDeviceClient {
         } catch (error) {
           if (attempt === 0 && hadActive && reusedActive === active && !readiness.aborted
             && this.peers.includes(peer) && peer.enabled && this.active.get(peer.id) === active
-            && !(error instanceof AgentHostSizeLimitError)) {
+            && !(error instanceof AgentHostSizeLimitError)
+            && (!(error instanceof AgentHostUpgradeError) || error.status === 401 || error.status === 403)
+            && await this.deviceTunnelFailed(peer, active, readiness)
+            && !readiness.aborted && this.peers.includes(peer) && peer.enabled && this.active.get(peer.id) === active) {
             this.resetActive(peer.id, active)
             continue
           }

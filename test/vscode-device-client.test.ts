@@ -5,32 +5,53 @@ import { createConnection } from 'node:net'
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { AhpClient } from '@microsoft/agent-host-protocol/client'
 import { VSCodeDeviceHost } from '../src/main/vscodeDeviceHost'
 import { VSCodeDeviceClient } from '../src/main/vscodeDeviceClient'
 import { newSshKeyPair, openSessionSshBridge, startSessionSshHost } from '../src/main/devTunnel/sessionSsh'
 import { deviceInvitationSchema } from '../src/main/vscodeDeviceProtocol'
 import type { DeviceInvitation } from '../src/main/vscodeDeviceProtocol'
-import type { AgentHostRegistry } from '../src/main/agentHostRegistry'
+import { AgentHostRegistry } from '../src/main/agentHostRegistry'
 import type { AgentHostTarget } from '../src/shared/agentHost'
 import * as deviceHttp from '../src/main/vscodeDeviceHttp'
 import * as agentTransport from '../src/main/agentHostTransport'
 import { flushAgentHostDiagnostics, startAgentHostDiagnostics, stopAgentHostDiagnostics } from '../src/main/agentHostDiagnostics'
+import { startAgentHostFixture } from './agent-host-fixture'
 
 const protector = { available: () => true, encrypt: (value: string) => Buffer.from(value), decrypt: (value: Buffer) => value.toString() }
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { try { for (const close of cleanup.splice(0)) await close() } finally { vi.restoreAllMocks() } })
 
-async function fixture(recoverOwner?: ConstructorParameters<typeof VSCodeDeviceClient>[4]) {
+async function fixture(recoverOwner?: ConstructorParameters<typeof VSCodeDeviceClient>[4], withNativeChat = false) {
   const root = await mkdtemp(join(process.cwd(), '.test-ah-device-client-'))
   const workspace = join(root, 'tasks')
   const otherWorkspace = join(root, 'other-tasks')
   const profile = join(root, 'client')
   await Promise.all([mkdir(workspace), mkdir(otherWorkspace)])
-  const target: AgentHostTarget = { sessionId: 'copilotcli:/original', chatId: 'ahp-chat:/original', owner: { clientId: randomUUID(), machineName: 'Owner-B' } }
+  const native = withNativeChat ? await startAgentHostFixture() : undefined
+  const target: AgentHostTarget = {
+    sessionId: native?.sessionId ?? 'copilotcli:/original', chatId: native?.chatId ?? 'ahp-chat:/original',
+    owner: { clientId: randomUUID(), machineName: 'Owner-B' },
+  }
   const host = new VSCodeDeviceHost(join(root, 'owner'), protector)
-  host.setAgentHostAccess({ describe: async () => ({ ...target, title: 'Original chat', provider: 'copilotcli', updatedAt: new Date().toISOString(), canSend: true }) } as unknown as AgentHostRegistry, async () => [target])
   const resources: { client?: VSCodeDeviceClient; ssh?: Awaited<ReturnType<typeof startSessionSshHost>> } = {}
-  cleanup.push(async () => { resources.client?.close(); await resources.ssh?.close(); await host.close(); await rm(root, { recursive: true, force: true }) })
+  const discovery = join(root, 'discovery')
+  const registry = new AgentHostRegistry(join(root, 'owner'), [discovery], async () => target.owner)
+  cleanup.push(async () => {
+    resources.client?.close()
+    await resources.ssh?.close()
+    await host.close()
+    await registry.close()
+    await native?.close()
+    await rm(root, { recursive: true, force: true })
+  })
+  if (native) {
+    await mkdir(discovery)
+    await writeFile(join(discovery, 'fixture.json'), JSON.stringify(native.endpoint))
+  } else vi.spyOn(registry, 'describe').mockResolvedValue({
+    ...target, title: 'Original chat', provider: 'copilotcli', updatedAt: new Date().toISOString(), canSend: true,
+  })
+  host.setAgentHostAccess(registry, async () => [target])
   const clientKey = newSshKeyPair()
   const participant = { clientId: randomUUID(), username: 'Alice', machineName: 'Client-A' }
   const pair = await host.pair(participant, clientKey.publicKey)
@@ -375,7 +396,9 @@ describe('paired native Agent Host SSH transport', () => {
     expect(await setup.client.agentHostTransport(setup.workspace, setup.target, new AbortController().signal)).toBe(socket)
     expect(setup.transport).toHaveBeenCalledTimes(2)
 
-    // 2. Within the 10s refreshed window, simulate a dead cached tunnel on the first websocket handshake: must reset active, run recoverOwner + ensure, and succeed.
+    // The device identity probe must reach the closed local SSH listener before triggering recovery.
+    const tunnel = await setup.transport.mock.results.at(-1)!.value
+    tunnel.close()
     recover.mockClear()
     websocket
       .mockRejectedValueOnce(new Error('Agent Host connection failed or access was rejected.'))
@@ -384,6 +407,30 @@ describe('paired native Agent Host SSH transport', () => {
     expect(recover).toHaveBeenCalledOnce()
     expect(setup.transport).toHaveBeenCalledTimes(3)
     expect(websocket).toHaveBeenCalledTimes(3)
+  })
+
+  it('keeps an existing chat connected after a second chat is denied or its websocket times out', async () => {
+    const recover = vi.fn(async () => {})
+    const setup = await fixture(recover, true)
+    await setup.host.setWorkspace(setup.invitation.id, setup.workspace, true)
+    await setup.client.connect(setup.workspace, setup.device.id)
+    const signal = new AbortController().signal
+    const transport = await setup.client.agentHostTransport(setup.workspace, setup.target, signal)
+    const connected = new AhpClient(transport)
+    try {
+      connected.connect()
+      await connected.initialize({ clientId: randomUUID(), protocolVersions: ['0.9.0', '1.0.0'] })
+      const otherChat = { ...setup.target, chatId: 'ahp-chat:/unlinked' }
+      await expect(setup.client.agentHostTransport(setup.workspace, otherChat, signal))
+        .rejects.toMatchObject({ name: 'AgentHostUpgradeError', status: 403 })
+      await expect(connected.request('ping', { channel: 'ahp-root://' })).resolves.toEqual({})
+
+      vi.spyOn(agentTransport, 'connectAgentHostWebSocket').mockRejectedValueOnce(new DOMException('Timed out.', 'TimeoutError'))
+      await expect(setup.client.agentHostTransport(setup.workspace, otherChat, signal)).rejects.toMatchObject({ name: 'TimeoutError' })
+      await expect(connected.request('ping', { channel: 'ahp-root://' })).resolves.toEqual({})
+      expect(setup.transport).toHaveBeenCalledOnce()
+      expect(recover).not.toHaveBeenCalled()
+    } finally { await connected.shutdown() }
   })
 })
 

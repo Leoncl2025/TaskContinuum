@@ -97,6 +97,8 @@ Do not pass credentials or command-line arguments. The stdio process authenticat
 the local desktop through the owner-private `session-collaboration-mcp.json` loopback
 descriptor. Existing `taskcontinuum-collab-mcp.cjs` configurations and `tc_*`
 tool names continue to work; new setups should use the product-wide entry.
+If the desktop cannot start the optional bridge or publish its private descriptor,
+it reports MCP as unavailable without blocking startup, chat, or native tools.
 
 ## Tools and delivery semantics
 
@@ -137,8 +139,12 @@ is not required.
   receipt or turn event is still `uncertain`. Existing uncertain messages are
   not automatically reclassified or replayed after an update.
 - Busy targets enter `queued` (up to 16 queued messages per task, 30-minute TTL) and
-  drain automatically once the active turn completes and authorization still holds.
-  A full queue returns `BUSY`; it frees capacity as pending messages finish or expire.
+  drain in order once the active turn completes and authorization still holds.
+  The local ledger also bounds record count and serialized UTF-8 bytes. At capacity,
+  new requests return `BUSY` without dropping already accepted pending messages.
+- Overlapping submissions of the same workspace `messageId` with the same target
+  and text share one delivery result. Reusing the ID for another target or text
+  returns `CONFLICT`.
 - Unsent human drafts or uncertain deliveries on the target chat return `blocked` rather
   than overwriting drafts or bypassing manual delivery review.
 - Application restarts transition persisted `queued` entries to `blocked` and

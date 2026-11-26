@@ -338,7 +338,7 @@ void app.whenReady().then(async () => {
   }, () => {
     sessionWindows?.broadcast('remote-vscode:git-bindings-changed')
   })
-  await Promise.all([remoteVSCode.filesReady, remoteVSCode.collaborationReady])
+  await remoteVSCode.filesReady
   if (quitting || cleanupComplete) return
   registerChatLinkBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.chatLinks)
   agentHost = registerAgentHostBridge(requireTrustedWindow, workspaces.currentRoot, remoteVSCode.agentHosts, remoteVSCode.nativeTools)

@@ -51,6 +51,13 @@ export function connectLocalAgentHost(endpoint: AgentHostEndpoint, signal: Abort
   return connectAgentHostWebSocket(`ws://localhost${query}`, { createConnection: () => connectSocket(path) }, signal)
 }
 
+export class AgentHostUpgradeError extends Error {
+  constructor(readonly status: number) {
+    super('Agent Host connection failed or access was rejected.')
+    this.name = 'AgentHostUpgradeError'
+  }
+}
+
 export async function connectAgentHostWebSocket(url: string, options: ClientOptions, signal: AbortSignal): Promise<AhpTransport> {
   signal.throwIfAborted()
   const socket = new WebSocket(url, { ...options, maxPayload: AGENT_HOST_LIMITS.messageBytes, handshakeTimeout: 10000, followRedirects: false, perMessageDeflate: false })
@@ -62,7 +69,7 @@ export async function connectAgentHostWebSocket(url: string, options: ClientOpti
       const header = response.headers[AGENT_HOST_LIMIT_HEADER]
       const limit = response.statusCode === 413 && typeof header === 'string' ? decodeAgentHostSizeLimit(header) : undefined
       cleanup()
-      reject(limit ?? new Error('Agent Host connection failed or access was rejected.'))
+      reject(limit ?? new AgentHostUpgradeError(response.statusCode ?? 500))
       response.resume()
       request.destroy()
       void transport.close()
