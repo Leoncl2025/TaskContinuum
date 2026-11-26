@@ -142,6 +142,10 @@ export class VSCodeDeviceHost {
         ?.filter((entry) => agentHostKey(entry.target) === agentHostKey(target))
         .map((entry) => entry.taskId)
       return { canSend: workspace.canSend, actor: pair.participant, ...(taskIds ? { taskIds } : {}), ...(binding ? {
+        canReferenceSource: (source) => {
+          const targets = source.owner.clientId === binding.owner.clientId ? binding.localTargets : binding.targets
+          return targets.some((item) => agentHostKey(item) === agentHostKey(source))
+        },
         current: () => {
           const current = this.state?.pairs.find((item) => item.id === pair.id)
           return !this.closed && this.agentHosts === authority && !!current && current.token === token

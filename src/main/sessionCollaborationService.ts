@@ -634,6 +634,8 @@ export class SessionCollaborationService {
     this.dispatchingTargets.add(lockKey)
     try {
       const actor = await this.deps.identity()
+      const source = record.sourceTarget
+      const nativeSourceSupported = link.owner.clientId === actor.clientId || connection.supportsNativeCollaborationSource
       const collaborationMeta: TaskContinuumCollaborationMeta = {
         version: 1,
         taskId: record.status.taskId,
@@ -643,10 +645,11 @@ export class SessionCollaborationService {
           machineName: actor.machineName,
           ...(actor.username ? { username: actor.username } : {}),
         },
-        sourceKind: record.sourceTarget && (link.owner.clientId === actor.clientId || connection.supportsNativeCollaborationSource)
-          ? 'agent-host-client' : 'mcp-client',
-        // A caller can attribute a chat to its own device, not claim the remote agent's owner identity.
-        ...(record.sourceTarget?.owner.clientId === actor.clientId ? { sourceTarget: record.sourceTarget } : {}),
+        sourceKind: source && nativeSourceSupported ? 'agent-host-client' : 'mcp-client',
+        ...(source?.owner.clientId === actor.clientId ? { sourceTarget: source } : {}),
+        ...(source && source.owner.clientId !== actor.clientId && nativeSourceSupported ? {
+          relayedSourceTarget: { sessionId: source.sessionId, chatId: source.chatId, owner: { clientId: source.owner.clientId } },
+        } : {}),
       }
       await connection.send(
         record.status.messageId,

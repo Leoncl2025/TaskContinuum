@@ -42,10 +42,14 @@ messages and Task Continuum cross-machine collaboration:
   messages (`origin.kind === "agent"` with `vscode.chat.delegation`) and Task Continuum
   collaboration messages (`_meta.taskcontinuumCollaboration`) render with distinct
   agent-origin styling and provenance headers.
-- **Authorized source navigation:** When a message's source chat/session matches a
-  currently linked, authorized session in the workspace, its provenance badge opens that
-  linked session. Unlinked or cross-owner claims remain plain labels and never auto-link
-  or open unauthorized chats.
+- **Authorized source navigation:** Click the provenance label to open the exact
+  source chat, including a chat linked to another task in the workspace. A
+  relayed tool call keeps the originating chat as a navigation reference while
+  displaying the authenticated relay device separately. The receiving gateway keeps
+  that reference only if it matches a binding in the authorized workspace. It does
+  not authenticate the source owner on behalf of the relay or grant access to the
+  source chat; opening it still uses the normal permissions. Older clients can
+  still read messages, but a message without source metadata remains a plain label.
 - **Pending queue & tool summaries:** Queued and steering messages appear in a dedicated
   pending section, collaboration tool calls display concise status summaries, and new
   background activity while reading older history shows a non-intrusive **New activity

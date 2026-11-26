@@ -17,6 +17,8 @@ import { registerRepositorySessionLinksBackend } from '../src/main/repositorySes
 import { SessionCollaborationService } from '../src/main/sessionCollaborationService'
 import { TaskContinuumAgentHostTools } from '../src/main/taskContinuumAgentHostTools'
 import { VSCodeDeviceClient } from '../src/main/vscodeDeviceClient'
+import { VSCodeDeviceHost } from '../src/main/vscodeDeviceHost'
+import { newSshKeyPair } from '../src/main/devTunnel/sessionSsh'
 import type { WorkspaceTaskMetadata } from '../src/main/workspaceReader'
 import { COLLABORATION_LIMITS, formatCollaborationTargetRef } from '../src/shared/sessionCollaboration'
 import type { AgentHostTarget } from '../src/shared/agentHost'
@@ -371,7 +373,48 @@ describe('SessionCollaborationService and gateway provenance', () => {
     const ownerApi = vi.fn(() => { throw new Error('Run5 must never execute tools with its owner’s permissions.') })
     const f = await setupCollaborationFixture('1.0.0', new TaskContinuumAgentHostTools(ownerApi))
     const taskId = 'T-0072'
+    const receiverTaskId = 'T-0073'
     const canonical = await canonicalPolicyRoot(f.workspaceRoot)
+    const otherScope = await canonicalPolicyRoot(f.otherWorkspaceRoot)
+    const protector = {
+      available: () => true, encrypt: (text: string) => Buffer.from(text), decrypt: (bytes: Buffer) => bytes.toString(),
+    }
+
+    const receiver = await startAgentHostFixture()
+    cleanups.push(() => receiver.close())
+    const receiverOwner = { clientId: randomUUID(), machineName: 'Receiver-C' }
+    const receiverTarget = { sessionId: receiver.sessionId, chatId: receiver.chatId, owner: receiverOwner }
+    const receiverProfile = await tempRoot('collab-receiver')
+    const receiverDiscovery = join(receiverProfile, 'discovery')
+    await mkdir(receiverDiscovery)
+    await writeFile(join(receiverDiscovery, 'fixture.json'), JSON.stringify(receiver.endpoint))
+    const registry = new AgentHostRegistry(receiverProfile, [receiverDiscovery], async () => receiverOwner)
+    cleanups.push(() => registry.close())
+    const receiverGateway = new VSCodeDeviceHost(receiverProfile, protector)
+    cleanups.push(() => receiverGateway.close())
+    let sourceLinked = true
+    receiverGateway.setAgentHostAccess(registry, async () => [], undefined, async (root) => {
+      const linked = sourceLinked
+      return root === canonical
+        ? {
+            owner: receiverOwner,
+            targets: linked ? [receiverTarget, f.remoteTarget] : [receiverTarget],
+            localTargets: [receiverTarget],
+            localTaskLinks: [{ taskId: receiverTaskId, target: receiverTarget }],
+            current: () => sourceLinked === linked,
+          }
+        : { owner: receiverOwner, targets: [f.remoteTarget], localTargets: [], current: () => true }
+    })
+    const receiverPair = await receiverGateway.pair(f.localOwner, newSshKeyPair().publicKey)
+    // Both workspaces are paired, but only one contains the destination.
+    await receiverGateway.setWorkspace(receiverPair.id, otherScope, true)
+    await receiverGateway.setWorkspace(receiverPair.id, canonical, true)
+    const receiverPort = await receiverGateway.start()
+    f.setBindings({
+      [taskId]: [{ ...f.localTarget, provider: 'agent-host' }, { ...f.remoteTarget, provider: 'agent-host' }],
+      [receiverTaskId]: [{ ...receiverTarget, provider: 'agent-host' }],
+    })
+
     cleanups.push(await registerRepositorySessionLinksBackend(canonical, {
       read: () => f.readLinks(canonical),
       update: async () => { throw new Error('Collaboration must not write workspace bindings.') },
@@ -381,10 +424,14 @@ describe('SessionCollaborationService and gateway provenance', () => {
     await mkdir(discovery)
     await writeFile(join(discovery, 'fixture.json'), JSON.stringify(f.localHost.endpoint))
     const identity = async () => f.localTarget.owner
-    const devices = new VSCodeDeviceClient(f.dataDir, {
-      available: () => true, encrypt: (text) => Buffer.from(text), decrypt: (bytes) => bytes.toString(),
-    }, async () => { throw new Error('Fixture uses a loopback gateway.') }, async () => {})
-    vi.spyOn(devices, 'agentHostTransport').mockImplementation((_root, target, signal) => f.connectRemote(target, signal))
+    const devices = new VSCodeDeviceClient(f.dataDir, protector, async () => { throw new Error('Fixture uses a loopback gateway.') }, async () => {})
+    vi.spyOn(devices, 'agentHostTransport').mockImplementation((_root, target, signal) =>
+      target.owner.clientId !== receiverOwner.clientId
+        ? f.connectRemote(target, signal)
+        : connectAgentHostWebSocket(
+            `ws://127.0.0.1:${receiverPort}/device/agent-host?target=${Buffer.from(JSON.stringify(target)).toString('base64url')}`,
+            { headers: { Authorization: `Bearer ${receiverPair.token}` } }, signal,
+          ))
     const manager = new AgentHostManager(f.dataDir, new AgentHostRegistry(f.dataDir, [discovery], identity), devices, identity)
     cleanups.push(async () => { await manager.close(); devices.close() })
     const service = new SessionCollaborationService({
@@ -430,17 +477,42 @@ describe('SessionCollaborationService and gateway provenance', () => {
     const call = request(send, { targetRef, messageId, text: 'Hi' })
     await invoke(call, { success: true, structuredContent: { result: { state: 'delivered', messageId } } })
     f.remoteHost.sessionAction(call)
+    const receiverRef = formatCollaborationTargetRef(receiverTaskId, receiverTarget)
+    const forwardedId = randomUUID()
+    await invoke(request(send, { targetRef: receiverRef, messageId: forwardedId, text: 'Hi from Run5' }), {
+      success: true, structuredContent: { result: { state: 'delivered', messageId: forwardedId } },
+    })
     const wrongTurn = request('taskcontinuum_collaboration_list_sessions', {}, randomUUID(), randomUUID())
     await invoke(wrongTurn, { success: false, error: { code: 'ACCESS_DENIED' } })
-    expect(f.localHost.dispatches).toMatchObject([{ turnId: messageId, message: { text: 'Hi', _meta: { taskcontinuumCollaboration: {
-      senderDevice: { clientId: f.localOwner.clientId }, sourceKind: 'agent-host-client',
-    } } } }])
-    expect(execute).toHaveBeenCalledTimes(3)
+    const sourceReference = {
+      sessionId: f.remoteTarget.sessionId, chatId: f.remoteTarget.chatId, owner: { clientId: f.remoteOwner.clientId },
+    }
+    expect(f.localHost.dispatches).toMatchObject([{ turnId: messageId, message: { text: 'Hi', _meta: {
+      taskcontinuumCollaboration: { senderDevice: { clientId: f.localOwner.clientId }, sourceKind: 'agent-host-client' },
+      taskcontinuumRelayedSource: sourceReference,
+    } } }])
+    expect(receiver.dispatches).toMatchObject([{ turnId: forwardedId, message: { text: 'Hi from Run5', _meta: {
+      taskcontinuumCollaboration: { senderDevice: f.localOwner, sourceKind: 'agent-host-client' },
+      taskcontinuumRelayedSource: sourceReference,
+    } } }])
+    expect(execute).toHaveBeenCalledTimes(4)
+
+    // Unlink only on the receiver. The source still exists in the other paired workspace.
+    sourceLinked = false
+    receiver.action({ type: 'chat/turnComplete', turnId: forwardedId, duration: 1 })
+    const receiving = await manager.connection(canonical, receiverTarget)
+    await vi.waitFor(() => expect(receiving.view.chat?.activeTurn).toBeUndefined())
+    const unlinkedId = randomUUID()
+    await invoke(request(send, { targetRef: receiverRef, messageId: unlinkedId, text: 'Hi without a link' }), {
+      success: true, structuredContent: { result: { state: 'delivered', messageId: unlinkedId } },
+    })
+    expect(receiver.dispatches.at(-1)).toMatchObject({ turnId: unlinkedId })
+    expect(receiver.dispatches.at(-1)).not.toHaveProperty('message._meta.taskcontinuumRelayedSource')
 
     // The owner rechecks its existing send grant for every relay.
     f.setGatewayCanSend(false)
     await invoke(request('taskcontinuum_collaboration_list_sessions', {}), { success: false, error: { code: 'ACCESS_DENIED' } })
-    expect(execute).toHaveBeenCalledTimes(3)
+    expect(execute).toHaveBeenCalledTimes(5)
 
     // A reconnected client cannot inherit an old turn or replay its tool calls.
     await run5.close()
@@ -453,7 +525,7 @@ describe('SessionCollaborationService and gateway provenance', () => {
     const oldTurn = request('taskcontinuum_collaboration_list_sessions', {})
     oldTurn.request.clientId = oldTurn.request.toolCall.contributor.clientId = registrations()[1].activeClient.clientId
     await invoke(oldTurn, { success: false, error: { code: 'UNAVAILABLE', message: expect.stringContaining('No live TaskContinuum connection') } })
-    expect(execute).toHaveBeenCalledTimes(3)
+    expect(execute).toHaveBeenCalledTimes(5)
     expect(ownerApi).not.toHaveBeenCalled()
   })
 
@@ -796,6 +868,12 @@ describe('SessionCollaborationService and gateway provenance', () => {
     })
     setup.remoteHost.action({ type: 'chat/turnComplete', turnId: spoofedTurnId, duration: 1 })
     await vi.waitFor(() => expect(setup.remoteConnection.view.chat?.activeTurn).toBeUndefined())
+
+    const forgedSourceId = randomUUID()
+    await expect(setup.remoteConnection.send(forgedSourceId, 'Forged direct source', undefined, async () => {}, setup.localOwner, undefined, {
+      version: 1, taskId: 'T-0072', messageId: forgedSourceId, senderDevice: setup.localOwner,
+      sourceKind: 'agent-host-client', sourceTarget: setup.remoteTarget,
+    })).rejects.toThrow('No turn was sent. Access to the owner chat changed.')
 
     // Claiming a task not linked on the owner gateway is rejected before native dispatch without locking the chat as uncertain.
     const wrongTaskTurnId = randomUUID()

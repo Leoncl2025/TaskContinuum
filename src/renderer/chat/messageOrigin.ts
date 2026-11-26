@@ -49,18 +49,24 @@ export function describeMessageOrigin(
   const collaboration = readTaskContinuumCollaborationMeta(message._meta)
   if (collaboration) {
     const senderMachine = machineLabel(collaboration.senderDevice, aliases)
-    const matchedSource = collaboration.sourceTarget
-      ? linkedSessions.find((entry) => agentHostKey(entry.binding.agentHost) === agentHostKey(collaboration.sourceTarget!)
+    const source = collaboration.sourceTarget ?? collaboration.relayedSourceTarget
+    const matchedSource = source
+      ? linkedSessions.find((entry) => agentHostKey(entry.binding.agentHost) === agentHostKey(source)
         && agentHostKey(entry.binding.agentHost) !== agentHostKey(currentTarget))
       : undefined
     return {
       kind: 'collaboration',
       isNonUserOrigin: true,
       icon: 'comment-discussion',
-      senderLabel: matchedSource ? matchedSource.label : 'Agent collaboration',
+      senderLabel: matchedSource && !collaboration.relayedSourceTarget ? matchedSource.label : 'Agent collaboration',
       machineBadge: { label: senderMachine, title: collaboration.senderDevice.machineName },
       provenance: matchedSource
-        ? { label: `From ${matchedSource.label} · ${senderMachine}`, jumpTarget: matchedSource }
+        ? {
+            label: collaboration.relayedSourceTarget
+              ? `Source session: ${matchedSource.label} · via ${senderMachine}`
+              : `From ${matchedSource.label} · ${senderMachine}`,
+            jumpTarget: matchedSource,
+          }
         : { label: `Sent via Task Continuum collaboration · ${collaboration.taskId}` },
     }
   }

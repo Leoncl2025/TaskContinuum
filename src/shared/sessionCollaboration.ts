@@ -46,7 +46,19 @@ export const taskContinuumCollaborationMetaSchema = z.object({
   sourceKind: z.enum(['mcp-client', 'agent-host-client']),
   sourceTarget: collaborationTargetSchema.optional(),
 }).strict()
-export type TaskContinuumCollaborationMeta = z.infer<typeof taskContinuumCollaborationMetaSchema>
+
+// Keep the strict v1 wire metadata readable by older versions.
+export const RELAYED_COLLABORATION_SOURCE_KEY = 'taskcontinuumRelayedSource'
+const relayedCollaborationSourceSchema = collaborationTargetSchema.extend({
+  owner: collaborationOwnerSchema.pick({ clientId: true }),
+})
+export type RelayedCollaborationSource = z.infer<typeof relayedCollaborationSourceSchema>
+export const taskContinuumCollaborationSendMetaSchema = taskContinuumCollaborationMetaSchema.extend({
+  relayedSourceTarget: relayedCollaborationSourceSchema.optional(),
+}).refine(({ relayedSourceTarget, sourceTarget, sourceKind, senderDevice }) =>
+  !relayedSourceTarget || (!sourceTarget && sourceKind === 'agent-host-client' && relayedSourceTarget.owner.clientId !== senderDevice.clientId),
+'A relayed source must reference a separate Agent Host chat without asserting its owner as the sender.')
+export type TaskContinuumCollaborationMeta = z.infer<typeof taskContinuumCollaborationSendMetaSchema>
 
 export type NativeDelegationMeta =
   | { kind: 'thread'; sourceThreadId: string }
@@ -82,7 +94,10 @@ export function readNativeDelegationMeta(meta: Record<string, unknown> | undefin
 export function readTaskContinuumCollaborationMeta(meta: Record<string, unknown> | undefined): TaskContinuumCollaborationMeta | undefined {
   if (!meta || !Object.prototype.hasOwnProperty.call(meta, 'taskcontinuumCollaboration')) return undefined
   const parsed = taskContinuumCollaborationMetaSchema.safeParse(meta.taskcontinuumCollaboration)
-  return parsed.success ? parsed.data : undefined
+  if (!parsed.success) return undefined
+  if (!Object.hasOwn(meta, RELAYED_COLLABORATION_SOURCE_KEY)) return parsed.data
+  const withSource = taskContinuumCollaborationSendMetaSchema.safeParse({ ...parsed.data, relayedSourceTarget: meta[RELAYED_COLLABORATION_SOURCE_KEY] })
+  return withSource.success ? withSource.data : parsed.data
 }
 
 export interface ParsedCollaborationTargetRef {

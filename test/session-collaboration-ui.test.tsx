@@ -1,12 +1,15 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MessageKind } from '@microsoft/agent-host-protocol'
 import type { ChatState, ResponsePartKind, Turn } from '@microsoft/agent-host-protocol'
 import type { AgentHostBridge, AgentHostView } from '../src/shared/agentHost'
 import { AgentHostPanel } from '../src/renderer/components/AgentHostPanel'
 import { AgentHostSessionsSidebar } from '../src/renderer/components/AgentHostSessionsSidebar'
+import { PaneWorkspaceGrid } from '../src/renderer/components/PaneWorkspaceGrid'
 import { sessionBindingKey } from '../src/renderer/chat/sessionBindings'
+import { createInitialPaneTree } from '../src/renderer/paneTree'
 import { fixtureTasks } from './task-fixture'
 
 afterEach(() => {
@@ -228,6 +231,57 @@ describe('AgentHostPanel collaboration UI adaptation', () => {
     const pendingRegion = screen.getByRole('region', { name: 'Pending session messages' })
     expect(within(pendingRegion).getByText('Queued for next turn')).toBeInTheDocument()
     expect(within(pendingRegion).getByText('Queued follow-up verification')).toBeInTheDocument()
+  })
+
+  it('opens the actual relayed source chat across tasks, only while the exact source is linked', async () => {
+    const setup = createPanelFixture()
+    const user = userEvent.setup()
+    const source = { ...setup.siblingTarget, owner: { clientId: crypto.randomUUID(), machineName: 'Run5' } }
+    const binding = { id: source.sessionId, title: 'Run5 investigation', owner: source.owner, agentHost: source }
+    const destination = { id: setup.target.sessionId, title: 'Destination', owner: setup.target.owner, agentHost: setup.target }
+    const alternatives = [
+      { ...binding, owner: setup.remoteSender, agentHost: { ...source, owner: setup.remoteSender } },
+      { ...binding, agentHost: { ...source, sessionId: 'copilotcli:/other-session' } },
+      { ...binding, agentHost: { ...source, chatId: 'ahp-chat:/other-chat' } },
+    ]
+    const messageId = crypto.randomUUID()
+    setup.view.chat!.turns = [{
+      id: messageId,
+      state: 'complete' as Turn['state'],
+      message: { text: 'Hi from Run5', origin: { kind: MessageKind.User }, _meta: {
+        taskcontinuumCollaboration: {
+          version: 1, taskId: 'T-0002', messageId, senderDevice: setup.remoteSender, sourceKind: 'agent-host-client',
+        },
+        taskcontinuumRelayedSource: {
+          sessionId: source.sessionId, chatId: source.chatId, owner: { clientId: source.owner.clientId },
+        },
+      } },
+      responseParts: [],
+      usage: undefined,
+    }]
+    const Workspace = ({ linked }: { linked: boolean }) => {
+      const [tree, setTree] = useState(() => createInitialPaneTree(['T-0002'], 'T-0002', { 'T-0002': sessionBindingKey(destination) }))
+      const bindings: Record<string, (typeof binding)[]> = {
+        'T-0002': [destination],
+        'T-0003': linked ? [...alternatives, binding] : alternatives,
+      }
+      return <PaneWorkspaceGrid tree={tree} onTreeChange={setTree} tasks={fixtureTasks} bindings={bindings}
+        orderedBindingsForTask={(taskId) => bindings[taskId] ?? []} cachedTitles={{}} theme="dark" />
+    }
+    const panel = render(<Workspace linked />)
+    const sourceLabel = 'Source session: Run5 investigation · via Worker-B'
+    await screen.findByRole('button', { name: sourceLabel })
+    expect(screen.getByText('Worker-B')).toBeInTheDocument()
+    expect(setup.bridge.watch).toHaveBeenCalledExactlyOnceWith(setup.target)
+
+    panel.rerender(<Workspace linked={false} />)
+    expect(screen.queryByTitle('Open source session')).not.toBeInTheDocument()
+    expect(screen.getByText('Sent via Task Continuum collaboration · T-0002')).toBeInTheDocument()
+
+    panel.rerender(<Workspace linked />)
+    await user.click(screen.getByRole('button', { name: sourceLabel }))
+    await screen.findByRole('log', { name: 'Agent Host conversation for T-0003' })
+    expect(setup.bridge.watch).toHaveBeenLastCalledWith(source)
   })
 
   it('preserves scroll position and shows a non-intrusive pill when background collaboration arrives while reading history', async () => {

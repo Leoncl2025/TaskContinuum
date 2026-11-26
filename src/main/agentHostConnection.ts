@@ -9,7 +9,7 @@ import type { AgentHostHistoryTransfer, AgentHostProtocolVersion, AgentHostTarge
 import { agentHostProtocolVersions, MAX_SESSION_TITLE_LENGTH } from '../shared/agentHost'
 import { chatSubmissionSchema } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
-import { COLLABORATION_LIMITS, CollaborationError, taskContinuumCollaborationMetaSchema } from '../shared/sessionCollaboration'
+import { COLLABORATION_LIMITS, CollaborationError, RELAYED_COLLABORATION_SOURCE_KEY, taskContinuumCollaborationSendMetaSchema } from '../shared/sessionCollaboration'
 import type { TaskContinuumCollaborationMeta } from '../shared/sessionCollaboration'
 import { modelConfigErrors, sanitizeInheritedModelSelection } from '../shared/agentHostModelConfig'
 import { AgentHostChatState, AgentHostHistoryCursorError } from './agentHostState'
@@ -952,7 +952,7 @@ export class AgentHostConnection {
 
   async send(id: string, text: string, images: ChatImageAttachment[] | undefined, authorize: () => Promise<void>, actor?: { clientId: string; machineName: string; username?: string; displayName?: string }, model?: ModelSelection, collaboration?: TaskContinuumCollaborationMeta,
     remoteOrigin?: { relay?: RelayToolToCaller; acknowledgeDelivery?: boolean }): Promise<void> {
-    const validatedCollaboration = collaboration === undefined ? undefined : taskContinuumCollaborationMetaSchema.parse(collaboration)
+    const validatedCollaboration = collaboration === undefined ? undefined : taskContinuumCollaborationSendMetaSchema.parse(collaboration)
     if (validatedCollaboration && validatedCollaboration.messageId !== id) throw new Error('Collaboration messageId must match the turn ID.')
     const command = {
       ...chatSubmissionSchema.parse({ id, text, ...(images?.length ? { images } : {}) }),
@@ -1026,9 +1026,11 @@ export class AgentHostConnection {
       const selection = isGateway ? undefined : this.chat.selection
       const selectedModel = command.model ?? (isGateway || validatedCollaboration ? undefined : this.inheritedModel(selection?.model, active))
       const attachments: MessageEmbeddedResourceAttachment[] | undefined = command.images?.map((image) => ({ type: 'embeddedResource' as MessageEmbeddedResourceAttachment['type'], label: image.name, displayKind: 'image', contentType: image.mimeType, data: image.data, _meta: { taskcontinuumImageId: image.id } }))
+      const { relayedSourceTarget, ...collaborationMeta } = validatedCollaboration ?? {}
       const messageMeta = actor || validatedCollaboration ? {
         ...(actor ? { taskcontinuumActor: actor } : {}),
-        ...(validatedCollaboration ? { taskcontinuumCollaboration: validatedCollaboration } : {}),
+        ...(validatedCollaboration ? { taskcontinuumCollaboration: collaborationMeta } : {}),
+        ...(relayedSourceTarget ? { [RELAYED_COLLABORATION_SOURCE_KEY]: relayedSourceTarget } : {}),
       } : undefined
       const action: ChatTurnStartedAction = { type: 'chat/turnStarted' as ChatTurnStartedAction['type'], turnId: id, startedAt: new Date().toISOString(), message: { text: command.text, origin: { kind: MessageKind.User }, ...(attachments?.length ? { attachments } : {}), ...(selection?.agent ? { agent: selection.agent } : {}), ...(selectedModel ? { model: selectedModel } : {}), ...(messageMeta ? { _meta: messageMeta } : {}) } }
       phase('dispatch')
