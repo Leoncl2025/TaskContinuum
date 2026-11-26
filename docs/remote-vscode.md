@@ -242,6 +242,11 @@ real titles update the cache. Older timestamped snapshots cannot undo a rename.
 The cache keeps up to 256 titles per workspace and is never published to Git.
 Storage failures are reported, with in-memory titles retained for the open workspace.
 
+Synchronizing a binding does not fetch its title. For a newly linked remote chat,
+open it or choose **Link → All available sessions** to discover its title from
+the owner. If an open chat's title is empty or a placeholder, both the chat
+header and Current tree can use the owning session's meaningful title.
+
 Titles are display metadata only. A cached title does not add a discovery entry,
 restore a removed task binding, reconnect a chat, or grant read/send access.
 Unavailable chats still show **Not in discovery list**; exact IDs remain visible.

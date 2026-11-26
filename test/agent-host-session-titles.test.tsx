@@ -191,6 +191,29 @@ describe('cached titles in the session sidebar and chat header', () => {
     expect(f.bridge.send).not.toHaveBeenCalled()
   })
 
+  it.each(['', 'New Copilot chat'])('caches the live session title when the linked chat title is %j', async (chatTitle) => {
+    const f = fixture()
+    f.bridge.list.mockResolvedValue({ sessions: [], warnings: [] })
+    f.view.chat!.title = chatTitle
+    f.view.sessionTitle = 'Title from the owner session'
+    const mounted = render(<f.Workspace panel />)
+    const panel = screen.getByRole('complementary', { name: 'Agent Host task chat' })
+    await within(panel).findByText(f.view.sessionTitle)
+    expect(await screen.findByRole('treeitem', { name: f.view.sessionTitle })).toBeInTheDocument()
+
+    f.view.chat!.title = 'Title for this exact chat'
+    f.view.chat!.modifiedAt = '2026-09-24T14:02:00.000Z'
+    act(() => f.emit())
+    expect(within(panel).getByText(f.view.chat!.title)).toBeInTheDocument()
+    expect(screen.getByRole('treeitem', { name: f.view.chat!.title })).toBeInTheDocument()
+    expect(f.bridge.watch).toHaveBeenCalledOnce()
+
+    mounted.unmount()
+    render(<f.Workspace />)
+    expect(screen.getByRole('treeitem', { name: f.view.chat!.title })).toBeInTheDocument()
+    expect(f.bridge.watch).toHaveBeenCalledOnce()
+  })
+
   it('surfaces title-cache storage errors without removing the real discovered title', async () => {
     const f = fixture()
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('Quota exceeded.') })

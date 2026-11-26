@@ -116,6 +116,10 @@ function historyTransferLabel(progress: AgentHostHistoryTransfer): string {
     : progress.resumed ? 'Resuming history...' : 'Syncing history...'
 }
 
+function hostViewTitle(view: AgentHostView): string | undefined {
+  return sessionTitle(view.target, view.chat?.title) ?? sessionTitle(view.target, view.sessionTitle)
+}
+
 function chatActivityTimestamps(chat: NonNullable<AgentHostView['chat']>, hasMoreHistory?: boolean): { updatedAt: string; createdAt?: string } {
   let latest = Date.parse(chat.modifiedAt)
   if (!Number.isFinite(latest)) latest = -1
@@ -681,7 +685,7 @@ export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, ta
         value: retainChatHistory(previous?.key === viewKey ? previous.value : undefined, value),
       }))
       if (connected && value.chat?.resource === chatId) {
-        onTitles?.([{ ...selected, title: value.chat.title, ...chatActivityTimestamps(value.chat, value.history?.hasMore) }])
+        onTitles?.([{ ...selected, title: hostViewTitle(value) ?? '', ...chatActivityTimestamps(value.chat, value.history?.hasMore) }])
       }
       if (recovered) {
         setHistoryLoadError(undefined)
@@ -900,8 +904,8 @@ export const AgentHostPanel = memo(function AgentHostPanel({ task, workspace, ta
   const historyFailure = view?.history?.error ?? (historyLoadError?.key === watchKey ? historyLoadError.message : undefined)
   const stateLabel = !bridge ? 'Desktop update required' : !view && (error || currentCatalog?.error) ? 'Connection failed' : !view || view.state === 'connecting' ? view?.historyTransfer ? historyTransferLabel(view.historyTransfer) : 'Connecting...' : view.state === 'offline' ? 'Offline history' : pending ? 'Delivery pending' : activeTurn ? 'Agent responding' : historyBusy ? 'Loading earlier history...' : view.readOnly ? 'Read only' : 'Connected'
   const modelStatus = !bridge ? 'Desktop update required.' : view?.state !== 'connected' ? undefined : !currentCatalog ? 'Loading models from the owner Host...' : currentCatalog.error ? undefined : !modelId ? 'Choose a model below to enable sending.' : !modelReady ? 'The selected model is unavailable. Choose another model or retry loading models.' : undefined
-  const liveHostTitle = view?.target && agentHostKey(view.target) === key ? (view.chat?.title || view.sessionTitle) : undefined
-  const displayTitle = customTitle || sessionTitle(target, liveHostTitle) || cachedTitle || 'Original Host chat'
+  const liveHostTitle = view && agentHostKey(view.target) === key ? hostViewTitle(view) : undefined
+  const displayTitle = customTitle || liveHostTitle || cachedTitle || 'Original Host chat'
   const editingTitle = editingTitleKey === key
   const detailsOpen = active && detailsKey === key
   const updateBlocker = busy || activeTurn || pending || imageInput.reading
