@@ -122,10 +122,16 @@ is not required.
 
 ### Delivery vs. work completion
 
+- Collaboration messages do not copy the target chat's model selection from
+  cached history. The target Agent Host chooses its current model.
 - `delivered` means the target Agent Host accepted and started turn `turnId` — **not**
   that the receiving Agent has finished its task. Poll
   `taskcontinuum_collaboration_message_status` until `turnStatus` reaches
   `completed`, then call `taskcontinuum_collaboration_read_context` to inspect results.
+- Updated gateways return a receipt for the exact turn. An explicit rejection
+  before native dispatch is `failed`; losing the connection without a matching
+  receipt or turn event is still `uncertain`. Existing uncertain messages are
+  not automatically reclassified or replayed after an update.
 - Busy targets enter `queued` (up to 16 queued messages per task, 30-minute TTL) and
   drain automatically once the active turn completes and authorization still holds.
   A full queue returns `BUSY`; it frees capacity as pending messages finish or expire.

@@ -1,5 +1,5 @@
 import type { ConfigPropertySchema, Message } from '@microsoft/agent-host-protocol'
-import { modelConfigValueLabel } from '../../shared/agentHostModelConfig'
+import { isHostInternalModelConfigKey, modelConfigValueLabel } from '../../shared/agentHostModelConfig'
 import type { AgentHostBridge } from '../../shared/agentHost'
 
 type AgentHostModel = Awaited<ReturnType<AgentHostBridge['models']>>[number]
@@ -77,7 +77,7 @@ export function formatRequestedModelSummary(
   ]
 
   for (const [key, value] of configEntries) {
-    if (value === undefined) continue
+    if (value === undefined || isHostInternalModelConfigKey(key)) continue
     const prop: ConfigPropertySchema | undefined = schemaProps && Object.hasOwn(schemaProps, key) ? schemaProps[key] : undefined
     if (prop) {
       if (typeof value !== 'object' || value === null) {

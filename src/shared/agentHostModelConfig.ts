@@ -46,3 +46,35 @@ export function modelConfigErrors(schema: ConfigSchema | undefined, config: Mode
   }
   return errors
 }
+
+export function isHostInternalModelConfigKey(key: string): boolean {
+  return key.startsWith('vscode.')
+}
+
+export function sanitizeInheritedModelSelection(
+  model: ModelSelection | undefined,
+  schema?: ConfigSchema,
+): ModelSelection | undefined {
+  const id = typeof model?.id === 'string' ? model.id.trim() : ''
+  if (!id || id.length > 512) return undefined
+  if (!model?.config || typeof model.config !== 'object' || Array.isArray(model.config)) {
+    return schema && modelConfigErrors(schema, {}).length > 0 ? undefined : { id }
+  }
+  const entries: [string, ModelConfig[string]][] = []
+  for (const [key, value] of Object.entries(model.config)) {
+    if (!key || key.length > 200 || isHostInternalModelConfigKey(key)) continue
+    if (!modelConfigValueSchema.safeParse(value).success) continue
+    if (schema !== undefined) {
+      const property = schema.properties && Object.hasOwn(schema.properties, key) ? schema.properties[key] : undefined
+      if (!property || property.readOnly) continue
+      if (property.enum ? !property.enum.includes(value) : typeof value !== property.type || value === null) continue
+    }
+    entries.push([key, value])
+    if (entries.length >= 32) break
+  }
+  const config = Object.fromEntries(entries)
+  if (schema && modelConfigErrors(schema, config).length > 0) {
+    return modelConfigErrors(schema, {}).length === 0 ? { id } : undefined
+  }
+  return entries.length > 0 ? { id, config } : { id }
+}

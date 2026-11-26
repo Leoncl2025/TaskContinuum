@@ -209,6 +209,7 @@ async function setupCollaborationFixture(protocolVersion = '0.9.0', ownerTools?:
     remoteOwner,
     localTarget,
     remoteTarget,
+    ownerSideConnection,
     get localConnection() { return localConnection },
     get remoteConnection() { return remoteConnection },
     setTime: (ms: number) => { currentTime = ms },
@@ -227,6 +228,145 @@ async function setupCollaborationFixture(protocolVersion = '0.9.0', ownerTools?:
 }
 
 describe('SessionCollaborationService and gateway provenance', () => {
+  it('sends collaboration and implicit remote turns without failing on VS Code internal model config keys or stale models', async () => {
+    const f = await setupCollaborationFixture()
+    f.remoteHost.setModels([{
+      id: 'gpt-6',
+      name: 'GPT-6',
+      provider: 'copilotcli',
+      configSchema: {
+        type: 'object',
+        properties: {
+          thinkingLevel: { type: 'string', title: 'Thinking Level', enum: ['low', 'medium', 'high', 'xhigh', 'max'] },
+          contextSize: { type: 'number', title: 'Context Size', enum: [272000, 872000] },
+          lockedOption: { type: 'string', title: 'Locked Option', readOnly: true },
+        },
+      },
+    }])
+    await f.ownerSideConnection.models()
+
+    // Simulate a previous turn authored in VS Code native UI carrying vscode.modelConfiguration.*.source metadata.
+    const nativeUiTurn = randomUUID()
+    f.remoteHost.action({
+      type: 'chat/turnStarted', turnId: nativeUiTurn, startedAt: new Date().toISOString(),
+      message: {
+        text: '占位：测试seesion collab ',
+        origin: { kind: MessageKind.User },
+        model: {
+          id: 'gpt-6',
+          config: {
+            contextSize: 872000,
+            thinkingLevel: 'xhigh',
+            lockedOption: 'managed',
+            'vscode.modelConfiguration.thinkingLevel.source': 'explicit',
+            'vscode.modelConfiguration.contextSize.source': 'explicit',
+            staleUnknownOption: 'legacy',
+          },
+        },
+      },
+    })
+    f.remoteHost.action({ type: 'chat/turnComplete', turnId: nativeUiTurn, duration: 1 })
+
+    const api = f.createService().forWorkspace(f.workspaceRoot)
+    const targetRef = formatCollaborationTargetRef('T-0072', f.remoteTarget)
+    const collabId = randomUUID()
+    await expect(api.sendMessage({ targetRef, messageId: collabId, text: 'Hi' }))
+      .resolves.toMatchObject({ state: 'delivered', turnId: collabId })
+    expect(f.remoteHost.dispatches[0]).toMatchObject({ turnId: collabId, message: { text: 'Hi' } })
+    expect(f.remoteHost.dispatches[0]).not.toHaveProperty('message.model')
+    f.remoteHost.action({ type: 'chat/turnComplete', turnId: collabId, duration: 1 })
+
+    // Re-seed native UI turn and verify an implicit remote send delegates clean inheritance to the owner.
+    const secondNativeTurn = randomUUID()
+    f.remoteHost.action({
+      type: 'chat/turnStarted', turnId: secondNativeTurn, startedAt: new Date().toISOString(),
+      message: {
+        text: 'Native UI turn 2',
+        origin: { kind: MessageKind.User },
+        model: {
+          id: 'gpt-6',
+          config: {
+            contextSize: 872000,
+            thinkingLevel: 'xhigh',
+            lockedOption: 'managed',
+            'vscode.modelConfiguration.thinkingLevel.source': 'explicit',
+            'vscode.modelConfiguration.contextSize.source': 'explicit',
+            staleUnknownOption: 'legacy',
+          },
+        },
+      },
+    })
+    f.remoteHost.action({ type: 'chat/turnComplete', turnId: secondNativeTurn, duration: 1 })
+    await vi.waitFor(() => {
+      expect(f.remoteConnection.view.chat?.turns.at(-1)?.id).toBe(secondNativeTurn)
+      expect(f.remoteConnection.view.chat?.activeTurn).toBeUndefined()
+    })
+
+    const followUpId = randomUUID()
+    await f.remoteConnection.send(followUpId, 'Implicit remote follow-up', undefined, async () => {})
+    expect(f.remoteHost.dispatches[1]).toMatchObject({
+      turnId: followUpId,
+      message: {
+        text: 'Implicit remote follow-up',
+        model: { id: 'gpt-6', config: { contextSize: 872000, thinkingLevel: 'xhigh' } },
+      },
+    })
+    f.remoteHost.action({ type: 'chat/turnComplete', turnId: followUpId, duration: 1 })
+
+    // Also verify collaboration succeeds when historical turn used a retired model and catalog queries fail.
+    const retiredTurn = randomUUID()
+    f.remoteHost.action({
+      type: 'chat/turnStarted', turnId: retiredTurn, startedAt: new Date().toISOString(),
+      message: { text: 'Retired model turn', origin: { kind: MessageKind.User }, model: { id: 'removed-model' } },
+    })
+    f.remoteHost.action({ type: 'chat/turnComplete', turnId: retiredTurn, duration: 1 })
+    await vi.waitFor(() => {
+      expect(f.remoteConnection.view.chat?.turns.at(-1)?.id).toBe(retiredTurn)
+      expect(f.remoteConnection.view.chat?.activeTurn).toBeUndefined()
+    })
+    f.remoteHost.failModels(true)
+    const messageId = randomUUID()
+    await expect(api.sendMessage({ targetRef, messageId, text: 'Hi again' }))
+      .resolves.toMatchObject({ state: 'delivered', turnId: messageId })
+    expect(f.remoteHost.dispatches[2]).not.toHaveProperty('message.model')
+  })
+
+  it('keeps the gateway connected when its newer catalog definitively rejects a stale explicit model', async () => {
+    const f = await setupCollaborationFixture()
+    expect(await f.remoteConnection.models()).toContainEqual(expect.objectContaining({ id: 'gpt-6' }))
+    f.remoteHost.setModels([{ id: 'owner-model', name: 'Owner model', provider: 'copilotcli' }])
+    await f.ownerSideConnection.models()
+    const id = randomUUID()
+    await expect(f.remoteConnection.send(id, 'Use the explicit selection', undefined, async () => {}, undefined, { id: 'gpt-6' }))
+      .rejects.toThrow('No turn was sent. The model or its configuration was rejected by the owner Host.')
+    expect(f.remoteConnection.view.state).toBe('connected')
+    expect(f.remoteConnection.view.pendingTurn).toBeUndefined()
+    expect(f.remoteHost.dispatches).toHaveLength(0)
+
+    await f.remoteConnection.send(randomUUID(), 'Use a currently available selection', undefined, async () => {}, undefined, { id: 'owner-model' })
+    expect(f.remoteHost.dispatches).toHaveLength(1)
+  })
+
+  it('keeps a disconnected submission uncertain and does not replay its ID', async () => {
+    const f = await setupCollaborationFixture()
+    const api = f.createService().forWorkspace(f.workspaceRoot)
+    const targetRef = formatCollaborationTargetRef('T-0072', f.remoteTarget)
+    const messageId = randomUUID()
+    const request = { targetRef, messageId, text: 'Hi' }
+    f.remoteHost.loseNextSend()
+    await expect(api.sendMessage(request)).resolves.toMatchObject({ state: 'uncertain', turnId: messageId })
+    await expect(api.messageStatus(messageId)).resolves.toMatchObject({ state: 'uncertain', turnStatus: 'unknown' })
+    await expect(api.sendMessage(request)).resolves.toMatchObject({ state: 'uncertain', turnId: messageId })
+
+    const freshSender = new AgentHostConnection(f.remoteTarget, join(f.dataDir, 'fresh-sender'),
+      (signal) => f.connectRemote(f.remoteTarget, signal))
+    cleanups.push(() => freshSender.close())
+    await expect(freshSender.send(messageId, request.text, undefined, async () => {})).rejects.toThrow()
+    // The owner cannot issue a definite rejection for a turn it may previously have dispatched.
+    expect(freshSender.view.pendingTurn).toEqual({ id: messageId, state: 'uncertain' })
+    expect(f.remoteHost.dispatches).toMatchObject([{ turnId: messageId }])
+  })
+
   it('lets a remotely started Run5 turn list and send through the Studio workspace without an owner-side view', async () => {
     const ownerApi = vi.fn(() => { throw new Error('Run5 must never execute tools with its owner’s permissions.') })
     const f = await setupCollaborationFixture('1.0.0', new TaskContinuumAgentHostTools(ownerApi))
@@ -654,8 +794,10 @@ describe('SessionCollaborationService and gateway provenance', () => {
       machineName: setup.localOwner.machineName,
       username: setup.localOwner.username,
     })
+    setup.remoteHost.action({ type: 'chat/turnComplete', turnId: spoofedTurnId, duration: 1 })
+    await vi.waitFor(() => expect(setup.remoteConnection.view.chat?.activeTurn).toBeUndefined())
 
-    // Claiming a task not linked on the owner gateway is rejected before native dispatch.
+    // Claiming a task not linked on the owner gateway is rejected before native dispatch without locking the chat as uncertain.
     const wrongTaskTurnId = randomUUID()
     await expect(setup.remoteConnection.send(
       wrongTaskTurnId,
@@ -671,7 +813,9 @@ describe('SessionCollaborationService and gateway provenance', () => {
         senderDevice: setup.localOwner,
         sourceKind: 'mcp-client',
       },
-    )).rejects.toThrow()
+    )).rejects.toThrow('No turn was sent. Access to the owner chat changed.')
+    expect(setup.remoteConnection.view.state).toBe('connected')
+    expect(setup.remoteConnection.view.pendingTurn).toBeUndefined()
     expect(setup.remoteHost.dispatches).toHaveLength(1)
   })
 

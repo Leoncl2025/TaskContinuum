@@ -9,6 +9,7 @@ import type { AgentHostTarget } from '../shared/agentHost'
 import { agentHostKey, agentHostTerminalIdSchema } from './agentHostProtocol'
 import { FileTransferError } from '../shared/fileTransfer'
 import { agentHostSizeLimit } from './agentHostLimits'
+import { SUBMIT_TURN_METHOD } from './agentHostDelivery'
 
 const DIRECTORY = 'agent-host-diagnostics'
 const ACTIVE_FILE = 'agent-host.jsonl'
@@ -152,6 +153,7 @@ function errorKind(error: unknown): string {
 }
 
 export function agentHostDiagnosticMethod(value: unknown): Method {
+  if (value === SUBMIT_TURN_METHOD) return 'dispatchAction'
   if (value === 'taskcontinuum/chatSnapshotPrepare') return 'snapshotPrepare'
   if (value === 'taskcontinuum/chatSnapshotChunk') return 'snapshotChunk'
   if (value === 'taskcontinuum/chatSnapshotActivate') return 'snapshotActivate'

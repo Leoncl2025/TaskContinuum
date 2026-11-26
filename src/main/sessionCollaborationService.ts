@@ -19,6 +19,7 @@ import type {
   CollaborationTurnStatus, SessionCollaborationApi, TaskContinuumCollaborationMeta,
 } from '../shared/sessionCollaboration'
 import type { AgentHostConnection } from './agentHostConnection'
+import { AgentHostTurnNotDispatchedError } from './agentHostDelivery'
 import type { AgentHostManager } from './agentHostManager'
 import { canonicalPolicyRoot } from './linkedSessionPolicy'
 import { readRepositorySessionLinksForAuthorization } from './repositorySessionLinks'
@@ -690,7 +691,8 @@ export class SessionCollaborationService {
           ...record.status,
           state: 'failed',
           updatedAt: timestamp,
-          reason: error instanceof CollaborationError ? error.message : 'Target session rejected or could not start the collaboration message.',
+          reason: error instanceof CollaborationError || error instanceof AgentHostTurnNotDispatchedError
+            ? error.message : 'Target session rejected or could not start the collaboration message.',
         }
       }
       await this.persistMessages()

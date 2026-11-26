@@ -11,13 +11,15 @@ import { chatSubmissionSchema } from '../shared/chatAttachments'
 import type { ChatImageAttachment } from '../shared/chatAttachments'
 import { COLLABORATION_LIMITS, CollaborationError, taskContinuumCollaborationMetaSchema } from '../shared/sessionCollaboration'
 import type { TaskContinuumCollaborationMeta } from '../shared/sessionCollaboration'
-import { modelConfigErrors } from '../shared/agentHostModelConfig'
+import { modelConfigErrors, sanitizeInheritedModelSelection } from '../shared/agentHostModelConfig'
 import { AgentHostChatState, AgentHostHistoryCursorError } from './agentHostState'
 import { agentHostDiagnosticChannel, logAgentHostDiagnostic } from './agentHostDiagnostics'
 import type { AgentHostDiagnosticDetails, AgentHostDiagnosticEvent } from './agentHostDiagnostics'
 import { agentHostKey, agentHostModelInfoSchema, agentHostModelSelectionSchema, agentHostTargetSchema, agentHostTerminalIdSchema, requireAgentHostProtocolVersion } from './agentHostProtocol'
 import { JsonFileSizeError, readJsonBounded, writeJsonAtomic, writeTextAtomic } from './shared/storage'
+import { abortable } from './shared/abortable'
 import { AGENT_HOST_LIMITS, AgentHostSizeLimitError, agentHostSizeLimit } from './agentHostLimits'
+import { AgentHostTurnNotDispatchedError, SUBMIT_TURN_METHOD, TURN_DELIVERY_CAPABILITY, turnDeliveryReceiptSchema } from './agentHostDelivery'
 import {
   AgentHostSnapshotSupersededError, SNAPSHOT_TRANSFER_LIMITS, SNAPSHOT_TRANSFER_METHODS, chatSnapshotCacheCapabilitySchema, chunkedSnapshotCapabilitySchema,
   historyContainsTurnResponseSchema, isAgentHostSnapshotSuperseded, pagedChatHistoryCapabilitySchema,
@@ -43,6 +45,7 @@ const cacheSchema = z.discriminatedUnion('schemaVersion', [
 ])
 type Command = z.infer<typeof commandSchema>
 type ModelCatalog = Pick<SessionModelInfo, 'id' | 'name' | 'provider' | 'configSchema'>[]
+const TURN_CONFIRMATION_TIMEOUT_MS = 15_000
 type ActiveConnection = {
   client: AhpClient; clientId: string; abort: AbortController; traceId: string; toolCalls?: Set<string>
   remoteTurn?: { id: string; relay?: RelayToolToCaller }
@@ -115,6 +118,7 @@ export class AgentHostConnection {
   get historyEpoch(): string { return this.historyGeneration }
   get historyProgress(): AgentHostHistoryTransfer | undefined { return this.historyTransfer ? { ...this.historyTransfer } : undefined }
   get readOnly(): boolean { return this.initialized?._meta?.taskcontinuumCanSend === false || this.chat.sendState.readOnly }
+  private get isGateway(): boolean { return !this.isNative && this.initialized?._meta?.taskcontinuumCanSend !== undefined }
   get title(): string | undefined { return this.chat.title || (this.snapshots.get(this.target.sessionId)?.state as SessionState | undefined)?.title }
   get supportsNativeCollaborationSource(): boolean {
     const capability = this.initialized?._meta?.taskcontinuumCollaboration
@@ -934,8 +938,20 @@ export class AgentHostConnection {
     if (errors.length) throw new Error(errors.join(' '))
   }
 
+  private inheritedModel(model: ModelSelection | undefined, active: ActiveConnection): ModelSelection | undefined {
+    if (!model) return undefined
+    const catalog = this.modelCatalog
+    if (catalog?.active === active && catalog.models && !catalog.pending && !catalog.failed) {
+      const provider = (this.snapshots.get(this.target.sessionId)?.state as SessionState | undefined)?.provider
+      const selected = catalog.models.find((item) => item.id === model.id && item.provider === provider)
+      if (!selected) return undefined
+      return sanitizeInheritedModelSelection(model, selected.configSchema ?? { type: 'object', properties: {} })
+    }
+    return sanitizeInheritedModelSelection(model)
+  }
+
   async send(id: string, text: string, images: ChatImageAttachment[] | undefined, authorize: () => Promise<void>, actor?: { clientId: string; machineName: string; username?: string; displayName?: string }, model?: ModelSelection, collaboration?: TaskContinuumCollaborationMeta,
-    remoteOrigin?: { relay?: RelayToolToCaller }): Promise<void> {
+    remoteOrigin?: { relay?: RelayToolToCaller; acknowledgeDelivery?: boolean }): Promise<void> {
     const validatedCollaboration = collaboration === undefined ? undefined : taskContinuumCollaborationMetaSchema.parse(collaboration)
     if (validatedCollaboration && validatedCollaboration.messageId !== id) throw new Error('Collaboration messageId must match the turn ID.')
     const command = {
@@ -955,6 +971,7 @@ export class AgentHostConnection {
     this.diagnose('connection.send', { traceId, status: 'begin', step, dispatched: false })
     let record: Command | undefined
     let dispatched = false
+    let ledgerLoaded = false
     let phaseStarted = started
     const phase = (next: NonNullable<AgentHostDiagnosticDetails['step']>) => {
       this.diagnose('connection.send.phase', { traceId, status: 'ok', step, elapsedMs: performance.now() - phaseStarted, dispatched })
@@ -962,6 +979,8 @@ export class AgentHostConnection {
       phaseStarted = performance.now()
     }
     try {
+      await this.load()
+      ledgerLoaded = true
       await this.open()
       traceId = this.current?.traceId
       phase('authorization')
@@ -1003,8 +1022,9 @@ export class AgentHostConnection {
         if (catalog?.active !== active || !catalog.models || catalog.pending || catalog.failed) throw new Error('The model catalog changed before sending. Retry after loading models. Nothing was sent.')
         this.validateModel(command.model, catalog.models)
       }
-      const selection = this.chat.selection
-      const selectedModel = command.model ?? selection?.model
+      const isGateway = this.isGateway
+      const selection = isGateway ? undefined : this.chat.selection
+      const selectedModel = command.model ?? (isGateway || validatedCollaboration ? undefined : this.inheritedModel(selection?.model, active))
       const attachments: MessageEmbeddedResourceAttachment[] | undefined = command.images?.map((image) => ({ type: 'embeddedResource' as MessageEmbeddedResourceAttachment['type'], label: image.name, displayKind: 'image', contentType: image.mimeType, data: image.data, _meta: { taskcontinuumImageId: image.id } }))
       const messageMeta = actor || validatedCollaboration ? {
         ...(actor ? { taskcontinuumActor: actor } : {}),
@@ -1017,23 +1037,50 @@ export class AgentHostConnection {
         active.sentTurn = { id, calls: new Set(), running: 0 }
       }
       dispatched = true
-      active.client.dispatch(this.target.chatId, action)
-      this.emit({ type: 'state' })
-      phase('confirmation')
-      await this.waitForTurn(id, active)
+      if (isGateway && this.initialized?._meta?.taskcontinuumTurnDelivery === TURN_DELIVERY_CAPABILITY.taskcontinuumTurnDelivery) {
+        const submission = this.requestExtension(active, SUBMIT_TURN_METHOD, { channel: this.target.chatId, action })
+        this.emit({ type: 'state' })
+        phase('confirmation')
+        try {
+          const receipt = turnDeliveryReceiptSchema.parse(await abortable(submission, AbortSignal.timeout(TURN_CONFIRMATION_TIMEOUT_MS)))
+          if (receipt.turnId !== id) throw new Error('The owner replied for a different turn. No execution was replayed.')
+          if (receipt.status === 'rejected') throw new AgentHostTurnNotDispatchedError(receipt.reason)
+        } catch (error) {
+          // A receipt may be lost after the original turn was already observed in the stream.
+          if (this.unverifiedCacheTurns.has(id) || !this.chat.hasTurn(id)) {
+            if (error instanceof AgentHostTurnNotDispatchedError) dispatched = false
+            throw error
+          }
+        }
+        record.state = 'confirmed'
+        try { await this.save() }
+        catch (error) { record.state = 'uncertain'; throw error }
+      } else {
+        active.client.dispatch(this.target.chatId, action)
+        this.emit({ type: 'state' })
+        phase('confirmation')
+        await this.waitForTurn(id, active)
+      }
       this.diagnose('connection.send.phase', { traceId, status: 'ok', step, elapsedMs: performance.now() - phaseStarted, dispatched })
       this.diagnose('connection.send', { traceId: active.traceId, status: 'ok', step, elapsedMs: performance.now() - started, dispatched })
     } catch (error) {
       this.diagnose('connection.send.phase', { traceId, status: 'error', step, elapsedMs: performance.now() - phaseStarted, dispatched, error })
       this.diagnose('connection.send', { traceId, status: 'error', step, elapsedMs: performance.now() - started, dispatched, error })
       if (record && record.state !== 'confirmed') { record.state = dispatched ? 'uncertain' : 'failed'; await this.save() }
+      if (remoteOrigin?.acknowledgeDelivery && ledgerLoaded && !dispatched && !this.chat.hasTurn(id)) {
+        const hasPriorAttempt = this.commands.some((item) => item.id === id && item !== record && item.state !== 'failed')
+        // A failed new attempt cannot prove non-delivery for an earlier attempt with this ID.
+        if (!hasPriorAttempt) {
+          throw AgentHostTurnNotDispatchedError.fromSendPhase(step, error)
+        }
+      }
       throw error
     } finally { this.sending = false; this.emit({ type: 'state' }) }
   }
 
   private waitForTurn(id: string, active: NonNullable<typeof this.current>): Promise<void> {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { stop(); reject(new Error('Delivery was not confirmed. Inspect the original chat; no automatic replay.')) }, 15000)
+      const timer = setTimeout(() => { stop(); reject(new Error('Delivery was not confirmed. Inspect the original chat; no automatic replay.')) }, TURN_CONFIRMATION_TIMEOUT_MS)
       const check = () => {
         if (this.chat.hasTurn(id)) { stop(); resolve() }
         else if (this.current !== active) { stop(); reject(new Error('Disconnected before confirmation. Inspect the original chat; no automatic replay.')) }

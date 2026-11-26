@@ -4,7 +4,8 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { ConfigSchema } from '@microsoft/agent-host-protocol'
 import { AgentHostModelConfig, AgentHostModelOptions } from '../src/renderer/components/AgentHostModelConfig'
-import { agentHostModelConfigSchema, modelConfigErrors } from '../src/shared/agentHostModelConfig'
+import { formatRequestedModelSummary } from '../src/renderer/chat/turnModelSummary'
+import { agentHostModelConfigSchema, modelConfigErrors, sanitizeInheritedModelSelection } from '../src/shared/agentHostModelConfig'
 import type { ModelConfig } from '../src/shared/agentHostModelConfig'
 import { modelConfigFixture } from './agent-host-model-fixture'
 
@@ -135,5 +136,47 @@ describe('Host model configuration', () => {
     render(<AgentHostModelConfig config={{ thinkingLevel: 'max' }} disabled={false} onChange={changed} />)
     await userEvent.setup().click(screen.getByRole('button', { name: 'Reset model options to defaults' }))
     expect(changed).toHaveBeenCalledExactlyOnceWith({})
+  })
+
+  it('strips VS Code internal provenance, unknown, and readOnly keys from inherited model selections and summaries', () => {
+    const nativeTurnModel = {
+      id: 'gpt-6.1-sol',
+      config: {
+        contextSize: 922000,
+        'vscode.modelConfiguration.thinkingLevel.source': 'explicit',
+        'vscode.modelConfiguration.contextSize.source': 'explicit',
+        reasoningEffort: 'xhigh',
+        lockedFlag: 'managed',
+        obsoleteKey: 'drop-me',
+      },
+    }
+    const schema: ConfigSchema = {
+      type: 'object',
+      properties: {
+        thinkingLevel: { type: 'string', title: 'Thinking Level', enum: ['low', 'medium', 'high', 'xhigh'] },
+        contextSize: { type: 'number', title: 'Context Size', enum: [272000, 922000], enumLabels: ['272K', '922K'] },
+        reasoningEffort: { type: 'string', title: 'Reasoning Effort', enum: ['low', 'medium', 'high', 'xhigh'], enumLabels: ['Low', 'Medium', 'High', 'XHigh'] },
+        lockedFlag: { type: 'string', title: 'Locked Flag', readOnly: true },
+      },
+    }
+    expect(sanitizeInheritedModelSelection(nativeTurnModel)).toEqual({
+      id: 'gpt-6.1-sol',
+      config: {
+        contextSize: 922000,
+        reasoningEffort: 'xhigh',
+        lockedFlag: 'managed',
+        obsoleteKey: 'drop-me',
+      },
+    })
+    expect(sanitizeInheritedModelSelection(nativeTurnModel, schema)).toEqual({
+      id: 'gpt-6.1-sol',
+      config: {
+        contextSize: 922000,
+        reasoningEffort: 'xhigh',
+      },
+    })
+    const summary = formatRequestedModelSummary(nativeTurnModel, [{ id: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', provider: 'copilotcli', configSchema: schema }])
+    expect(summary?.optionsLabel).not.toContain('Explicit')
+    expect(summary?.tooltip).not.toContain('vscode.modelConfiguration')
   })
 })

@@ -17,6 +17,7 @@ import { isAgentHostTurnBoundary } from './agentHostConnection'
 import { AgentHostGatewayScheduler, GATEWAY_LIMITS } from './agentHostGatewayScheduler'
 import { abortable } from './shared/abortable'
 import { AGENT_HOST_LIMIT_HEADER, AGENT_HOST_LIMIT_RPC_CODE, AGENT_HOST_LIMITS, AgentHostSizeLimitError, agentHostSizeLimit } from './agentHostLimits'
+import { AgentHostTurnNotDispatchedError, SUBMIT_TURN_METHOD, TURN_DELIVERY_CAPABILITY } from './agentHostDelivery'
 import {
   AGENT_HOST_SNAPSHOT_SUPERSEDED_RPC_CODE, AgentHostSnapshotStore, AgentHostSnapshotSupersededError,
   SNAPSHOT_TRANSFER_METHODS, historyContainsTurnRequestSchema, snapshotChunkRequestSchema, snapshotPrepareRequestSchema, snapshotTransferLookupSchema,
@@ -48,7 +49,8 @@ const rpcSchema = z.object({ jsonrpc: z.literal('2.0'), id: z.union([z.number().
 const subscribeSchema = z.object({ channel: z.string().max(512), delivery: z.unknown().optional(), view: z.unknown().optional() }).strict()
 const initializeSchema = z.object({ channel: z.literal('ahp-root://'), clientId: z.string().min(1).max(128), protocolVersions: z.array(agentHostAdvertisedVersionSchema).min(1).max(10), initialSubscriptions: z.array(z.string().max(512)).max(18).optional(), locale: z.string().max(100).optional(), clientInfo: z.unknown().optional() }).strict()
 const reconnectSchema = z.object({ channel: z.literal('ahp-root://'), clientId: z.string().min(1).max(128), lastSeenServerSeq: z.number().int().nonnegative(), subscriptions: z.array(z.string().max(512)).max(18) }).strict()
-const dispatchSchema = z.object({ channel: z.string().max(512), clientSeq: z.number().int().nonnegative(), action: z.record(z.string(), z.unknown()) }).strict()
+const submitTurnSchema = z.object({ channel: z.string().max(512), action: z.record(z.string(), z.unknown()) }).strict()
+const dispatchSchema = submitTurnSchema.extend({ clientSeq: z.number().int().nonnegative() })
 
 class TerminalUnavailableError extends Error {}
 
@@ -383,7 +385,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
       const earlierHistory = hintedMethod === 'fetchTurns' || hintedMethod === SNAPSHOT_TRANSFER_METHODS.containsTurn
         || hintedMethod === SNAPSHOT_TRANSFER_METHODS.prepare && params.history !== null && typeof params.history === 'object' && 'before' in params.history
       const lane = hintedMethod === 'ping' || hintedMethod === 'unsubscribe' || hintedMethod === SNAPSHOT_TRANSFER_METHODS.release ? 'control'
-        : hintedMethod === 'dispatchAction' ? 'execution'
+        : hintedMethod === 'dispatchAction' || hintedMethod === SUBMIT_TURN_METHOD ? 'execution'
           : terminal && !activeTerminal || earlierHistory ? 'history' : 'interactive'
       const isInitialization = hintedMethod === 'initialize' || hintedMethod === 'reconnect'
       let initializer = false
@@ -490,7 +492,7 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
                 }
               }
               result = request.method === 'initialize'
-                ? { ...connection.handshake, snapshots: ready.map((item) => item.snapshot), _meta: { taskcontinuumCanSend: initialAccess.canSend, taskcontinuumModelSelection: true, taskcontinuumModelConfig: true, taskcontinuumStreamedSendValidation: true, taskcontinuumChunkedChatSnapshot: snapshotStore.capability, taskcontinuumPagedChatHistory: { version: 1 }, taskcontinuumChatSnapshotCache: { version: 1 }, taskcontinuumCollaboration: { version: 1, nativeSource: true, ...(detachTools ? TOOL_RELAY_CAPABILITY : {}) } } }
+                ? { ...connection.handshake, snapshots: ready.map((item) => item.snapshot), _meta: { ...TURN_DELIVERY_CAPABILITY, taskcontinuumCanSend: initialAccess.canSend, taskcontinuumModelSelection: true, taskcontinuumModelConfig: true, taskcontinuumStreamedSendValidation: true, taskcontinuumChunkedChatSnapshot: snapshotStore.capability, taskcontinuumPagedChatHistory: { version: 1 }, taskcontinuumChatSnapshotCache: { version: 1 }, taskcontinuumCollaboration: { version: 1, nativeSource: true, ...(detachTools ? TOOL_RELAY_CAPABILITY : {}) } } }
                 : { type: 'snapshot', snapshots: ready.map((item) => item.snapshot) }
             } else if (request.method === 'ping') {
               z.object({ channel: z.literal('ahp-root://') }).strict().parse(request.params)
@@ -543,60 +545,89 @@ export function attachAgentHostGateway(server: Server, options: AgentHostGateway
               if (selected !== 'ahp-root://' && !connection.allowedChannel(selected) && !subscribed.has(selected) && !retained.has(selected) && !pendingSubscriptions.has(selected)) throw new Error('Channel not authorized.')
               cancelSubscription(selected)
               result = {}
-            } else if (request.method === 'dispatchAction') {
-              step = 'authorization'
-              const access = await requestAuthorization(true)
-              const params = dispatchSchema.parse(request.params)
-              if (params.channel === target.sessionId && params.action.type === 'session/titleChanged') {
-                const action = z.object({ type: z.literal('session/titleChanged'), title: z.string().trim().min(1).max(200) }).strict().parse(params.action)
-                step = 'native'
-                await connection.rename(action.title, async () => { await requestAuthorization(true) })
-              } else {
-                if (params.channel !== target.chatId) throw new Error('Only the selected chat can receive input.')
-                if (params.action.type === 'chat/turnStarted') {
-                  const action = z.object({ type: z.literal('chat/turnStarted'), turnId: z.uuid(), startedAt: z.iso.datetime(), message: z.object({ text: z.string().max(MAX_CHAT_TEXT_LENGTH), origin: z.object({ kind: z.literal('user') }).strict(), attachments: z.array(z.object({ type: z.literal('embeddedResource'), label: z.string().max(200), displayKind: z.literal('image'), contentType: z.string(), data: z.string(), _meta: z.object({ taskcontinuumImageId: z.uuid() }).strict() }).strict()).max(4).optional(), agent: z.unknown().optional(), model: z.unknown().optional(), _meta: z.unknown().optional() }).strict() }).strict().parse(params.action)
-                  const images = action.message.attachments?.map((image) => ({ id: image._meta.taskcontinuumImageId, name: image.label, mimeType: image.contentType, data: image.data })) as ChatImageAttachment[] | undefined
-                  const command = chatSubmissionSchema.parse({ id: action.turnId, text: action.message.text, ...(images?.length ? { images } : {}) })
-                  const model = agentHostModelSelectionSchema.optional().parse(action.message.model)
-                  const parsedSenderDisplay = z.object({
-                    taskcontinuumActor: z.object({
-                      displayName: z.string().trim().min(1).max(80).optional(),
-                    }).loose().optional(),
-                  }).loose().safeParse(action.message._meta)
-                  const senderDisplay = parsedSenderDisplay.success ? parsedSenderDisplay.data.taskcontinuumActor?.displayName : undefined
-                  const effectiveActor = senderDisplay
-                    ? { ...access.actor, displayName: senderDisplay }
-                    : access.actor
-                  let collaboration: TaskContinuumCollaborationMeta | undefined
-                  if (action.message._meta && typeof action.message._meta === 'object' && !Array.isArray(action.message._meta) && Object.prototype.hasOwnProperty.call(action.message._meta, 'taskcontinuumCollaboration')) {
-                    const parsedCollab = taskContinuumCollaborationMetaSchema.parse((action.message._meta as Record<string, unknown>).taskcontinuumCollaboration)
-                    if (parsedCollab.messageId !== command.id) throw new Error('Collaboration messageId does not match the turn ID.')
-                    if (access.taskIds && !access.taskIds.includes(parsedCollab.taskId)) throw new Error('The target chat is not linked to that task on its owner.')
-                    if (parsedCollab.sourceTarget && parsedCollab.sourceTarget.owner.clientId !== access.actor.clientId) {
-                      throw new Error('Collaboration source target must belong to the authenticated sender device.')
-                    }
-                    collaboration = {
-                      ...parsedCollab,
-                      senderDevice: {
-                        clientId: access.actor.clientId,
-                        machineName: access.actor.machineName,
-                        ...(access.actor.username ? { username: access.actor.username } : {}),
-                      },
-                    }
-                  }
+            } else if (request.method === 'dispatchAction' || request.method === SUBMIT_TURN_METHOD) {
+              const acknowledgeDelivery = request.method === SUBMIT_TURN_METHOD
+              const rawAction = typeof request.params.action === 'object' && request.params.action !== null
+                ? request.params.action as Record<string, unknown>
+                : undefined
+              const candidateTurnId = acknowledgeDelivery && id !== undefined && request.params.channel === target.chatId && rawAction?.type === 'chat/turnStarted'
+                ? z.uuid().safeParse(rawAction.turnId).data
+                : undefined
+              let enteredNativeSend = false
+              try {
+                step = 'authorization'
+                const access = await requestAuthorization(true)
+                step = 'validation'
+                const params = (acknowledgeDelivery ? submitTurnSchema : dispatchSchema).parse(request.params)
+                if (acknowledgeDelivery && (id === undefined || params.action.type !== 'chat/turnStarted')) {
+                  throw new Error('Turn submission requires a request ID and a turn-start action.')
+                }
+                if (params.channel === target.sessionId && params.action.type === 'session/titleChanged') {
+                  const action = z.object({ type: z.literal('session/titleChanged'), title: z.string().trim().min(1).max(200) }).strict().parse(params.action)
                   step = 'native'
-                  await connection.send(command.id, command.text, command.images, async () => {
-                    const rechecked = await requestAuthorization(true)
-                    if (collaboration && rechecked.taskIds && !rechecked.taskIds.includes(collaboration.taskId)) {
-                      throw new Error('The target chat is no longer linked to that task on its owner.')
+                  await connection.rename(action.title, async () => { await requestAuthorization(true) })
+                } else {
+                  if (params.channel !== target.chatId) throw new Error('Only the selected chat can receive input.')
+                  if (params.action.type === 'chat/turnStarted') {
+                    const action = z.object({ type: z.literal('chat/turnStarted'), turnId: z.uuid(), startedAt: z.iso.datetime(), message: z.object({ text: z.string().max(MAX_CHAT_TEXT_LENGTH), origin: z.object({ kind: z.literal('user') }).strict(), attachments: z.array(z.object({ type: z.literal('embeddedResource'), label: z.string().max(200), displayKind: z.literal('image'), contentType: z.string(), data: z.string(), _meta: z.object({ taskcontinuumImageId: z.uuid() }).strict() }).strict()).max(4).optional(), agent: z.unknown().optional(), model: z.unknown().optional(), _meta: z.unknown().optional() }).strict() }).strict().parse(params.action)
+                    const images = action.message.attachments?.map((image) => ({ id: image._meta.taskcontinuumImageId, name: image.label, mimeType: image.contentType, data: image.data })) as ChatImageAttachment[] | undefined
+                    const command = chatSubmissionSchema.parse({ id: action.turnId, text: action.message.text, ...(images?.length ? { images } : {}) })
+                    const model = agentHostModelSelectionSchema.optional().parse(action.message.model)
+                    const parsedSenderDisplay = z.object({
+                      taskcontinuumActor: z.object({
+                        displayName: z.string().trim().min(1).max(80).optional(),
+                      }).loose().optional(),
+                    }).loose().safeParse(action.message._meta)
+                    const senderDisplay = parsedSenderDisplay.success ? parsedSenderDisplay.data.taskcontinuumActor?.displayName : undefined
+                    const effectiveActor = senderDisplay
+                      ? { ...access.actor, displayName: senderDisplay }
+                      : access.actor
+                    let collaboration: TaskContinuumCollaborationMeta | undefined
+                    if (action.message._meta && typeof action.message._meta === 'object' && !Array.isArray(action.message._meta) && Object.prototype.hasOwnProperty.call(action.message._meta, 'taskcontinuumCollaboration')) {
+                      const parsedCollab = taskContinuumCollaborationMetaSchema.parse((action.message._meta as Record<string, unknown>).taskcontinuumCollaboration)
+                      if (parsedCollab.messageId !== command.id) throw new Error('Collaboration messageId does not match the turn ID.')
+                      if (access.taskIds && !access.taskIds.includes(parsedCollab.taskId)) {
+                        step = 'authorization'
+                        throw new Error('The target chat is not linked to that task on its owner.')
+                      }
+                      if (parsedCollab.sourceTarget && parsedCollab.sourceTarget.owner.clientId !== access.actor.clientId) {
+                        step = 'authorization'
+                        throw new Error('Collaboration source target must belong to the authenticated sender device.')
+                      }
+                      collaboration = {
+                        ...parsedCollab,
+                        senderDevice: {
+                          clientId: access.actor.clientId,
+                          machineName: access.actor.machineName,
+                          ...(access.actor.username ? { username: access.actor.username } : {}),
+                        },
+                      }
                     }
-                  }, effectiveActor, model, collaboration, { relay: detachTools ? relayTool : undefined })
-                } else if (params.action.type === 'chat/turnCancelled') {
-                  const action = z.object({ type: z.literal('chat/turnCancelled'), turnId: z.string().min(1).max(200), duration: z.number().nonnegative() }).strict().parse(params.action)
-                  await connection.cancel(action.turnId, async () => { await requestAuthorization(true) })
-                } else throw new Error('This action is not available through the session gateway.')
+                    step = 'native'
+                    enteredNativeSend = true
+                    await connection.send(command.id, command.text, command.images, async () => {
+                      const rechecked = await requestAuthorization(true)
+                      if (collaboration && rechecked.taskIds && !rechecked.taskIds.includes(collaboration.taskId)) {
+                        throw new Error('The target chat is no longer linked to that task on its owner.')
+                      }
+                    }, effectiveActor, model, collaboration, { relay: detachTools ? relayTool : undefined, acknowledgeDelivery })
+                    if (acknowledgeDelivery) result = { status: 'confirmed', turnId: command.id }
+                  } else if (params.action.type === 'chat/turnCancelled') {
+                    const action = z.object({ type: z.literal('chat/turnCancelled'), turnId: z.string().min(1).max(200), duration: z.number().nonnegative() }).strict().parse(params.action)
+                    await connection.cancel(action.turnId, async () => { await requestAuthorization(true) })
+                  } else throw new Error('This action is not available through the session gateway.')
+                }
+                result ??= {}
+              } catch (error) {
+                if (!acknowledgeDelivery || !candidateTurnId || agentHostSizeLimit(error)) throw error
+                if (!enteredNativeSend) {
+                  result = { status: 'rejected', turnId: candidateTurnId, reason: step === 'authorization' ? 'authorization' : 'validation' }
+                } else if (error instanceof AgentHostTurnNotDispatchedError) {
+                  result = { status: 'rejected', turnId: candidateTurnId, reason: error.reason }
+                } else {
+                  throw error
+                }
               }
-              result = {}
             } else if (request.method === SNAPSHOT_TRANSFER_METHODS.prepare) {
               const params = snapshotPrepareRequestSchema.parse(request.params)
               if (params.channel !== target.chatId || params.subscribe && pendingSubscriptions.has(params.channel)) {

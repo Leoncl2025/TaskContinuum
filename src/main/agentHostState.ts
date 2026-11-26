@@ -1,5 +1,6 @@
 import { chatReducer } from '@microsoft/agent-host-protocol'
 import type { ActionEnvelope, ChatAction, ChatState, ChatTurnsLoadedAction, Message, ResponsePart, Snapshot } from '@microsoft/agent-host-protocol'
+import { sanitizeInheritedModelSelection } from '../shared/agentHostModelConfig'
 import { agentHostTerminalIdSchema } from './agentHostProtocol'
 
 export const CHAT_HISTORY_PAGE_LIMITS = { turns: 20, bytes: 512 * 1024 } as const
@@ -38,7 +39,12 @@ export class AgentHostChatState {
   hasTurn(id: string): boolean { return this.state?.activeTurn?.id === id || this.turnIds.has(id) }
   get selection(): Pick<Message, 'agent' | 'model'> | undefined {
     const message = this.state?.draft ?? this.state?.turns.at(-1)?.message
-    return message ? structuredClone({ agent: message.agent, model: message.model }) : undefined
+    if (!message) return undefined
+    const model = sanitizeInheritedModelSelection(message.model)
+    return structuredClone({
+      ...(message.agent !== undefined ? { agent: message.agent } : {}),
+      ...(model !== undefined ? { model } : {}),
+    })
   }
   get terminalResources(): { referenced: Set<string>; active: Set<string> } {
     const referenced = new Set(this.historicalTerminals)
