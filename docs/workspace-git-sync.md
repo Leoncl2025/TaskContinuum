@@ -328,6 +328,26 @@ an error.
 
 ## Settings and recovery
 
+### Checkout synchronization locks
+
+`taskcontinuum-sync.lock` is in the Git directory of the **selected task
+workspace**, which may be a different checkout or worktree. Locate it with
+`git -C "<task workspace>" rev-parse --absolute-git-dir`. This is separate from
+the configuration transaction lock below.
+
+On Windows, new checkout locks record the owner's OS process creation time
+alongside the hostname, PID and ownership nonce. Task Continuum can reclaim a
+recognized same-machine lock when its owner exited or when the OS confirms
+the live PID belongs to a different process instance. It rechecks the lock
+under a separate recovery guard before removing it. A matching live owner,
+another host, or unavailable process identity never authorizes removal.
+
+Older locks without a creation time can still be recovered if the PID no
+longer exists. If the PID is present and the original owner cannot be verified,
+stop all Task Continuum instances that use that checkout and confirm no other
+host is using it before renaming **only the stale lock** to a backup. Neither
+the lock's age nor the current process name proves that removal is safe.
+
 ### Configuration transaction locks
 
 The private `workspace-sync/<workspace-hash>/store/store.lock` records its

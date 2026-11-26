@@ -6,8 +6,9 @@ import { hostname } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { GitReplica } from '../src/main/remoteConfig/git'
+import { GitReplica, withGitSyncLock } from '../src/main/remoteConfig/git'
 import type { GitPublication } from '../src/main/remoteConfig/git'
+import * as processIdentity from '../src/main/remoteConfig/gitProcessIdentity'
 import { createRecord, readRecords, recordPath, serializeRecord } from '../src/main/remoteConfig/records'
 import { immutableRecordSigner } from './immutable-bindings-fixture'
 
@@ -20,7 +21,7 @@ const DEVICE = '11111111-1111-4111-8111-111111111111'
 afterEach(async () => {
   await Promise.all(replicas.splice(0).map((replica) => replica.close()))
   vi.unstubAllEnvs()
-  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
+  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true, maxRetries: 5 })
 })
 
 function record(label: string): GitPublication {
@@ -696,7 +697,7 @@ describe('single selected checkout Git synchronization', () => {
     expect(await git(setup.remote, 'show', `${BRANCH}:README.md`)).toBe('Original task prose.')
   }, 60000)
 
-  it('serializes owners and safely recovers only dead process locks', async () => {
+  it('serializes owners and recovers a legacy lock after its process exits', async () => {
     const setup = await fixture()
     const a = await setup.replica()
     const b = await setup.replica()
@@ -711,6 +712,18 @@ describe('single selected checkout Git synchronization', () => {
     await b.sync()
     expect(await present(lock)).toBe(false)
   }, 90000)
+
+  it.skipIf(process.platform !== 'win32')('reopens the selected workspace when a live PID belongs to a different process instance', async () => {
+    const setup = await fixture()
+    const prior = await setup.replica(0, false)
+    await prior.close()
+    const lock = join(await git(setup.clients[0], 'rev-parse', '--absolute-git-dir'), 'taskcontinuum-sync.lock')
+    await writeFile(lock, JSON.stringify({
+      pid: process.pid, host: hostname(), nonce: randomUUID(), processCreationTicks: '638000000000000000',
+    }))
+    await expect(setup.replica(0, false)).resolves.toMatchObject({ root: setup.clients[0] })
+    expect(await present(lock)).toBe(false)
+  }, 60000)
 
   it('does not recreate a deleted remote branch or guess an upstream', async () => {
     const setup = await fixture()
@@ -765,4 +778,118 @@ describe('single selected checkout Git synchronization', () => {
     expect(await readFile(join(oldRoot, 'private-user-work.txt'), 'utf8')).toBe('Do not remove or modify this')
     expect(await git(workspaceRoot, 'rev-parse', 'HEAD')).toBe(head)
   }, 60000)
+})
+
+describe('checkout synchronization lock recovery', () => {
+  async function lockFixture() {
+    const directory = resolve('.runtime', 'remote-config-git', `lock ${randomUUID()}`)
+    roots.push(directory)
+    await mkdir(directory, { recursive: true })
+    const lock = join(directory, 'taskcontinuum-sync.lock')
+    const recovery = join(directory, 'taskcontinuum-sync-recovery.lock')
+    const owner = { pid: process.pid, host: hostname(), nonce: randomUUID(), processCreationTicks: '638000000000000000' }
+    return { directory, lock, recovery, owner }
+  }
+
+  it.skipIf(process.platform !== 'win32')('records the real owner creation identity and retains a live matching lock', async () => {
+    const { directory, lock } = await lockFixture()
+    const ticks = await processIdentity.readProcessCreationTicks(process.pid)
+    expect(ticks).toMatch(/^[1-9]\d{17}$/)
+    const contender = vi.fn(async () => {})
+
+    await withGitSyncLock(directory, true, async () => {
+      const held = await readFile(lock, 'utf8')
+      expect(JSON.parse(held)).toMatchObject({ pid: process.pid, host: hostname(), processCreationTicks: ticks })
+      await expect(withGitSyncLock(directory, true, contender)).rejects.toMatchObject({
+        code: 'busy', message: 'Another process is synchronizing this upstream.',
+      })
+      expect(await readFile(lock, 'utf8')).toBe(held)
+    })
+    expect(contender).not.toHaveBeenCalled()
+    expect(await present(lock)).toBe(false)
+  }, 20000)
+
+  it('retains locks from another host or without verifiable ownership', async () => {
+    const { directory, lock, recovery, owner } = await lockFixture()
+    const probe = vi.spyOn(processIdentity, 'readProcessCreationTicks').mockResolvedValue(undefined)
+    const contender = vi.fn(async () => {})
+    try {
+      for (const [value, recognized] of [
+        [{ ...owner, host: `${hostname()}-other` }, true],
+        [{ ...owner, processCreationTicks: undefined }, true],
+        [owner, false],
+        [{ ...owner, processCreationTicks: 'invalid' }, true],
+      ] as const) {
+        const content = JSON.stringify(value)
+        await writeFile(lock, content)
+        await expect(withGitSyncLock(directory, recognized, contender)).rejects.toMatchObject({ code: 'busy' })
+        expect(await readFile(lock, 'utf8')).toBe(content)
+        expect(await present(recovery)).toBe(false)
+      }
+      expect(probe).not.toHaveBeenCalled()
+
+      const content = JSON.stringify(owner)
+      await writeFile(lock, content)
+      await expect(withGitSyncLock(directory, true, contender)).rejects.toMatchObject({
+        code: 'busy', message: expect.stringContaining('process identity could not be verified'),
+      })
+      expect(probe).toHaveBeenCalledWith(owner.pid)
+      expect(await readFile(lock, 'utf8')).toBe(content)
+      expect(contender).not.toHaveBeenCalled()
+    } finally { probe.mockRestore() }
+  }, 15000)
+
+  it('serializes competing reclaimers and leaves the new holder in control', async () => {
+    const { directory, lock, recovery, owner } = await lockFixture()
+    const stale = JSON.stringify(owner)
+    await writeFile(lock, stale)
+    let resume!: () => void
+    const paused = new Promise<void>((done) => { resume = done })
+    const probe = vi.spyOn(processIdentity, 'readProcessCreationTicks').mockImplementationOnce(async () => {
+      await paused
+      return '638000001000000000'
+    })
+    const contender = vi.fn(async () => {})
+    const first = withGitSyncLock(directory, true, async () => {
+      const acquired = await readFile(lock, 'utf8')
+      expect(JSON.parse(acquired).nonce).not.toBe(owner.nonce)
+      await expect(withGitSyncLock(directory, true, contender)).rejects.toMatchObject({ code: 'busy' })
+      expect(await readFile(lock, 'utf8')).toBe(acquired)
+    }).then(() => undefined, (error: unknown) => error)
+    try {
+      await vi.waitFor(() => expect(probe).toHaveBeenCalledExactlyOnceWith(owner.pid), { timeout: 8000 })
+      await expect(withGitSyncLock(directory, true, contender)).rejects.toMatchObject({
+        code: 'busy', message: expect.stringContaining('Another process is recovering'),
+      })
+      expect(await readFile(lock, 'utf8')).toBe(stale)
+      expect(await present(recovery)).toBe(true)
+    } finally {
+      resume()
+      await first
+      probe.mockRestore()
+    }
+    expect(await first).toBeUndefined()
+    expect(contender).not.toHaveBeenCalled()
+    expect(await present(lock)).toBe(false)
+    expect(await present(recovery)).toBe(false)
+  }, 20000)
+
+  it('does not remove a lock whose contents changed during the process lookup', async () => {
+    const { directory, lock, recovery, owner } = await lockFixture()
+    const replacement = JSON.stringify({ ...owner, nonce: randomUUID(), processCreationTicks: '638000001000000000' })
+    await writeFile(lock, JSON.stringify(owner))
+    const probe = vi.spyOn(processIdentity, 'readProcessCreationTicks').mockImplementationOnce(async () => {
+      await writeFile(lock, replacement)
+      return '638000001000000000'
+    })
+    const contender = vi.fn(async () => {})
+    try {
+      await expect(withGitSyncLock(directory, true, contender)).rejects.toMatchObject({
+        code: 'busy', message: expect.stringContaining('changed during recovery'),
+      })
+      expect(await readFile(lock, 'utf8')).toBe(replacement)
+      expect(await present(recovery)).toBe(false)
+      expect(contender).not.toHaveBeenCalled()
+    } finally { probe.mockRestore() }
+  }, 15000)
 })

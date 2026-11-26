@@ -2,10 +2,14 @@ import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, open, readFile, realpath, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
+import type { BigIntStats } from 'node:fs'
 import { hostname } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { z } from 'zod'
 import { matchesGitText } from '../shared/gitText'
 import { assertMigrationReady, planHash, validateBaselineFiles, type BaselinePin } from './trustBaseline'
+import { readCheckedFile } from './records'
+import { ownProcessCreationTicks, readProcessCreationTicks, windowsCreationTicks } from './gitProcessIdentity'
 
 export interface GitPublication {
   path: string
@@ -220,6 +224,95 @@ async function exists(file: string): Promise<boolean> {
 async function regularFile(file: string): Promise<void> {
   const info = await lstat(file)
   if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) integrity('Git synchronization state must use app-owned regular files.')
+}
+
+const syncLockOwnerSchema = z.object({
+  pid: z.number().int().positive().max(0x7fffffff),
+  host: z.string().min(1).max(255),
+  nonce: z.uuid().optional(),
+  processCreationTicks: z.string().regex(windowsCreationTicks).optional(),
+}).strict().refine((owner) => !owner.processCreationTicks || owner.nonce !== undefined)
+
+function isSameLockFile(held: BigIntStats, current: BigIntStats): boolean {
+  return current.isFile() && !current.isSymbolicLink() && current.nlink === 1n && held.ino === current.ino && held.dev === current.dev
+}
+
+async function releaseFileLock(file: string, handle: FileHandle): Promise<void> {
+  try {
+    const held = await handle.stat({ bigint: true })
+    if (!isSameLockFile(held, await lstat(file, { bigint: true }))) integrity('Synchronization lock ownership changed; the replacement lock was not removed.')
+  } finally { await handle.close() }
+  await rm(file)
+}
+
+async function openExclusiveLock(file: string): Promise<FileHandle | undefined> {
+  try { return await open(file, 'wx', 0o600) }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+  }
+}
+
+async function readSyncLock(gitDirectory: string, file: string): Promise<Buffer> {
+  try { return await readCheckedFile(gitDirectory, file, 1024) }
+  catch { throw new GitSyncError('busy', 'The synchronization lock is unreadable or changed during recovery. No lock was removed.') }
+}
+
+async function removeStaleSyncLock(gitDirectory: string, file: string): Promise<void> {
+  const original = await lstat(file, { bigint: true })
+  const content = await readSyncLock(gitDirectory, file)
+  let value: unknown
+  try { value = JSON.parse(content.toString('utf8')) }
+  catch { throw new GitSyncError('busy', 'The synchronization lock has no readable owner. No lock was removed.') }
+  const parsed = syncLockOwnerSchema.safeParse(value)
+  if (!parsed.success || parsed.data.host !== hostname()) {
+    throw new GitSyncError('busy', 'The synchronization lock owner is unknown or belongs to another machine. No lock was removed.')
+  }
+  const owner = parsed.data
+  const unverifiable = () => new GitSyncError('busy', 'The synchronization lock process identity could not be verified. No lock was removed.')
+  let exited = false
+  try { process.kill(owner.pid, 0) }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ESRCH') exited = true
+    else if (code !== 'EPERM' && code !== 'EACCES') throw unverifiable()
+  }
+  if (!exited) {
+    if (!owner.processCreationTicks) throw unverifiable()
+    const currentTicks = await readProcessCreationTicks(owner.pid)
+    if (!currentTicks) throw unverifiable()
+    if (currentTicks === owner.processCreationTicks) throw new GitSyncError('busy', 'Another process is synchronizing this upstream.')
+  }
+  // The process lookup can block; never remove a file that changed while it ran.
+  if (!(await readSyncLock(gitDirectory, file)).equals(content) || !isSameLockFile(original, await lstat(file, { bigint: true }))) {
+    throw new GitSyncError('busy', 'The synchronization lock changed during recovery. The replacement lock was not removed.')
+  }
+  await rm(file)
+}
+
+export async function withGitSyncLock<T>(gitDirectory: string, recognizedReplica: boolean, action: () => Promise<T>): Promise<T> {
+  const processCreationTicks = await ownProcessCreationTicks()
+  const file = join(gitDirectory, 'taskcontinuum-sync.lock')
+  let handle = await openExclusiveLock(file)
+  try {
+    if (!handle) {
+      if (!recognizedReplica) throw new GitSyncError('busy', 'An existing synchronization lock has no recognized replica owner. Its state was not removed.')
+      // Only one process may inspect and reclaim a stale lock.
+      const recoveryPath = join(gitDirectory, 'taskcontinuum-sync-recovery.lock')
+      const recovery = await openExclusiveLock(recoveryPath)
+      if (!recovery) throw new GitSyncError('busy', 'Another process is recovering the synchronization lock. Retry or review local state if this persists.')
+      try {
+        handle = await openExclusiveLock(file)
+        if (!handle) {
+          await removeStaleSyncLock(gitDirectory, file)
+          handle = await openExclusiveLock(file)
+        }
+      } finally { await releaseFileLock(recoveryPath, recovery) }
+    }
+    if (!handle) throw new GitSyncError('busy', 'Another process is synchronizing this upstream.')
+    await handle.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), nonce: randomUUID(), processCreationTicks }))
+    await handle.sync()
+    return await action()
+  } finally { if (handle) await releaseFileLock(file, handle) }
 }
 
 async function serialized<T>(key: string, action: () => Promise<T>): Promise<T> {
@@ -469,41 +562,7 @@ export class GitReplica {
       if (this.closed) throw cancelled()
       await mkdir(this.directory, { recursive: true })
       if (await realpath(this.directory) !== this.directory) integrity('The replica state directory may not be redirected through a symbolic link.')
-      const recognized = await this.checkOwner(false)
-      const file = join(this.gitDirectory, 'taskcontinuum-sync.lock')
-      let handle
-      try { handle = await open(file, 'wx', 0o600) } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-        if (!recognized) throw new GitSyncError('busy', 'An existing synchronization lock has no recognized replica owner. Its state was not removed.')
-        // Serialize stale-owner recovery too: two reclaimers must not unlink a newly
-        // acquired live lock after both observed the same dead process.
-        const recoveryPath = join(this.gitDirectory, 'taskcontinuum-sync-recovery.lock')
-        const recovery = await open(recoveryPath, 'wx', 0o600).catch(() => {
-          throw new GitSyncError('busy', 'Another process is recovering the synchronization lock. Retry or review local state if this persists.')
-        })
-        try {
-          try { handle = await open(file, 'wx', 0o600) } catch (failure) {
-            if ((failure as NodeJS.ErrnoException).code !== 'EEXIST') throw failure
-            await regularFile(file)
-            const info = await lstat(file)
-            if (info.size > 1024) throw new GitSyncError('busy', 'The replica has an invalid synchronization lock. Review local state before retrying.')
-            let owner: { pid?: number; host?: string } | null
-            try { owner = JSON.parse(await readFile(file, 'utf8')) as typeof owner } catch { throw new GitSyncError('busy', 'Another process owns the replica synchronization lock.') }
-            if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid! <= 0 || owner.host !== hostname()) throw new GitSyncError('busy', 'Another process owns the replica synchronization lock.')
-            try { process.kill(owner.pid!, 0); throw new GitSyncError('busy', 'Another process is synchronizing this upstream.') } catch (failure) {
-              if ((failure as NodeJS.ErrnoException).code !== 'ESRCH') throw new GitSyncError('busy', 'Another process is synchronizing this upstream.')
-            }
-            await rm(file)
-            handle = await open(file, 'wx', 0o600).catch(() => { throw new GitSyncError('busy', 'Another process is synchronizing this upstream.') })
-          }
-        } finally { await this.releaseLock(recoveryPath, recovery) }
-      }
-      if (!handle) throw new GitSyncError('busy', 'Another process is synchronizing this upstream.')
-      try {
-        await handle.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), nonce: randomUUID() }))
-        await handle.sync()
-        return await action()
-      } finally { await this.releaseLock(file, handle) }
+      return withGitSyncLock(this.gitDirectory, await this.checkOwner(false), action)
     })
     this.pending = work.catch(() => undefined)
     return work
@@ -536,15 +595,6 @@ export class GitReplica {
     await regularFile(file)
     if ((await lstat(file)).size > 65536 || await readFile(file, 'utf8') !== this.ownerIdentity()) integrity('The replica ownership metadata does not match the selected upstream.')
     return true
-  }
-
-  private async releaseLock(file: string, handle: FileHandle): Promise<void> {
-    try {
-      const held = await handle.stat()
-      const current = await lstat(file)
-      if (!current.isFile() || current.isSymbolicLink() || current.nlink !== 1 || held.ino !== current.ino || held.dev !== current.dev) integrity('Synchronization lock ownership changed; the replacement lock was not removed.')
-    } finally { await handle.close() }
-    await rm(file)
   }
 
   private async checkDirectories(): Promise<void> {
@@ -834,7 +884,7 @@ export class GitReplica {
           throw new GitSyncError('busy', 'Git could not safely update the selected checkout. Preserve/reconcile local changes and retry.')
         }
       }
-    } finally { await this.releaseLock(headLockPath, headLock) }
+    } finally { await releaseFileLock(headLockPath, headLock) }
     await this.assertUpstream(signal)
     const zero = '0'.repeat(head.length)
     await this.git(this.repositoryRoot, ['update-ref', '--stdin'], {
